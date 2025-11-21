@@ -123,6 +123,8 @@ For example, any static blockchain address, lightning network invoice, address o
 
 A stateless toolkit featuring developer-friendly APIs and language bindings to engage with Paykit’s Payment Method Lists. This kit is intended to serve as a new dependency in the existing logic of applications and services responsible for processing of payments.
 
+For release history and upgrade notes see [CHANGELOG.md](CHANGELOG.md).
+
 ## Usecases
 
 The Paykit Library is intended for users who have already implemented payment receiving and execution functions including both push and pull subscription functionality implemented with these methods.
@@ -374,4 +376,3 @@ Examples of **Payment Methods** can be “bitcoin” \- referring to bitcoin onc
   "currency": "BTC"
 }
 ```
-

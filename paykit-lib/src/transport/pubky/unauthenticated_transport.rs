@@ -1,3 +1,5 @@
+//! Unauthenticated Pubky adapter that exposes reads over [`crate::UnauthenticatedTransportRead`].
+
 use std::collections::HashMap;
 
 use async_trait::async_trait;

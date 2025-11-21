@@ -1,7 +1,21 @@
 //! Paykit library.
 //!
-//! This crate intentionally stays stateless and delegates authenticated access
-//! to callers through trait-based dependency injection.
+//! `paykit-lib` is a stateless Rust SDK that focuses on the transport layer of the
+//! Paykit protocol. It defines ergonomic helper types plus a pair of tiny traits that
+//! callers implement (or wrap) to perform reads and writes against the routing network.
+//! The crate includes first-party adapters for the Pubky SDK behind the default
+//! `pubky` feature while remaining open for custom transports or mocks.
+//!
+//! ## Design goals
+//! - Provide high-level helpers such as [`get_payment_list`] and [`set_payment_endpoint`]
+//!   that work with any type implementing [`UnauthenticatedTransportRead`] or
+//!   [`AuthenticatedTransport`].
+//! - Keep storage/session management outside of the crate so integrators can inject their
+//!   own security model, capability scoping, caching, or telemetry.
+//! - Export the standard Pubky path prefixes (see [`transport::pubky`]) to keep file layout
+//!   consistent across bindings.
+//!
+//! For an architectural overview and example workflows, see `paykit-lib/README.md`.
 
 use std::{collections::HashMap, fmt};
 
@@ -9,8 +23,28 @@ use std::{collections::HashMap, fmt};
 pub use pubky::PublicKey;
 
 #[cfg(not(feature = "pubky"))]
+/// Public key placeholder used when the `pubky` feature is disabled.
+///
+/// Applications providing their own transport layer should define a richer type
+/// and convert into this wrapper where necessary.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PublicKey(pub String);
+
+#[cfg(not(feature = "pubky"))]
+impl fmt::Display for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[cfg(not(feature = "pubky"))]
+impl std::str::FromStr for PublicKey {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(PublicKey(s.to_string()))
+    }
+}
 
 mod transport;
 

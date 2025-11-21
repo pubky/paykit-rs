@@ -1,3 +1,5 @@
+//! Authenticated Pubky adapter that satisfies [`crate::AuthenticatedTransport`].
+
 use async_trait::async_trait;
 use pubky::PubkySession;
 

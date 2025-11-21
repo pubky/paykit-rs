@@ -1,3 +1,10 @@
+//! Pubky transport adapters and shared constants.
+//!
+//! These helpers wrap the upstream Pubky SDK so Paykit calls can operate over the
+//! standardized [`crate::AuthenticatedTransport`] and
+//! [`crate::UnauthenticatedTransportRead`] traits without depending on specific SDK
+//! types.
+
 pub mod authenticated_transport;
 pub mod unauthenticated_transport;
 

@@ -1,10 +1,17 @@
 [package]
 name = "paykit-lib"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["denys@synonym.to"]
 description = "Paykit library implementation"
 license = "MIT"
 edition = "2021"
+rust-version = "1.91.1"
+repository = "https://github.com/pubkit/paykit-rs"
+homepage = "https://github.com/pubku/paykit-rs#readme"
+documentation = "https://docs.rs/paykit-lib"
+readme = "README.md"
+keywords = ["paykit", "payments", "routing", "pubky"]
+categories = ["network-programming", "finance"]
 
 [features]
 default = ["pubky"]
@@ -13,8 +20,7 @@ pubky = ["dep:pubky"]
 [dependencies]
 async-trait = "0.1.89"
 pubky = { version = "0.6.0-rc.6", optional = true }
-tokio = "1.48.0"
 
 [dev-dependencies]
 pubky-testnet = { version = "0.6.0-rc.6" }
-
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }

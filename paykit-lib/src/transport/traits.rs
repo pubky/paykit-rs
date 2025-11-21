@@ -1,3 +1,5 @@
+//! Core transport traits that decouple Paykit logic from specific SDKs or backends.
+
 use async_trait::async_trait;
 
 use crate::{EndpointData, MethodId, PublicKey, Result};
