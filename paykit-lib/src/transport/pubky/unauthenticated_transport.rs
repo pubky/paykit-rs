@@ -76,7 +76,7 @@ impl PubkyUnauthenticatedTransport {
 #[async_trait]
 impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
     async fn fetch_supported_payments(&self, payee: &PublicKey) -> Result<SupportedPayments> {
-        let addr = format!("pubky{payee}{PAYKIT_PATH_PREFIX}");
+        let addr = format!("{payee}{PAYKIT_PATH_PREFIX}");
         let entries = self.list_entries(addr, "list supported payments").await?;
 
         let mut map = HashMap::new();
@@ -112,7 +112,7 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
         payee: &PublicKey,
         method: &MethodId,
     ) -> Result<Option<EndpointData>> {
-        let addr = format!("pubky{payee}{PAYKIT_PATH_PREFIX}{}", method.0);
+        let addr = format!("{payee}{PAYKIT_PATH_PREFIX}{}", method.0);
         match self.fetch_text(addr, "fetch endpoint").await? {
             Some(payload) => Ok(Some(EndpointData(payload))),
             None => Ok(None),
@@ -120,7 +120,7 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
     }
 
     async fn fetch_known_contacts(&self, owner: &PublicKey) -> Result<Vec<PublicKey>> {
-        let addr = format!("pubky{owner}{PUBKY_FOLLOWS_PATH}");
+        let addr = format!("{owner}{PUBKY_FOLLOWS_PATH}");
         let entries = self.list_entries(addr, "list known contacts").await?;
 
         let mut contacts = Vec::new();
