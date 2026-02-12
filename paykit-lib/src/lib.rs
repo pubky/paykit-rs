@@ -258,8 +258,9 @@ mod tests {
 
     impl TestSetup {
         async fn new() -> Self {
-            let testnet = EphemeralTestnet::start().await.unwrap();
-            let homeserver = testnet.homeserver();
+            let testnet = EphemeralTestnet::builder().build().await.unwrap();
+
+            let homeserver = testnet.homeserver_app();
             let sdk = testnet.sdk().unwrap();
 
             let pair = Keypair::random();
