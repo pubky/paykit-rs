@@ -49,14 +49,6 @@ impl std::str::FromStr for PublicKey {
     }
 }
 
-#[cfg(not(feature = "pubky"))]
-/// Public key placeholder used when the `pubky` feature is disabled.
-///
-/// Applications providing their own social layer should define a richer type
-/// and convert into this wrapper where necessary.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Profile(pub String);
-
 #[cfg(feature = "pubky")]
 /// Re-export pubky sdk to allow for non accounted usecases on transport level
 pub use pubky;

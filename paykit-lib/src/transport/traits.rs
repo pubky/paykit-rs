@@ -21,6 +21,7 @@ pub trait UnauthenticatedTransportRead {
     /// Returns the set of known contacts (public keys) reachable to the caller.
     async fn fetch_known_contacts(&self, owner: &PublicKey) -> Result<Vec<PublicKey>>;
 
+    #[cfg(feature = "pubky")]
     /// Returns the profile of the given user.
     ///
     /// # Errors
