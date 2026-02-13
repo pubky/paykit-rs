@@ -167,7 +167,7 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
                 })?
                 .to_vec(),
             Err(err) if is_not_found(&err) => {
-                return Err(PaykitError::Profile("profile not found".into()))
+                return Err(PaykitError::NotFound("profile not found".into()))
             }
             Err(err) => {
                 return Err(PaykitError::Transport(format!(

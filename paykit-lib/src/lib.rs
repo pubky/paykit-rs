@@ -80,9 +80,18 @@ pub enum PaykitError {
     /// Wrapper for transport layer failures.
     ///
     /// Most user-facing failures bubble up through this variant, encapsulating
-    /// lower-level SDK/network errors. Other variants are reserved for future use.
+    /// lower-level SDK/network errors.
     Transport(String),
-    /// Wrapper for application error?
+    /// The requested resource does not exist.
+    ///
+    /// Returned when a profile or other resource is not found (404/GONE).
+    /// Distinct from [`Profile`] which indicates the data exists but is malformed.
+    NotFound(String),
+    /// Profile data is malformed or invalid.
+    ///
+    /// Returned when profile data exists but cannot be parsed or validated.
+    /// Distinct from [`PaykitError::NotFound`] which indicates the resource doesn't exist,
+    /// and [`PaykitError::Transport`] which covers network/SDK errors.
     Profile(String),
 }
 
@@ -93,6 +102,7 @@ impl fmt::Display for PaykitError {
                 write!(f, "{label} is not implemented yet")
             }
             PaykitError::Transport(msg) => write!(f, "transport error: {msg}"),
+            PaykitError::NotFound(msg) => write!(f, "not found: {msg}"),
             PaykitError::Profile(msg) => write!(f, "profile error: {msg}"),
         }
     }
@@ -249,19 +259,23 @@ where
         .map_err(|err| map_error("get_known_contacts", err))
 }
 
-/// Returns profile of a given public key.
+/// Returns the profile of a given public key.
 ///
 /// # Semantics
-/// - Returns `Profile` object.
-// TODO: add two separate errors
-/// - Returns `Err` profile was not found or when there is a transport error.
+/// - Returns `Ok(Profile)` when the profile exists and is valid.
+/// - Returns `Err(PaykitError::NotFound)` if the profile does not exist.
+/// - Returns `Err(PaykitError::Profile)` if the profile exists but is malformed.
+/// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
 ///
 /// # Examples
 /// ```
 /// # use paykit_lib::{get_profile, PublicKey, Profile};
 /// # use paykit_lib::UnauthenticatedTransportRead;
-/// # async fn profile(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
-/// println!("known contact: {}", get_profile(reader, pk).await?);
+/// # async fn demo(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
+/// let profile = get_profile(reader, pk).await?;
+/// println!("user name: {}", profile.name);
+/// # Ok(())
+/// # }
 /// ```
 pub async fn get_profile<R>(reader: &R, key: &PublicKey) -> Result<Profile>
 where
@@ -276,6 +290,7 @@ where
 fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
     match err {
         PaykitError::Transport(msg) => PaykitError::Transport(format!("{label}: {msg}")),
+        PaykitError::NotFound(msg) => PaykitError::NotFound(format!("{label}: {msg}")),
         PaykitError::Profile(msg) => PaykitError::Profile(format!("{label}: {msg}")),
         _ => err,
     }
@@ -517,7 +532,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, PaykitError::Profile(msg) if msg.contains("not found")));
+        assert!(matches!(err, PaykitError::NotFound(msg) if msg.contains("not found")));
 
         setup.raw_session.signout().await.unwrap();
     }
