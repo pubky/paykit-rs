@@ -2,6 +2,11 @@
 
 Stateless Rust crate that implements the Paykit transport layer. It orchestrates reads from Paykit public storage and writes to private/public paths while delegating authentication to callers.
 
+Paykit replies on **transport** protocol for network *communication* between peers and on **social media** protocol for bootstrap of *profile* and *social graph*. 
+
+The default transport protocol in this implementation is [pubky](https://pubky.org/) and default social media protocol is [pubky.app](https://pubky.app/).
+Both of them are enabled via default feature flag `pubky`.
+
 ## Auth & Dependency Injection
 
 - Writes require an authenticated client. Instead of hard-coding `PubkySession`, public APIs accept an argument that implements a thin Paykit-defined trait (e.g., `AuthenticatedTransport`).  

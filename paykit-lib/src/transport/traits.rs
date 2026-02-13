@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::{EndpointData, MethodId, PublicKey, Result};
+use crate::{EndpointData, MethodId, Profile, PublicKey, Result};
 
 /// Trait describing read-only access to public Paykit transport.
 #[async_trait]
@@ -20,6 +20,9 @@ pub trait UnauthenticatedTransportRead {
 
     /// Returns the set of known contacts (public keys) reachable to the caller.
     async fn fetch_known_contacts(&self, owner: &PublicKey) -> Result<Vec<PublicKey>>;
+
+    /// Returns the profile of the given owner.
+    async fn fetch_profile(&self, owner: &PublicKey) -> Result<Profile>;
 }
 
 /// Trait describing authenticated write (and optional read) access.
