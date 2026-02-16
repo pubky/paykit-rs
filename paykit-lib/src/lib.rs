@@ -22,6 +22,9 @@ use std::{collections::HashMap, fmt};
 #[cfg(feature = "pubky")]
 pub use pubky::PublicKey;
 
+#[cfg(feature = "pubky")]
+pub use pubky_app_specs::PubkyAppUser as Profile;
+
 #[cfg(not(feature = "pubky"))]
 /// Public key placeholder used when the `pubky` feature is disabled.
 ///
@@ -46,6 +49,10 @@ impl std::str::FromStr for PublicKey {
     }
 }
 
+#[cfg(feature = "pubky")]
+/// Re-export pubky sdk to allow for non accounted usecases on transport level
+pub use pubky;
+
 mod transport;
 
 pub use transport::{AuthenticatedTransport, UnauthenticatedTransportRead};
@@ -65,8 +72,19 @@ pub enum PaykitError {
     /// Wrapper for transport layer failures.
     ///
     /// Most user-facing failures bubble up through this variant, encapsulating
-    /// lower-level SDK/network errors. Other variants are reserved for future use.
+    /// lower-level SDK/network errors.
     Transport(String),
+    /// The requested resource does not exist.
+    ///
+    /// Returned when a profile or other resource is not found (404/GONE).
+    /// Distinct from [`Profile`] which indicates the data exists but is malformed.
+    NotFound(String),
+    /// Profile data is malformed or invalid.
+    ///
+    /// Returned when profile data exists but cannot be parsed or validated.
+    /// Distinct from [`PaykitError::NotFound`] which indicates the resource doesn't exist,
+    /// and [`PaykitError::Transport`] which covers network/SDK errors.
+    Profile(String),
 }
 
 impl fmt::Display for PaykitError {
@@ -76,6 +94,8 @@ impl fmt::Display for PaykitError {
                 write!(f, "{label} is not implemented yet")
             }
             PaykitError::Transport(msg) => write!(f, "transport error: {msg}"),
+            PaykitError::NotFound(msg) => write!(f, "not found: {msg}"),
+            PaykitError::Profile(msg) => write!(f, "profile error: {msg}"),
         }
     }
 }
@@ -122,7 +142,7 @@ where
     client
         .upsert_payment_endpoint(&method, &data)
         .await
-        .map_err(|err| map_transport_error("set_payment_endpoint", err))
+        .map_err(|err| map_error("set_payment_endpoint", err))
 }
 
 /// Removes a payment endpoint via the injected authenticated client.
@@ -133,7 +153,7 @@ where
     client
         .remove_payment_endpoint(&method)
         .await
-        .map_err(|err| map_transport_error("remove_payment_endpoint", err))
+        .map_err(|err| map_error("remove_payment_endpoint", err))
 }
 
 /// Retrieves all supported payment methods for the given payee.
@@ -166,7 +186,7 @@ where
     reader
         .fetch_supported_payments(payee)
         .await
-        .map_err(|err| map_transport_error("get_payment_list", err))
+        .map_err(|err| map_error("get_payment_list", err))
 }
 
 /// Retrieves a specific payment endpoint for `payee` and `method`.
@@ -200,7 +220,7 @@ where
     reader
         .fetch_payment_endpoint(payee, method)
         .await
-        .map_err(|err| map_transport_error("get_payment_endpoint", err))
+        .map_err(|err| map_error("get_payment_endpoint", err))
 }
 
 /// Returns known contacts of a given public key.
@@ -228,12 +248,42 @@ where
     reader
         .fetch_known_contacts(key)
         .await
-        .map_err(|err| map_transport_error("get_known_contacts", err))
+        .map_err(|err| map_error("get_known_contacts", err))
 }
 
-fn map_transport_error(label: &'static str, err: PaykitError) -> PaykitError {
+/// Returns the profile of a given public key.
+///
+/// # Semantics
+/// - Returns `Ok(Profile)` when the profile exists and is valid.
+/// - Returns `Err(PaykitError::NotFound)` if the profile does not exist.
+/// - Returns `Err(PaykitError::Profile)` if the profile exists but is malformed.
+/// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
+///
+/// # Examples
+/// ```
+/// # use paykit_lib::{get_profile, PublicKey, Profile};
+/// # use paykit_lib::UnauthenticatedTransportRead;
+/// # async fn demo(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
+/// let profile = get_profile(reader, pk).await?;
+/// println!("user name: {}", profile.name);
+/// # Ok(())
+/// # }
+/// ```
+pub async fn get_profile<R>(reader: &R, key: &PublicKey) -> Result<Profile>
+where
+    R: UnauthenticatedTransportRead,
+{
+    reader
+        .fetch_profile(key)
+        .await
+        .map_err(|err| map_error("get_profile", err))
+}
+
+fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
     match err {
         PaykitError::Transport(msg) => PaykitError::Transport(format!("{label}: {msg}")),
+        PaykitError::NotFound(msg) => PaykitError::NotFound(format!("{label}: {msg}")),
+        PaykitError::Profile(msg) => PaykitError::Profile(format!("{label}: {msg}")),
         _ => err,
     }
 }
@@ -244,7 +294,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::transport::pubky::PUBKY_FOLLOWS_PATH;
+    use crate::transport::pubky::{PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE};
     use pubky::PubkySession;
     use pubky_testnet::{pubky::Keypair, EphemeralTestnet};
 
@@ -437,6 +487,90 @@ mod tests {
 
         assert!(contacts.contains(&contact_a));
         assert!(contacts.contains(&contact_b));
+
+        setup.raw_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fetch_profile_success() {
+        let setup = TestSetup::new().await;
+
+        // Seed a valid profile using raw session
+        let profile_json =
+            r#"{"name":"Alice","bio":"Hello world","image":null,"links":null,"status":"online"}"#;
+        setup
+            .raw_session
+            .storage()
+            .put(PUBKY_PROFILE_FILE, profile_json)
+            .await
+            .unwrap();
+
+        let profile = get_profile(&setup.reader_transport, &setup.public_key)
+            .await
+            .unwrap();
+
+        assert_eq!(profile.name, "Alice");
+        assert_eq!(profile.bio, Some("Hello world".into()));
+        assert_eq!(profile.status, Some("online".into()));
+
+        setup.raw_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fetch_profile_not_found() {
+        let setup = TestSetup::new().await;
+
+        let result = get_profile(&setup.reader_transport, &setup.public_key).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, PaykitError::NotFound(msg) if msg.contains("not found")));
+
+        setup.raw_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fetch_profile_invalid_json() {
+        let setup = TestSetup::new().await;
+
+        // Seed malformed JSON
+        setup
+            .raw_session
+            .storage()
+            .put(PUBKY_PROFILE_FILE, "not valid json {{{")
+            .await
+            .unwrap();
+
+        let result = get_profile(&setup.reader_transport, &setup.public_key).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, PaykitError::Profile(msg) if msg.contains("parse")));
+
+        setup.raw_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fetch_profile_minimal() {
+        let setup = TestSetup::new().await;
+
+        let profile_json = r#"{"name":"Bob"}"#;
+        setup
+            .raw_session
+            .storage()
+            .put(PUBKY_PROFILE_FILE, profile_json)
+            .await
+            .unwrap();
+
+        let profile = get_profile(&setup.reader_transport, &setup.public_key)
+            .await
+            .unwrap();
+
+        assert_eq!(profile.name, "Bob");
+        assert!(profile.bio.is_none());
+        assert!(profile.image.is_none());
+        assert!(profile.links.is_none());
+        assert!(profile.status.is_none());
 
         setup.raw_session.signout().await.unwrap();
     }

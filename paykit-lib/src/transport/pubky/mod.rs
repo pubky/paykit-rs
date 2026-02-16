@@ -14,3 +14,5 @@ pub mod unauthenticated_transport;
 pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit.app/v0/";
 /// Directory that stores contact/follow information (one file per known contact).
 pub const PUBKY_FOLLOWS_PATH: &str = "/pub/pubky.app/follows/";
+/// File that stores profile information
+pub const PUBKY_PROFILE_FILE: &str = "/pub/pubky.app/profile.json";

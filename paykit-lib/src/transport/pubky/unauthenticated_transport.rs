@@ -8,9 +8,11 @@ use pubky::{
     PublicStorage as SdkUnauthenticatedTransport, StatusCode,
 };
 
-use super::{PAYKIT_PATH_PREFIX, PUBKY_FOLLOWS_PATH};
+use pubky_app_specs::PubkyAppObject;
+
+use super::{PAYKIT_PATH_PREFIX, PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE};
 use crate::transport::traits::UnauthenticatedTransportRead;
-use crate::{EndpointData, MethodId, PaykitError, PublicKey, Result, SupportedPayments};
+use crate::{EndpointData, MethodId, PaykitError, Profile, PublicKey, Result, SupportedPayments};
 
 /// Adapter around `pubky::PublicStorage` implementing `UnauthenticatedTransportRead`.
 #[derive(Clone)]
@@ -147,6 +149,42 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
         }
 
         Ok(contacts)
+    }
+
+    async fn fetch_profile(&self, user: &PublicKey) -> Result<Profile> {
+        let resource = PubkyResource::new(user.clone(), PUBKY_PROFILE_FILE).map_err(|e| {
+            PaykitError::Transport(format!(
+                "failed to construct profile resource for {user}: {e}"
+            ))
+        })?;
+
+        let blob = match self.inner.get(&resource).await {
+            Ok(resp) => resp
+                .bytes()
+                .await
+                .map_err(|err| {
+                    PaykitError::Transport(format!("fetch profile bytes failed: {err}"))
+                })?
+                .to_vec(),
+            Err(err) if is_not_found(&err) => {
+                return Err(PaykitError::NotFound("profile not found".into()))
+            }
+            Err(err) => {
+                return Err(PaykitError::Transport(format!(
+                    "fetch profile failed: {err}"
+                )))
+            }
+        };
+
+        match PubkyAppObject::from_uri(&resource.to_pubky_url(), &blob) {
+            Ok(PubkyAppObject::User(profile)) => Ok(profile),
+            Ok(_) => Err(PaykitError::Profile(
+                "resource is not a user profile".into(),
+            )),
+            Err(e) => Err(PaykitError::Profile(format!(
+                "failed to parse profile: {e}"
+            ))),
+        }
     }
 }
 
