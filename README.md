@@ -147,11 +147,13 @@ The Paykit Library is an abstraction for payment specific CRUD methods of Paykit
 
 ### Implementation language
 
-* **Rust**: Edition 2021, Version \+1.82.0
+* **Rust**: Edition 2021, Version \+1.91.1
 
 ### Dependencies
 
 * **The Pubky SDK** [https://github.com/pubky/pubky-core/tree/main/pubky](https://github.com/pubky/pubky-core/tree/main/pubky)
+* **async-trait** — async fn in trait definitions
+* **tracing** — structured, context-aware logging
 
 ### Language bindings
 

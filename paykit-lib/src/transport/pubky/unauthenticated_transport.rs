@@ -58,8 +58,13 @@ impl PubkyUnauthenticatedTransport {
                     return Ok(None);
                 }
                 let data = String::from_utf8(bytes.to_vec()).map_err(|err| {
-                    error!(error = %err, "response is not valid UTF-8");
-                    PaykitError::Transport(format!("{label}: {err}"))
+                    let pos = err.utf8_error().valid_up_to();
+                    error!(
+                        error = %err,
+                        valid_up_to = pos,
+                        "response contains invalid UTF-8 — data may be corrupt"
+                    );
+                    PaykitError::InvalidData(format!("{label}: invalid UTF-8 at byte {pos}"))
                 })?;
                 trace!(len = data.len(), "text resource fetched");
                 Ok(Some(data))
@@ -132,9 +137,10 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
                 .filter(|segment| !segment.is_empty())
                 .ok_or_else(|| {
                     error!(path = %resource.path, "invalid resource path for payment entry");
-                    PaykitError::Transport(
-                        "invalid resource returned for supported payment entry".into(),
-                    )
+                    PaykitError::InvalidData(format!(
+                        "cannot extract method from resource path '{}'",
+                        resource.path
+                    ))
                 })?
                 .to_string();
 
@@ -191,8 +197,8 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
                 match pk_str.parse::<PublicKey>() {
                     Ok(pk) => contacts.push(pk),
                     Err(err) => {
-                        warn!(entry = %pk_str, error = %err, "invalid contact entry, cannot parse as PublicKey");
-                        return Err(PaykitError::Transport(format!(
+                        error!(entry = %pk_str, error = %err, "invalid contact entry, cannot parse as PublicKey");
+                        return Err(PaykitError::InvalidData(format!(
                             "invalid contact entry '{pk_str}': {err}"
                         )));
                     }
