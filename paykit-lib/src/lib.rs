@@ -12,7 +12,7 @@
 //!   [`AuthenticatedTransport`].
 //! - Keep storage/session management outside of the crate so integrators can inject their
 //!   own security model, capability scoping, caching, or telemetry.
-//! - Export the standard Pubky path prefixes (see [`transport::pubky`]) to keep file layout
+//! - Export the standard Pubky path prefixes (e.g. `/pub/paykit.app/v0/`) to keep file layout
 //!   consistent across bindings.
 //!
 //! For an architectural overview and example workflows, see `paykit-lib/README.md`.
@@ -74,13 +74,23 @@ pub enum PaykitError {
     /// Wrapper for transport layer failures.
     ///
     /// Most user-facing failures bubble up through this variant, encapsulating
-    /// lower-level SDK/network errors.
+    /// lower-level SDK/network errors (timeouts, connection refused, permission
+    /// denied, etc.).
     Transport(String),
     /// The requested resource does not exist.
     ///
     /// Returned when a profile or other resource is not found (404/GONE).
-    /// Distinct from [`Profile`] which indicates the data exists but is malformed.
+    /// Distinct from [`PaykitError::Profile`] which indicates the data exists but is malformed.
     NotFound(String),
+    /// Retrieved data is corrupt or structurally invalid.
+    ///
+    /// Returned when a resource was successfully fetched from the network but its
+    /// content cannot be interpreted — for example invalid UTF-8 bytes, an
+    /// unparseable resource path, or a contact entry that is not a valid public
+    /// key. This is distinct from [`PaykitError::Transport`] (the network call
+    /// itself failed) and [`PaykitError::Profile`] (profile-specific parse
+    /// errors).
+    InvalidData(String),
     /// Profile data is malformed or invalid.
     ///
     /// Returned when profile data exists but cannot be parsed or validated.
@@ -97,6 +107,7 @@ impl fmt::Display for PaykitError {
             }
             PaykitError::Transport(msg) => write!(f, "transport error: {msg}"),
             PaykitError::NotFound(msg) => write!(f, "not found: {msg}"),
+            PaykitError::InvalidData(msg) => write!(f, "invalid data: {msg}"),
             PaykitError::Profile(msg) => write!(f, "profile error: {msg}"),
         }
     }
@@ -106,7 +117,7 @@ impl std::error::Error for PaykitError {}
 
 /// Identifier for a payment method specification.
 ///
-/// Typically based filename component stored under `/pub/paykit.app/v0/…`.
+/// Typically a path-based filename component stored under `/pub/paykit.app/v0/…`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MethodId(pub String);
 
@@ -167,7 +178,9 @@ where
 /// # Semantics
 /// - Returns an empty map when the payee has not published any endpoints or their
 ///   storage directory is missing.
-/// - Propagates transport failures (e.g., network errors) as `PaykitError::Transport`.
+/// - Returns `Err(PaykitError::InvalidData)` when a resource path is unparseable or
+///   an endpoint payload contains invalid UTF-8.
+/// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
 ///
 /// # Examples
 /// ```
@@ -203,7 +216,8 @@ where
 ///
 /// # Semantics
 /// - Returns `Ok(None)` when the endpoint file is missing or empty.
-/// - Returns `Err` only when the underlying transport fails (permissions, network, etc.).
+/// - Returns `Err(PaykitError::InvalidData)` when the endpoint payload contains invalid UTF-8.
+/// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
 ///
 /// # Examples
 /// ```
@@ -242,7 +256,9 @@ where
 /// # Semantics
 /// - Returns an empty vector when no contacts are stored under the follows path
 ///   or the directory does not exist yet.
-/// - Returns `Err` only when listing fails due to a transport error.
+/// - Returns `Err(PaykitError::InvalidData)` when a contact entry cannot be parsed
+///   as a valid [`PublicKey`].
+/// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
 ///
 /// # Examples
 /// ```
@@ -308,6 +324,10 @@ fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
         PaykitError::NotFound(msg) => {
             debug!(operation = label, error = %msg, "resource not found");
             PaykitError::NotFound(format!("{label}: {msg}"))
+        }
+        PaykitError::InvalidData(msg) => {
+            warn!(operation = label, error = %msg, "invalid data");
+            PaykitError::InvalidData(format!("{label}: {msg}"))
         }
         PaykitError::Profile(msg) => {
             warn!(operation = label, error = %msg, "profile error");
