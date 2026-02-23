@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use pubky::PubkySession;
+use tracing::{debug, error, instrument};
 
 use super::PAYKIT_PATH_PREFIX;
 use crate::transport::traits::AuthenticatedTransport;
@@ -33,23 +34,31 @@ impl From<PubkySession> for PubkyAuthenticatedTransport {
 
 #[async_trait]
 impl AuthenticatedTransport for PubkyAuthenticatedTransport {
+    #[instrument(skip(self, data), fields(method = %method.0))]
     async fn upsert_payment_endpoint(&self, method: &MethodId, data: &EndpointData) -> Result<()> {
         let path = format!("{PAYKIT_PATH_PREFIX}{}", method.0);
+        debug!(path = %path, "writing payment endpoint to storage");
         self.session
             .storage()
             .put(path, data.0.clone())
             .await
-            .map_err(|err| PaykitError::Transport(format!("put endpoint: {err}")))?;
+            .map_err(|err| {
+                error!(error = %err, "failed to put payment endpoint");
+                PaykitError::Transport(format!("put endpoint: {err}"))
+            })?;
+        debug!("payment endpoint stored successfully");
         Ok(())
     }
 
+    #[instrument(skip(self), fields(method = %method.0))]
     async fn remove_payment_endpoint(&self, method: &MethodId) -> Result<()> {
         let path = format!("{PAYKIT_PATH_PREFIX}{}", method.0);
-        self.session
-            .storage()
-            .delete(path)
-            .await
-            .map_err(|err| PaykitError::Transport(format!("delete endpoint: {err}")))?;
+        debug!(path = %path, "deleting payment endpoint from storage");
+        self.session.storage().delete(path).await.map_err(|err| {
+            error!(error = %err, "failed to delete payment endpoint");
+            PaykitError::Transport(format!("delete endpoint: {err}"))
+        })?;
+        debug!("payment endpoint removed successfully");
         Ok(())
     }
 }

@@ -19,6 +19,8 @@
 
 use std::{collections::HashMap, fmt};
 
+use tracing::{debug, instrument, warn};
+
 #[cfg(feature = "pubky")]
 pub use pubky::PublicKey;
 
@@ -135,10 +137,12 @@ pub struct SupportedPayments {
 /// # Ok(())
 /// # }
 /// ```
+#[instrument(skip(client, data), fields(method = %method.0))]
 pub async fn set_payment_endpoint<S>(client: &S, method: MethodId, data: EndpointData) -> Result<()>
 where
     S: AuthenticatedTransport,
 {
+    debug!("storing payment endpoint");
     client
         .upsert_payment_endpoint(&method, &data)
         .await
@@ -146,10 +150,12 @@ where
 }
 
 /// Removes a payment endpoint via the injected authenticated client.
+#[instrument(skip(client), fields(method = %method.0))]
 pub async fn remove_payment_endpoint<S>(client: &S, method: MethodId) -> Result<()>
 where
     S: AuthenticatedTransport,
 {
+    debug!("removing payment endpoint");
     client
         .remove_payment_endpoint(&method)
         .await
@@ -179,14 +185,18 @@ where
 /// # Ok(())
 /// # }
 /// ```
+#[instrument(skip(reader), fields(payee = %payee))]
 pub async fn get_payment_list<R>(reader: &R, payee: &PublicKey) -> Result<SupportedPayments>
 where
     R: UnauthenticatedTransportRead,
 {
-    reader
+    debug!("fetching payment list");
+    let result = reader
         .fetch_supported_payments(payee)
         .await
-        .map_err(|err| map_error("get_payment_list", err))
+        .map_err(|err| map_error("get_payment_list", err))?;
+    debug!(count = result.entries.len(), "payment list retrieved");
+    Ok(result)
 }
 
 /// Retrieves a specific payment endpoint for `payee` and `method`.
@@ -209,6 +219,7 @@ where
 /// # Ok(())
 /// # }
 /// ```
+#[instrument(skip(reader), fields(payee = %payee, method = %method.0))]
 pub async fn get_payment_endpoint<R>(
     reader: &R,
     payee: &PublicKey,
@@ -217,10 +228,13 @@ pub async fn get_payment_endpoint<R>(
 where
     R: UnauthenticatedTransportRead,
 {
-    reader
+    debug!("fetching payment endpoint");
+    let result = reader
         .fetch_payment_endpoint(payee, method)
         .await
-        .map_err(|err| map_error("get_payment_endpoint", err))
+        .map_err(|err| map_error("get_payment_endpoint", err))?;
+    debug!(found = result.is_some(), "payment endpoint lookup complete");
+    Ok(result)
 }
 
 /// Returns known contacts of a given public key.
@@ -241,14 +255,18 @@ where
 /// # Ok(())
 /// # }
 /// ```
+#[instrument(skip(reader), fields(owner = %key))]
 pub async fn get_known_contacts<R>(reader: &R, key: &PublicKey) -> Result<Vec<PublicKey>>
 where
     R: UnauthenticatedTransportRead,
 {
-    reader
+    debug!("fetching known contacts");
+    let result = reader
         .fetch_known_contacts(key)
         .await
-        .map_err(|err| map_error("get_known_contacts", err))
+        .map_err(|err| map_error("get_known_contacts", err))?;
+    debug!(count = result.len(), "known contacts retrieved");
+    Ok(result)
 }
 
 /// Returns the profile of a given public key.
@@ -269,10 +287,12 @@ where
 /// # Ok(())
 /// # }
 /// ```
+#[instrument(skip(reader), fields(user = %key))]
 pub async fn get_profile<R>(reader: &R, key: &PublicKey) -> Result<Profile>
 where
     R: UnauthenticatedTransportRead,
 {
+    debug!("fetching user profile");
     reader
         .fetch_profile(key)
         .await
@@ -281,9 +301,18 @@ where
 
 fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
     match err {
-        PaykitError::Transport(msg) => PaykitError::Transport(format!("{label}: {msg}")),
-        PaykitError::NotFound(msg) => PaykitError::NotFound(format!("{label}: {msg}")),
-        PaykitError::Profile(msg) => PaykitError::Profile(format!("{label}: {msg}")),
+        PaykitError::Transport(msg) => {
+            warn!(operation = label, error = %msg, "transport error");
+            PaykitError::Transport(format!("{label}: {msg}"))
+        }
+        PaykitError::NotFound(msg) => {
+            debug!(operation = label, error = %msg, "resource not found");
+            PaykitError::NotFound(format!("{label}: {msg}"))
+        }
+        PaykitError::Profile(msg) => {
+            warn!(operation = label, error = %msg, "profile error");
+            PaykitError::Profile(format!("{label}: {msg}"))
+        }
         _ => err,
     }
 }
