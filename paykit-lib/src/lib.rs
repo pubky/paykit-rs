@@ -541,6 +541,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn known_contacts_skips_invalid_entries() {
+        let setup = TestSetup::new().await;
+
+        // Seed one valid contact.
+        let valid_contact = Keypair::random().public_key();
+        setup
+            .raw_session
+            .storage()
+            .put(format!("{PUBKY_FOLLOWS_PATH}{}", valid_contact), "")
+            .await
+            .unwrap();
+
+        // Seed an entry that cannot be parsed as a PublicKey.
+        setup
+            .raw_session
+            .storage()
+            .put(format!("{PUBKY_FOLLOWS_PATH}not-a-valid-public-key"), "")
+            .await
+            .unwrap();
+
+        // fetch_known_contacts should succeed, returning only the valid contact.
+        let contacts = get_known_contacts(&setup.reader_transport, &setup.public_key)
+            .await
+            .unwrap();
+
+        assert_eq!(contacts.len(), 1, "invalid entry should be skipped");
+        assert!(contacts.contains(&valid_contact));
+
+        setup.raw_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_fetch_profile_success() {
         let setup = TestSetup::new().await;
 
