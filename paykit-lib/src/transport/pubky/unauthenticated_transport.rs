@@ -197,10 +197,8 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
                 match pk_str.parse::<PublicKey>() {
                     Ok(pk) => contacts.push(pk),
                     Err(err) => {
-                        error!(entry = %pk_str, error = %err, "invalid contact entry, cannot parse as PublicKey");
-                        return Err(PaykitError::InvalidData(format!(
-                            "invalid contact entry '{pk_str}': {err}"
-                        )));
+                        error!(entry = %pk_str, error = %err, "skipping invalid contact entry, cannot parse as PublicKey");
+                        continue;
                     }
                 }
             }
