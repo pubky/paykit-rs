@@ -34,13 +34,13 @@ impl From<PubkySession> for PubkyAuthenticatedTransport {
 
 #[async_trait]
 impl AuthenticatedTransport for PubkyAuthenticatedTransport {
-    #[instrument(skip(self, data), fields(method = %method.0))]
+    #[instrument(skip(self, data), fields(method = %method))]
     async fn upsert_payment_endpoint(&self, method: &MethodId, data: &EndpointData) -> Result<()> {
-        let path = format!("{PAYKIT_PATH_PREFIX}{}", method.0);
+        let path = format!("{PAYKIT_PATH_PREFIX}{}", method.as_str());
         debug!(path = %path, "writing payment endpoint to storage");
         self.session
             .storage()
-            .put(path, data.0.clone())
+            .put(path, data.as_str().to_string())
             .await
             .map_err(|err| {
                 error!(error = %err, "failed to put payment endpoint");
@@ -53,9 +53,9 @@ impl AuthenticatedTransport for PubkyAuthenticatedTransport {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(method = %method.0))]
+    #[instrument(skip(self), fields(method = %method))]
     async fn remove_payment_endpoint(&self, method: &MethodId) -> Result<()> {
-        let path = format!("{PAYKIT_PATH_PREFIX}{}", method.0);
+        let path = format!("{PAYKIT_PATH_PREFIX}{}", method.as_str());
         debug!(path = %path, "deleting payment endpoint from storage");
         self.session.storage().delete(path).await.map_err(|err| {
             error!(error = %err, "failed to delete payment endpoint");

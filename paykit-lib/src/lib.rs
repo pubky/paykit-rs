@@ -123,20 +123,138 @@ pub enum PaykitError {
     /// and [`PaykitError::Transport`] which covers network/SDK errors.
     #[error("profile error: {0}")]
     Profile(String),
+
+    /// Input failed validation.
+    ///
+    /// Returned when a caller-supplied value (such as a [`MethodId`]) violates
+    /// structural invariants — for example containing path-traversal sequences,
+    /// null bytes, or characters outside the allowed set.
+    #[error("validation error: {0}")]
+    Validation(String),
 }
 
 /// Identifier for a payment method specification.
 ///
-/// Typically a path-based filename component stored under `/pub/paykit.app/v0/…`.
+/// A `MethodId` is a single, safe path segment stored under `/pub/paykit.app/v0/…`.
+/// It is validated at construction time to prevent path injection attacks.
+///
+/// # Allowed characters
+/// ASCII alphanumeric (`a-z`, `A-Z`, `0-9`), hyphens (`-`), underscores (`_`),
+/// and dots (`.`) — but the value must not consist solely of dots (i.e. `"."` and
+/// `".."` are rejected).
+///
+/// # Limits
+/// - Must not be empty.
+/// - Must not exceed 64 characters.
+///
+/// # Examples
+/// ```
+/// # use paykit_lib::MethodId;
+/// let m = MethodId::new("lightning").unwrap();
+/// assert_eq!(m.as_str(), "lightning");
+///
+/// // Path traversal is rejected:
+/// assert!(MethodId::new("../etc/passwd").is_err());
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct MethodId(pub String);
+pub struct MethodId(String);
+
+/// Maximum length (in bytes) of a [`MethodId`] value.
+const METHOD_ID_MAX_LEN: usize = 64;
+
+impl MethodId {
+    /// Create a new `MethodId` after validating the identifier.
+    ///
+    /// Returns `Err(PaykitError::Validation)` if the value is empty, too long,
+    /// contains forbidden characters, or resembles a path-traversal component.
+    pub fn new(id: impl Into<String>) -> Result<Self> {
+        let id = id.into();
+
+        if id.is_empty() {
+            return Err(PaykitError::Validation("MethodId must not be empty".into()));
+        }
+
+        if id.len() > METHOD_ID_MAX_LEN {
+            return Err(PaykitError::Validation(format!(
+                "MethodId must not exceed {METHOD_ID_MAX_LEN} characters, got {}",
+                id.len()
+            )));
+        }
+
+        // Every character must be ASCII alphanumeric, hyphen, underscore, or dot.
+        if let Some(pos) = id
+            .bytes()
+            .position(|b| !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'))
+        {
+            return Err(PaykitError::Validation(format!(
+                "MethodId contains forbidden character '{}' at byte {pos} in \"{id}\"",
+                id.as_bytes()[pos] as char
+            )));
+        }
+
+        // Reject pure-dot names that are path-traversal components.
+        if id.bytes().all(|b| b == b'.') {
+            return Err(PaykitError::Validation(format!(
+                "MethodId must not be a path-traversal component: \"{id}\""
+            )));
+        }
+
+        Ok(Self(id))
+    }
+
+    /// Access the inner identifier string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for MethodId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for MethodId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Serialized payload served by a payment endpoint (UTF-8 text such as JSON, lnurl, etc.).
 ///
 /// If you need to transmit binary payloads, encode them (e.g., base64) before wrapping
 /// in `EndpointData`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EndpointData(pub String);
+pub struct EndpointData(String);
+
+impl EndpointData {
+    /// Wrap a payload string as endpoint data.
+    pub fn new(data: impl Into<String>) -> Self {
+        Self(data.into())
+    }
+
+    /// Access the inner payload string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume the wrapper and return the inner string.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for EndpointData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for EndpointData {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Collection of supported payment entries keyed by method identifiers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -152,13 +270,13 @@ pub struct SupportedPayments {
 /// # use paykit_lib::{set_payment_endpoint, MethodId, EndpointData, PublicKey};
 /// # use paykit_lib::AuthenticatedTransport;
 /// # async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
-/// let method = MethodId("lightning".into());
-/// let data = EndpointData("{\"bolt11\":\"ln...\"}".into());
+/// let method = MethodId::new("lightning")?;
+/// let data = EndpointData::new("{\"bolt11\":\"ln...\"}");
 /// set_payment_endpoint(client, method, data).await?;
 /// # Ok(())
 /// # }
 /// ```
-#[instrument(skip(client, data), fields(method = %method.0))]
+#[instrument(skip(client, data), fields(method = %method))]
 pub async fn set_payment_endpoint<S>(client: &S, method: MethodId, data: EndpointData) -> Result<()>
 where
     S: AuthenticatedTransport,
@@ -171,7 +289,7 @@ where
 }
 
 /// Removes a payment endpoint via the injected authenticated client.
-#[instrument(skip(client), fields(method = %method.0))]
+#[instrument(skip(client), fields(method = %method))]
 pub async fn remove_payment_endpoint<S>(client: &S, method: MethodId) -> Result<()>
 where
     S: AuthenticatedTransport,
@@ -202,7 +320,7 @@ where
 ///     println!("payee published no endpoints yet");
 /// } else {
 ///     for (method, data) in &payments.entries {
-///         println!("method={} payload={}", method.0, data.0);
+///         println!("method={} payload={}", method.as_str(), data.as_str());
 ///     }
 /// }
 /// # Ok(())
@@ -234,16 +352,16 @@ where
 /// # use paykit_lib::{get_payment_endpoint, MethodId, PublicKey};
 /// # use paykit_lib::UnauthenticatedTransportRead;
 /// # async fn inspect(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
-/// let lightning = MethodId("lightning".into());
+/// let lightning = MethodId::new("lightning")?;
 /// if let Some(endpoint) = get_payment_endpoint(reader, pk, &lightning).await? {
-///     println!("lightning endpoint: {}", endpoint.0);
+///     println!("lightning endpoint: {}", endpoint.as_str());
 /// } else {
 ///     println!("no lightning endpoint published");
 /// }
 /// # Ok(())
 /// # }
 /// ```
-#[instrument(skip(reader), fields(payee = %payee, method = %method.0))]
+#[instrument(skip(reader), fields(payee = %payee, method = %method))]
 pub async fn get_payment_endpoint<R>(
     reader: &R,
     payee: &PublicKey,
@@ -337,10 +455,163 @@ fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
             source,
         },
         PaykitError::Profile(msg) => PaykitError::Profile(format!("{label}: {msg}")),
+        PaykitError::Validation(msg) => PaykitError::Validation(format!("{label}: {msg}")),
     }
 }
 
-/// Tests
+/// Unit tests for input validation (no network required).
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    // ── MethodId: valid inputs ──────────────────────────────────────────
+
+    #[test]
+    fn test_method_id_valid_simple_names() {
+        for name in ["lightning", "onchain", "bolt11", "lnurl-pay"] {
+            assert!(MethodId::new(name).is_ok(), "expected '{name}' to be valid");
+        }
+    }
+
+    #[test]
+    fn test_method_id_valid_with_dots() {
+        let m = MethodId::new("method.v2").unwrap();
+        assert_eq!(m.as_str(), "method.v2");
+    }
+
+    #[test]
+    fn test_method_id_valid_with_underscores() {
+        let m = MethodId::new("my_method").unwrap();
+        assert_eq!(m.as_str(), "my_method");
+    }
+
+    #[test]
+    fn test_method_id_valid_mixed_case() {
+        let m = MethodId::new("LnUrl-Pay").unwrap();
+        assert_eq!(m.as_str(), "LnUrl-Pay");
+    }
+
+    #[test]
+    fn test_method_id_valid_max_length() {
+        let name = "a".repeat(METHOD_ID_MAX_LEN);
+        assert!(MethodId::new(&name).is_ok());
+    }
+
+    #[test]
+    fn test_method_id_valid_single_char() {
+        assert!(MethodId::new("x").is_ok());
+    }
+
+    #[test]
+    fn test_method_id_display() {
+        let m = MethodId::new("lightning").unwrap();
+        assert_eq!(format!("{m}"), "lightning");
+    }
+
+    #[test]
+    fn test_method_id_as_ref() {
+        let m = MethodId::new("onchain").unwrap();
+        let s: &str = m.as_ref();
+        assert_eq!(s, "onchain");
+    }
+
+    // ── MethodId: invalid inputs ────────────────────────────────────────
+
+    #[test]
+    fn test_method_id_reject_empty() {
+        let err = MethodId::new("").unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("empty")));
+    }
+
+    #[test]
+    fn test_method_id_reject_path_traversal_dotdot() {
+        assert!(MethodId::new("..").is_err());
+    }
+
+    #[test]
+    fn test_method_id_reject_path_traversal_dot() {
+        assert!(MethodId::new(".").is_err());
+    }
+
+    #[test]
+    fn test_method_id_reject_path_traversal_sequence() {
+        // Slashes are rejected by the character allowlist, but verify the
+        // specific traversal pattern is caught.
+        assert!(MethodId::new("../etc/passwd").is_err());
+        assert!(MethodId::new("../../foo").is_err());
+    }
+
+    #[test]
+    fn test_method_id_reject_forward_slash() {
+        assert!(MethodId::new("foo/bar").is_err());
+    }
+
+    #[test]
+    fn test_method_id_reject_backslash() {
+        assert!(MethodId::new("a\\b").is_err());
+    }
+
+    #[test]
+    fn test_method_id_reject_null_byte() {
+        assert!(MethodId::new("foo\0bar").is_err());
+    }
+
+    #[test]
+    fn test_method_id_reject_too_long() {
+        let name = "a".repeat(METHOD_ID_MAX_LEN + 1);
+        let err = MethodId::new(&name).unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("exceed")));
+    }
+
+    #[test]
+    fn test_method_id_reject_space() {
+        assert!(MethodId::new("foo bar").is_err());
+    }
+
+    #[test]
+    fn test_method_id_reject_special_chars() {
+        for bad in ["foo@bar", "foo:bar", "foo?bar", "foo#bar", "foo=bar"] {
+            assert!(
+                MethodId::new(bad).is_err(),
+                "expected '{bad}' to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_method_id_reject_unicode() {
+        assert!(MethodId::new("⚡lightning").is_err());
+    }
+
+    #[test]
+    fn test_method_id_reject_triple_dots() {
+        assert!(MethodId::new("...").is_err());
+    }
+
+    // ── EndpointData: basic accessors ───────────────────────────────────
+
+    #[test]
+    fn test_endpoint_data_new_and_accessors() {
+        let d = EndpointData::new("{\"bolt11\":\"ln...\"}");
+        assert_eq!(d.as_str(), "{\"bolt11\":\"ln...\"}");
+        assert_eq!(format!("{d}"), "{\"bolt11\":\"ln...\"}");
+    }
+
+    #[test]
+    fn test_endpoint_data_into_inner() {
+        let d = EndpointData::new("payload");
+        assert_eq!(d.into_inner(), "payload");
+    }
+
+    #[test]
+    fn test_endpoint_data_as_ref() {
+        let d = EndpointData::new("data");
+        let s: &str = d.as_ref();
+        assert_eq!(s, "data");
+    }
+}
+
+/// Integration tests (require `pubky` feature and ephemeral testnet).
 #[cfg(all(test, feature = "pubky"))]
 mod tests {
     use std::collections::HashMap;
@@ -386,8 +657,8 @@ mod tests {
     async fn endpoint_round_trip_and_update() {
         let setup = TestSetup::new().await;
 
-        let method = MethodId("onchain".into());
-        let endpoint = EndpointData("{\"address\":\"bc1...\"}".into());
+        let method = MethodId::new("onchain").unwrap();
+        let endpoint = EndpointData::new("{\"address\":\"bc1...\"}");
 
         set_payment_endpoint(&setup.session_transport, method.clone(), endpoint.clone())
             .await
@@ -410,7 +681,8 @@ mod tests {
             }
         );
 
-        let new_endpoint = EndpointData("{\"address\":\"1c1...\"}".into());
+        let new_endpoint = EndpointData::new("{\"address\":\"1c1...\"}");
+
         set_payment_endpoint(
             &setup.session_transport,
             method.clone(),
@@ -430,7 +702,7 @@ mod tests {
     #[tokio::test]
     async fn missing_endpoint_returns_none() {
         let setup = TestSetup::new().await;
-        let method = MethodId("bolt11".into());
+        let method = MethodId::new("bolt11").unwrap();
 
         let missing = get_payment_endpoint(&setup.reader_transport, &setup.public_key, &method)
             .await
@@ -444,10 +716,10 @@ mod tests {
     async fn list_reflects_additions_and_removals() {
         let setup = TestSetup::new().await;
 
-        let onchain = MethodId("onchain".into());
-        let lightning = MethodId("lightning".into());
-        let onchain_data = EndpointData("{\"address\":\"bc1...\"}".into());
-        let lightning_data = EndpointData("{\"bolt11\":\"ln...\"}".into());
+        let onchain = MethodId::new("onchain").unwrap();
+        let lightning = MethodId::new("lightning").unwrap();
+        let onchain_data = EndpointData::new("{\"address\":\"bc1...\"}");
+        let lightning_data = EndpointData::new("{\"bolt11\":\"ln...\"}");
 
         set_payment_endpoint(
             &setup.session_transport,
@@ -499,7 +771,7 @@ mod tests {
     #[tokio::test]
     async fn removing_missing_endpoint_is_error() {
         let setup = TestSetup::new().await;
-        let method = MethodId("unused".into());
+        let method = MethodId::new("unused").unwrap();
 
         remove_payment_endpoint(&setup.session_transport, method)
             .await
