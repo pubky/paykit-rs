@@ -177,18 +177,18 @@ impl MethodId {
         if id.len() > METHOD_ID_MAX_LEN {
             return Err(PaykitError::Validation(format!(
                 "MethodId must not exceed {METHOD_ID_MAX_LEN} characters, got {}",
-                id.len()
+                id.chars().count()
             )));
         }
 
         // Every character must be ASCII alphanumeric, hyphen, underscore, or dot.
-        if let Some(pos) = id
-            .bytes()
-            .position(|b| !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'))
+        if let Some((pos, ch)) = id
+            .char_indices()
+            .find(|&(_, ch)| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
         {
             return Err(PaykitError::Validation(format!(
                 "MethodId contains forbidden character '{}' at byte {pos} in \"{id}\"",
-                id.as_bytes()[pos] as char
+                ch
             )));
         }
 

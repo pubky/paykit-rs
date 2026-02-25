@@ -166,12 +166,9 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
             let label = format!("fetch endpoint {}", method);
             if let Some(payload) = self.fetch_text(resource.to_string(), &label).await? {
                 debug!(method = %method, "fetched payment endpoint payload");
-                let method_id = MethodId::new(method).map_err(|_| PaykitError::InvalidData {
-                    context: format!(
-                        "storage returned invalid method identifier '{}'",
-                        resource.path
-                    ),
-                    source: None,
+                let method_id = MethodId::new(&method).map_err(|err| PaykitError::InvalidData {
+                    context: format!("storage returned invalid method identifier '{}'", method),
+                    source: Some(err.into()),
                 })?;
                 map.insert(method_id, EndpointData::new(payload));
             }
