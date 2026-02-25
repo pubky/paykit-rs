@@ -33,7 +33,10 @@ impl PubkyUnauthenticatedTransport {
         debug!("attempting to create PubkyUnauthenticatedTransport via PublicStorage::new()");
         let inner = SdkUnauthenticatedTransport::new().map_err(|err| {
             error!(error = %err, "failed to create Pubky public transport");
-            PaykitError::Transport(format!("failed to create Pubky public transport: {err}"))
+            PaykitError::Transport {
+                context: "failed to create Pubky public transport".into(),
+                source: err.into(),
+            }
         })?;
         debug!("PubkyUnauthenticatedTransport created successfully");
         Ok(Self { inner })
@@ -51,7 +54,10 @@ impl PubkyUnauthenticatedTransport {
             Ok(resp) => {
                 let bytes = resp.bytes().await.map_err(|err| {
                     error!(error = %err, "failed to read response bytes");
-                    PaykitError::Transport(format!("{label}: {err}"))
+                    PaykitError::Transport {
+                        context: label.to_string(),
+                        source: err.into(),
+                    }
                 })?;
                 if bytes.is_empty() {
                     debug!("resource is empty, returning None");
@@ -64,7 +70,10 @@ impl PubkyUnauthenticatedTransport {
                         valid_up_to = pos,
                         "response contains invalid UTF-8 — data may be corrupt"
                     );
-                    PaykitError::InvalidData(format!("{label}: invalid UTF-8 at byte {pos}"))
+                    PaykitError::InvalidData {
+                        context: format!("{label}: invalid UTF-8 at byte {pos}"),
+                        source: Some(err.into()),
+                    }
                 })?;
                 trace!(len = data.len(), "text resource fetched");
                 Ok(Some(data))
@@ -75,7 +84,10 @@ impl PubkyUnauthenticatedTransport {
             }
             Err(err) => {
                 error!(error = %err, "transport error during fetch");
-                Err(PaykitError::Transport(format!("{label}: {err}")))
+                Err(PaykitError::Transport {
+                    context: label.to_string(),
+                    source: err.into(),
+                })
             }
         }
     }
@@ -91,7 +103,10 @@ impl PubkyUnauthenticatedTransport {
             }
             Err(err) => {
                 error!(error = %err, "failed to create list builder");
-                return Err(PaykitError::Transport(format!("{label}: {err}")));
+                return Err(PaykitError::Transport {
+                    context: label.to_string(),
+                    source: err.into(),
+                });
             }
         };
 
@@ -106,9 +121,10 @@ impl PubkyUnauthenticatedTransport {
             }
             Err(err) => {
                 error!(error = %err, "list send failed");
-                Err(PaykitError::Transport(format!(
-                    "{label} send failed: {err}"
-                )))
+                Err(PaykitError::Transport {
+                    context: format!("{label} send failed"),
+                    source: err.into(),
+                })
             }
         }
     }
@@ -137,10 +153,13 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
                 .filter(|segment| !segment.is_empty())
                 .ok_or_else(|| {
                     error!(path = %resource.path, "invalid resource path for payment entry");
-                    PaykitError::InvalidData(format!(
-                        "cannot extract method from resource path '{}'",
-                        resource.path
-                    ))
+                    PaykitError::InvalidData {
+                        context: format!(
+                            "cannot extract method from resource path '{}'",
+                            resource.path
+                        ),
+                        source: None,
+                    }
                 })?
                 .to_string();
 
@@ -213,9 +232,10 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
         debug!("constructing profile resource");
         let resource = PubkyResource::new(user.clone(), PUBKY_PROFILE_FILE).map_err(|e| {
             error!(error = %e, "failed to construct profile resource");
-            PaykitError::Transport(format!(
-                "failed to construct profile resource for {user}: {e}"
-            ))
+            PaykitError::Transport {
+                context: format!("failed to construct profile resource for {user}"),
+                source: e.into(),
+            }
         })?;
 
         debug!("fetching profile blob from storage");
@@ -225,7 +245,10 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
                 .await
                 .map_err(|err| {
                     error!(error = %err, "failed to read profile response bytes");
-                    PaykitError::Transport(format!("fetch profile bytes failed: {err}"))
+                    PaykitError::Transport {
+                        context: "fetch profile bytes failed".into(),
+                        source: err.into(),
+                    }
                 })?
                 .to_vec(),
             Err(err) if is_not_found(&err) => {
@@ -234,9 +257,10 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
             }
             Err(err) => {
                 error!(error = %err, "transport error fetching profile");
-                return Err(PaykitError::Transport(format!(
-                    "fetch profile failed: {err}"
-                )));
+                return Err(PaykitError::Transport {
+                    context: "fetch profile failed".into(),
+                    source: err.into(),
+                });
             }
         };
 
