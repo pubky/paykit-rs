@@ -166,7 +166,11 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
             let label = format!("fetch endpoint {}", method);
             if let Some(payload) = self.fetch_text(resource.to_string(), &label).await? {
                 debug!(method = %method, "fetched payment endpoint payload");
-                map.insert(MethodId(method), EndpointData(payload));
+                let method_id = MethodId::new(&method).map_err(|err| PaykitError::InvalidData {
+                    context: format!("storage returned invalid method identifier '{}'", method),
+                    source: Some(err.into()),
+                })?;
+                map.insert(method_id, EndpointData::new(payload));
             }
         }
 
@@ -174,18 +178,18 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
         Ok(SupportedPayments { entries: map })
     }
 
-    #[instrument(skip(self), fields(payee = %payee, method = %method.0))]
+    #[instrument(skip(self), fields(payee = %payee, method = %method))]
     async fn fetch_payment_endpoint(
         &self,
         payee: &PublicKey,
         method: &MethodId,
     ) -> Result<Option<EndpointData>> {
-        let addr = format!("{payee}{PAYKIT_PATH_PREFIX}{}", method.0);
+        let addr = format!("{payee}{PAYKIT_PATH_PREFIX}{}", method.as_str());
         debug!(addr = %addr, "fetching individual payment endpoint");
         match self.fetch_text(addr, "fetch endpoint").await? {
             Some(payload) => {
                 debug!("payment endpoint found");
-                Ok(Some(EndpointData(payload)))
+                Ok(Some(EndpointData::new(payload)))
             }
             None => {
                 debug!("payment endpoint not found");

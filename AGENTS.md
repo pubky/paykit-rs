@@ -35,6 +35,12 @@
 - Each PR should describe motivation, list protocol impacts, and link relevant spec/issue references; include `cargo fmt`, `cargo clippy`, and `cargo test` outputs or mention if skipped.
 - Highlight any changes to exposed structs or capability strings so downstream bindings (Swift/RN/Kotlin) can be updated in sync.
 
+## Error Handling
+- `PaykitError` has five variants: `Transport`, `NotFound`, `InvalidData`, `Profile`, and `Validation`. Any exhaustive `match` must cover all five.
+- Use `PaykitError::Validation` for caller-supplied input that fails structural checks (e.g. invalid `MethodId`). Use `PaykitError::InvalidData` for data fetched from the network that turns out to be corrupt.
+
 ## Security & Configuration Tips
 - Never commit real routing keys or secrets; stub them via env vars or fixture files ignored by git.
 - Treat private URL handling code as sensitive: add comments describing assumptions about encryption and access control to aid auditing.
+- `MethodId` is validated at construction time (`MethodId::new()`). The inner field is private. Do not add escape hatches that bypass validation — all values interpolated into storage paths must go through the validated constructor. Allowed characters: ASCII alphanumeric, hyphens, underscores, and dots; max 64 chars; no path traversal (`.`, `..`).
+- `EndpointData` has a private inner field accessed via `.as_str()` / `.into_inner()`. Construct via `EndpointData::new()`.
