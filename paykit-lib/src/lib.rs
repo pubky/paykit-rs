@@ -17,9 +17,12 @@
 //!
 //! For an architectural overview and example workflows, see `paykit-lib/README.md`.
 
-use std::{collections::HashMap, fmt};
+use std::collections::HashMap;
+#[cfg(not(feature = "pubky"))]
+use std::fmt;
 
-use tracing::{debug, instrument, warn};
+use thiserror::Error;
+use tracing::{debug, instrument};
 
 #[cfg(feature = "pubky")]
 pub use pubky::PublicKey;
@@ -67,21 +70,35 @@ pub use transport::{PubkyAuthenticatedTransport, PubkyUnauthenticatedTransport};
 pub type Result<T> = std::result::Result<T, PaykitError>;
 
 /// Domain-specific error type.
-#[derive(Debug)]
+///
+/// Variants that wrap an underlying cause carry a `source` field backed by
+/// [`anyhow::Error`] so that the standard [`std::error::Error::source`] chain
+/// is preserved while keeping the public API decoupled from upstream error
+/// types. Callers can downcast the source via [`anyhow::Error::downcast_ref`]
+/// when they need the original typed error.
+#[derive(Debug, Error)]
 pub enum PaykitError {
-    /// Placeholder for unimplemented logic in the current scaffold.
-    Unimplemented(&'static str),
     /// Wrapper for transport layer failures.
     ///
     /// Most user-facing failures bubble up through this variant, encapsulating
     /// lower-level SDK/network errors (timeouts, connection refused, permission
     /// denied, etc.).
-    Transport(String),
+    #[error("transport error: {context}")]
+    Transport {
+        /// Human-readable description of what went wrong.
+        context: String,
+        /// The underlying error that caused this failure.
+        #[source]
+        source: anyhow::Error,
+    },
+
     /// The requested resource does not exist.
     ///
     /// Returned when a profile or other resource is not found (404/GONE).
     /// Distinct from [`PaykitError::Profile`] which indicates the data exists but is malformed.
+    #[error("not found: {0}")]
     NotFound(String),
+
     /// Retrieved data is corrupt or structurally invalid.
     ///
     /// Returned when a resource was successfully fetched from the network but its
@@ -90,30 +107,23 @@ pub enum PaykitError {
     /// key. This is distinct from [`PaykitError::Transport`] (the network call
     /// itself failed) and [`PaykitError::Profile`] (profile-specific parse
     /// errors).
-    InvalidData(String),
+    #[error("invalid data: {context}")]
+    InvalidData {
+        /// Human-readable description of the data problem.
+        context: String,
+        /// The underlying error, when available.
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+
     /// Profile data is malformed or invalid.
     ///
     /// Returned when profile data exists but cannot be parsed or validated.
     /// Distinct from [`PaykitError::NotFound`] which indicates the resource doesn't exist,
     /// and [`PaykitError::Transport`] which covers network/SDK errors.
+    #[error("profile error: {0}")]
     Profile(String),
 }
-
-impl fmt::Display for PaykitError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PaykitError::Unimplemented(label) => {
-                write!(f, "{label} is not implemented yet")
-            }
-            PaykitError::Transport(msg) => write!(f, "transport error: {msg}"),
-            PaykitError::NotFound(msg) => write!(f, "not found: {msg}"),
-            PaykitError::InvalidData(msg) => write!(f, "invalid data: {msg}"),
-            PaykitError::Profile(msg) => write!(f, "profile error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for PaykitError {}
 
 /// Identifier for a payment method specification.
 ///
@@ -317,23 +327,16 @@ where
 
 fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
     match err {
-        PaykitError::Transport(msg) => {
-            warn!(operation = label, error = %msg, "transport error");
-            PaykitError::Transport(format!("{label}: {msg}"))
-        }
-        PaykitError::NotFound(msg) => {
-            debug!(operation = label, error = %msg, "resource not found");
-            PaykitError::NotFound(format!("{label}: {msg}"))
-        }
-        PaykitError::InvalidData(msg) => {
-            warn!(operation = label, error = %msg, "invalid data");
-            PaykitError::InvalidData(format!("{label}: {msg}"))
-        }
-        PaykitError::Profile(msg) => {
-            warn!(operation = label, error = %msg, "profile error");
-            PaykitError::Profile(format!("{label}: {msg}"))
-        }
-        _ => err,
+        PaykitError::Transport { context, source } => PaykitError::Transport {
+            context: format!("{label}: {context}"),
+            source,
+        },
+        PaykitError::NotFound(msg) => PaykitError::NotFound(format!("{label}: {msg}")),
+        PaykitError::InvalidData { context, source } => PaykitError::InvalidData {
+            context: format!("{label}: {context}"),
+            source,
+        },
+        PaykitError::Profile(msg) => PaykitError::Profile(format!("{label}: {msg}")),
     }
 }
 

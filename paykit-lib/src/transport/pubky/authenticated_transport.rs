@@ -44,7 +44,10 @@ impl AuthenticatedTransport for PubkyAuthenticatedTransport {
             .await
             .map_err(|err| {
                 error!(error = %err, "failed to put payment endpoint");
-                PaykitError::Transport(format!("put endpoint: {err}"))
+                PaykitError::Transport {
+                    context: "put endpoint".into(),
+                    source: err.into(),
+                }
             })?;
         debug!("payment endpoint stored successfully");
         Ok(())
@@ -56,7 +59,10 @@ impl AuthenticatedTransport for PubkyAuthenticatedTransport {
         debug!(path = %path, "deleting payment endpoint from storage");
         self.session.storage().delete(path).await.map_err(|err| {
             error!(error = %err, "failed to delete payment endpoint");
-            PaykitError::Transport(format!("delete endpoint: {err}"))
+            PaykitError::Transport {
+                context: "delete endpoint".into(),
+                source: err.into(),
+            }
         })?;
         debug!("payment endpoint removed successfully");
         Ok(())
