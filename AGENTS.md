@@ -27,7 +27,7 @@
 ## Transport Policy (Timeout & Retry)
 - Both Pubky adapters embed a `TransportPolicy` that applies a **default 30 s per-attempt timeout** and **3 retries with exponential backoff + full jitter**. Callers get this protection automatically from `::new()` / `::try_new()`.
 - Override the default via `.with_policy(TransportPolicy::builder()...build())`. Use `TransportPolicy::none()` to restore the old unbounded behaviour.
-- Only `PaykitError::Transport` and `PaykitError::Timeout` are retried. All other error variants are returned immediately without retry.
+- Only `PaykitError::Transport` is retried. All other error variants — including `PaykitError::Timeout` — are returned immediately without retry.
 - The `TransportPolicy` struct and `TransportPolicyBuilder` are always exported (no feature gate). The retry/timeout execution machinery is internal to the Pubky adapters — custom transport implementations are responsible for their own timeout/retry logic.
 - `tokio` (time feature) and `rand` are optional dependencies gated behind the `pubky` feature.
 

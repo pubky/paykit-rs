@@ -144,9 +144,10 @@ impl TransportPolicyBuilder {
 
 /// Execute an async operation with timeout and retry according to `policy`.
 ///
-/// Only [`PaykitError::Transport`] and [`PaykitError::Timeout`] are considered
-/// retryable. All other variants (`Validation`, `NotFound`, `InvalidData`,
-/// `Profile`) are returned immediately.
+/// Only [`PaykitError::Transport`] is considered retryable. All other variants
+/// — including `Timeout` — are returned immediately. A timed-out operation has
+/// already consumed the full timeout budget; retrying it would multiply the
+/// total wait time by `max_retries`, defeating the purpose of the timeout.
 #[cfg(feature = "pubky")]
 pub(crate) async fn execute_with_policy<F, Fut, R>(
     policy: &TransportPolicy,
@@ -192,10 +193,7 @@ where
 
 #[cfg(feature = "pubky")]
 fn is_retryable(err: &crate::PaykitError) -> bool {
-    matches!(
-        err,
-        crate::PaykitError::Transport { .. } | crate::PaykitError::Timeout { .. }
-    )
+    matches!(err, crate::PaykitError::Transport { .. })
 }
 
 #[cfg(feature = "pubky")]
@@ -321,11 +319,11 @@ mod tests {
 
     #[cfg(feature = "pubky")]
     #[test]
-    fn test_is_retryable_timeout() {
+    fn test_not_retryable_timeout() {
         let err = crate::PaykitError::Timeout {
             context: "test".into(),
         };
-        assert!(is_retryable(&err));
+        assert!(!is_retryable(&err));
     }
 
     #[cfg(feature = "pubky")]
@@ -449,6 +447,33 @@ mod tests {
             matches!(err, crate::PaykitError::Timeout { .. }),
             "expected Timeout, got {err:?}"
         );
+    }
+
+    #[cfg(feature = "pubky")]
+    #[tokio::test]
+    async fn test_execute_no_retry_on_timeout() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let policy = TransportPolicy::builder()
+            .timeout(Duration::from_millis(10))
+            .max_retries(3)
+            .build();
+
+        let call_count = AtomicU32::new(0);
+
+        let result: crate::Result<()> = execute_with_policy(&policy, "slow_op", || async {
+            call_count.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        })
+        .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::PaykitError::Timeout { .. }
+        ));
+        // Timeout should NOT be retried — only 1 attempt despite max_retries=3.
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
     #[cfg(feature = "pubky")]
