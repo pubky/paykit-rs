@@ -3,10 +3,11 @@
 //! `paykit-lib` is a stateless Rust SDK that focuses on the transport layer of the
 //! Paykit protocol. It defines ergonomic helper types, a pair of tiny traits that
 //! callers implement (or wrap) to perform reads and writes against the routing network,
-//! and a [`TransportPolicy`] system that guards every network call with configurable
+//! and a [`TransportPolicy`] system that can guard network calls with configurable
 //! timeouts and retries. The crate includes first-party adapters for the Pubky SDK
-//! behind the default `pubky` feature while remaining open for custom transports or
-//! mocks.
+//! behind the default `pubky` feature, which wire `TransportPolicy` into their network
+//! operations, while remaining open for custom transports or mocks that may enforce
+//! their own policies.
 //!
 //! ## Design goals
 //! - Provide high-level helpers such as [`get_payment_list`] and [`set_payment_endpoint`]
