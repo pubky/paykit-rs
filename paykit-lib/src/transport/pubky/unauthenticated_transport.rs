@@ -185,11 +185,12 @@ impl PubkyUnauthenticatedTransport {
 
     /// Fetch the raw profile blob from storage, with policy applied.
     ///
-    /// Returns the raw bytes on success, or an appropriate error. Parsing is
-    /// handled by the caller so that non-retryable parse failures are not
-    /// wrapped in the retry loop.
+    /// Returns the [`PubkyResource`] handle and raw bytes on success, so the
+    /// caller can use the resource for parsing without reconstructing it.
+    /// Parsing is handled by the caller so that non-retryable parse failures
+    /// are not wrapped in the retry loop.
     #[instrument(skip(self), fields(user = %user))]
-    async fn fetch_profile_blob(&self, user: &PublicKey) -> Result<Vec<u8>> {
+    async fn fetch_profile_blob(&self, user: &PublicKey) -> Result<(PubkyResource, Vec<u8>)> {
         debug!("constructing profile resource");
         let resource = PubkyResource::new(user.clone(), PUBKY_PROFILE_FILE).map_err(|e| {
             error!(error = %e, "failed to construct profile resource");
@@ -200,7 +201,7 @@ impl PubkyUnauthenticatedTransport {
         })?;
 
         debug!("fetching profile blob from storage");
-        execute_with_policy(&self.policy, "fetch_profile", || {
+        let blob = execute_with_policy(&self.policy, "fetch_profile", || {
             let resource = resource.clone();
             async move {
                 match self.inner.get(&resource).await {
@@ -232,7 +233,9 @@ impl PubkyUnauthenticatedTransport {
                 }
             }
         })
-        .await
+        .await?;
+
+        Ok((resource, blob))
     }
 }
 
@@ -339,17 +342,9 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
 
     #[instrument(skip(self), fields(user = %user))]
     async fn fetch_profile(&self, user: &PublicKey) -> Result<Profile> {
-        let blob = self.fetch_profile_blob(user).await?;
+        let (resource, blob) = self.fetch_profile_blob(user).await?;
 
         debug!(blob_len = blob.len(), "parsing profile blob");
-        let resource = PubkyResource::new(user.clone(), PUBKY_PROFILE_FILE).map_err(|e| {
-            error!(error = %e, "failed to construct profile resource for parsing");
-            PaykitError::Transport {
-                context: format!("failed to construct profile resource for {user}"),
-                source: e.into(),
-            }
-        })?;
-
         match PubkyAppObject::from_uri(&resource.to_pubky_url(), &blob) {
             Ok(PubkyAppObject::User(profile)) => {
                 debug!("profile parsed successfully");
