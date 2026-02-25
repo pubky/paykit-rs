@@ -1,10 +1,12 @@
 //! Paykit library.
 //!
 //! `paykit-lib` is a stateless Rust SDK that focuses on the transport layer of the
-//! Paykit protocol. It defines ergonomic helper types plus a pair of tiny traits that
-//! callers implement (or wrap) to perform reads and writes against the routing network.
-//! The crate includes first-party adapters for the Pubky SDK behind the default
-//! `pubky` feature while remaining open for custom transports or mocks.
+//! Paykit protocol. It defines ergonomic helper types, a pair of tiny traits that
+//! callers implement (or wrap) to perform reads and writes against the routing network,
+//! and a [`TransportPolicy`] system that guards every network call with configurable
+//! timeouts and retries. The crate includes first-party adapters for the Pubky SDK
+//! behind the default `pubky` feature while remaining open for custom transports or
+//! mocks.
 //!
 //! ## Design goals
 //! - Provide high-level helpers such as [`get_payment_list`] and [`set_payment_endpoint`]
@@ -14,6 +16,9 @@
 //!   own security model, capability scoping, caching, or telemetry.
 //! - Export the standard Pubky path prefixes (e.g. `/pub/paykit.app/v0/`) to keep file layout
 //!   consistent across bindings.
+//! - Protect callers from indefinitely hanging network calls via a default
+//!   [`TransportPolicy`] (30 s timeout, 3 retries with exponential backoff) embedded
+//!   in the Pubky adapters.
 //!
 //! For an architectural overview and example workflows, see `paykit-lib/README.md`.
 
@@ -60,7 +65,9 @@ pub use pubky;
 
 mod transport;
 
-pub use transport::{AuthenticatedTransport, UnauthenticatedTransportRead};
+pub use transport::{
+    AuthenticatedTransport, TransportPolicy, TransportPolicyBuilder, UnauthenticatedTransportRead,
+};
 
 /// Pubky adapters are only exposed when the default `pubky` feature is enabled.
 #[cfg(feature = "pubky")]
@@ -131,6 +138,18 @@ pub enum PaykitError {
     /// null bytes, or characters outside the allowed set.
     #[error("validation error: {0}")]
     Validation(String),
+
+    /// An operation exceeded its configured timeout.
+    ///
+    /// Returned when a transport call does not complete within the duration
+    /// specified by [`TransportPolicy::timeout`]. This is distinct from
+    /// [`PaykitError::Transport`] (the call itself failed) — a timeout means
+    /// the call was abandoned because it took too long.
+    #[error("operation timed out: {context}")]
+    Timeout {
+        /// Description of which operation timed out and the duration.
+        context: String,
+    },
 }
 
 /// Identifier for a payment method specification.
@@ -265,6 +284,10 @@ pub struct SupportedPayments {
 
 /// Stores or updates a payment endpoint via the injected authenticated client.
 ///
+/// # Errors
+/// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
+/// - Returns `Err(PaykitError::Timeout)` if the operation exceeds the configured timeout.
+///
 /// # Examples
 /// ```
 /// # use paykit_lib::{set_payment_endpoint, MethodId, EndpointData, PublicKey};
@@ -289,6 +312,10 @@ where
 }
 
 /// Removes a payment endpoint via the injected authenticated client.
+///
+/// # Errors
+/// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
+/// - Returns `Err(PaykitError::Timeout)` if the operation exceeds the configured timeout.
 #[instrument(skip(client), fields(method = %method))]
 pub async fn remove_payment_endpoint<S>(client: &S, method: MethodId) -> Result<()>
 where
@@ -309,6 +336,7 @@ where
 /// - Returns `Err(PaykitError::InvalidData)` when a resource path is unparseable or
 ///   an endpoint payload contains invalid UTF-8.
 /// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
+/// - Returns `Err(PaykitError::Timeout)` if the operation exceeds the configured timeout.
 ///
 /// # Examples
 /// ```
@@ -346,6 +374,7 @@ where
 /// - Returns `Ok(None)` when the endpoint file is missing or empty.
 /// - Returns `Err(PaykitError::InvalidData)` when the endpoint payload contains invalid UTF-8.
 /// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
+/// - Returns `Err(PaykitError::Timeout)` if the operation exceeds the configured timeout.
 ///
 /// # Examples
 /// ```
@@ -387,6 +416,7 @@ where
 /// - Returns `Err(PaykitError::InvalidData)` when a contact entry cannot be parsed
 ///   as a valid [`PublicKey`].
 /// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
+/// - Returns `Err(PaykitError::Timeout)` if the operation exceeds the configured timeout.
 ///
 /// # Examples
 /// ```
@@ -420,6 +450,7 @@ where
 /// - Returns `Err(PaykitError::NotFound)` if the profile does not exist.
 /// - Returns `Err(PaykitError::Profile)` if the profile exists but is malformed.
 /// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
+/// - Returns `Err(PaykitError::Timeout)` if the operation exceeds the configured timeout.
 ///
 /// # Examples
 /// ```
@@ -456,6 +487,9 @@ fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
         },
         PaykitError::Profile(msg) => PaykitError::Profile(format!("{label}: {msg}")),
         PaykitError::Validation(msg) => PaykitError::Validation(format!("{label}: {msg}")),
+        PaykitError::Timeout { context } => PaykitError::Timeout {
+            context: format!("{label}: {context}"),
+        },
     }
 }
 

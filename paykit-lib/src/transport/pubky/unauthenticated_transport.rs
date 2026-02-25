@@ -12,23 +12,37 @@ use tracing::{debug, error, instrument, trace, warn};
 use pubky_app_specs::PubkyAppObject;
 
 use super::{PAYKIT_PATH_PREFIX, PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE};
+use crate::transport::policy::{execute_with_policy, TransportPolicy};
 use crate::transport::traits::UnauthenticatedTransportRead;
 use crate::{EndpointData, MethodId, PaykitError, Profile, PublicKey, Result, SupportedPayments};
 
 /// Adapter around `pubky::PublicStorage` implementing `UnauthenticatedTransportRead`.
+///
+/// Every instance carries a [`TransportPolicy`] that governs timeout and retry
+/// behaviour. The default policy (30 s timeout, 3 retries with exponential
+/// backoff) is applied automatically — use [`with_policy`](Self::with_policy)
+/// only when you need non-default settings.
 #[derive(Clone)]
 pub struct PubkyUnauthenticatedTransport {
     inner: SdkUnauthenticatedTransport,
+    policy: TransportPolicy,
 }
 
 impl PubkyUnauthenticatedTransport {
     /// Build an adapter from an existing SDK handle.
+    ///
+    /// Uses [`TransportPolicy::default()`] (30 s timeout, 3 retries).
     pub fn new(inner: SdkUnauthenticatedTransport) -> Self {
         debug!("creating PubkyUnauthenticatedTransport from existing handle");
-        Self { inner }
+        Self {
+            inner,
+            policy: TransportPolicy::default(),
+        }
     }
 
     /// Attempt to construct the underlying SDK transport via `pubky::PublicStorage::new()`.
+    ///
+    /// Uses [`TransportPolicy::default()`] (30 s timeout, 3 retries).
     pub fn try_new() -> Result<Self> {
         debug!("attempting to create PubkyUnauthenticatedTransport via PublicStorage::new()");
         let inner = SdkUnauthenticatedTransport::new().map_err(|err| {
@@ -39,7 +53,28 @@ impl PubkyUnauthenticatedTransport {
             }
         })?;
         debug!("PubkyUnauthenticatedTransport created successfully");
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            policy: TransportPolicy::default(),
+        })
+    }
+
+    /// Override the transport policy.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use paykit_lib::{PubkyUnauthenticatedTransport, TransportPolicy};
+    /// let reader = PubkyUnauthenticatedTransport::try_new()
+    ///     .unwrap()
+    ///     .with_policy(TransportPolicy::builder()
+    ///         .timeout(Duration::from_secs(5))
+    ///         .max_retries(1)
+    ///         .build());
+    /// ```
+    pub fn with_policy(mut self, policy: TransportPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Access the wrapped SDK transport handle.
@@ -47,86 +82,157 @@ impl PubkyUnauthenticatedTransport {
         &self.inner
     }
 
+    /// Access the current transport policy.
+    pub fn policy(&self) -> &TransportPolicy {
+        &self.policy
+    }
+
     #[instrument(skip(self), fields(addr = %addr, label = %label))]
     async fn fetch_text(&self, addr: String, label: &str) -> Result<Option<String>> {
         trace!("fetching text resource");
-        match self.inner.get(&addr).await {
-            Ok(resp) => {
-                let bytes = resp.bytes().await.map_err(|err| {
-                    error!(error = %err, "failed to read response bytes");
-                    PaykitError::Transport {
-                        context: label.to_string(),
-                        source: err.into(),
+        execute_with_policy(&self.policy, label, || {
+            let addr = addr.clone();
+            let label = label.to_string();
+            async move {
+                match self.inner.get(&addr).await {
+                    Ok(resp) => {
+                        let bytes = resp.bytes().await.map_err(|err| {
+                            error!(error = %err, "failed to read response bytes");
+                            PaykitError::Transport {
+                                context: label.clone(),
+                                source: err.into(),
+                            }
+                        })?;
+                        if bytes.is_empty() {
+                            debug!("resource is empty, returning None");
+                            return Ok(None);
+                        }
+                        let data = String::from_utf8(bytes.to_vec()).map_err(|err| {
+                            let pos = err.utf8_error().valid_up_to();
+                            error!(
+                                error = %err,
+                                valid_up_to = pos,
+                                "response contains invalid UTF-8 — data may be corrupt"
+                            );
+                            PaykitError::InvalidData {
+                                context: format!("{label}: invalid UTF-8 at byte {pos}"),
+                                source: Some(err.into()),
+                            }
+                        })?;
+                        trace!(len = data.len(), "text resource fetched");
+                        Ok(Some(data))
                     }
-                })?;
-                if bytes.is_empty() {
-                    debug!("resource is empty, returning None");
-                    return Ok(None);
+                    Err(err) if is_not_found(&err) => {
+                        debug!("resource not found (404/GONE)");
+                        Ok(None)
+                    }
+                    Err(err) => {
+                        error!(error = %err, "transport error during fetch");
+                        Err(PaykitError::Transport {
+                            context: label.clone(),
+                            source: err.into(),
+                        })
+                    }
                 }
-                let data = String::from_utf8(bytes.to_vec()).map_err(|err| {
-                    let pos = err.utf8_error().valid_up_to();
-                    error!(
-                        error = %err,
-                        valid_up_to = pos,
-                        "response contains invalid UTF-8 — data may be corrupt"
-                    );
-                    PaykitError::InvalidData {
-                        context: format!("{label}: invalid UTF-8 at byte {pos}"),
-                        source: Some(err.into()),
-                    }
-                })?;
-                trace!(len = data.len(), "text resource fetched");
-                Ok(Some(data))
             }
-            Err(err) if is_not_found(&err) => {
-                debug!("resource not found (404/GONE)");
-                Ok(None)
-            }
-            Err(err) => {
-                error!(error = %err, "transport error during fetch");
-                Err(PaykitError::Transport {
-                    context: label.to_string(),
-                    source: err.into(),
-                })
-            }
-        }
+        })
+        .await
     }
 
     #[instrument(skip(self), fields(addr = %addr, label = %label))]
     async fn list_entries(&self, addr: String, label: &str) -> Result<Vec<PubkyResource>> {
         trace!("listing directory entries");
-        let builder = match self.inner.list(&addr) {
-            Ok(builder) => builder,
-            Err(err) if is_not_found(&err) => {
-                debug!("directory not found, returning empty list");
-                return Ok(Vec::new());
-            }
-            Err(err) => {
-                error!(error = %err, "failed to create list builder");
-                return Err(PaykitError::Transport {
-                    context: label.to_string(),
-                    source: err.into(),
-                });
-            }
-        };
+        execute_with_policy(&self.policy, label, || {
+            let addr = addr.clone();
+            let label = label.to_string();
+            async move {
+                let builder = match self.inner.list(&addr) {
+                    Ok(builder) => builder,
+                    Err(err) if is_not_found(&err) => {
+                        debug!("directory not found, returning empty list");
+                        return Ok(Vec::new());
+                    }
+                    Err(err) => {
+                        error!(error = %err, "failed to create list builder");
+                        return Err(PaykitError::Transport {
+                            context: label.clone(),
+                            source: err.into(),
+                        });
+                    }
+                };
 
-        match builder.shallow(true).send().await {
-            Ok(entries) => {
-                debug!(count = entries.len(), "directory entries listed");
-                Ok(entries)
+                match builder.shallow(true).send().await {
+                    Ok(entries) => {
+                        debug!(count = entries.len(), "directory entries listed");
+                        Ok(entries)
+                    }
+                    Err(err) if is_not_found(&err) => {
+                        debug!("directory not found during send, returning empty list");
+                        Ok(Vec::new())
+                    }
+                    Err(err) => {
+                        error!(error = %err, "list send failed");
+                        Err(PaykitError::Transport {
+                            context: format!("{label} send failed"),
+                            source: err.into(),
+                        })
+                    }
+                }
             }
-            Err(err) if is_not_found(&err) => {
-                debug!("directory not found during send, returning empty list");
-                Ok(Vec::new())
+        })
+        .await
+    }
+
+    /// Fetch the raw profile blob from storage, with policy applied.
+    ///
+    /// Returns the raw bytes on success, or an appropriate error. Parsing is
+    /// handled by the caller so that non-retryable parse failures are not
+    /// wrapped in the retry loop.
+    #[instrument(skip(self), fields(user = %user))]
+    async fn fetch_profile_blob(&self, user: &PublicKey) -> Result<Vec<u8>> {
+        debug!("constructing profile resource");
+        let resource = PubkyResource::new(user.clone(), PUBKY_PROFILE_FILE).map_err(|e| {
+            error!(error = %e, "failed to construct profile resource");
+            PaykitError::Transport {
+                context: format!("failed to construct profile resource for {user}"),
+                source: e.into(),
             }
-            Err(err) => {
-                error!(error = %err, "list send failed");
-                Err(PaykitError::Transport {
-                    context: format!("{label} send failed"),
-                    source: err.into(),
-                })
+        })?;
+
+        debug!("fetching profile blob from storage");
+        execute_with_policy(&self.policy, "fetch_profile", || {
+            let resource = resource.clone();
+            async move {
+                match self.inner.get(&resource).await {
+                    Ok(resp) => {
+                        let blob = resp
+                            .bytes()
+                            .await
+                            .map_err(|err| {
+                                error!(error = %err, "failed to read profile response bytes");
+                                PaykitError::Transport {
+                                    context: "fetch profile bytes failed".into(),
+                                    source: err.into(),
+                                }
+                            })?
+                            .to_vec();
+                        Ok(blob)
+                    }
+                    Err(err) if is_not_found(&err) => {
+                        debug!("profile not found (404/GONE)");
+                        Err(PaykitError::NotFound("profile not found".into()))
+                    }
+                    Err(err) => {
+                        error!(error = %err, "transport error fetching profile");
+                        Err(PaykitError::Transport {
+                            context: "fetch profile failed".into(),
+                            source: err.into(),
+                        })
+                    }
+                }
             }
-        }
+        })
+        .await
     }
 }
 
@@ -233,42 +339,17 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
 
     #[instrument(skip(self), fields(user = %user))]
     async fn fetch_profile(&self, user: &PublicKey) -> Result<Profile> {
-        debug!("constructing profile resource");
+        let blob = self.fetch_profile_blob(user).await?;
+
+        debug!(blob_len = blob.len(), "parsing profile blob");
         let resource = PubkyResource::new(user.clone(), PUBKY_PROFILE_FILE).map_err(|e| {
-            error!(error = %e, "failed to construct profile resource");
+            error!(error = %e, "failed to construct profile resource for parsing");
             PaykitError::Transport {
                 context: format!("failed to construct profile resource for {user}"),
                 source: e.into(),
             }
         })?;
 
-        debug!("fetching profile blob from storage");
-        let blob = match self.inner.get(&resource).await {
-            Ok(resp) => resp
-                .bytes()
-                .await
-                .map_err(|err| {
-                    error!(error = %err, "failed to read profile response bytes");
-                    PaykitError::Transport {
-                        context: "fetch profile bytes failed".into(),
-                        source: err.into(),
-                    }
-                })?
-                .to_vec(),
-            Err(err) if is_not_found(&err) => {
-                debug!("profile not found (404/GONE)");
-                return Err(PaykitError::NotFound("profile not found".into()));
-            }
-            Err(err) => {
-                error!(error = %err, "transport error fetching profile");
-                return Err(PaykitError::Transport {
-                    context: "fetch profile failed".into(),
-                    source: err.into(),
-                });
-            }
-        };
-
-        debug!(blob_len = blob.len(), "parsing profile blob");
         match PubkyAppObject::from_uri(&resource.to_pubky_url(), &blob) {
             Ok(PubkyAppObject::User(profile)) => {
                 debug!("profile parsed successfully");

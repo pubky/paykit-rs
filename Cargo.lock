@@ -2517,6 +2517,7 @@ dependencies = [
  "pubky",
  "pubky-app-specs",
  "pubky-testnet",
+ "rand 0.8.5",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

@@ -4,7 +4,7 @@
 - Workspace root hosts `Cargo.toml` that pins resolver `2` and registers members.
 - Core library lives in `paykit-lib/` with its own `Cargo.toml` and `src/lib.rs`; treat this crate as the canonical abstraction over the routing network.
 - Transport abstractions live in `paykit-lib/src/transport/`: `traits.rs` defines the public interfaces, while feature-gated adapters (e.g., `transport/pubky/*`) provide concrete implementations.
-- `transport/pubky/mod.rs` exports `PAYKIT_PATH_PREFIX` (`/pub/paykit.app/v0/`) and `PUBKY_FOLLOWS_PATH` (`/pub/pubky.app/follows/`) to keep all Pubky paths consistent—reuse them instead of hard-coding strings.
+- `transport/pubky/mod.rs` exports `PAYKIT_PATH_PREFIX` (`/pub/paykit.app/v0/`) and `PUBKY_FOLLOWS_PATH` (`/pub/pubky.app/follows/`) to keep all Pubky paths consistent — reuse them instead of hard-coding strings.
 
 ## Build, Test, and Development Commands
 - `cargo fmt` — run rustfmt on every crate; required before submitting changes.
@@ -22,7 +22,14 @@
 - Keep the library stateless. Functions that touch remote state must accept `AuthenticatedTransport` or `UnauthenticatedTransportRead` implementors instead of concrete SDK types.
 - Pubky support lives behind the default `pubky` feature; adapters such as `PubkyAuthenticatedTransport` and `PubkyUnauthenticatedTransport` simply wrap `PubkySession` and `pubky::PublicStorage`. Disable the feature if you need to compile without the SDK.
 - When adding or updating adapters, follow the convention: `fetch_payment_endpoint` returns `Option`, list operations treat 404s as empty, and contact discovery relies on directory listings rather than file contents.
-- Document in each API that session creation, capability scope, and key rotation remain the caller’s responsibility; Paykit only consumes the trait methods it needs.
+- Document in each API that session creation, capability scope, and key rotation remain the caller's responsibility; Paykit only consumes the trait methods it needs.
+
+## Transport Policy (Timeout & Retry)
+- Both Pubky adapters embed a `TransportPolicy` that applies a **default 30 s per-attempt timeout** and **3 retries with exponential backoff + full jitter**. Callers get this protection automatically from `::new()` / `::try_new()`.
+- Override the default via `.with_policy(TransportPolicy::builder()...build())`. Use `TransportPolicy::none()` to restore the old unbounded behaviour.
+- Only `PaykitError::Transport` and `PaykitError::Timeout` are retried. All other error variants are returned immediately without retry.
+- The `TransportPolicy` struct and `TransportPolicyBuilder` are always exported (no feature gate). The retry/timeout execution machinery is internal to the Pubky adapters — custom transport implementations are responsible for their own timeout/retry logic.
+- `tokio` (time feature) and `rand` are optional dependencies gated behind the `pubky` feature.
 
 ## Testing Guidelines
 - Rely on the standard Rust test harness; embed minimal reproducible examples in doc comments so `cargo test` exercises them automatically.
@@ -36,8 +43,9 @@
 - Highlight any changes to exposed structs or capability strings so downstream bindings (Swift/RN/Kotlin) can be updated in sync.
 
 ## Error Handling
-- `PaykitError` has five variants: `Transport`, `NotFound`, `InvalidData`, `Profile`, and `Validation`. Any exhaustive `match` must cover all five.
+- `PaykitError` has six variants: `Transport`, `NotFound`, `InvalidData`, `Profile`, `Validation`, and `Timeout`. Any exhaustive `match` must cover all six.
 - Use `PaykitError::Validation` for caller-supplied input that fails structural checks (e.g. invalid `MethodId`). Use `PaykitError::InvalidData` for data fetched from the network that turns out to be corrupt.
+- Use `PaykitError::Timeout` when a transport call is abandoned because it exceeded the configured `TransportPolicy` timeout. This is distinct from `PaykitError::Transport` which means the call itself failed with a network/SDK error.
 
 ## Security & Configuration Tips
 - Never commit real routing keys or secrets; stub them via env vars or fixture files ignored by git.

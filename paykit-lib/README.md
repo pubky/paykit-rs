@@ -54,6 +54,32 @@ Domain error enum with the following variants:
 | `InvalidData { context, source }` | Fetched data is corrupt or structurally invalid |
 | `Profile(String)` | Profile data is malformed |
 | `Validation(String)` | Caller-supplied input failed validation (e.g. invalid `MethodId`) |
+| `Timeout { context }` | Operation exceeded its configured timeout |
+
+### `TransportPolicy`
+
+Configuration for timeout and retry behaviour applied to transport operations. The Pubky adapters embed `TransportPolicy::default()` automatically (30 s timeout, 3 retries with exponential backoff + full jitter). Override via `.with_policy()`:
+
+```rust
+use std::time::Duration;
+use paykit_lib::{PubkyUnauthenticatedTransport, TransportPolicy};
+
+// Default policy applied automatically:
+let reader = PubkyUnauthenticatedTransport::try_new()?;
+
+// Custom policy:
+let reader = PubkyUnauthenticatedTransport::try_new()?
+    .with_policy(TransportPolicy::builder()
+        .timeout(Duration::from_secs(5))
+        .max_retries(1)
+        .build());
+
+// Disable timeout and retry entirely:
+let reader = PubkyUnauthenticatedTransport::try_new()?
+    .with_policy(TransportPolicy::none());
+```
+
+Custom transport implementations are responsible for their own timeout/retry logic; the policy execution machinery is internal to the Pubky adapters.
 
 ## Proposed Surface
 
@@ -69,7 +95,9 @@ Domain error enum with the following variants:
   Retrieve all known contacts by listing `/pub/pubky.app/follows/`. Returns an empty vector when none are stored.
 
 Method/endpoint naming follows the PMIP consensus described in the repository root `README.md`. Each API returns well-typed structures (enums/structs) that mirror the protocol specification so downstream clients can share the same serialization layer.  
-When the `pubky` feature is enabled the crate exports:
+The crate always exports `TransportPolicy` and `TransportPolicyBuilder` for configuring timeout and retry behaviour.
+
+When the `pubky` feature is enabled the crate additionally exports:
 
 - `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit.app/v0/`) and `PUBKY_FOLLOWS_PATH` (`/pub/pubky.app/follows/`) to standardize path construction.  
-- `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the traits above.
+- `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the traits above. Both embed a default `TransportPolicy` (30 s timeout, 3 retries) and expose `.with_policy()` for customization.

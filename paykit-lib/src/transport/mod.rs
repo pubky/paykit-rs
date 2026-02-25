@@ -3,11 +3,13 @@
 //! This module exposes the public traits that callers must implement as well as the
 //! feature-gated Pubky adapters that satisfy those traits out of the box.
 
+pub mod policy;
 pub mod traits;
 
 #[cfg(feature = "pubky")]
 pub mod pubky;
 
+pub use policy::{TransportPolicy, TransportPolicyBuilder};
 pub use traits::{AuthenticatedTransport, UnauthenticatedTransportRead};
 
 #[cfg(feature = "pubky")]
