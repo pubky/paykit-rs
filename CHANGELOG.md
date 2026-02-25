@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (BREAKING)
+- **`MethodId` is now validated at construction time.** The inner field is private;
+  use `MethodId::new("lightning")?` instead of `MethodId("lightning".into())`.
+  Accepted characters: ASCII alphanumeric, hyphens, underscores, and dots (max 64
+  chars). Path traversal components (`.`, `..`) are rejected.
+- **`EndpointData` inner field is now private.** Use `EndpointData::new("...")` to
+  construct and `.as_str()` / `.into_inner()` to read.
+- **New `PaykitError::Validation` variant.** Exhaustive `match` on `PaykitError`
+  must now handle this variant, returned when `MethodId::new()` rejects invalid
+  input.
+
+### Added
+- `MethodId::new()` — validated constructor enforcing safe path-segment invariants.
+- `MethodId::as_str()`, `Display`, and `AsRef<str>` for read access.
+- `EndpointData::new()`, `EndpointData::as_str()`, `EndpointData::into_inner()`,
+  `Display`, and `AsRef<str>`.
+- 23 unit tests covering `MethodId` validation (positive and negative cases) and
+  `EndpointData` accessors.
+
+### Security
+- Mitigated path injection vulnerability in `MethodId`. Previously, a caller could
+  inject path traversal sequences (`../`), null bytes, or special characters into
+  storage paths via unvalidated `MethodId` values. Depending on how the storage
+  backend handles paths, this could lead to writing to unintended locations, reading
+  other users' data, or storage corruption.
+
+### Migration guide
+- Replace `MethodId("name".into())` with `MethodId::new("name")?` (or `.unwrap()`
+  for known-good literals in tests).
+- Replace `EndpointData("payload".into())` with `EndpointData::new("payload")`.
+- Replace `.0` field access with `.as_str()` on both types.
+- Add a `PaykitError::Validation(_)` arm to any exhaustive `match` on `PaykitError`.
+- Downstream bindings (Swift/RN/Kotlin) that construct `MethodId` must be updated to
+  handle the `Result` returned by `new()`.
+
 ## [0.1.0] - 2025-11-21
 
 ### Added
