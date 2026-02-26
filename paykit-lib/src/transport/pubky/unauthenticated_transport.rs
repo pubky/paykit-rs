@@ -132,6 +132,18 @@ impl PubkyUnauthenticatedTransport {
 
 #[async_trait]
 impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
+    // NOTE: Race condition — the directory listing and subsequent per-entry
+    // fetches are **not** atomic. Between the `list_entries` call and the
+    // individual `fetch_text` calls the payee may add, remove, or update
+    // endpoints. The returned `SupportedPayments` is therefore a best-effort
+    // snapshot. The underlying Pubky storage layer does not expose
+    // locks or transactional reads, so this cannot be resolved at the
+    // transport level.
+    //
+    // If a payment execution error suggests the endpoint has already been
+    // consumed (evidence of a race), callers should re-fetch the specific
+    // endpoint via `fetch_payment_endpoint`, compare the `EndpointData`, and
+    // retry with the updated value if it differs.
     #[instrument(skip(self), fields(payee = %payee))]
     async fn fetch_supported_payments(&self, payee: &PublicKey) -> Result<SupportedPayments> {
         let addr = format!("{payee}{PAYKIT_PATH_PREFIX}");

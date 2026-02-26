@@ -28,6 +28,30 @@ use crate::{EndpointData, MethodId, Profile, PublicKey, Result};
 #[async_trait]
 pub trait UnauthenticatedTransportRead {
     /// Fetches the raw Supported Payments List for the provided `payee`.
+    ///
+    /// # Consistency
+    ///
+    /// This method first lists available payment method entries and then fetches
+    /// each one individually. Because the underlying transport does not support
+    /// atomic/transactional reads, a **race condition** exists: between the
+    /// directory listing and the individual fetches, endpoints may be added,
+    /// removed, or modified by the payee. The returned [`SupportedPayments`] is
+    /// therefore a **best-effort snapshot** and may be inconsistent.
+    ///
+    /// ## Recommended caller strategy
+    ///
+    /// If a payment execution fails with an error that suggests the endpoint
+    /// has already been consumed or is no longer valid (evidence of a race
+    /// condition), callers should:
+    ///
+    /// 1. Re-fetch the specific endpoint via
+    ///    [`fetch_payment_endpoint`](Self::fetch_payment_endpoint).
+    /// 2. Compare the newly retrieved [`EndpointData`] with the value used in
+    ///    the failed attempt.
+    /// 3. If the endpoint data differs, it is safe to retry the payment with
+    ///    the updated value.
+    ///
+    /// [`SupportedPayments`]: crate::SupportedPayments
     async fn fetch_supported_payments(&self, payee: &PublicKey)
         -> Result<crate::SupportedPayments>;
 
