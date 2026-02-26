@@ -14,6 +14,21 @@ Both of them are enabled via default feature flag `pubky`.
 - Public reads only require the `UnauthenticatedTransportRead` trait, keeping unauthenticated flows lightweight. Session lifecycle, capability scoping, and key rotation stay outside this crate.
 - The `pubky` feature flag (enabled by default) wires in Pubky adapters under `transport::pubky`. Disable it if you want to use custom transports only.
 
+## Timeout Handling
+
+The transport traits intentionally do **not** enforce timeouts. Each transport implementation is responsible for configuring appropriate timeout behaviour at its own layer. A slow or unresponsive backend will block the caller indefinitely unless the underlying transport applies a timeout.
+
+For the Pubky adapter the underlying SDK handles this via [`PubkyHttpClientBuilder::request_timeout`](https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout):
+
+```rust
+use std::time::Duration;
+let client = PubkyHttpClient::builder()
+    .request_timeout(Duration::from_secs(10))
+    .build()?;
+```
+
+Custom transport implementations should apply equivalent safeguards (e.g. per-request deadlines, connect timeouts) before passing the transport to Paykit APIs.
+
 ## Core Types
 
 ### `MethodId`
