@@ -157,9 +157,10 @@ The Paykit Library is an abstraction for payment specific CRUD methods of Paykit
 
 ### Language bindings
 
+Mobile bindings are generated via [UniFFI](https://mozilla.github.io/uniffi-rs/) in the [`paykit-ffi/`](paykit-ffi/) crate. See its [README](paykit-ffi/README.md) for build and integration instructions.
+
 * **Swift:** Version \+5  
-* **React Native:** Version \+0.75.2  
-* **Kotlin:** Version \+1.9.24
+* **Kotlin:** Version \+2.0
 
 ### Test coverage
 

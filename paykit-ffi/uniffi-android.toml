@@ -1,0 +1,11 @@
+package_name = "com.synonym.paykit"
+cdylib_name = "paykit"
+kotlin_targets = ["android"]
+kotlin_target_version = "2.0"
+kotlin_multiplatform = false
+generate_serializable_types = true
+generate_immutable_records = true
+
+[bindings.kotlin]
+android = true
+android_cleaner = true

@@ -1,0 +1,30 @@
+[package]
+name = "paykit-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91.1"
+description = "UniFFI bindings for paykit-lib targeting iOS and Android"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+name = "paykit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+paykit-lib = { path = "../paykit-lib" }
+uniffi = { version = "0.29.4", features = ["cli", "bindgen"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+thiserror = "2"
+once_cell = "1"
+pubky = "0.6.0"
+hex = "0.4"
+log = "0.4"
+tracing = { version = "0.1", features = ["log"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
