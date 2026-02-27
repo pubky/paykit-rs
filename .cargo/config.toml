@@ -1,0 +1,11 @@
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
+
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
+
+[target.i686-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]

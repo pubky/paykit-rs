@@ -1,1 +1,11 @@
 /target
+.idea/
+.DS_Store
+*.swp
+.swiftpm/
+
+# iOS build artifacts (rebuilt by build_ios.sh; sources are committed)
+paykit-ffi/bindings/ios/Paykit.xcframework/
+paykit-ffi/bindings/ios/Paykit.xcframework.zip
+paykit-ffi/bindings/ios/ios-arm64/
+paykit-ffi/bindings/ios/ios-arm64-sim/

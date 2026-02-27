@@ -57,4 +57,4 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[0.1.0]: https://github.com/synonymdev/paykit-rs/releases/tag/v0.1.0
+[0.1.0]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0
