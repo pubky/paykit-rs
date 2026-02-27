@@ -1040,7 +1040,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_get_payment_endpoint() != 52733.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 41026.toShort()) {
+        if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 63326.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_get_profile() != 26566.toShort()) {
@@ -1049,7 +1049,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_import_session() != 29532.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_paykit_initialize() != 53919.toShort()) {
+        if (uniffi_paykit_checksum_func_paykit_initialize() != 62040.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_is_authenticated() != 34745.toShort()) {
@@ -1061,16 +1061,16 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_set_payment_endpoint() != 62857.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_paykit_sign_in() != 2135.toShort()) {
+        if (uniffi_paykit_checksum_func_paykit_sign_in() != 50011.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_sign_out() != 116.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_paykit_sign_up() != 56463.toShort()) {
+        if (uniffi_paykit_checksum_func_paykit_sign_up() != 45538.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_paykit_switch_network() != 64609.toShort()) {
+        if (uniffi_paykit_checksum_func_paykit_switch_network() != 57482.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
     }
@@ -1973,7 +1973,7 @@ public suspend fun `paykitGetPaymentEndpoint`(`publicKey`: kotlin.String, `metho
 }
 
 /**
- * Fetch all published payment methods for a user, sorted by method ID.
+ * Fetch all published payment methods for a user.
  */
 @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
 public suspend fun `paykitGetPaymentList`(`publicKey`: kotlin.String): List<FfiPaymentEntry> {
@@ -2039,8 +2039,7 @@ public suspend fun `paykitImportSession`(`sessionSecret`: kotlin.String): kotlin
 /**
  * Create the Pubky SDK facade and initialize logging. Call once at app startup.
  *
- * Defaults to the **production** network. Call `paykit_switch_network(true)`
- * afterwards to target a local testnet instead.
+ * Targets the **production** network.
  *
  * Safe to call multiple times — subsequent calls are no-ops if the first
  * succeeded. If it fails (e.g. network issue), call it again to retry.
@@ -2124,7 +2123,8 @@ public suspend fun `paykitSetPaymentEndpoint`(`methodId`: kotlin.String, `endpoi
 }
 
 /**
- * Sign in with a raw secret key (development / testing).
+ * Sign in with a raw secret key. Only available with the `dev-auth`
+ * feature (enabled by default, disable for production builds).
  *
  * The homeserver is resolved automatically via PKDNS.
  */
@@ -2168,7 +2168,8 @@ public suspend fun `paykitSignOut`() {
 }
 
 /**
- * Sign up for a new account using a raw secret key (development / testing).
+ * Sign up for a new account using a raw secret key. Only available with
+ * the `dev-auth` feature (enabled by default, disable for production builds).
  */
 @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
 public suspend fun `paykitSignUp`(`secretKeyHex`: kotlin.String, `homeserverPublicKey`: kotlin.String): kotlin.String {
@@ -2189,9 +2190,9 @@ public suspend fun `paykitSignUp`(`secretKeyHex`: kotlin.String, `homeserverPubl
 }
 
 /**
- * Switch between production and testnet networks at runtime.
+ * Switch to a local testnet (`Pubky::testnet()`, targeting localhost).
  *
- * Clears any active session since it belongs to the previous network.
+ * Only available with the `dev-auth` feature. Clears any active session.
  */
 @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
 public suspend fun `paykitSwitchNetwork`(`useTestnet`: kotlin.Boolean) {

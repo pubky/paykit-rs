@@ -1092,7 +1092,7 @@ public func paykitGetPaymentEndpoint(publicKey: String, methodId: String)async t
         )
 }
 /**
- * Fetch all published payment methods for a user, sorted by method ID.
+ * Fetch all published payment methods for a user.
  */
 public func paykitGetPaymentList(publicKey: String)async throws  -> [FfiPaymentEntry]  {
     return
@@ -1149,8 +1149,7 @@ public func paykitImportSession(sessionSecret: String)async throws  -> String  {
 /**
  * Create the Pubky SDK facade and initialize logging. Call once at app startup.
  *
- * Defaults to the **production** network. Call `paykit_switch_network(true)`
- * afterwards to target a local testnet instead.
+ * Targets the **production** network.
  *
  * Safe to call multiple times — subsequent calls are no-ops if the first
  * succeeded. If it fails (e.g. network issue), call it again to retry.
@@ -1222,7 +1221,8 @@ public func paykitSetPaymentEndpoint(methodId: String, endpointData: String)asyn
         )
 }
 /**
- * Sign in with a raw secret key (development / testing).
+ * Sign in with a raw secret key. Only available with the `dev-auth`
+ * feature (enabled by default, disable for production builds).
  *
  * The homeserver is resolved automatically via PKDNS.
  */
@@ -1260,7 +1260,8 @@ public func paykitSignOut()async throws   {
         )
 }
 /**
- * Sign up for a new account using a raw secret key (development / testing).
+ * Sign up for a new account using a raw secret key. Only available with
+ * the `dev-auth` feature (enabled by default, disable for production builds).
  */
 public func paykitSignUp(secretKeyHex: String, homeserverPublicKey: String)async throws  -> String  {
     return
@@ -1277,9 +1278,9 @@ public func paykitSignUp(secretKeyHex: String, homeserverPublicKey: String)async
         )
 }
 /**
- * Switch between production and testnet networks at runtime.
+ * Switch to a local testnet (`Pubky::testnet()`, targeting localhost).
  *
- * Clears any active session since it belongs to the previous network.
+ * Only available with the `dev-auth` feature. Clears any active session.
  */
 public func paykitSwitchNetwork(useTestnet: Bool)async throws   {
     return
@@ -1326,7 +1327,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_get_payment_endpoint() != 52733) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 41026) {
+    if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 63326) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_get_profile() != 26566) {
@@ -1335,7 +1336,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_import_session() != 29532) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_paykit_initialize() != 53919) {
+    if (uniffi_paykit_checksum_func_paykit_initialize() != 62040) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_is_authenticated() != 34745) {
@@ -1347,16 +1348,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_set_payment_endpoint() != 62857) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_paykit_sign_in() != 2135) {
+    if (uniffi_paykit_checksum_func_paykit_sign_in() != 50011) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_sign_out() != 116) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_paykit_sign_up() != 56463) {
+    if (uniffi_paykit_checksum_func_paykit_sign_up() != 45538) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_paykit_switch_network() != 64609) {
+    if (uniffi_paykit_checksum_func_paykit_switch_network() != 57482) {
         return InitializationResult.apiChecksumMismatch
     }
 
