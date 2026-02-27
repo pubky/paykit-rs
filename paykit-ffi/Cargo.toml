@@ -15,6 +15,10 @@ path = "src/lib.rs"
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
 
+[features]
+default = ["dev-auth"]
+dev-auth = ["dep:hex"]
+
 [dependencies]
 paykit-lib = { path = "../paykit-lib" }
 uniffi = { version = "0.29.4", features = ["cli", "bindgen"] }
@@ -22,7 +26,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 thiserror = "2"
 once_cell = "1"
 pubky = "0.6.0"
-hex = "0.4"
+hex = { version = "0.4", optional = true }
 log = "0.4"
 tracing = { version = "0.1", features = ["log"] }
 

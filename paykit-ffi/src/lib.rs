@@ -3,7 +3,9 @@ uniffi::setup_scaffolding!();
 use std::sync::{Arc, Mutex};
 
 use once_cell::sync::OnceCell;
-use pubky::{Keypair, Pubky, PubkySession, PublicKey};
+#[cfg(feature = "dev-auth")]
+use pubky::Keypair;
+use pubky::{Pubky, PubkySession, PublicKey};
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -148,8 +150,7 @@ async fn get_authenticated_transport() -> Result<PubkyAuthenticatedTransport, Pa
 
 /// Create the Pubky SDK facade and initialize logging. Call once at app startup.
 ///
-/// Defaults to the **production** network. Call `paykit_switch_network(true)`
-/// afterwards to target a local testnet instead.
+/// Targets the **production** network.
 ///
 /// Safe to call multiple times — subsequent calls are no-ops if the first
 /// succeeded. If it fails (e.g. network issue), call it again to retry.
@@ -173,9 +174,10 @@ pub async fn paykit_initialize() -> Result<(), PaykitFfiError> {
     .unwrap_or_else(|e| Err(runtime_err(e)))
 }
 
-/// Switch between production and testnet networks at runtime.
+/// Switch to a local testnet (`Pubky::testnet()`, targeting localhost).
 ///
-/// Clears any active session since it belongs to the previous network.
+/// Only available with the `dev-auth` feature. Clears any active session.
+#[cfg(feature = "dev-auth")]
 #[uniffi::export]
 pub async fn paykit_switch_network(use_testnet: bool) -> Result<(), PaykitFfiError> {
     let rt = ensure_runtime();
@@ -303,7 +305,7 @@ pub async fn paykit_get_contacts(public_key: String) -> Result<Vec<String>, Payk
     .unwrap_or_else(|e| Err(runtime_err(e)))
 }
 
-/// Fetch all published payment methods for a user, sorted by method ID.
+/// Fetch all published payment methods for a user.
 #[uniffi::export]
 pub async fn paykit_get_payment_list(
     public_key: String,
@@ -314,9 +316,8 @@ pub async fn paykit_get_payment_list(
         let pk = parse_public_key(&public_key)?;
         let reader = make_reader(&pubky);
         let payments = paykit_lib::get_payment_list(&reader, &pk).await?;
-        let mut entries: Vec<_> = payments.entries.into_iter().collect();
-        entries.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
-        Ok(entries
+        Ok(payments
+            .entries
             .into_iter()
             .map(|(method, data)| FfiPaymentEntry {
                 method_id: method.as_str().to_string(),
@@ -380,7 +381,9 @@ pub async fn paykit_import_session(session_secret: String) -> Result<String, Pay
     .unwrap_or_else(|e| Err(runtime_err(e)))
 }
 
-/// Sign up for a new account using a raw secret key (development / testing).
+/// Sign up for a new account using a raw secret key. Only available with
+/// the `dev-auth` feature (enabled by default, disable for production builds).
+#[cfg(feature = "dev-auth")]
 #[uniffi::export]
 pub async fn paykit_sign_up(
     secret_key_hex: String,
@@ -412,9 +415,11 @@ pub async fn paykit_sign_up(
     .unwrap_or_else(|e| Err(runtime_err(e)))
 }
 
-/// Sign in with a raw secret key (development / testing).
+/// Sign in with a raw secret key. Only available with the `dev-auth`
+/// feature (enabled by default, disable for production builds).
 ///
 /// The homeserver is resolved automatically via PKDNS.
+#[cfg(feature = "dev-auth")]
 #[uniffi::export]
 pub async fn paykit_sign_in(secret_key_hex: String) -> Result<String, PaykitFfiError> {
     let rt = ensure_runtime();
@@ -525,6 +530,7 @@ pub async fn paykit_force_sign_out() {
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "dev-auth")]
 fn keypair_from_hex(hex_str: &str) -> Result<Keypair, PaykitFfiError> {
     let bytes = hex::decode(hex_str).map_err(|e| PaykitFfiError::Validation {
         reason: format!("Invalid hex secret key: {e}"),

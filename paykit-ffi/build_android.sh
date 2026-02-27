@@ -45,7 +45,10 @@ cargo ndk \
 echo "Removing spurious intermediate .so files from jniLibs..."
 find "$JNILIBS_DIR" -name "*.so" ! -name "libpaykit.so" -delete
 
-LIBRARY_PATH="${TARGET_DIR}/release/libpaykit.dylib"
+case "$(uname -s)" in
+    Darwin*) LIBRARY_PATH="${TARGET_DIR}/release/libpaykit.dylib" ;;
+    *)       LIBRARY_PATH="${TARGET_DIR}/release/libpaykit.so" ;;
+esac
 if [ ! -f "$LIBRARY_PATH" ]; then
     echo "Error: Library file not found at $LIBRARY_PATH"
     echo "Available files in ${TARGET_DIR}/release/:"
@@ -81,8 +84,11 @@ ls -la "$BASE_DIR"
 
 echo "Syncing version from Cargo.toml..."
 CARGO_VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/' | head -1)
-sed -i.bak "s/^version=.*/version=$CARGO_VERSION/" "$ANDROID_LIB_DIR/gradle.properties"
-rm -f "$ANDROID_LIB_DIR/gradle.properties.bak"
+if sed --version >/dev/null 2>&1; then
+    sed -i "s/^version=.*/version=$CARGO_VERSION/" "$ANDROID_LIB_DIR/gradle.properties"
+else
+    sed -i '' "s/^version=.*/version=$CARGO_VERSION/" "$ANDROID_LIB_DIR/gradle.properties"
+fi
 
 echo "Testing android library publish to Maven Local..."
 "$ANDROID_LIB_DIR"/gradlew --project-dir "$ANDROID_LIB_DIR" clean publishToMavenLocal

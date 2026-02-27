@@ -40,10 +40,17 @@ bump_version() {
 
     echo "Bumping $bump_type version from $current_version to $new_version"
 
-    sed -i '' "s/^version = \".*\"/version = \"$new_version\"/" Cargo.toml
-    sed -i '' "s/^version = \".*\"/version = \"$new_version\"/" ../paykit-lib/Cargo.toml
-    sed -i '' "s/let tag = \"v.*\"/let tag = \"v$new_version\"/" Package.swift
-    sed -i '' "s/^version=.*/version=$new_version/" bindings/android/gradle.properties
+    if sed --version >/dev/null 2>&1; then
+        # GNU sed
+        SED_INPLACE=(sed -i)
+    else
+        # BSD/macOS sed
+        SED_INPLACE=(sed -i '')
+    fi
+    "${SED_INPLACE[@]}" "s/^version = \".*\"/version = \"$new_version\"/" Cargo.toml
+    "${SED_INPLACE[@]}" "s/^version = \".*\"/version = \"$new_version\"/" ../paykit-lib/Cargo.toml
+    "${SED_INPLACE[@]}" "s/let tag = \"v.*\"/let tag = \"v$new_version\"/" Package.swift
+    "${SED_INPLACE[@]}" "s/^version=.*/version=$new_version/" bindings/android/gradle.properties
 
     echo "Version bumped to $new_version in all files"
 }

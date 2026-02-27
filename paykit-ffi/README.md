@@ -9,7 +9,7 @@ UniFFI bindings for [paykit-lib](../paykit-lib/), exposing Paykit's payment rout
 | Function | Description |
 |---|---|
 | `paykit_initialize()` | Create the Pubky SDK facade and logger. Call once at app startup. |
-| `paykit_switch_network(use_testnet)` | Switch between production and testnet at runtime. Clears any active session. |
+| `paykit_switch_network(use_testnet)` | Switch to local testnet at runtime. Dev-auth only. Clears any active session. |
 
 ### Session queries
 
@@ -33,8 +33,8 @@ UniFFI bindings for [paykit-lib](../paykit-lib/), exposing Paykit's payment rout
 | Function | Description |
 |---|---|
 | `paykit_import_session(session_secret)` | Import a session from Pubky Ring auth (`<pubkey_z32>:<cookie_secret>`). Returns the user's public key. |
-| `paykit_sign_up(secret_key_hex, homeserver_public_key)` | Create a new account with a raw secret key (dev/testing). Returns the user's public key. |
-| `paykit_sign_in(secret_key_hex)` | Sign in with a raw secret key (dev/testing). Homeserver resolved via PKDNS. Returns the user's public key. |
+| `paykit_sign_up(secret_key_hex, homeserver_public_key)` | Create a new account with a raw secret key. Dev-auth only. Returns the user's public key. |
+| `paykit_sign_in(secret_key_hex)` | Sign in with a raw secret key. Dev-auth only. Homeserver resolved via PKDNS. Returns the user's public key. |
 
 ### Write operations (require active session)
 
