@@ -1,7 +1,5 @@
 uniffi::setup_scaffolding!();
 
-use std::sync::{Arc, Mutex};
-
 use once_cell::sync::OnceCell;
 #[cfg(feature = "dev-auth")]
 use pubky::Keypair;
@@ -93,7 +91,7 @@ pub struct FfiPaymentEntry {
 // ---------------------------------------------------------------------------
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
-static PUBKY: OnceCell<Mutex<Arc<Pubky>>> = OnceCell::new();
+static PUBKY: OnceCell<Pubky> = OnceCell::new();
 
 struct SessionState {
     transport: PubkyAuthenticatedTransport,
@@ -110,11 +108,10 @@ fn get_session_lock() -> &'static TokioMutex<Option<SessionState>> {
     SESSION.get_or_init(|| TokioMutex::new(None))
 }
 
-fn get_pubky_client() -> Result<Arc<Pubky>, PaykitFfiError> {
-    let lock = PUBKY.get().ok_or_else(|| PaykitFfiError::Session {
+fn get_pubky_client() -> Result<&'static Pubky, PaykitFfiError> {
+    PUBKY.get().ok_or_else(|| PaykitFfiError::Session {
         reason: "Paykit not initialized. Call paykit_initialize() first.".into(),
-    })?;
-    Ok(lock.lock().expect("PUBKY mutex poisoned").clone())
+    })
 }
 
 fn parse_public_key(pk_str: &str) -> Result<PublicKey, PaykitFfiError> {
@@ -125,7 +122,7 @@ fn parse_public_key(pk_str: &str) -> Result<PublicKey, PaykitFfiError> {
         })
 }
 
-fn make_reader(pubky: &Arc<Pubky>) -> PubkyUnauthenticatedTransport {
+fn make_reader(pubky: &Pubky) -> PubkyUnauthenticatedTransport {
     PubkyUnauthenticatedTransport::new(pubky.public_storage())
 }
 
@@ -162,47 +159,11 @@ pub async fn paykit_initialize() -> Result<(), PaykitFfiError> {
     let rt = ensure_runtime();
     rt.spawn(async {
         PUBKY.get_or_try_init(|| {
-            let client = Pubky::new().map_err(|e| PaykitFfiError::Session {
+            Pubky::new().map_err(|e| PaykitFfiError::Session {
                 reason: format!("Failed to initialize Pubky SDK: {e}"),
-            })?;
-            Ok::<_, PaykitFfiError>(Mutex::new(Arc::new(client)))
+            })
         })?;
         let _ = get_session_lock();
-        Ok(())
-    })
-    .await
-    .unwrap_or_else(|e| Err(runtime_err(e)))
-}
-
-/// Switch to a local testnet (`Pubky::testnet()`, targeting localhost).
-///
-/// Only available with the `dev-auth` feature. Clears any active session.
-#[cfg(feature = "dev-auth")]
-#[uniffi::export]
-pub async fn paykit_switch_network(use_testnet: bool) -> Result<(), PaykitFfiError> {
-    let rt = ensure_runtime();
-    rt.spawn(async move {
-        let lock = PUBKY.get().ok_or_else(|| PaykitFfiError::Session {
-            reason: "Paykit not initialized. Call paykit_initialize() first.".into(),
-        })?;
-
-        let new_client = if use_testnet {
-            Pubky::testnet()
-        } else {
-            Pubky::new()
-        }
-        .map_err(|e| PaykitFfiError::Session {
-            reason: format!("Failed to create Pubky client: {e}"),
-        })?;
-
-        {
-            let mut pubky = lock.lock().expect("PUBKY mutex poisoned");
-            *pubky = Arc::new(new_client);
-        }
-
-        let mut guard = get_session_lock().lock().await;
-        guard.take();
-
         Ok(())
     })
     .await
@@ -268,7 +229,7 @@ pub async fn paykit_get_profile(public_key: String) -> Result<FfiProfile, Paykit
     rt.spawn(async move {
         let pubky = get_pubky_client()?;
         let pk = parse_public_key(&public_key)?;
-        let reader = make_reader(&pubky);
+        let reader = make_reader(pubky);
         let profile = paykit_lib::get_profile(&reader, &pk).await?;
         Ok(FfiProfile {
             name: profile.name,
@@ -297,7 +258,7 @@ pub async fn paykit_get_contacts(public_key: String) -> Result<Vec<String>, Payk
     rt.spawn(async move {
         let pubky = get_pubky_client()?;
         let pk = parse_public_key(&public_key)?;
-        let reader = make_reader(&pubky);
+        let reader = make_reader(pubky);
         let contacts = paykit_lib::get_known_contacts(&reader, &pk).await?;
         Ok(contacts.into_iter().map(|c| c.to_string()).collect())
     })
@@ -314,7 +275,7 @@ pub async fn paykit_get_payment_list(
     rt.spawn(async move {
         let pubky = get_pubky_client()?;
         let pk = parse_public_key(&public_key)?;
-        let reader = make_reader(&pubky);
+        let reader = make_reader(pubky);
         let payments = paykit_lib::get_payment_list(&reader, &pk).await?;
         Ok(payments
             .entries
@@ -340,7 +301,7 @@ pub async fn paykit_get_payment_endpoint(
         let pubky = get_pubky_client()?;
         let pk = parse_public_key(&public_key)?;
         let method = MethodId::new(method_id)?;
-        let reader = make_reader(&pubky);
+        let reader = make_reader(pubky);
         let endpoint = paykit_lib::get_payment_endpoint(&reader, &pk, &method).await?;
         Ok(endpoint.map(|d| d.into_inner()))
     })

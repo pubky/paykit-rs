@@ -1277,25 +1277,6 @@ public func paykitSignUp(secretKeyHex: String, homeserverPublicKey: String)async
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
-/**
- * Switch to a local testnet (`Pubky::testnet()`, targeting localhost).
- *
- * Only available with the `dev-auth` feature. Clears any active session.
- */
-public func paykitSwitchNetwork(useTestnet: Bool)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_paykit_fn_func_paykit_switch_network(FfiConverterBool.lower(useTestnet)
-                )
-            },
-            pollFunc: ffi_paykit_rust_future_poll_void,
-            completeFunc: ffi_paykit_rust_future_complete_void,
-            freeFunc: ffi_paykit_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypePaykitFfiError_lift
-        )
-}
 
 private enum InitializationResult {
     case ok
@@ -1355,9 +1336,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_sign_up() != 45538) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_paykit_checksum_func_paykit_switch_network() != 57482) {
         return InitializationResult.apiChecksumMismatch
     }
 

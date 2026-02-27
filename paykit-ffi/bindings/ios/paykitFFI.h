@@ -332,11 +332,6 @@ uint64_t uniffi_paykit_fn_func_paykit_sign_out(void
 uint64_t uniffi_paykit_fn_func_paykit_sign_up(RustBuffer secret_key_hex, RustBuffer homeserver_public_key
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_SWITCH_NETWORK
-#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_SWITCH_NETWORK
-uint64_t uniffi_paykit_fn_func_paykit_switch_network(int8_t use_testnet
-);
-#endif
 #ifndef UNIFFI_FFIDEF_FFI_PAYKIT_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_PAYKIT_RUSTBUFFER_ALLOC
 RustBuffer ffi_paykit_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -704,12 +699,6 @@ uint16_t uniffi_paykit_checksum_func_paykit_sign_out(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SIGN_UP
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SIGN_UP
 uint16_t uniffi_paykit_checksum_func_paykit_sign_up(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SWITCH_NETWORK
-#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SWITCH_NETWORK
-uint16_t uniffi_paykit_checksum_func_paykit_switch_network(void
     
 );
 #endif

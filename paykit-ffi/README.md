@@ -9,7 +9,6 @@ UniFFI bindings for [paykit-lib](../paykit-lib/), exposing Paykit's payment rout
 | Function | Description |
 |---|---|
 | `paykit_initialize()` | Create the Pubky SDK facade and logger. Call once at app startup. |
-| `paykit_switch_network(use_testnet)` | Switch to local testnet at runtime. Dev-auth only. Clears any active session. |
 
 ### Session queries
 
@@ -157,7 +156,6 @@ paykitGetPaymentList(contactPk)
 
 ```
 paykitInitialize()
-paykitSwitchNetwork(useTestnet: true)   // optional: target local testnet
 paykitSignIn(secretKeyHex)
     → Returns own public key
     → Same flow as above for reads/writes

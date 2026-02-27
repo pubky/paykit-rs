@@ -984,8 +984,6 @@ internal interface UniffiForeignFutureCompleteVoid: com.sun.jna.Callback {
 
 
 
-
-
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1070,9 +1068,6 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_sign_up() != 45538.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_paykit_switch_network() != 57482.toShort()) {
-            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-        }
     }
 
     // Integrity check functions only
@@ -1120,9 +1115,6 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_sign_up(
-    ): Short
-    @JvmStatic
-    external fun uniffi_paykit_checksum_func_paykit_switch_network(
     ): Short
     @JvmStatic
     external fun ffi_paykit_uniffi_contract_version(
@@ -1195,10 +1187,6 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_func_paykit_sign_up(
         `secretKeyHex`: RustBufferByValue,
         `homeserverPublicKey`: RustBufferByValue,
-    ): Long
-    @JvmStatic
-    external fun uniffi_paykit_fn_func_paykit_switch_network(
-        `useTestnet`: Byte,
     ): Long
     @JvmStatic
     external fun ffi_paykit_rustbuffer_alloc(
@@ -2184,29 +2172,6 @@ public suspend fun `paykitSignUp`(`secretKeyHex`: kotlin.String, `homeserverPubl
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
         // lift function
         { FfiConverterString.lift(it) },
-        // Error FFI converter
-        PaykitFfiExceptionErrorHandler,
-    )
-}
-
-/**
- * Switch to a local testnet (`Pubky::testnet()`, targeting localhost).
- *
- * Only available with the `dev-auth` feature. Clears any active session.
- */
-@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-public suspend fun `paykitSwitchNetwork`(`useTestnet`: kotlin.Boolean) {
-    return uniffiRustCallAsync(
-        UniffiLib.uniffi_paykit_fn_func_paykit_switch_network(
-            FfiConverterBoolean.lower(`useTestnet`),
-        ),
-        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_paykit_rust_future_free_void(future) },
-        { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
-        // lift function
-        { Unit },
-        
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
