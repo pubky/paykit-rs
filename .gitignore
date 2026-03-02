@@ -3,6 +3,7 @@
 .DS_Store
 *.swp
 .swiftpm/
+*.local*
 
 # iOS build artifacts (rebuilt by build_ios.sh; sources are committed)
 paykit-ffi/bindings/ios/Paykit.xcframework/
