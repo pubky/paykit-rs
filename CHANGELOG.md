@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-03-02
 
 ### Changed (BREAKING)
 - **`MethodId` is now validated at construction time.** The inner field is private;
@@ -17,14 +17,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - **New `PaykitError::Validation` variant.** Exhaustive `match` on `PaykitError`
   must now handle this variant, returned when `MethodId::new()` rejects invalid
   input.
+- Removed `paykit_switch_network` — simplified global state.
 
 ### Added
+- **UniFFI mobile bindings** (`paykit-ffi` crate) for iOS and Android, with build
+  infrastructure (`build.sh`, `build_ios.sh`, `build_android.sh`, `Package.swift`,
+  Android Gradle project) and CI workflow for Android publishing.
 - `MethodId::new()` — validated constructor enforcing safe path-segment invariants.
 - `MethodId::as_str()`, `Display`, and `AsRef<str>` for read access.
 - `EndpointData::new()`, `EndpointData::as_str()`, `EndpointData::into_inner()`,
   `Display`, and `AsRef<str>`.
 - 23 unit tests covering `MethodId` validation (positive and negative cases) and
   `EndpointData` accessors.
+- Dev-only functions gated behind a feature flag.
 
 ### Security
 - Mitigated path injection vulnerability in `MethodId`. Previously, a caller could
@@ -41,6 +46,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Add a `PaykitError::Validation(_)` arm to any exhaustive `match` on `PaykitError`.
 - Downstream bindings (Swift/RN/Kotlin) that construct `MethodId` must be updated to
   handle the `Result` returned by `new()`.
+- Remove any calls to `paykit_switch_network`.
 
 ## [0.1.0] - 2025-11-21
 
@@ -57,4 +63,5 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
+[0.2.0]: https://github.com/pubky/paykit-rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0
