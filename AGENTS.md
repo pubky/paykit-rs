@@ -22,8 +22,16 @@
 - Keep the library stateless. Functions that touch remote state must accept `AuthenticatedTransport` or `UnauthenticatedTransportRead` implementors instead of concrete SDK types.
 - Pubky support lives behind the default `pubky` feature; adapters such as `PubkyAuthenticatedTransport` and `PubkyUnauthenticatedTransport` simply wrap `PubkySession` and `pubky::PublicStorage`. Disable the feature if you need to compile without the SDK.
 - When adding or updating adapters, follow the convention: `fetch_payment_endpoint` returns `Option`, list operations treat 404s as empty, and contact discovery relies on directory listings rather than file contents.
-- Document in each API that session creation, capability scope, and key rotation remain the caller’s responsibility; Paykit only consumes the trait methods it needs.
-- Timeout handling is the transport layer’s responsibility, not Paykit’s. The traits do not enforce any deadline — implementations must configure their own timeouts. The Pubky SDK exposes [`PubkyHttpClientBuilder::request_timeout`](https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout) for this purpose.
+- Document in each API that session creation, capability scope, and key rotation remain the caller's responsibility; Paykit only consumes the trait methods it needs.
+- Timeout handling is the transport layer's responsibility, not Paykit's. The traits do not enforce any deadline — implementations must configure their own timeouts. The Pubky SDK exposes [`PubkyHttpClientBuilder::request_timeout`](https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout) for this purpose.
+
+### Public vs. Private Payload Types
+- **Public** payment methods use `EndpointData` (a UTF-8 `String` wrapper) at the transport trait level. Each method is stored as a separate file at a well-known path.
+- **Private** payment methods use raw bytes (`Vec<u8>` / `&[u8]`) at the transport trait level. All methods for a given recipient are stored together in a single encrypted blob whose plaintext is JSON (`{ "method_id": "endpoint_value", ... }`). The transport treats these blobs as opaque.
+- **Encryption/decryption** is handled by the higher-level helper functions in `lib.rs` (e.g. `set_private_payment_endpoint`), which compose transport trait methods with `pubky-data` encryption. These helpers accept and return `EndpointData` to callers, so the public API is consistent regardless of whether storage is encrypted.
+- This separation keeps the transport traits **crypto-agnostic**: implementors only store/retrieve bytes at the correct paths. Alternative transports can plug in their own encryption without changing the trait contract. See `paykit-lib/src/transport/traits.rs` module docs for the full rationale.
+- Private payment helper functions are `#[cfg(feature = "pubky")]` and accept concrete Pubky types (not generic over the transport traits) because they depend on `pubky-data` for Noise encryption.
+- The recipient path component in `/pub/paykit.app/v0/private/{recipient_id}/payments.json` is computed internally via `compute_recipient_component()`. Currently it returns the counterparty's public key string; this will be replaced with a derivation function in the future.
 
 ## Testing Guidelines
 - Rely on the standard Rust test harness; embed minimal reproducible examples in doc comments so `cargo test` exercises them automatically.
