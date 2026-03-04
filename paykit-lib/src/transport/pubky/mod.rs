@@ -13,11 +13,10 @@ pub mod unauthenticated_transport;
 ///  - /pub/paykit.app/v0/{method_id} -> with payload being the payment endpoint
 pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit.app/v0/";
 /// Conventional prefix for private (encrypted) Paykit data.
-/// Private payments for a given recipient are stored as a single encrypted blob at:
-///  - /pub/paykit.app/v0/private/{recipient_id}/{PAYKIT_PRIVATE_PAYMENTS_FILE}
+/// This prefix is used as the `destination_path` for pubky-data's encrypted
+/// messaging. Pubky-data manages individual file slots within this folder using
+/// a counter-based scheme.
 pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit.app/v0/private/";
-/// Filename for the encrypted private payments blob within a recipient directory.
-pub const PAYKIT_PRIVATE_PAYMENTS_FILE: &str = "payments.json";
 /// Directory that stores contact/follow information (one file per known contact).
 pub const PUBKY_FOLLOWS_PATH: &str = "/pub/pubky.app/follows/";
 /// File that stores profile information

@@ -26,12 +26,11 @@
 - Timeout handling is the transport layer's responsibility, not Paykit's. The traits do not enforce any deadline — implementations must configure their own timeouts. The Pubky SDK exposes [`PubkyHttpClientBuilder::request_timeout`](https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout) for this purpose.
 
 ### Public vs. Private Payload Types
-- **Public** payment methods use `EndpointData` (a UTF-8 `String` wrapper) at the transport trait level. Each method is stored as a separate file at a well-known path.
-- **Private** payment methods use raw bytes (`Vec<u8>` / `&[u8]`) at the transport trait level. All methods for a given recipient are stored together in a single encrypted blob whose plaintext is JSON (`{ "method_id": "endpoint_value", ... }`). The transport treats these blobs as opaque.
-- **Encryption/decryption** is handled by the higher-level helper functions in `lib.rs` (e.g. `set_private_payment_endpoint`), which compose transport trait methods with `pubky-data` encryption. These helpers accept and return `EndpointData` to callers, so the public API is consistent regardless of whether storage is encrypted.
-- This separation keeps the transport traits **crypto-agnostic**: implementors only store/retrieve bytes at the correct paths. Alternative transports can plug in their own encryption without changing the trait contract. See `paykit-lib/src/transport/traits.rs` module docs for the full rationale.
+- **Public** payment methods use `EndpointData` (a UTF-8 `String` wrapper) at the transport trait level. Each method is stored as a separate file at a well-known path. The transport traits (`AuthenticatedTransport`, `UnauthenticatedTransportRead`) handle public payment storage.
+- **Private** payment methods bypass the transport traits entirely. They are handled by `pubky-data`'s `PubkyDataEncryptor`, which manages encryption, file naming, and storage via `send_message`/`receive_message`. The plaintext format is JSON (`{ "method_id": "endpoint_value", ... }`). The `destination_path` (folder prefix) is set during `establish_encrypted_link`; pubky-data manages individual file slots within that folder using a counter-based scheme.
+- The helper functions `set_private_payments` and `get_private_payments` in `lib.rs` compose JSON serialization with `PubkyDataEncryptor::send_message`/`receive_message`. The caller is responsible for managing the payments map (adding/removing entries) and passing the complete map to `set_private_payments`.
 - Private payment helper functions are `#[cfg(feature = "pubky")]` and accept concrete Pubky types (not generic over the transport traits) because they depend on `pubky-data` for Noise encryption.
-- The recipient path component in `/pub/paykit.app/v0/private/{recipient_id}/payments.json` is computed internally via `compute_recipient_component()`. Currently it returns the counterparty's public key string; this will be replaced with a derivation function in the future.
+- The serialized private payments JSON must fit within a single pubky-data message (`PUBKY_DATA_MSG_LEN`, currently 1000 bytes).
 
 ## Testing Guidelines
 - Rely on the standard Rust test harness; embed minimal reproducible examples in doc comments so `cargo test` exercises them automatically.

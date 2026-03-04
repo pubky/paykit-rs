@@ -12,31 +12,30 @@
 //!
 //! # Public vs. private payload types
 //!
+//! ## Public payment methods
+//!
 //! Public payment methods use [`EndpointData`] — a validated UTF-8 string wrapper
 //! representing human-readable payment endpoint payloads (addresses, invoices,
 //! JSON, etc.). Each public method is stored as a separate file at a well-known
 //! path (one file per [`MethodId`]).
 //!
-//! Private payment methods use raw bytes (`Vec<u8>` / `&[u8]`) at the transport
-//! level because the data is encrypted before it reaches the transport and
-//! decrypted after retrieval. All private methods for a given recipient are
-//! stored together in a single encrypted blob whose plaintext is a JSON object
-//! mapping method identifiers to endpoint values
-//! (e.g. `{ "lightning": "ln...", "onchain": "bc1..." }`). The transport layer
-//! treats these blobs as **opaque** — it has no knowledge of the encryption
-//! scheme, key material, or plaintext structure.
+//! The transport traits in this module handle **only public payment endpoints**.
+//! All public endpoint operations go through [`UnauthenticatedTransportRead`]
+//! and [`AuthenticatedTransport`].
 //!
-//! Encryption and decryption are handled by the higher-level helper functions in
-//! [`crate`] (e.g. [`crate::set_private_payment_endpoint`]), which compose the
-//! transport trait methods with application-level encryption (currently
-//! [`pubky-data`]). Those helpers accept and return [`EndpointData`] to callers,
-//! so the public API surface is consistent regardless of whether the underlying
-//! storage is encrypted.
+//! ## Private payment methods
 //!
-//! This separation keeps the transport traits **crypto-agnostic**: implementors
-//! only need to store and retrieve bytes at the correct paths, without importing
-//! or understanding any encryption library. It also means alternative transports
-//! can plug in their own encryption scheme without changing the trait contract.
+//! Private payment methods are handled entirely by [`pubky-data`]'s encrypted
+//! messaging layer via `PubkyDataEncryptor::send_message` and `receive_message`.
+//! This layer manages file naming, storage locations, and end-to-end encryption
+//! independently. **The transport traits have no involvement with private
+//! payments.**
+//!
+//! Higher-level helper functions in [`crate`] (e.g.
+//! [`crate::set_private_payments`]) compose `pubky-data` encryption
+//! directly with storage operations, bypassing the transport traits entirely.
+//! This keeps the transport traits focused on public, unencrypted storage
+//! operations.
 
 use async_trait::async_trait;
 
@@ -101,25 +100,6 @@ pub trait UnauthenticatedTransportRead {
     /// - Returns `PaykitError::Profile` if the profile exists but cannot be parsed.
     /// - Returns `PaykitError::Transport` for network failures.
     async fn fetch_profile(&self, user: &PublicKey) -> Result<Profile>;
-
-    /// Fetches the raw (encrypted) private payments blob for a given `owner`
-    /// and `recipient_id`.
-    ///
-    /// The `recipient_id` is an opaque path component computed by the caller
-    /// (currently derived from the counterparty's public key; the derivation
-    /// logic may change in the future).
-    ///
-    /// Returns `Ok(None)` when no private payments file exists for this
-    /// recipient. The returned bytes are **opaque** to the transport —
-    /// decryption is the caller's responsibility.
-    ///
-    /// See the [module-level documentation](self) for the rationale behind
-    /// using raw bytes instead of [`EndpointData`] for private payments.
-    async fn fetch_private_payments_blob(
-        &self,
-        owner: &PublicKey,
-        recipient_id: &str,
-    ) -> Result<Option<Vec<u8>>>;
 }
 
 /// Trait describing authenticated write (and optional read) access.
@@ -140,18 +120,4 @@ pub trait AuthenticatedTransport {
 
     /// Removes an existing payment endpoint for the provided method.
     async fn remove_payment_endpoint(&self, method: &MethodId) -> Result<()>;
-
-    /// Writes an opaque (already encrypted) blob to the private payments
-    /// path for the given `recipient_id`.
-    ///
-    /// The `recipient_id` is an opaque path component computed by the caller.
-    /// The transport stores the bytes as-is without inspecting or transforming
-    /// them.
-    ///
-    /// See the [module-level documentation](super::traits) for the rationale
-    /// behind using raw bytes instead of [`EndpointData`] for private payments.
-    async fn put_private_payments(&self, recipient_id: &str, data: &[u8]) -> Result<()>;
-
-    /// Removes the private payments file for the given `recipient_id`.
-    async fn remove_private_payments(&self, recipient_id: &str) -> Result<()>;
 }

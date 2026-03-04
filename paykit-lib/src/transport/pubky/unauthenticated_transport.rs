@@ -11,10 +11,7 @@ use tracing::{debug, error, instrument, trace, warn};
 
 use pubky_app_specs::PubkyAppObject;
 
-use super::{
-    PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_PRIVATE_PAYMENTS_FILE,
-    PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE,
-};
+use super::{PAYKIT_PATH_PREFIX, PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE};
 use crate::transport::traits::UnauthenticatedTransportRead;
 use crate::{EndpointData, MethodId, PaykitError, Profile, PublicKey, Result, SupportedPayments};
 
@@ -300,46 +297,6 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
                 Err(PaykitError::Profile(format!(
                     "failed to parse profile: {e}"
                 )))
-            }
-        }
-    }
-
-    #[instrument(skip(self), fields(owner = %owner, recipient_id = %recipient_id))]
-    async fn fetch_private_payments_blob(
-        &self,
-        owner: &PublicKey,
-        recipient_id: &str,
-    ) -> Result<Option<Vec<u8>>> {
-        let addr = format!(
-            "{owner}{PAYKIT_PRIVATE_PATH_PREFIX}{recipient_id}/{PAYKIT_PRIVATE_PAYMENTS_FILE}"
-        );
-        debug!(addr = %addr, "fetching private payments blob");
-        match self.inner.get(&addr).await {
-            Ok(resp) => {
-                let bytes = resp.bytes().await.map_err(|err| {
-                    error!(error = %err, "failed to read private payments response bytes");
-                    PaykitError::Transport {
-                        context: "fetch private payments blob".into(),
-                        source: err.into(),
-                    }
-                })?;
-                if bytes.is_empty() {
-                    debug!("private payments blob is empty, returning None");
-                    return Ok(None);
-                }
-                debug!(len = bytes.len(), "private payments blob fetched");
-                Ok(Some(bytes.to_vec()))
-            }
-            Err(err) if is_not_found(&err) => {
-                debug!("private payments blob not found (404/GONE)");
-                Ok(None)
-            }
-            Err(err) => {
-                error!(error = %err, "transport error fetching private payments blob");
-                Err(PaykitError::Transport {
-                    context: "fetch private payments blob".into(),
-                    source: err.into(),
-                })
             }
         }
     }
