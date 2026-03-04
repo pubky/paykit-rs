@@ -288,6 +288,9 @@ where
         .map_err(|err| map_error("set_payment_endpoint", err))
 }
 
+// TODO:
+// pub async fn set_private_payment_endpoint()
+
 /// Removes a payment endpoint via the injected authenticated client.
 #[instrument(skip(client), fields(method = %method))]
 pub async fn remove_payment_endpoint<S>(client: &S, method: MethodId) -> Result<()>
@@ -300,6 +303,9 @@ where
         .await
         .map_err(|err| map_error("remove_payment_endpoint", err))
 }
+
+// TODO:
+// pub async fn remove_private_payment_endpoint()
 
 /// Retrieves all supported payment methods for the given payee.
 ///
@@ -340,6 +346,9 @@ where
     Ok(result)
 }
 
+// TODO:
+// pub async fn get_private_payment_list()
+
 /// Retrieves a specific payment endpoint for `payee` and `method`.
 ///
 /// # Semantics
@@ -378,6 +387,9 @@ where
     debug!(found = result.is_some(), "payment endpoint lookup complete");
     Ok(result)
 }
+
+// TODO:
+// pub async fn get_private_payment_endpoint()
 
 /// Returns known contacts of a given public key.
 ///
