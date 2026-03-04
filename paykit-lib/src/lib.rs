@@ -30,6 +30,9 @@ pub use pubky::PublicKey;
 #[cfg(feature = "pubky")]
 pub use pubky_app_specs::PubkyAppUser as Profile;
 
+#[cfg(feature = "pubky")]
+pub use pubky_data;
+
 #[cfg(not(feature = "pubky"))]
 /// Public key placeholder used when the `pubky` feature is disabled.
 ///
@@ -263,6 +266,70 @@ pub struct SupportedPayments {
     pub entries: HashMap<MethodId, EndpointData>,
 }
 
+#[cfg(feature = "pubky")]
+/// Handle to an established encrypted Noise link with a peer.
+///
+/// Created by [`establish_encrypted_link`] after a successful Noise handshake.
+/// Used by the private payment helper functions to encrypt and decrypt payment
+/// data. Must be closed via [`close_encrypted_link`] when no longer needed.
+///
+/// The link wraps a [`pubky_data::PubkyDataEncryptor`] in transport mode and
+/// the [`pubky_data::LinkId`] that identifies the session.
+pub struct EncryptedLink {
+    /// The Noise session manager in transport mode.
+    encryptor: pubky_data::PubkyDataEncryptor,
+    /// Identifier for the established transport session.
+    link_id: pubky_data::LinkId,
+    /// The counterparty's public key.
+    recipient: PublicKey,
+}
+
+#[cfg(feature = "pubky")]
+/// Computes the path component used to address a recipient's private payments
+/// directory.
+///
+/// Currently returns the string representation of the counterparty's public key.
+/// This will be replaced with a derivation function in the future.
+fn compute_recipient_component(receiver_pubkey: &PublicKey) -> String {
+    receiver_pubkey.to_string()
+}
+
+#[cfg(feature = "pubky")]
+/// Deserializes a private payments JSON blob into a map of method IDs to
+/// endpoint data.
+///
+/// The expected format is `{ "method_id": "endpoint_value", ... }`.
+fn parse_private_payments_json(json: &str) -> Result<HashMap<MethodId, EndpointData>> {
+    let map: HashMap<String, String> =
+        serde_json::from_str(json).map_err(|err| PaykitError::InvalidData {
+            context: format!("failed to parse private payments JSON: {err}"),
+            source: Some(err.into()),
+        })?;
+
+    let mut result = HashMap::new();
+    for (key, value) in map {
+        let method_id = MethodId::new(&key).map_err(|err| PaykitError::InvalidData {
+            context: format!("private payments blob contains invalid method identifier '{key}'"),
+            source: Some(err.into()),
+        })?;
+        result.insert(method_id, EndpointData::new(value));
+    }
+    Ok(result)
+}
+
+/// Serializes a map of method IDs to endpoint data into a JSON string.
+#[cfg(feature = "pubky")]
+fn serialize_private_payments_json(entries: &HashMap<MethodId, EndpointData>) -> Result<String> {
+    let map: HashMap<&str, &str> = entries
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    serde_json::to_string(&map).map_err(|err| PaykitError::InvalidData {
+        context: format!("failed to serialize private payments JSON: {err}"),
+        source: Some(err.into()),
+    })
+}
+
 /// Stores or updates a payment endpoint via the injected authenticated client.
 ///
 /// # Examples
@@ -288,8 +355,67 @@ where
         .map_err(|err| map_error("set_payment_endpoint", err))
 }
 
-// TODO:
-// pub async fn set_private_payment_endpoint()
+#[cfg(feature = "pubky")]
+/// Stores or updates a private payment endpoint for a specific method.
+///
+/// Performs a read-decrypt-modify-encrypt-write cycle: fetches the existing
+/// encrypted payments blob (if any), decrypts it, inserts or updates the
+/// given method entry, re-encrypts, and writes the blob back.
+///
+/// # Parameters
+/// - `client` — authenticated transport for writing the encrypted blob.
+/// - `reader` — unauthenticated transport for reading the existing blob.
+/// - `link` — an established [`EncryptedLink`] for encrypt/decrypt operations.
+/// - `method` — the payment method identifier to store.
+/// - `data` — the endpoint payload to associate with the method.
+///
+/// # Errors
+/// - Returns `PaykitError::Transport` for network failures.
+/// - Returns `PaykitError::InvalidData` if the existing blob cannot be
+///   decrypted or parsed.
+#[instrument(skip(client, reader, link, data), fields(method = %method, recipient = %link.recipient))]
+pub async fn set_private_payment_endpoint(
+    client: &PubkyAuthenticatedTransport,
+    reader: &PubkyUnauthenticatedTransport,
+    link: &mut EncryptedLink,
+    method: MethodId,
+    data: EndpointData,
+) -> Result<()> {
+    debug!("storing private payment endpoint");
+    let recipient_id = compute_recipient_component(&link.recipient);
+
+    // Read existing blob, decrypt, and parse (or start with empty map).
+    let mut entries = match reader
+        .fetch_private_payments_blob(&link.recipient, &recipient_id)
+        .await
+        .map_err(|err| map_error("set_private_payment_endpoint", err))?
+    {
+        Some(_blob) => {
+            // TODO: decrypt blob using link.encryptor / link.link_id
+            // let plaintext = decrypt(&link, blob)?;
+            // parse_private_payments_json(&plaintext)?
+            todo!("decrypt private payments blob using pubky-data EncryptedLink")
+        }
+        None => HashMap::new(),
+    };
+
+    entries.insert(method, data);
+
+    let _json = serialize_private_payments_json(&entries)
+        .map_err(|err| map_error("set_private_payment_endpoint", err))?;
+
+    // TODO: encrypt json using link.encryptor / link.link_id
+    // let encrypted = encrypt(&link, json.as_bytes())?;
+    let encrypted: Vec<u8> = todo!("encrypt private payments blob using pubky-data EncryptedLink");
+
+    client
+        .put_private_payments(&recipient_id, &encrypted)
+        .await
+        .map_err(|err| map_error("set_private_payment_endpoint", err))?;
+
+    debug!("private payment endpoint stored successfully");
+    Ok(())
+}
 
 /// Removes a payment endpoint via the injected authenticated client.
 #[instrument(skip(client), fields(method = %method))]
@@ -304,8 +430,74 @@ where
         .map_err(|err| map_error("remove_payment_endpoint", err))
 }
 
-// TODO:
-// pub async fn remove_private_payment_endpoint()
+#[cfg(feature = "pubky")]
+/// Removes a private payment endpoint for a specific method.
+///
+/// Performs a read-decrypt-modify-encrypt-write cycle: fetches the existing
+/// encrypted payments blob, decrypts it, removes the given method entry,
+/// re-encrypts, and writes the blob back. If the resulting map is empty,
+/// the entire private payments file is removed.
+///
+/// # Parameters
+/// - `client` — authenticated transport for writing/deleting the encrypted blob.
+/// - `reader` — unauthenticated transport for reading the existing blob.
+/// - `link` — an established [`EncryptedLink`] for encrypt/decrypt operations.
+/// - `method` — the payment method identifier to remove.
+///
+/// # Errors
+/// - Returns `PaykitError::NotFound` if no private payments blob exists.
+/// - Returns `PaykitError::Transport` for network failures.
+/// - Returns `PaykitError::InvalidData` if the existing blob cannot be
+///   decrypted or parsed.
+#[instrument(skip(client, reader, link), fields(method = %method, recipient = %link.recipient))]
+pub async fn remove_private_payment_endpoint(
+    client: &PubkyAuthenticatedTransport,
+    reader: &PubkyUnauthenticatedTransport,
+    link: &mut EncryptedLink,
+    method: MethodId,
+) -> Result<()> {
+    debug!("removing private payment endpoint");
+    let recipient_id = compute_recipient_component(&link.recipient);
+
+    let _blob = reader
+        .fetch_private_payments_blob(&link.recipient, &recipient_id)
+        .await
+        .map_err(|err| map_error("remove_private_payment_endpoint", err))?
+        .ok_or_else(|| {
+            PaykitError::NotFound("no private payments blob exists for this recipient".into())
+        })?;
+
+    // TODO: decrypt blob using link.encryptor / link.link_id
+    // let plaintext = decrypt(&link, blob)?;
+    // let mut entries = parse_private_payments_json(&plaintext)?;
+    let mut entries: HashMap<MethodId, EndpointData> =
+        todo!("decrypt private payments blob using pubky-data EncryptedLink");
+
+    entries.remove(&method);
+
+    if entries.is_empty() {
+        client
+            .remove_private_payments(&recipient_id)
+            .await
+            .map_err(|err| map_error("remove_private_payment_endpoint", err))?;
+    } else {
+        let _json = serialize_private_payments_json(&entries)
+            .map_err(|err| map_error("remove_private_payment_endpoint", err))?;
+
+        // TODO: encrypt json using link.encryptor / link.link_id
+        // let encrypted = encrypt(&link, json.as_bytes())?;
+        let encrypted: Vec<u8> =
+            todo!("encrypt private payments blob using pubky-data EncryptedLink");
+
+        client
+            .put_private_payments(&recipient_id, &encrypted)
+            .await
+            .map_err(|err| map_error("remove_private_payment_endpoint", err))?;
+    }
+
+    debug!("private payment endpoint removed successfully");
+    Ok(())
+}
 
 /// Retrieves all supported payment methods for the given payee.
 ///
@@ -346,8 +538,53 @@ where
     Ok(result)
 }
 
-// TODO:
-// pub async fn get_private_payment_list()
+#[cfg(feature = "pubky")]
+/// Retrieves the full private payment list for a given payee.
+///
+/// Fetches the encrypted payments blob, decrypts it using the established
+/// link, and returns all method/endpoint pairs.
+///
+/// # Parameters
+/// - `reader` — unauthenticated transport for reading the encrypted blob.
+/// - `link` — an established [`EncryptedLink`] for decryption.
+/// - `payee` — the public key of the payee whose private payments to fetch.
+///
+/// # Semantics
+/// - Returns an empty [`SupportedPayments`] when no private payments blob
+///   exists for this recipient.
+/// - Returns `Err(PaykitError::InvalidData)` when the blob cannot be
+///   decrypted or parsed.
+/// - Returns `Err(PaykitError::Transport)` for network failures.
+#[instrument(skip(reader, link), fields(payee = %payee, recipient = %link.recipient))]
+pub async fn get_private_payment_list(
+    reader: &PubkyUnauthenticatedTransport,
+    link: &mut EncryptedLink,
+    payee: &PublicKey,
+) -> Result<SupportedPayments> {
+    debug!("fetching private payment list");
+    let recipient_id = compute_recipient_component(&link.recipient);
+
+    let blob = match reader
+        .fetch_private_payments_blob(payee, &recipient_id)
+        .await
+        .map_err(|err| map_error("get_private_payment_list", err))?
+    {
+        Some(blob) => blob,
+        None => {
+            debug!("no private payments blob found, returning empty list");
+            return Ok(SupportedPayments::default());
+        }
+    };
+
+    // TODO: decrypt blob using link.encryptor / link.link_id
+    // let plaintext = decrypt(&link, blob)?;
+    let _blob = blob;
+    let entries: HashMap<MethodId, EndpointData> =
+        todo!("decrypt private payments blob using pubky-data EncryptedLink");
+
+    debug!(count = entries.len(), "private payment list retrieved");
+    Ok(SupportedPayments { entries })
+}
 
 /// Retrieves a specific payment endpoint for `payee` and `method`.
 ///
@@ -388,8 +625,59 @@ where
     Ok(result)
 }
 
-// TODO:
-// pub async fn get_private_payment_endpoint()
+#[cfg(feature = "pubky")]
+/// Retrieves a specific private payment endpoint for a given payee and method.
+///
+/// Fetches the encrypted payments blob, decrypts it using the established
+/// link, and extracts the endpoint for the requested method.
+///
+/// # Parameters
+/// - `reader` — unauthenticated transport for reading the encrypted blob.
+/// - `link` — an established [`EncryptedLink`] for decryption.
+/// - `payee` — the public key of the payee whose private endpoint to fetch.
+/// - `method` — the payment method identifier to look up.
+///
+/// # Semantics
+/// - Returns `Ok(None)` when no private payments blob exists or the blob
+///   does not contain the requested method.
+/// - Returns `Err(PaykitError::InvalidData)` when the blob cannot be
+///   decrypted or parsed.
+/// - Returns `Err(PaykitError::Transport)` for network failures.
+#[instrument(skip(reader, link), fields(payee = %payee, method = %method, recipient = %link.recipient))]
+pub async fn get_private_payment_endpoint(
+    reader: &PubkyUnauthenticatedTransport,
+    link: &mut EncryptedLink,
+    payee: &PublicKey,
+    method: &MethodId,
+) -> Result<Option<EndpointData>> {
+    debug!("fetching private payment endpoint");
+    let recipient_id = compute_recipient_component(&link.recipient);
+
+    let blob = match reader
+        .fetch_private_payments_blob(payee, &recipient_id)
+        .await
+        .map_err(|err| map_error("get_private_payment_endpoint", err))?
+    {
+        Some(blob) => blob,
+        None => {
+            debug!("no private payments blob found");
+            return Ok(None);
+        }
+    };
+
+    // TODO: decrypt blob using link.encryptor / link.link_id
+    // let plaintext = decrypt(&link, blob)?;
+    let _blob = blob;
+    let entries: HashMap<MethodId, EndpointData> =
+        todo!("decrypt private payments blob using pubky-data EncryptedLink");
+
+    let result = entries.get(method).cloned();
+    debug!(
+        found = result.is_some(),
+        "private payment endpoint lookup complete"
+    );
+    Ok(result)
+}
 
 /// Returns known contacts of a given public key.
 ///
@@ -453,6 +741,61 @@ where
         .fetch_profile(key)
         .await
         .map_err(|err| map_error("get_profile", err))
+}
+
+#[cfg(feature = "pubky")]
+/// Establishes an encrypted Noise link with a remote peer.
+///
+/// Drives a full Noise handshake (currently XX pattern) to completion using
+/// `pubky-data`. The handshake messages are exchanged via the Pubky homeserver
+/// (managed internally by `pubky-data`). Once the handshake completes, the
+/// returned [`EncryptedLink`] can be used with the private payment helper
+/// functions to encrypt and decrypt payment data.
+///
+/// # Parameters
+/// - `session` — an authenticated Pubky session for writing handshake messages.
+/// - `sender_secret_key` — the 32-byte Ed25519 secret key of the local peer.
+/// - `receiver_pubkey` — the public key of the remote peer to establish a link with.
+///
+/// # Errors
+/// - Returns `PaykitError::Transport` if the handshake fails due to network
+///   issues or if `pubky-data` cannot initialize the encryption stack.
+#[instrument(skip(session, sender_secret_key), fields(receiver = %receiver_pubkey))]
+pub async fn establish_encrypted_link(
+    session: &pubky::PubkySession,
+    sender_secret_key: &[u8; 32],
+    receiver_pubkey: &PublicKey,
+) -> Result<EncryptedLink> {
+    debug!("establishing encrypted link");
+    // TODO: Initialize PubkyDataEncryptor, create context, drive handshake,
+    // transition to transport mode, and return EncryptedLink.
+    //
+    // Rough sequence:
+    // 1. PubkyDataEncryptor::init_encryptor_stack(...)
+    // 2. encryptor.init_context(key_set, initiator=true, endpoint_pubkey)
+    // 3. loop { encryptor.handle_handshake(...) } until Terminal
+    // 4. link_id = encryptor.transition_transport(tmp_link_id)
+    // 5. return EncryptedLink { encryptor, link_id, recipient }
+    let _ = (session, sender_secret_key, receiver_pubkey);
+    todo!("establish encrypted link using pubky-data Noise handshake")
+}
+
+#[cfg(feature = "pubky")]
+/// Closes an encrypted link and cleans up the Noise session state.
+///
+/// After calling this function, the [`EncryptedLink`] is consumed and can no
+/// longer be used for encryption or decryption.
+#[instrument(skip(link), fields(recipient = %link.recipient))]
+pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
+    debug!("closing encrypted link");
+    link.encryptor
+        .close_context(&link.link_id)
+        .map_err(|err| PaykitError::Transport {
+            context: format!("failed to close encrypted link: {err:?}"),
+            source: anyhow::anyhow!("pubky-data close_context failed: {err:?}"),
+        })?;
+    debug!("encrypted link closed successfully");
+    Ok(())
 }
 
 fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
