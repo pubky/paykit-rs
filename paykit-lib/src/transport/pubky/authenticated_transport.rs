@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use pubky::PubkySession;
 use tracing::{debug, error, instrument};
 
-use super::{PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_PRIVATE_PAYMENTS_FILE};
+use super::PAYKIT_PATH_PREFIX;
 use crate::transport::traits::AuthenticatedTransport;
 use crate::{EndpointData, MethodId, PaykitError, Result};
 
@@ -65,42 +65,6 @@ impl AuthenticatedTransport for PubkyAuthenticatedTransport {
             }
         })?;
         debug!("payment endpoint removed successfully");
-        Ok(())
-    }
-
-    #[instrument(skip(self, data), fields(recipient_id = %recipient_id))]
-    async fn put_private_payments(&self, recipient_id: &str, data: &[u8]) -> Result<()> {
-        let path =
-            format!("{PAYKIT_PRIVATE_PATH_PREFIX}{recipient_id}/{PAYKIT_PRIVATE_PAYMENTS_FILE}");
-        debug!(path = %path, len = data.len(), "writing private payments blob to storage");
-        self.session
-            .storage()
-            .put(path, data.to_vec())
-            .await
-            .map_err(|err| {
-                error!(error = %err, "failed to put private payments blob");
-                PaykitError::Transport {
-                    context: "put private payments".into(),
-                    source: err.into(),
-                }
-            })?;
-        debug!("private payments blob stored successfully");
-        Ok(())
-    }
-
-    #[instrument(skip(self), fields(recipient_id = %recipient_id))]
-    async fn remove_private_payments(&self, recipient_id: &str) -> Result<()> {
-        let path =
-            format!("{PAYKIT_PRIVATE_PATH_PREFIX}{recipient_id}/{PAYKIT_PRIVATE_PAYMENTS_FILE}");
-        debug!(path = %path, "deleting private payments blob from storage");
-        self.session.storage().delete(path).await.map_err(|err| {
-            error!(error = %err, "failed to delete private payments blob");
-            PaykitError::Transport {
-                context: "delete private payments".into(),
-                source: err.into(),
-            }
-        })?;
-        debug!("private payments blob removed successfully");
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 # Paykit Library
 
-Stateless Rust crate that implements the Paykit transport layer. It orchestrates reads from Paykit public storage and writes to private/public paths while delegating authentication to callers.
+Stateless Rust crate that implements the Paykit transport layer. It provides helpers for both **public** payment endpoints (stored as plaintext files on the homeserver) and **private** payment endpoints (end-to-end encrypted via `pubky-data`'s Noise protocol), while delegating authentication and session management to callers.
 
 Paykit replies on **transport** protocol for network *communication* between peers and on **social media** protocol for bootstrap of *profile* and *social graph*. 
 
@@ -9,10 +9,10 @@ Both of them are enabled via default feature flag `pubky`.
 
 ## Auth & Dependency Injection
 
-- Writes require an authenticated client. Instead of hard-coding `PubkySession`, public APIs accept an argument that implements a thin Paykit-defined trait (e.g., `AuthenticatedTransport`).  
-- The crate provides adapters so callers can wrap [`pubky::PubkySession`](https://docs.rs/pubky/0.6.0/pubky/struct.PubkySession.html) or provide mocks for tests.  
+- **Public endpoints** use the generic transport traits (`AuthenticatedTransport` / `UnauthenticatedTransportRead`). Instead of hard-coding `PubkySession`, public APIs accept any type implementing these traits. The crate provides adapters so callers can wrap [`pubky::PubkySession`](https://docs.rs/pubky/0.6.0/pubky/struct.PubkySession.html) or provide mocks for tests.
+- **Private endpoints** bypass the transport traits entirely. They use `pubky-data`'s `PubkyDataEncryptor` for Noise-encrypted messaging, which handles both encryption and homeserver I/O. Private payment functions accept an `EncryptedLink` (established via a Noise handshake) and are gated behind the `pubky` feature.
 - Public reads only require the `UnauthenticatedTransportRead` trait, keeping unauthenticated flows lightweight. Session lifecycle, capability scoping, and key rotation stay outside this crate.
-- The `pubky` feature flag (enabled by default) wires in Pubky adapters under `transport::pubky`. Disable it if you want to use custom transports only.
+- The `pubky` feature flag (enabled by default) wires in Pubky adapters under `transport::pubky` and enables the private payment helpers. Disable it if you want to use custom transports for public endpoints only.
 
 ## Timeout Handling
 
@@ -70,7 +70,11 @@ Domain error enum with the following variants:
 | `Profile(String)` | Profile data is malformed |
 | `Validation(String)` | Caller-supplied input failed validation (e.g. invalid `MethodId`) |
 
-## Proposed Surface
+## API Surface
+
+### Public Payment Endpoints
+
+These functions use the transport traits (`AuthenticatedTransport` / `UnauthenticatedTransportRead`) and work with any backend.
 
 - `set_payment_endpoint(client: impl AuthenticatedTransport, method: MethodId, data: EndpointData) -> Result<()>`  
   Store or update a payee-owned endpoint using the caller's authenticated client.
@@ -80,11 +84,33 @@ Domain error enum with the following variants:
   Resolve the supported methods document for a public key. The result is empty when no endpoints are published.
 - `get_payment_endpoint(reader: impl UnauthenticatedTransportRead, payee: PublicKey, method: &MethodId) -> Result<Option<EndpointData>>`  
   Convenience resolver for a single method. Returns `Ok(None)` when the endpoint is missing or empty.
+
+### Private Payment Endpoints (`pubky` feature)
+
+Private payments are end-to-end encrypted via a Noise protocol handshake managed by `pubky-data`. They bypass the transport traits entirely — `PubkyDataEncryptor` handles encryption, file naming, and homeserver storage via `send_message`/`receive_message`.
+
+- `establish_encrypted_link(session, sender_secret_key, receiver_pubkey) -> Result<EncryptedLink>`  
+  Drives a Noise XX handshake to completion and returns an `EncryptedLink` for subsequent encrypt/decrypt operations. *(not yet implemented)*
+- `close_encrypted_link(link: EncryptedLink) -> Result<()>`  
+  Closes the Noise session and releases resources.
+- `set_private_payments(link: &mut EncryptedLink, entries: &HashMap<MethodId, EndpointData>) -> Result<()>`  
+  Serializes the complete payments map to JSON, encrypts it, and sends it via the encrypted link. The caller is responsible for managing the map (adding/removing entries) and passing the full map each time. The serialized JSON must fit within `PUBKY_DATA_MSG_LEN` (1000 bytes).
+- `get_private_payments(link: &mut EncryptedLink) -> Result<SupportedPayments>`  
+  Receives and decrypts the private payments map from the remote peer. Returns an empty map when no messages are available.
+
+The `destination_path` (folder prefix, e.g. `/pub/paykit.app/v0/private/{recipient}/`) is set during `establish_encrypted_link`. Within that folder, `pubky-data` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private data.
+
+### Contacts & Profiles
+
 - `get_known_contacts(reader: impl UnauthenticatedTransportRead, owner: &PublicKey) -> Result<Vec<PublicKey>>`  
   Retrieve all known contacts by listing `/pub/pubky.app/follows/`. Returns an empty vector when none are stored.
+- `get_profile(reader: &PubkyUnauthenticatedTransport, user: &PublicKey) -> Result<Profile>` *(pubky feature)*  
+  Fetch and parse a user's profile from `/pub/pubky.app/profile.json`.
 
 Method/endpoint naming follows the PMIP consensus described in the repository root `README.md`. Each API returns well-typed structures (enums/structs) that mirror the protocol specification so downstream clients can share the same serialization layer.  
 When the `pubky` feature is enabled the crate exports:
 
 - `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit.app/v0/`) and `PUBKY_FOLLOWS_PATH` (`/pub/pubky.app/follows/`) to standardize path construction.  
-- `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the traits above.
+- `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the public payment traits above.
+- `EncryptedLink`, `establish_encrypted_link`, `close_encrypted_link`, `set_private_payments`, `get_private_payments` for private encrypted payment operations.
+- `pubky_data` re-export for advanced callers that need direct access to the encryption layer.
