@@ -1,5 +1,3 @@
-⚠️ WIP - NOT FOR PRODUCTION ⚠️
-
 # Paykit
 
 # Description
