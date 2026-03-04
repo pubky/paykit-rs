@@ -290,8 +290,20 @@ pub struct EncryptedLink {
 ///
 /// Currently returns the string representation of the counterparty's public key.
 /// This will be replaced with a derivation function in the future.
-fn compute_recipient_component(receiver_pubkey: &PublicKey) -> String {
+fn compute_remote_path_component(receiver_pubkey: &PublicKey) -> String {
+    // TODO: will do something like SHA(DH(sender_secret_key, receiver_pubkey)) in the future instead of raw pubkey
     receiver_pubkey.to_string()
+}
+
+#[cfg(feature = "pubky")]
+/// Computes the path component used to address a sender's private payments
+/// directory.
+///
+/// Currently returns the string representation of the our's public key.
+/// This will be replaced with a derivation function in the future.
+fn compute_local_path_component(sender_pubkey: &PublicKey) -> String {
+    // TODO: will do something like SHA(DH(sender_secret_key, receiver_pubkey)) in the future instead of raw pubkey
+    sender_pubkey.to_string()
 }
 
 #[cfg(feature = "pubky")]
@@ -382,11 +394,11 @@ pub async fn set_private_payment_endpoint(
     data: EndpointData,
 ) -> Result<()> {
     debug!("storing private payment endpoint");
-    let recipient_id = compute_recipient_component(&link.recipient);
+    let path_component = compute_local_path_component(&link.recipient);
 
     // Read existing blob, decrypt, and parse (or start with empty map).
     let mut entries = match reader
-        .fetch_private_payments_blob(&link.recipient, &recipient_id)
+        .fetch_private_payments_blob(&link.recipient, &path_component)
         .await
         .map_err(|err| map_error("set_private_payment_endpoint", err))?
     {
@@ -409,7 +421,7 @@ pub async fn set_private_payment_endpoint(
     let encrypted: Vec<u8> = todo!("encrypt private payments blob using pubky-data EncryptedLink");
 
     client
-        .put_private_payments(&recipient_id, &encrypted)
+        .put_private_payments(&path_component, &encrypted)
         .await
         .map_err(|err| map_error("set_private_payment_endpoint", err))?;
 
@@ -457,10 +469,10 @@ pub async fn remove_private_payment_endpoint(
     method: MethodId,
 ) -> Result<()> {
     debug!("removing private payment endpoint");
-    let recipient_id = compute_recipient_component(&link.recipient);
+    let path_component = compute_local_path_component(&link.recipient);
 
     let _blob = reader
-        .fetch_private_payments_blob(&link.recipient, &recipient_id)
+        .fetch_private_payments_blob(&link.recipient, &path_component)
         .await
         .map_err(|err| map_error("remove_private_payment_endpoint", err))?
         .ok_or_else(|| {
@@ -477,7 +489,7 @@ pub async fn remove_private_payment_endpoint(
 
     if entries.is_empty() {
         client
-            .remove_private_payments(&recipient_id)
+            .remove_private_payments(&path_component)
             .await
             .map_err(|err| map_error("remove_private_payment_endpoint", err))?;
     } else {
@@ -490,7 +502,7 @@ pub async fn remove_private_payment_endpoint(
             todo!("encrypt private payments blob using pubky-data EncryptedLink");
 
         client
-            .put_private_payments(&recipient_id, &encrypted)
+            .put_private_payments(&path_component, &encrypted)
             .await
             .map_err(|err| map_error("remove_private_payment_endpoint", err))?;
     }
@@ -562,10 +574,10 @@ pub async fn get_private_payment_list(
     payee: &PublicKey,
 ) -> Result<SupportedPayments> {
     debug!("fetching private payment list");
-    let recipient_id = compute_recipient_component(&link.recipient);
+    let path_component = compute_remote_path_component(&link.recipient);
 
     let blob = match reader
-        .fetch_private_payments_blob(payee, &recipient_id)
+        .fetch_private_payments_blob(payee, &path_component)
         .await
         .map_err(|err| map_error("get_private_payment_list", err))?
     {
@@ -651,10 +663,10 @@ pub async fn get_private_payment_endpoint(
     method: &MethodId,
 ) -> Result<Option<EndpointData>> {
     debug!("fetching private payment endpoint");
-    let recipient_id = compute_recipient_component(&link.recipient);
+    let path_component = compute_remote_path_component(&link.recipient);
 
     let blob = match reader
-        .fetch_private_payments_blob(payee, &recipient_id)
+        .fetch_private_payments_blob(payee, &path_component)
         .await
         .map_err(|err| map_error("get_private_payment_endpoint", err))?
     {
