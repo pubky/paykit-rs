@@ -849,8 +849,11 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::transport::pubky::{PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE};
+    use crate::transport::pubky::{
+        PAYKIT_PRIVATE_PATH_PREFIX, PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE,
+    };
     use pubky::PubkySession;
+    use pubky_data::{PubkyDataEncryptor, PubkyKeySet};
     use pubky_testnet::{pubky::Keypair, EphemeralTestnet};
 
     struct TestSetup {
@@ -1161,5 +1164,309 @@ mod tests {
         assert!(profile.status.is_none());
 
         setup.raw_session.signout().await.unwrap();
+    }
+
+    // ── Private payments test infrastructure ────────────────────────────
+
+    /// Test setup for private (encrypted) payment flows.
+    ///
+    /// Creates two users on the same ephemeral testnet, performs a full Noise XX
+    /// handshake between them, and transitions both sides to transport mode so
+    /// that `set_private_payments` / `get_private_payments` can be exercised.
+    struct PrivateTestSetup {
+        _testnet: EphemeralTestnet,
+        /// Sender's encrypted link (writes private payments).
+        sender_link: EncryptedLink,
+        /// Sender's session (kept for cleanup via `signout`).
+        sender_session: PubkySession,
+        /// Receiver's encrypted link (reads private payments).
+        receiver_link: EncryptedLink,
+        /// Receiver's session (kept for cleanup via `signout`).
+        receiver_session: PubkySession,
+    }
+
+    impl PrivateTestSetup {
+        async fn new() -> Self {
+            let testnet = EphemeralTestnet::builder().build().await.unwrap();
+            let homeserver = testnet.homeserver_app();
+
+            // Each user gets its own Pubky SDK instance.
+            let sender_sdk = testnet.sdk().unwrap();
+            let receiver_sdk = testnet.sdk().unwrap();
+
+            // Sign up two independent users.
+            let sender_keypair = Keypair::random();
+            let sender_signer = sender_sdk.signer(sender_keypair.clone());
+            let sender_session = sender_signer
+                .signup(&homeserver.public_key(), None)
+                .await
+                .unwrap();
+
+            let receiver_keypair = Keypair::random();
+            let receiver_signer = receiver_sdk.signer(receiver_keypair.clone());
+            let receiver_session = receiver_signer
+                .signup(&homeserver.public_key(), None)
+                .await
+                .unwrap();
+
+            let sender_public_key = sender_session.info().public_key();
+            let receiver_public_key = receiver_session.info().public_key();
+
+            // Build encryptor stacks — one per user, using the paykit private path.
+            let mut sender_encryptor = PubkyDataEncryptor::init_encryptor_stack(
+                sender_keypair.secret_key(),
+                0,
+                "XX".to_string(),
+                sender_session.clone(),
+                PAYKIT_PRIVATE_PATH_PREFIX.to_string(),
+                sender_sdk,
+                false,
+            )
+            .unwrap();
+
+            let mut receiver_encryptor = PubkyDataEncryptor::init_encryptor_stack(
+                receiver_keypair.secret_key(),
+                0,
+                "XX".to_string(),
+                receiver_session.clone(),
+                PAYKIT_PRIVATE_PATH_PREFIX.to_string(),
+                receiver_sdk,
+                false,
+            )
+            .unwrap();
+
+            // Ephemeral keypairs for the Noise key exchange.
+            let sender_ephemeral = Keypair::random();
+            let receiver_ephemeral = Keypair::random();
+
+            // Init contexts with cross-exchanged ephemeral keys.
+            let sender_key_set = PubkyKeySet::new(
+                Some(sender_ephemeral.secret_key()),
+                Some(receiver_ephemeral.public_key()),
+            );
+            let sender_tmp_link_id = sender_encryptor
+                .init_context(sender_key_set, true, receiver_public_key.clone())
+                .unwrap();
+
+            let receiver_key_set = PubkyKeySet::new(
+                Some(receiver_ephemeral.secret_key()),
+                Some(sender_ephemeral.public_key()),
+            );
+            let receiver_tmp_link_id = receiver_encryptor
+                .init_context(receiver_key_set, false, sender_public_key.clone())
+                .unwrap();
+
+            // Drive the XX handshake to completion (4 steps):
+            //   -> e
+            //   <- e, ee, s, es
+            //   -> s, se
+            //   (responder reads final message)
+            sender_encryptor
+                .handle_handshake(true, sender_tmp_link_id, receiver_public_key.clone())
+                .await
+                .unwrap();
+            receiver_encryptor
+                .handle_handshake(false, receiver_tmp_link_id, sender_public_key.clone())
+                .await
+                .unwrap();
+            sender_encryptor
+                .handle_handshake(true, sender_tmp_link_id, receiver_public_key.clone())
+                .await
+                .unwrap();
+            receiver_encryptor
+                .handle_handshake(false, receiver_tmp_link_id, sender_public_key.clone())
+                .await
+                .unwrap();
+
+            // Verify handshake is complete on both sides.
+            // `is_handshake` returns `Ok(())` while still in handshake phase,
+            // `Err(IsTransport)` once the handshake has finished.
+            assert!(
+                sender_encryptor.is_handshake(&sender_tmp_link_id).is_err(),
+                "sender should have finished handshake"
+            );
+            assert!(
+                receiver_encryptor
+                    .is_handshake(&receiver_tmp_link_id)
+                    .is_err(),
+                "receiver should have finished handshake"
+            );
+
+            // Transition both sides to transport mode.
+            let sender_link_id = sender_encryptor
+                .transition_transport(sender_tmp_link_id)
+                .unwrap();
+            let receiver_link_id = receiver_encryptor
+                .transition_transport(receiver_tmp_link_id)
+                .unwrap();
+
+            let sender_link = EncryptedLink {
+                encryptor: sender_encryptor,
+                link_id: sender_link_id,
+                recipient: receiver_public_key.clone(),
+            };
+            let receiver_link = EncryptedLink {
+                encryptor: receiver_encryptor,
+                link_id: receiver_link_id,
+                recipient: sender_public_key.clone(),
+            };
+
+            Self {
+                _testnet: testnet,
+                sender_link,
+                sender_session,
+                receiver_link,
+                receiver_session,
+            }
+        }
+    }
+
+    // ── Private payments tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn private_payments_empty_returns_empty() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let result = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap();
+        assert!(
+            result.entries.is_empty(),
+            "fresh link with no messages should return empty map"
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_payments_round_trip() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let method = MethodId::new("lightning").unwrap();
+        let data = EndpointData::new("{\"bolt11\":\"lnbc1...\"}");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+
+        set_private_payments(&mut setup.sender_link, &entries)
+            .await
+            .unwrap();
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap();
+        assert_eq!(received.entries.len(), 1);
+        assert_eq!(received.entries.get(&method), Some(&data));
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_payments_multiple_methods() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let lightning = MethodId::new("lightning").unwrap();
+        let onchain = MethodId::new("onchain").unwrap();
+        let cashu = MethodId::new("cashu").unwrap();
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            lightning.clone(),
+            EndpointData::new("{\"bolt11\":\"ln...\"}"),
+        );
+        entries.insert(
+            onchain.clone(),
+            EndpointData::new("{\"address\":\"bc1...\"}"),
+        );
+        entries.insert(
+            cashu.clone(),
+            EndpointData::new("{\"mint\":\"https://...\"}"),
+        );
+
+        set_private_payments(&mut setup.sender_link, &entries)
+            .await
+            .unwrap();
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap();
+        assert_eq!(received.entries.len(), 3);
+        assert_eq!(
+            received.entries.get(&lightning),
+            Some(&EndpointData::new("{\"bolt11\":\"ln...\"}"))
+        );
+        assert_eq!(
+            received.entries.get(&onchain),
+            Some(&EndpointData::new("{\"address\":\"bc1...\"}"))
+        );
+        assert_eq!(
+            received.entries.get(&cashu),
+            Some(&EndpointData::new("{\"mint\":\"https://...\"}"))
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_payments_update_overwrites() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        // First write: lightning only.
+        let mut entries_v1 = HashMap::new();
+        entries_v1.insert(MethodId::new("lightning").unwrap(), EndpointData::new("v1"));
+        set_private_payments(&mut setup.sender_link, &entries_v1)
+            .await
+            .unwrap();
+
+        // Second write: completely different map (onchain only).
+        let onchain = MethodId::new("onchain").unwrap();
+        let mut entries_v2 = HashMap::new();
+        entries_v2.insert(onchain.clone(), EndpointData::new("v2"));
+        set_private_payments(&mut setup.sender_link, &entries_v2)
+            .await
+            .unwrap();
+
+        // pubky-data's receive_message reads one slot per call (counter-based).
+        // The first call consumes v1 (slot N), the second reads v2 (slot N+1).
+        let _v1 = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap();
+
+        // Second call should yield the latest map.
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap();
+        assert_eq!(received.entries.len(), 1);
+        assert_eq!(
+            received.entries.get(&onchain),
+            Some(&EndpointData::new("v2"))
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_payments_rejects_oversized_payload() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        // Build a map whose serialized JSON exceeds PUBKY_DATA_MSG_LEN (1000 bytes).
+        let method = MethodId::new("lightning").unwrap();
+        let oversized_value = "x".repeat(1000);
+        let mut entries = HashMap::new();
+        entries.insert(method, EndpointData::new(oversized_value));
+
+        let result = set_private_payments(&mut setup.sender_link, &entries).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("exceeds")),
+            "expected Validation error about size, got: {err}"
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
     }
 }

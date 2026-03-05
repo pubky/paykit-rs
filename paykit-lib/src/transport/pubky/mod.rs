@@ -16,7 +16,7 @@ pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit.app/v0/";
 /// This prefix is used as the `destination_path` for pubky-data's encrypted
 /// messaging. Pubky-data manages individual file slots within this folder using
 /// a counter-based scheme.
-pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit.app/v0/private/";
+pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit.app/v0/private";
 /// Directory that stores contact/follow information (one file per known contact).
 pub const PUBKY_FOLLOWS_PATH: &str = "/pub/pubky.app/follows/";
 /// File that stores profile information
