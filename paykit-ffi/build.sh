@@ -13,7 +13,7 @@ set_version() {
 
     "${SED_INPLACE[@]}" "s/^version = \".*\"/version = \"$new_version\"/" Cargo.toml
     "${SED_INPLACE[@]}" "s/^version = \".*\"/version = \"$new_version\"/" ../paykit-lib/Cargo.toml
-    "${SED_INPLACE[@]}" "s/let tag = \"v.*\"/let tag = \"v$new_version\"/" Package.swift
+    "${SED_INPLACE[@]}" "s/let tag = \"v.*\"/let tag = \"v$new_version\"/" ../Package.swift
     "${SED_INPLACE[@]}" "s/^version=.*/version=$new_version/" bindings/android/gradle.properties
 }
 
