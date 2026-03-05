@@ -31,10 +31,10 @@ def run(new_checksum: str = None, new_tag: str = None):
             print('Tag must not contain any whitespace.', file=sys.stderr)
             sys.exit(1)
 
-        tag_regex = re.compile("^v?\\d+[.]\\d+[.]\\d+$")
+        tag_regex = re.compile("^v?\\d+[.]\\d+[.]\\d+(-rc\\d+)?$")
         tag_match = tag_regex.match(new_tag)
         if tag_match is None:
-            print('Tag must adhere to x.x.x or vx.x.x major/minor/patch format.', file=sys.stderr)
+            print('Tag must adhere to x.x.x or vx.x.x format (optional -rcN suffix).', file=sys.stderr)
             sys.exit(1)
 
     settings = [
@@ -43,8 +43,13 @@ def run(new_checksum: str = None, new_tag: str = None):
     ]
 
     script_dir = os.path.dirname(os.path.realpath(__file__))
-    package_file_path = os.path.join(script_dir, 'Package.swift')
+    root_dir = os.path.dirname(script_dir)
+    package_file_path = os.path.join(root_dir, 'Package.swift')
 
+    _update_package_file(package_file_path, settings)
+
+
+def _update_package_file(package_file_path, settings):
     print(f'Updating: {package_file_path}')
 
     original_package_file = None

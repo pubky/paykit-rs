@@ -11,7 +11,7 @@ From `paykit-ffi/`:
 ./build.sh -r --patch all        # Patch: 0.1.0 → 0.1.1
 ```
 
-This bumps the version consistently in `paykit-ffi/Cargo.toml`, `paykit-lib/Cargo.toml`, `Package.swift`, and `gradle.properties`, then builds both platforms and updates the `Package.swift` checksum.
+This bumps the version consistently in `paykit-ffi/Cargo.toml`, `paykit-lib/Cargo.toml`, the root `Package.swift`, and `gradle.properties`, then builds both platforms and updates the `Package.swift` checksum.
 
 Build a single platform with `ios` or `android` instead of `all`.
 

@@ -1,5 +1,4 @@
 // swift-tools-version:5.5
-// The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
@@ -22,13 +21,13 @@ let package = Package(
         .target(
             name: "Paykit",
             dependencies: ["PaykitFFI"],
-            path: "./bindings/ios",
+            path: "./paykit-ffi/bindings/ios",
             sources: ["paykit.swift"]
         ),
         .binaryTarget(
             name: "PaykitFFI",
             url: url,
             checksum: checksum
-        )
+        ),
     ]
 )

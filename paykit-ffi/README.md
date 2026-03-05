@@ -58,7 +58,7 @@ UniFFI bindings for [paykit-lib](../paykit-lib/), exposing Paykit's payment rout
 ```
 
 ### Release Builds (with version bump)
-The `-r/--release` flag bumps versions in `Cargo.toml`, `Package.swift`, and `gradle.properties`, then builds.
+The `-r/--release` flag bumps versions in `Cargo.toml`, the root `Package.swift`, and `gradle.properties`, then builds.
 Defaults to patch version bump; use `--major`/`-M` or `--minor`/`-m` for other increments.
 
 ```
@@ -78,7 +78,7 @@ cargo test -p paykit-lib
 
 The built XCFramework is distributed as an SPM package. After uploading the zip to a GitHub release:
 
-1. Update `Package.swift` with the release tag and checksum.
+1. The root `Package.swift` is updated automatically by the build scripts with the release tag and checksum.
 2. Add the package dependency pointing to this repo.
 3. Import and use:
 
@@ -175,8 +175,7 @@ paykit-ffi/
 ├── build.sh                # Unified build script (ios|android|all + version bump)
 ├── build_ios.sh            # iOS build + XCFramework generation
 ├── build_android.sh        # Android build + Gradle publish
-├── update_package.py       # Auto-update Package.swift checksum/tag
-├── Package.swift           # SPM manifest
+├── update_package.py       # Auto-update root Package.swift checksum/tag
 ├── bindings/
 │   ├── ios/                # Generated: Swift bindings + XCFramework (after build_ios.sh)
 │   └── android/            # Gradle project for Maven publishing
