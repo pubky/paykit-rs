@@ -1262,19 +1262,19 @@ mod tests {
             //   -> s, se
             //   (responder reads final message)
             sender_encryptor
-                .handle_handshake(true, sender_tmp_link_id, receiver_public_key.clone())
+                .handle_handshake(sender_tmp_link_id, receiver_public_key.clone())
                 .await
                 .unwrap();
             receiver_encryptor
-                .handle_handshake(false, receiver_tmp_link_id, sender_public_key.clone())
+                .handle_handshake(receiver_tmp_link_id, sender_public_key.clone())
                 .await
                 .unwrap();
             sender_encryptor
-                .handle_handshake(true, sender_tmp_link_id, receiver_public_key.clone())
+                .handle_handshake(sender_tmp_link_id, receiver_public_key.clone())
                 .await
                 .unwrap();
             receiver_encryptor
-                .handle_handshake(false, receiver_tmp_link_id, sender_public_key.clone())
+                .handle_handshake(receiver_tmp_link_id, sender_public_key.clone())
                 .await
                 .unwrap();
 
