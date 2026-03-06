@@ -2,10 +2,9 @@
 
 Stateless Rust crate that implements the Paykit transport layer. It orchestrates reads from Paykit public storage and writes to private/public paths while delegating authentication to callers.
 
-Paykit replies on **transport** protocol for network *communication* between peers and on **social media** protocol for bootstrap of *profile* and *social graph*. 
+Paykit relies on a **transport** protocol for network *communication* between peers.
 
-The default transport protocol in this implementation is [pubky](https://pubky.org/) and default social media protocol is [pubky.app](https://pubky.app/).
-Both of them are enabled via default feature flag `pubky`.
+The default transport protocol in this implementation is [pubky](https://pubky.org/), enabled via the default feature flag `pubky`.
 
 ## Auth & Dependency Injection
 
@@ -67,7 +66,6 @@ Domain error enum with the following variants:
 | `Transport { context, source }` | Network or SDK failure |
 | `NotFound(String)` | Requested resource does not exist (404/GONE) |
 | `InvalidData { context, source }` | Fetched data is corrupt or structurally invalid |
-| `Profile(String)` | Profile data is malformed |
 | `Validation(String)` | Caller-supplied input failed validation (e.g. invalid `MethodId`) |
 
 ## Proposed Surface
@@ -80,11 +78,8 @@ Domain error enum with the following variants:
   Resolve the supported methods document for a public key. The result is empty when no endpoints are published.
 - `get_payment_endpoint(reader: impl UnauthenticatedTransportRead, payee: PublicKey, method: &MethodId) -> Result<Option<EndpointData>>`  
   Convenience resolver for a single method. Returns `Ok(None)` when the endpoint is missing or empty.
-- `get_known_contacts(reader: impl UnauthenticatedTransportRead, owner: &PublicKey) -> Result<Vec<PublicKey>>`  
-  Retrieve all known contacts by listing `/pub/pubky.app/follows/`. Returns an empty vector when none are stored.
-
 Method/endpoint naming follows the PMIP consensus described in the repository root `README.md`. Each API returns well-typed structures (enums/structs) that mirror the protocol specification so downstream clients can share the same serialization layer.  
 When the `pubky` feature is enabled the crate exports:
 
-- `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit.app/v0/`) and `PUBKY_FOLLOWS_PATH` (`/pub/pubky.app/follows/`) to standardize path construction.  
+- `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit.app/v0/`) to standardize path construction.  
 - `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the traits above.
