@@ -22,8 +22,6 @@ UniFFI bindings for [paykit-lib](../paykit-lib/), exposing Paykit's payment rout
 
 | Function | Description |
 |---|---|
-| `paykit_get_profile(public_key)` | Fetch a user's profile (name, bio, image, links, status). |
-| `paykit_get_contacts(public_key)` | Fetch a user's contact list (returns public key strings). |
 | `paykit_get_payment_list(public_key)` | Fetch all published payment methods for a user. |
 | `paykit_get_payment_endpoint(public_key, method_id)` | Fetch a specific payment endpoint for a user. |
 
@@ -86,7 +84,7 @@ The built XCFramework is distributed as an SPM package. After uploading the zip 
 import Paykit
 
 try await paykitInitialize()
-let profile = try await paykitGetProfile(publicKey: pk)
+let payments = try await paykitGetPaymentList(publicKey: pk)
 ```
 
 ### Android (Gradle / GitHub Packages)
@@ -123,7 +121,7 @@ Then import and use:
 import com.synonym.paykit.*
 
 paykitInitialize()
-val profile = paykitGetProfile(publicKey = pk)
+val payments = paykitGetPaymentList(publicKey = pk)
 ```
 
 ## Typical app startup
@@ -148,7 +146,6 @@ saveToKeychain("paykit_session", secret)
 
 // Normal operations
 paykitSetPaymentEndpoint("lightning", lnurlJson)
-paykitGetContacts(ownPk)
 paykitGetPaymentList(contactPk)
 ```
 

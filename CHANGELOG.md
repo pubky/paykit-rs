@@ -7,6 +7,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Removed (BREAKING)
+- **`get_profile` and `get_known_contacts` helpers removed.** Profile fetching and
+  contact discovery are outside Paykit's scope — callers should use the Pubky SDK
+  directly for these operations.
+- **`pub use pubky` re-export removed from `paykit-lib`.** Downstream crates that
+  relied on `paykit_lib::pubky` must add `pubky` as a direct dependency.
+- **`PaykitError::Profile` variant removed.** Exhaustive `match` on `PaykitError`
+  must drop this arm. The enum now has four variants.
+- **`PUBKY_FOLLOWS_PATH` constant removed** from `transport::pubky`.
+- **`pubky-app-specs` dependency removed** from `paykit-lib`.
+- **FFI:** `paykit_get_profile`, `paykit_get_contacts`, `FfiProfile`,
+  `FfiProfileLink`, and `PaykitFfiError::ProfileError` removed from bindings.
+
 ### Changed (BREAKING)
 - **`MethodId` is now validated at construction time.** The inner field is private;
   use `MethodId::new("lightning")?` instead of `MethodId("lightning".into())`.
