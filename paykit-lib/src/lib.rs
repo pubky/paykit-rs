@@ -274,13 +274,10 @@ pub struct SupportedPayments {
 /// encrypt and decrypt payment data. Must be closed via [`close_encrypted_link`]
 /// when no longer needed.
 ///
-/// The link wraps a [`pubky_data::PubkyDataEncryptor`] in transport mode and
-/// the [`pubky_data::LinkId`] that identifies the session.
+/// The link wraps a [`pubky_data::PubkyDataEncryptor`] in transport mode.
 pub struct EncryptedLink {
     /// The Noise session manager in transport mode.
     encryptor: pubky_data::PubkyDataEncryptor,
-    /// Identifier for the established transport session.
-    link_id: pubky_data::LinkId,
     /// The counterparty's public key.
     recipient: PublicKey,
 }
@@ -298,8 +295,6 @@ pub struct EncryptedLink {
 pub struct EncryptedLinkHandshake {
     /// The Noise session manager in handshake mode.
     encryptor: pubky_data::PubkyDataEncryptor,
-    /// Temporary identifier for the handshake session (valid until transition).
-    tmp_link_id: pubky_data::TemporaryLinkId,
     /// The counterparty's public key (used for homeserver path construction).
     remote_pubkey: PublicKey,
 }
@@ -445,7 +440,7 @@ pub async fn set_private_payments(
         )));
     }
 
-    let success = link.encryptor.send_message(plaintext, link.link_id).await;
+    let success = link.encryptor.send_message(plaintext).await;
 
     if !success {
         return Err(PaykitError::Transport {
@@ -529,7 +524,7 @@ where
 pub async fn get_private_payments(link: &mut EncryptedLink) -> Result<SupportedPayments> {
     debug!("receiving private payments map");
 
-    let messages = link.encryptor.receive_message(link.link_id).await;
+    let messages = link.encryptor.receive_message().await;
 
     if messages.is_empty() {
         debug!("no private payments messages available, returning empty map");
@@ -661,24 +656,14 @@ where
 /// handshake messages are exchanged by repeatedly calling [`advance_handshake`]
 /// until it returns [`HandshakeProgress::Complete`].
 ///
-/// # Ephemeral key exchange
-///
-/// The Noise XX pattern requires both peers to have each other's ephemeral
-/// public keys before starting the handshake. This exchange happens out-of-band
-/// (not managed by this function). Both peers must:
-///
-/// 1. Generate an ephemeral keypair (e.g. `Keypair::random()`)
-/// 2. Exchange ephemeral public keys via an agreed-upon mechanism
-/// 3. Call this function (initiator) or [`accept_encrypted_link`] (responder)
-///    with both the local ephemeral secret and remote ephemeral public key
+/// Ephemeral keys are managed internally by the Noise stack — callers only need
+/// to provide their static identity key and the remote peer's public key.
 ///
 /// # Parameters
 /// - `session` — authenticated Pubky session for writing handshake messages
 ///   (consumed; caller should `.clone()` if needed elsewhere).
 /// - `sender_secret_key` — 32-byte Ed25519 secret key of the local peer.
 /// - `receiver_pubkey` — public key of the remote peer.
-/// - `ephemeral_secret` — local ephemeral secret key (32 bytes).
-/// - `remote_ephemeral_pubkey` — remote peer's ephemeral public key.
 /// - `outbox_client` — HTTP client for reading from the remote homeserver
 ///   (consumed; caller should `.clone()` if needed elsewhere).
 ///
@@ -686,49 +671,45 @@ where
 /// Returns [`PaykitError::Transport`] if the encryption stack cannot be
 /// initialized or if the context creation fails.
 #[instrument(
-    skip(session, sender_secret_key, ephemeral_secret, outbox_client),
+    skip(session, sender_secret_key, outbox_client),
     fields(receiver = %receiver_pubkey)
 )]
 pub fn initiate_encrypted_link(
     session: pubky::PubkySession,
     sender_secret_key: [u8; 32],
     receiver_pubkey: &PublicKey,
-    ephemeral_secret: [u8; 32],
-    remote_ephemeral_pubkey: &PublicKey,
     outbox_client: pubky::Pubky,
 ) -> Result<EncryptedLinkHandshake> {
     debug!("initializing encrypted link handshake (initiator)");
 
-    let mut encryptor = pubky_data::PubkyDataEncryptor::init_encryptor_stack(
+    let config = pubky_data::PubkyDataConfig::new(
         sender_secret_key,
         0,
         "XX".to_string(),
         session,
         transport::pubky::PAYKIT_PRIVATE_PATH_PREFIX.to_string(),
         outbox_client,
-        false,
     )
     .map_err(|err| PaykitError::Transport {
-        context: format!("failed to initialize encryptor stack: {err:?}"),
-        source: anyhow::anyhow!("pubky-data init_encryptor_stack failed: {err:?}"),
+        context: format!("failed to create encryptor config: {err:?}"),
+        source: anyhow::anyhow!("pubky-data PubkyDataConfig::new failed: {err:?}"),
     })?;
 
-    let key_set = pubky_data::PubkyKeySet::new(
-        Some(ephemeral_secret),
-        Some(remote_ephemeral_pubkey.clone()),
-    );
-
-    let tmp_link_id = encryptor
-        .init_context(key_set, true, receiver_pubkey.clone())
-        .map_err(|err| PaykitError::Transport {
-            context: format!("failed to initialize handshake context: {err:?}"),
-            source: anyhow::anyhow!("pubky-data init_context failed: {err:?}"),
-        })?;
+    let encryptor = pubky_data::PubkyDataEncryptor::new(
+        config,
+        sender_secret_key,
+        receiver_pubkey.clone(),
+        true,
+        receiver_pubkey.clone(),
+    )
+    .map_err(|err| PaykitError::Transport {
+        context: format!("failed to initialize encryptor: {err:?}"),
+        source: anyhow::anyhow!("pubky-data PubkyDataEncryptor::new failed: {err:?}"),
+    })?;
 
     debug!("handshake context initialized (initiator)");
     Ok(EncryptedLinkHandshake {
         encryptor,
-        tmp_link_id,
         remote_pubkey: receiver_pubkey.clone(),
     })
 }
@@ -740,15 +721,11 @@ pub fn initiate_encrypted_link(
 /// responder side. The actual handshake messages are exchanged by repeatedly
 /// calling [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
 ///
-/// See [`initiate_encrypted_link`] for details on ephemeral key exchange.
-///
 /// # Parameters
 /// - `session` — authenticated Pubky session for writing handshake messages
 ///   (consumed; caller should `.clone()` if needed elsewhere).
 /// - `receiver_secret_key` — 32-byte Ed25519 secret key of the local peer.
 /// - `sender_pubkey` — public key of the remote peer (the initiator).
-/// - `ephemeral_secret` — local ephemeral secret key (32 bytes).
-/// - `remote_ephemeral_pubkey` — remote peer's ephemeral public key.
 /// - `outbox_client` — HTTP client for reading from the remote homeserver
 ///   (consumed; caller should `.clone()` if needed elsewhere).
 ///
@@ -756,49 +733,45 @@ pub fn initiate_encrypted_link(
 /// Returns [`PaykitError::Transport`] if the encryption stack cannot be
 /// initialized or if the context creation fails.
 #[instrument(
-    skip(session, receiver_secret_key, ephemeral_secret, outbox_client),
+    skip(session, receiver_secret_key, outbox_client),
     fields(sender = %sender_pubkey)
 )]
 pub fn accept_encrypted_link(
     session: pubky::PubkySession,
     receiver_secret_key: [u8; 32],
     sender_pubkey: &PublicKey,
-    ephemeral_secret: [u8; 32],
-    remote_ephemeral_pubkey: &PublicKey,
     outbox_client: pubky::Pubky,
 ) -> Result<EncryptedLinkHandshake> {
     debug!("initializing encrypted link handshake (responder)");
 
-    let mut encryptor = pubky_data::PubkyDataEncryptor::init_encryptor_stack(
+    let config = pubky_data::PubkyDataConfig::new(
         receiver_secret_key,
         0,
         "XX".to_string(),
         session,
         transport::pubky::PAYKIT_PRIVATE_PATH_PREFIX.to_string(),
         outbox_client,
-        false,
     )
     .map_err(|err| PaykitError::Transport {
-        context: format!("failed to initialize encryptor stack: {err:?}"),
-        source: anyhow::anyhow!("pubky-data init_encryptor_stack failed: {err:?}"),
+        context: format!("failed to create encryptor config: {err:?}"),
+        source: anyhow::anyhow!("pubky-data PubkyDataConfig::new failed: {err:?}"),
     })?;
 
-    let key_set = pubky_data::PubkyKeySet::new(
-        Some(ephemeral_secret),
-        Some(remote_ephemeral_pubkey.clone()),
-    );
-
-    let tmp_link_id = encryptor
-        .init_context(key_set, false, sender_pubkey.clone())
-        .map_err(|err| PaykitError::Transport {
-            context: format!("failed to initialize handshake context: {err:?}"),
-            source: anyhow::anyhow!("pubky-data init_context failed: {err:?}"),
-        })?;
+    let encryptor = pubky_data::PubkyDataEncryptor::new(
+        config,
+        receiver_secret_key,
+        sender_pubkey.clone(),
+        false,
+        sender_pubkey.clone(),
+    )
+    .map_err(|err| PaykitError::Transport {
+        context: format!("failed to initialize encryptor: {err:?}"),
+        source: anyhow::anyhow!("pubky-data PubkyDataEncryptor::new failed: {err:?}"),
+    })?;
 
     debug!("handshake context initialized (responder)");
     Ok(EncryptedLinkHandshake {
         encryptor,
-        tmp_link_id,
         remote_pubkey: sender_pubkey.clone(),
     })
 }
@@ -854,7 +827,7 @@ pub fn accept_encrypted_link(
 #[instrument(skip(handshake), fields(remote = %handshake.remote_pubkey))]
 pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
     // Check whether the handshake has already finished.
-    match handshake.encryptor.is_handshake(&handshake.tmp_link_id) {
+    match handshake.encryptor.is_handshake() {
         Ok(()) => {
             // Still in handshake phase — drive it forward.
             debug!("advancing handshake step");
@@ -873,11 +846,7 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
     }
 
     // Process the next handshake step.
-    match handshake
-        .encryptor
-        .handle_handshake(handshake.tmp_link_id, handshake.remote_pubkey.clone())
-        .await
-    {
+    match handshake.encryptor.handle_handshake().await {
         Ok(pubky_data::HandshakeResult::Pending) => {
             debug!("handshake step pending (waiting for peer)");
             Ok(HandshakeProgress::Pending(handshake))
@@ -896,18 +865,18 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
 /// Transitions a completed handshake into an [`EncryptedLink`].
 #[cfg(feature = "pubky")]
 fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
-    let link_id = handshake
-        .encryptor
-        .transition_transport(handshake.tmp_link_id)
-        .map_err(|err| PaykitError::Transport {
-            context: format!("failed to transition to transport mode: {err:?}"),
-            source: anyhow::anyhow!("pubky-data transition_transport failed: {err:?}"),
-        })?;
+    let _link_id =
+        handshake
+            .encryptor
+            .transition_transport()
+            .map_err(|err| PaykitError::Transport {
+                context: format!("failed to transition to transport mode: {err:?}"),
+                source: anyhow::anyhow!("pubky-data transition_transport failed: {err:?}"),
+            })?;
 
     debug!("encrypted link established");
     Ok(HandshakeProgress::Complete(EncryptedLink {
         encryptor: handshake.encryptor,
-        link_id,
         recipient: handshake.remote_pubkey,
     }))
 }
@@ -920,12 +889,7 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
 #[instrument(skip(link), fields(recipient = %link.recipient))]
 pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
     debug!("closing encrypted link");
-    link.encryptor
-        .close_context(&link.link_id)
-        .map_err(|err| PaykitError::Transport {
-            context: format!("failed to close encrypted link: {err:?}"),
-            source: anyhow::anyhow!("pubky-data close_context failed: {err:?}"),
-        })?;
+    link.encryptor.close();
     debug!("encrypted link closed successfully");
     Ok(())
 }
@@ -1490,17 +1454,11 @@ mod tests {
             let sender_public_key = sender_session.info().public_key();
             let receiver_public_key = receiver_session.info().public_key();
 
-            // Ephemeral keypairs for the Noise XX key exchange.
-            let sender_ephemeral = Keypair::random();
-            let receiver_ephemeral = Keypair::random();
-
             // Initiate handshake from sender side.
             let sender_handshake = initiate_encrypted_link(
                 sender_session.clone(),
                 sender_keypair.secret_key(),
                 receiver_public_key,
-                sender_ephemeral.secret_key(),
-                &receiver_ephemeral.public_key(),
                 sender_sdk,
             )
             .unwrap();
@@ -1510,8 +1468,6 @@ mod tests {
                 receiver_session.clone(),
                 receiver_keypair.secret_key(),
                 sender_public_key,
-                receiver_ephemeral.secret_key(),
-                &sender_ephemeral.public_key(),
                 receiver_sdk,
             )
             .unwrap();
@@ -1679,5 +1635,151 @@ mod tests {
 
         setup.sender_session.signout().await.unwrap();
         setup.receiver_session.signout().await.unwrap();
+    }
+
+    // ── Parallel writer/reader happy-path test ──────────────────────────
+
+    /// Polls [`get_private_payments`] until a non-empty result is returned.
+    /// Panics on timeout (10 s).
+    async fn poll_private_payments(link: &mut EncryptedLink) -> SupportedPayments {
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(10);
+
+        loop {
+            assert!(
+                start.elapsed() < timeout,
+                "private payments poll timed out after {timeout:?}"
+            );
+
+            let result = get_private_payments(link).await.unwrap();
+            if !result.entries.is_empty() {
+                return result;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// End-to-end test that spins up a testnet and homeserver in the main
+    /// task, then exercises the private payment API from two concurrent
+    /// tasks (writer and reader) that perform a Noise XX handshake and
+    /// exchange encrypted payment data.
+    ///
+    /// Coverage:
+    /// - Encrypted link: initiate, accept, handshake (polling loops)
+    /// - Private payments: set, get (with polling)
+    /// - Link cleanup: close
+    /// - All interactions use only public `paykit_lib` functions
+    #[tokio::test]
+    async fn test_parallel_writer_reader_happy_path() {
+        // ── Shared infrastructure (main task) ───────────────────────────
+
+        let testnet = EphemeralTestnet::builder().build().await.unwrap();
+        let homeserver = testnet.homeserver_app();
+
+        // Writer (Alice): authenticated session + SDK for outbox reads.
+        let writer_sdk = testnet.sdk().unwrap();
+        let writer_keypair = Keypair::random();
+        let writer_session = writer_sdk
+            .signer(writer_keypair.clone())
+            .signup(&homeserver.public_key(), None)
+            .await
+            .unwrap();
+        let writer_pubkey = writer_session.info().public_key().clone();
+
+        // Reader (Bob): authenticated session for the encrypted link
+        // responder role + SDK for outbox reads.
+        let reader_sdk = testnet.sdk().unwrap();
+        let reader_keypair = Keypair::random();
+        let reader_session = reader_sdk
+            .signer(reader_keypair.clone())
+            .signup(&homeserver.public_key(), None)
+            .await
+            .unwrap();
+        let reader_pubkey = reader_session.info().public_key().clone();
+
+        // ── Writer task ─────────────────────────────────────────────────
+
+        let w_session = writer_session.clone();
+        let w_reader_pubkey = reader_pubkey;
+
+        let writer_handle = tokio::spawn(async move {
+            // 1. Initiate encrypted link handshake.
+            let handshake = initiate_encrypted_link(
+                w_session.clone(),
+                writer_keypair.secret_key(),
+                &w_reader_pubkey,
+                writer_sdk,
+            )
+            .unwrap();
+
+            // 2. Drive handshake to completion (polling loop).
+            let mut link = drive_handshake_to_completion(handshake).await;
+
+            // 3. Send private payments.
+            let mut entries = HashMap::new();
+            entries.insert(
+                MethodId::new("lightning").unwrap(),
+                EndpointData::new("{\"bolt11\":\"lnbc_priv...\"}"),
+            );
+            entries.insert(
+                MethodId::new("onchain").unwrap(),
+                EndpointData::new("{\"address\":\"bc1_priv...\"}"),
+            );
+            set_private_payments(&mut link, &entries).await.unwrap();
+
+            // 4. Clean up.
+            close_encrypted_link(link).await.unwrap();
+            w_session.signout().await.unwrap();
+        });
+
+        // ── Reader task ─────────────────────────────────────────────────
+
+        let r_session = reader_session.clone();
+        let r_writer_pubkey = writer_pubkey;
+
+        let reader_handle = tokio::spawn(async move {
+            // 1. Accept encrypted link handshake.
+            let handshake = accept_encrypted_link(
+                r_session.clone(),
+                reader_keypair.secret_key(),
+                &r_writer_pubkey,
+                reader_sdk,
+            )
+            .unwrap();
+
+            // 2. Drive handshake to completion (polling loop).
+            let mut link = drive_handshake_to_completion(handshake).await;
+
+            // 3. Poll for private payments (writer may not have sent yet).
+            let private = poll_private_payments(&mut link).await;
+            assert_eq!(
+                private.entries.len(),
+                2,
+                "expected 2 private payment methods, got {}",
+                private.entries.len()
+            );
+            assert_eq!(
+                private.entries.get(&MethodId::new("lightning").unwrap()),
+                Some(&EndpointData::new("{\"bolt11\":\"lnbc_priv...\"}")),
+            );
+            assert_eq!(
+                private.entries.get(&MethodId::new("onchain").unwrap()),
+                Some(&EndpointData::new("{\"address\":\"bc1_priv...\"}")),
+            );
+
+            // 4. Clean up.
+            close_encrypted_link(link).await.unwrap();
+            r_session.signout().await.unwrap();
+        });
+
+        // ── Join both tasks ─────────────────────────────────────────────
+
+        let (writer_result, reader_result) = tokio::join!(writer_handle, reader_handle);
+        writer_result.expect("writer task panicked");
+        reader_result.expect("reader task panicked");
+
+        // Testnet drops here, cleaning up the ephemeral homeserver.
     }
 }
