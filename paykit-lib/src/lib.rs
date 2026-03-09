@@ -312,27 +312,46 @@ pub enum HandshakeProgress {
     Complete(EncryptedLink),
 }
 
-// XXX: this is something to be passed to PubkyDataEncryptor
-#[cfg(feature = "pubky")]
-/// Computes the path component used to address a recipient's private payments
-/// directory.
+/// Domain separation string for Paykit private payment path derivation.
 ///
-/// Currently returns the string representation of the counterparty's public key.
-/// This will be replaced with a derivation function in the future.
-fn compute_remote_path_component(receiver_pubkey: &PublicKey) -> String {
-    // TODO: will do something like SHA(DH(sender_secret_key, receiver_pubkey)) in the future instead of raw pubkey
-    receiver_pubkey.to_string()
-}
+/// Ensures that different applications using the same key pairs derive
+/// different storage paths, preventing cross-protocol path collisions.
+#[cfg(feature = "pubky")]
+const PAYKIT_PATH_DOMAIN: &[u8] = b"paykit-path-v0";
 
 #[cfg(feature = "pubky")]
-/// Computes the path component used to address a sender's private payments
-/// directory.
+/// Computes the write and read path components for private payment storage.
 ///
-/// Currently returns the string representation of the our's public key.
-/// This will be replaced with a derivation function in the future.
-fn compute_local_path_component(sender_pubkey: &PublicKey) -> String {
-    // TODO: will do something like SHA(DH(sender_secret_key, receiver_pubkey)) in the future instead of raw pubkey
-    sender_pubkey.to_string()
+/// Uses [`pubky_data::path_derivation::derive_asymmetric_paths`] to derive
+/// per-peer-pair paths from a DH shared secret. The derivation formula is:
+///
+/// ```text
+/// dh_secret  = X25519(to_scalar_bytes(local_ed25519_seed), to_montgomery(remote_ed25519_pk))
+/// write_path = "{base}/{hex(SHA-256(domain || dh_secret || local_pk))}"
+/// read_path  = "{base}/{hex(SHA-256(domain || dh_secret || remote_pk))}"
+/// ```
+///
+/// # Returns
+///
+/// A tuple `(write_path, read_path)` where:
+/// - `write_path` — the full path the local party writes to on their own homeserver.
+/// - `read_path` — the full path the local party reads from on the remote homeserver.
+///
+/// # Correctness
+///
+/// For parties Alice and Bob:
+/// - `compute_private_paths(alice_sk, bob_pk).write == compute_private_paths(bob_sk, alice_pk).read`
+/// - `compute_private_paths(alice_sk, bob_pk).read == compute_private_paths(bob_sk, alice_pk).write`
+fn compute_private_paths(
+    local_secret_key: &[u8; 32],
+    remote_pubkey: &PublicKey,
+) -> (String, String) {
+    pubky_data::path_derivation::derive_asymmetric_paths(
+        local_secret_key,
+        remote_pubkey,
+        PAYKIT_PATH_DOMAIN,
+        transport::pubky::PAYKIT_PRIVATE_PATH_PREFIX,
+    )
 }
 
 #[cfg(feature = "pubky")]
@@ -682,12 +701,15 @@ pub fn initiate_encrypted_link(
 ) -> Result<EncryptedLinkHandshake> {
     debug!("initializing encrypted link handshake (initiator)");
 
-    let config = pubky_data::PubkyDataConfig::new(
+    let (write_path, read_path) = compute_private_paths(&sender_secret_key, receiver_pubkey);
+
+    let config = pubky_data::PubkyDataConfig::new_with_paths(
         sender_secret_key,
         0,
         "XX".to_string(),
         session,
-        transport::pubky::PAYKIT_PRIVATE_PATH_PREFIX.to_string(),
+        write_path,
+        read_path,
         outbox_client,
     )
     .map_err(|err| PaykitError::Transport {
@@ -744,12 +766,15 @@ pub fn accept_encrypted_link(
 ) -> Result<EncryptedLinkHandshake> {
     debug!("initializing encrypted link handshake (responder)");
 
-    let config = pubky_data::PubkyDataConfig::new(
+    let (write_path, read_path) = compute_private_paths(&receiver_secret_key, sender_pubkey);
+
+    let config = pubky_data::PubkyDataConfig::new_with_paths(
         receiver_secret_key,
         0,
         "XX".to_string(),
         session,
-        transport::pubky::PAYKIT_PRIVATE_PATH_PREFIX.to_string(),
+        write_path,
+        read_path,
         outbox_client,
     )
     .map_err(|err| PaykitError::Transport {

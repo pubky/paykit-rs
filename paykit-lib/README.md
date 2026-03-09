@@ -89,8 +89,12 @@ These functions use the transport traits (`AuthenticatedTransport` / `Unauthenti
 
 Private payments are end-to-end encrypted via a Noise protocol handshake managed by `pubky-data`. They bypass the transport traits entirely — `PubkyDataEncryptor` handles encryption, file naming, and homeserver storage via `send_message`/`receive_message`.
 
-- `establish_encrypted_link(session, sender_secret_key, receiver_pubkey) -> Result<EncryptedLink>`  
-  Drives a Noise XX handshake to completion and returns an `EncryptedLink` for subsequent encrypt/decrypt operations. *(not yet implemented)*
+- `initiate_encrypted_link(session, sender_secret_key, receiver_pubkey, outbox_client) -> Result<EncryptedLinkHandshake>`  
+  Initializes a Noise XX handshake as the **initiator**. Returns a handshake handle to be driven forward with `advance_handshake`.
+- `accept_encrypted_link(session, receiver_secret_key, sender_pubkey, outbox_client) -> Result<EncryptedLinkHandshake>`  
+  Initializes a Noise XX handshake as the **responder**. Returns a handshake handle to be driven forward with `advance_handshake`.
+- `advance_handshake(handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress>`  
+  Advances the handshake by one step. Returns `HandshakeProgress::Pending(handle)` when waiting for the peer, or `HandshakeProgress::Complete(EncryptedLink)` when finished. Polling-safe — the caller controls retry timing and timeouts.
 - `close_encrypted_link(link: EncryptedLink) -> Result<()>`  
   Closes the Noise session and releases resources.
 - `set_private_payments(link: &mut EncryptedLink, entries: &HashMap<MethodId, EndpointData>) -> Result<()>`  
@@ -98,7 +102,7 @@ Private payments are end-to-end encrypted via a Noise protocol handshake managed
 - `get_private_payments(link: &mut EncryptedLink) -> Result<SupportedPayments>`  
   Receives and decrypts the private payments map from the remote peer. Returns an empty map when no messages are available.
 
-The `destination_path` (folder prefix, e.g. `/pub/paykit.app/v0/private/{recipient}/`) is set during `establish_encrypted_link`. Within that folder, `pubky-data` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private data.
+Storage paths for private data are derived per-peer-pair using `pubky_data::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit.app/v0/private`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-data` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private data.
 
 ### Contacts & Profiles
 
@@ -112,5 +116,5 @@ When the `pubky` feature is enabled the crate exports:
 
 - `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit.app/v0/`) and `PUBKY_FOLLOWS_PATH` (`/pub/pubky.app/follows/`) to standardize path construction.  
 - `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the public payment traits above.
-- `EncryptedLink`, `establish_encrypted_link`, `close_encrypted_link`, `set_private_payments`, `get_private_payments` for private encrypted payment operations.
+- `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `set_private_payments`, `get_private_payments` for private encrypted payment operations.
 - `pubky_data` re-export for advanced callers that need direct access to the encryption layer.
