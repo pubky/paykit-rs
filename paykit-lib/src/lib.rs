@@ -269,9 +269,10 @@ pub struct SupportedPayments {
 #[cfg(feature = "pubky")]
 /// Handle to an established encrypted Noise link with a peer.
 ///
-/// Created by [`establish_encrypted_link`] after a successful Noise handshake.
-/// Used by the private payment helper functions to encrypt and decrypt payment
-/// data. Must be closed via [`close_encrypted_link`] when no longer needed.
+/// Created by [`advance_handshake`] (via [`HandshakeProgress::Complete`]) after
+/// a successful Noise handshake. Used by the private payment helper functions to
+/// encrypt and decrypt payment data. Must be closed via [`close_encrypted_link`]
+/// when no longer needed.
 ///
 /// The link wraps a [`pubky_data::PubkyDataEncryptor`] in transport mode and
 /// the [`pubky_data::LinkId`] that identifies the session.
@@ -283,6 +284,39 @@ pub struct EncryptedLink {
     /// The counterparty's public key.
     recipient: PublicKey,
 }
+
+#[cfg(feature = "pubky")]
+/// Handle to an in-progress Noise handshake.
+///
+/// Created by [`initiate_encrypted_link`] (initiator) or
+/// [`accept_encrypted_link`] (responder). Drive the handshake forward by
+/// repeatedly calling [`advance_handshake`] until it returns
+/// [`HandshakeProgress::Complete`].
+///
+/// The caller controls the polling strategy — timing between retries, timeouts,
+/// back-off, etc. are all the caller's responsibility.
+pub struct EncryptedLinkHandshake {
+    /// The Noise session manager in handshake mode.
+    encryptor: pubky_data::PubkyDataEncryptor,
+    /// Temporary identifier for the handshake session (valid until transition).
+    tmp_link_id: pubky_data::TemporaryLinkId,
+    /// The counterparty's public key (used for homeserver path construction).
+    remote_pubkey: PublicKey,
+}
+
+#[cfg(feature = "pubky")]
+/// Result of a single [`advance_handshake`] step.
+pub enum HandshakeProgress {
+    /// Handshake is still in progress. The peer may not have written their next
+    /// message yet. Pass the returned handle back to [`advance_handshake`] after
+    /// a caller-chosen delay.
+    Pending(EncryptedLinkHandshake),
+
+    /// Handshake completed successfully. The [`EncryptedLink`] is ready for use
+    /// with [`set_private_payments`] and [`get_private_payments`].
+    Complete(EncryptedLink),
+}
+
 // XXX: this is something to be passed to PubkyDataEncryptor
 #[cfg(feature = "pubky")]
 /// Computes the path component used to address a recipient's private payments
@@ -621,40 +655,261 @@ where
 }
 
 #[cfg(feature = "pubky")]
-/// Establishes an encrypted Noise link with a remote peer.
+/// Initiates a Noise XX handshake with a remote peer (initiator role).
 ///
-/// Drives a full Noise handshake (currently XX pattern) to completion using
-/// `pubky-data`. The handshake messages are exchanged via the Pubky homeserver
-/// (managed internally by `pubky-data`). Once the handshake completes, the
-/// returned [`EncryptedLink`] can be used with the private payment helper
-/// functions to encrypt and decrypt payment data.
+/// Initializes the encryption stack and creates a handshake context. The actual
+/// handshake messages are exchanged by repeatedly calling [`advance_handshake`]
+/// until it returns [`HandshakeProgress::Complete`].
+///
+/// # Ephemeral key exchange
+///
+/// The Noise XX pattern requires both peers to have each other's ephemeral
+/// public keys before starting the handshake. This exchange happens out-of-band
+/// (not managed by this function). Both peers must:
+///
+/// 1. Generate an ephemeral keypair (e.g. `Keypair::random()`)
+/// 2. Exchange ephemeral public keys via an agreed-upon mechanism
+/// 3. Call this function (initiator) or [`accept_encrypted_link`] (responder)
+///    with both the local ephemeral secret and remote ephemeral public key
 ///
 /// # Parameters
-/// - `session` — an authenticated Pubky session for writing handshake messages.
-/// - `sender_secret_key` — the 32-byte Ed25519 secret key of the local peer.
-/// - `receiver_pubkey` — the public key of the remote peer to establish a link with.
+/// - `session` — authenticated Pubky session for writing handshake messages
+///   (consumed; caller should `.clone()` if needed elsewhere).
+/// - `sender_secret_key` — 32-byte Ed25519 secret key of the local peer.
+/// - `receiver_pubkey` — public key of the remote peer.
+/// - `ephemeral_secret` — local ephemeral secret key (32 bytes).
+/// - `remote_ephemeral_pubkey` — remote peer's ephemeral public key.
+/// - `outbox_client` — HTTP client for reading from the remote homeserver
+///   (consumed; caller should `.clone()` if needed elsewhere).
 ///
 /// # Errors
-/// - Returns `PaykitError::Transport` if the handshake fails due to network
-///   issues or if `pubky-data` cannot initialize the encryption stack.
-#[instrument(skip(session, sender_secret_key), fields(receiver = %receiver_pubkey))]
-pub async fn establish_encrypted_link(
-    session: &pubky::PubkySession,
-    sender_secret_key: &[u8; 32],
+/// Returns [`PaykitError::Transport`] if the encryption stack cannot be
+/// initialized or if the context creation fails.
+#[instrument(
+    skip(session, sender_secret_key, ephemeral_secret, outbox_client),
+    fields(receiver = %receiver_pubkey)
+)]
+pub fn initiate_encrypted_link(
+    session: pubky::PubkySession,
+    sender_secret_key: [u8; 32],
     receiver_pubkey: &PublicKey,
-) -> Result<EncryptedLink> {
-    debug!("establishing encrypted link");
-    // TODO: Initialize PubkyDataEncryptor, create context, drive handshake,
-    // transition to transport mode, and return EncryptedLink.
-    //
-    // Rough sequence:
-    // 1. PubkyDataEncryptor::init_encryptor_stack(...)
-    // 2. encryptor.init_context(key_set, initiator=true, endpoint_pubkey)
-    // 3. loop { encryptor.handle_handshake(...) } until Terminal
-    // 4. link_id = encryptor.transition_transport(tmp_link_id)
-    // 5. return EncryptedLink { encryptor, link_id, recipient }
-    let _ = (session, sender_secret_key, receiver_pubkey);
-    todo!("establish encrypted link using pubky-data Noise handshake")
+    ephemeral_secret: [u8; 32],
+    remote_ephemeral_pubkey: &PublicKey,
+    outbox_client: pubky::Pubky,
+) -> Result<EncryptedLinkHandshake> {
+    debug!("initializing encrypted link handshake (initiator)");
+
+    let mut encryptor = pubky_data::PubkyDataEncryptor::init_encryptor_stack(
+        sender_secret_key,
+        0,
+        "XX".to_string(),
+        session,
+        transport::pubky::PAYKIT_PRIVATE_PATH_PREFIX.to_string(),
+        outbox_client,
+        false,
+    )
+    .map_err(|err| PaykitError::Transport {
+        context: format!("failed to initialize encryptor stack: {err:?}"),
+        source: anyhow::anyhow!("pubky-data init_encryptor_stack failed: {err:?}"),
+    })?;
+
+    let key_set = pubky_data::PubkyKeySet::new(
+        Some(ephemeral_secret),
+        Some(remote_ephemeral_pubkey.clone()),
+    );
+
+    let tmp_link_id = encryptor
+        .init_context(key_set, true, receiver_pubkey.clone())
+        .map_err(|err| PaykitError::Transport {
+            context: format!("failed to initialize handshake context: {err:?}"),
+            source: anyhow::anyhow!("pubky-data init_context failed: {err:?}"),
+        })?;
+
+    debug!("handshake context initialized (initiator)");
+    Ok(EncryptedLinkHandshake {
+        encryptor,
+        tmp_link_id,
+        remote_pubkey: receiver_pubkey.clone(),
+    })
+}
+
+#[cfg(feature = "pubky")]
+/// Accepts a Noise XX handshake from a remote peer (responder role).
+///
+/// Initializes the encryption stack and creates a handshake context for the
+/// responder side. The actual handshake messages are exchanged by repeatedly
+/// calling [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
+///
+/// See [`initiate_encrypted_link`] for details on ephemeral key exchange.
+///
+/// # Parameters
+/// - `session` — authenticated Pubky session for writing handshake messages
+///   (consumed; caller should `.clone()` if needed elsewhere).
+/// - `receiver_secret_key` — 32-byte Ed25519 secret key of the local peer.
+/// - `sender_pubkey` — public key of the remote peer (the initiator).
+/// - `ephemeral_secret` — local ephemeral secret key (32 bytes).
+/// - `remote_ephemeral_pubkey` — remote peer's ephemeral public key.
+/// - `outbox_client` — HTTP client for reading from the remote homeserver
+///   (consumed; caller should `.clone()` if needed elsewhere).
+///
+/// # Errors
+/// Returns [`PaykitError::Transport`] if the encryption stack cannot be
+/// initialized or if the context creation fails.
+#[instrument(
+    skip(session, receiver_secret_key, ephemeral_secret, outbox_client),
+    fields(sender = %sender_pubkey)
+)]
+pub fn accept_encrypted_link(
+    session: pubky::PubkySession,
+    receiver_secret_key: [u8; 32],
+    sender_pubkey: &PublicKey,
+    ephemeral_secret: [u8; 32],
+    remote_ephemeral_pubkey: &PublicKey,
+    outbox_client: pubky::Pubky,
+) -> Result<EncryptedLinkHandshake> {
+    debug!("initializing encrypted link handshake (responder)");
+
+    let mut encryptor = pubky_data::PubkyDataEncryptor::init_encryptor_stack(
+        receiver_secret_key,
+        0,
+        "XX".to_string(),
+        session,
+        transport::pubky::PAYKIT_PRIVATE_PATH_PREFIX.to_string(),
+        outbox_client,
+        false,
+    )
+    .map_err(|err| PaykitError::Transport {
+        context: format!("failed to initialize encryptor stack: {err:?}"),
+        source: anyhow::anyhow!("pubky-data init_encryptor_stack failed: {err:?}"),
+    })?;
+
+    let key_set = pubky_data::PubkyKeySet::new(
+        Some(ephemeral_secret),
+        Some(remote_ephemeral_pubkey.clone()),
+    );
+
+    let tmp_link_id = encryptor
+        .init_context(key_set, false, sender_pubkey.clone())
+        .map_err(|err| PaykitError::Transport {
+            context: format!("failed to initialize handshake context: {err:?}"),
+            source: anyhow::anyhow!("pubky-data init_context failed: {err:?}"),
+        })?;
+
+    debug!("handshake context initialized (responder)");
+    Ok(EncryptedLinkHandshake {
+        encryptor,
+        tmp_link_id,
+        remote_pubkey: sender_pubkey.clone(),
+    })
+}
+
+#[cfg(feature = "pubky")]
+/// Advances the handshake by one step.
+///
+/// This function is **polling-safe**: calling it when the remote peer has not
+/// written their next message yet returns [`HandshakeProgress::Pending`] without
+/// corrupting internal state. The caller can safely retry after a delay.
+///
+/// # Polling strategy
+///
+/// The caller controls the polling strategy. Common patterns:
+///
+/// **Fixed interval:**
+/// ```ignore
+/// loop {
+///     match advance_handshake(handshake).await? {
+///         HandshakeProgress::Pending(h) => {
+///             handshake = h;
+///             tokio::time::sleep(Duration::from_millis(100)).await;
+///         }
+///         HandshakeProgress::Complete(link) => break link,
+///     }
+/// }
+/// ```
+///
+/// **With timeout:**
+/// ```ignore
+/// let deadline = Instant::now() + Duration::from_secs(60);
+/// loop {
+///     if Instant::now() > deadline {
+///         return Err(/* timeout */);
+///     }
+///     match advance_handshake(handshake).await? {
+///         HandshakeProgress::Pending(h) => {
+///             handshake = h;
+///             tokio::time::sleep(Duration::from_millis(100)).await;
+///         }
+///         HandshakeProgress::Complete(link) => break link,
+///     }
+/// }
+/// ```
+///
+/// # Parameters
+/// - `handshake` — the in-progress handshake handle (consumed; returned inside
+///   [`HandshakeProgress::Pending`] if the handshake is not yet finished).
+///
+/// # Errors
+/// Returns [`PaykitError::Transport`] if the handshake processing fails or if
+/// the context is in an invalid state.
+#[instrument(skip(handshake), fields(remote = %handshake.remote_pubkey))]
+pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
+    // Check whether the handshake has already finished.
+    match handshake.encryptor.is_handshake(&handshake.tmp_link_id) {
+        Ok(()) => {
+            // Still in handshake phase — drive it forward.
+            debug!("advancing handshake step");
+        }
+        Err(pubky_data::PubkyDataError::IsTransport) => {
+            // Handshake already finished — transition to transport.
+            debug!("handshake complete, transitioning to transport");
+            return finish_handshake(handshake);
+        }
+        Err(err) => {
+            return Err(PaykitError::Transport {
+                context: format!("handshake context error: {err:?}"),
+                source: anyhow::anyhow!("pubky-data is_handshake failed: {err:?}"),
+            });
+        }
+    }
+
+    // Process the next handshake step.
+    match handshake
+        .encryptor
+        .handle_handshake(handshake.tmp_link_id, handshake.remote_pubkey.clone())
+        .await
+    {
+        Ok(pubky_data::HandshakeResult::Pending) => {
+            debug!("handshake step pending (waiting for peer)");
+            Ok(HandshakeProgress::Pending(handshake))
+        }
+        Ok(pubky_data::HandshakeResult::Terminal) => {
+            debug!("handshake terminal, transitioning to transport");
+            finish_handshake(handshake)
+        }
+        Err(err) => Err(PaykitError::Transport {
+            context: format!("handshake step failed: {err:?}"),
+            source: anyhow::anyhow!("pubky-data handle_handshake failed: {err:?}"),
+        }),
+    }
+}
+
+/// Transitions a completed handshake into an [`EncryptedLink`].
+#[cfg(feature = "pubky")]
+fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
+    let link_id = handshake
+        .encryptor
+        .transition_transport(handshake.tmp_link_id)
+        .map_err(|err| PaykitError::Transport {
+            context: format!("failed to transition to transport mode: {err:?}"),
+            source: anyhow::anyhow!("pubky-data transition_transport failed: {err:?}"),
+        })?;
+
+    debug!("encrypted link established");
+    Ok(HandshakeProgress::Complete(EncryptedLink {
+        encryptor: handshake.encryptor,
+        link_id,
+        recipient: handshake.remote_pubkey,
+    }))
 }
 
 #[cfg(feature = "pubky")]
@@ -849,11 +1104,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::transport::pubky::{
-        PAYKIT_PRIVATE_PATH_PREFIX, PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE,
-    };
+    use crate::transport::pubky::{PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE};
     use pubky::PubkySession;
-    use pubky_data::{PubkyDataEncryptor, PubkyKeySet};
     use pubky_testnet::{pubky::Keypair, EphemeralTestnet};
 
     struct TestSetup {
@@ -1171,8 +1423,10 @@ mod tests {
     /// Test setup for private (encrypted) payment flows.
     ///
     /// Creates two users on the same ephemeral testnet, performs a full Noise XX
-    /// handshake between them, and transitions both sides to transport mode so
-    /// that `set_private_payments` / `get_private_payments` can be exercised.
+    /// handshake between them using the public `initiate_encrypted_link` /
+    /// `accept_encrypted_link` / `advance_handshake` API, and produces ready-to-use
+    /// [`EncryptedLink`] handles so that `set_private_payments` /
+    /// `get_private_payments` can be exercised.
     struct PrivateTestSetup {
         _testnet: EphemeralTestnet,
         /// Sender's encrypted link (writes private payments).
@@ -1183,6 +1437,30 @@ mod tests {
         receiver_link: EncryptedLink,
         /// Receiver's session (kept for cleanup via `signout`).
         receiver_session: PubkySession,
+    }
+
+    /// Drives a handshake to completion by polling `advance_handshake` with a
+    /// short sleep between retries. Panics on timeout (10 s).
+    async fn drive_handshake_to_completion(mut handshake: EncryptedLinkHandshake) -> EncryptedLink {
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(10);
+
+        loop {
+            assert!(
+                start.elapsed() < timeout,
+                "handshake timed out after {timeout:?}"
+            );
+
+            match advance_handshake(handshake).await.unwrap() {
+                HandshakeProgress::Pending(h) => {
+                    handshake = h;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                HandshakeProgress::Complete(link) => return link,
+            }
+        }
     }
 
     impl PrivateTestSetup {
@@ -1212,104 +1490,37 @@ mod tests {
             let sender_public_key = sender_session.info().public_key();
             let receiver_public_key = receiver_session.info().public_key();
 
-            // Build encryptor stacks — one per user, using the paykit private path.
-            let mut sender_encryptor = PubkyDataEncryptor::init_encryptor_stack(
-                sender_keypair.secret_key(),
-                0,
-                "XX".to_string(),
-                sender_session.clone(),
-                PAYKIT_PRIVATE_PATH_PREFIX.to_string(),
-                sender_sdk,
-                false,
-            )
-            .unwrap();
-
-            let mut receiver_encryptor = PubkyDataEncryptor::init_encryptor_stack(
-                receiver_keypair.secret_key(),
-                0,
-                "XX".to_string(),
-                receiver_session.clone(),
-                PAYKIT_PRIVATE_PATH_PREFIX.to_string(),
-                receiver_sdk,
-                false,
-            )
-            .unwrap();
-
-            // Ephemeral keypairs for the Noise key exchange.
+            // Ephemeral keypairs for the Noise XX key exchange.
             let sender_ephemeral = Keypair::random();
             let receiver_ephemeral = Keypair::random();
 
-            // Init contexts with cross-exchanged ephemeral keys.
-            let sender_key_set = PubkyKeySet::new(
-                Some(sender_ephemeral.secret_key()),
-                Some(receiver_ephemeral.public_key()),
+            // Initiate handshake from sender side.
+            let sender_handshake = initiate_encrypted_link(
+                sender_session.clone(),
+                sender_keypair.secret_key(),
+                receiver_public_key,
+                sender_ephemeral.secret_key(),
+                &receiver_ephemeral.public_key(),
+                sender_sdk,
+            )
+            .unwrap();
+
+            // Accept handshake from receiver side.
+            let receiver_handshake = accept_encrypted_link(
+                receiver_session.clone(),
+                receiver_keypair.secret_key(),
+                sender_public_key,
+                receiver_ephemeral.secret_key(),
+                &sender_ephemeral.public_key(),
+                receiver_sdk,
+            )
+            .unwrap();
+
+            // Drive both handshakes to completion concurrently.
+            let (sender_link, receiver_link) = tokio::join!(
+                drive_handshake_to_completion(sender_handshake),
+                drive_handshake_to_completion(receiver_handshake),
             );
-            let sender_tmp_link_id = sender_encryptor
-                .init_context(sender_key_set, true, receiver_public_key.clone())
-                .unwrap();
-
-            let receiver_key_set = PubkyKeySet::new(
-                Some(receiver_ephemeral.secret_key()),
-                Some(sender_ephemeral.public_key()),
-            );
-            let receiver_tmp_link_id = receiver_encryptor
-                .init_context(receiver_key_set, false, sender_public_key.clone())
-                .unwrap();
-
-            // Drive the XX handshake to completion (4 steps):
-            //   -> e
-            //   <- e, ee, s, es
-            //   -> s, se
-            //   (responder reads final message)
-            sender_encryptor
-                .handle_handshake(sender_tmp_link_id, receiver_public_key.clone())
-                .await
-                .unwrap();
-            receiver_encryptor
-                .handle_handshake(receiver_tmp_link_id, sender_public_key.clone())
-                .await
-                .unwrap();
-            sender_encryptor
-                .handle_handshake(sender_tmp_link_id, receiver_public_key.clone())
-                .await
-                .unwrap();
-            receiver_encryptor
-                .handle_handshake(receiver_tmp_link_id, sender_public_key.clone())
-                .await
-                .unwrap();
-
-            // Verify handshake is complete on both sides.
-            // `is_handshake` returns `Ok(())` while still in handshake phase,
-            // `Err(IsTransport)` once the handshake has finished.
-            assert!(
-                sender_encryptor.is_handshake(&sender_tmp_link_id).is_err(),
-                "sender should have finished handshake"
-            );
-            assert!(
-                receiver_encryptor
-                    .is_handshake(&receiver_tmp_link_id)
-                    .is_err(),
-                "receiver should have finished handshake"
-            );
-
-            // Transition both sides to transport mode.
-            let sender_link_id = sender_encryptor
-                .transition_transport(sender_tmp_link_id)
-                .unwrap();
-            let receiver_link_id = receiver_encryptor
-                .transition_transport(receiver_tmp_link_id)
-                .unwrap();
-
-            let sender_link = EncryptedLink {
-                encryptor: sender_encryptor,
-                link_id: sender_link_id,
-                recipient: receiver_public_key.clone(),
-            };
-            let receiver_link = EncryptedLink {
-                encryptor: receiver_encryptor,
-                link_id: receiver_link_id,
-                recipient: sender_public_key.clone(),
-            };
 
             Self {
                 _testnet: testnet,
