@@ -11,6 +11,7 @@
 - `cargo clippy --all-targets --all-features` — lint with the default warning set; fix or allow with justification.
 - `cargo test` — executes unit tests + doc tests; use `cargo test mod_name::case` for focused runs.
 - `cargo doc --no-deps` — verify public API docs compile; treat warnings as blockers because Paykit is SDK-facing.
+- **Platform bindings**: Always build **all** platform bindings (`cd paykit-ffi && ./build.sh all`), never just one target. This ensures iOS and Android bindings stay in sync.
 
 ## Coding Style & Naming Conventions
 - Follow Rust 2021 defaults: four-space indentation, snake_case for functions/modules, UpperCamelCase for types/traits, SCREAMING_SNAKE_CASE for consts.
