@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc2] - 2026-03-10
+
 ### Removed (BREAKING)
 - **`get_profile` and `get_known_contacts` helpers removed.** Profile fetching and
   contact discovery are outside Paykit's scope — callers should use the Pubky SDK
@@ -19,6 +21,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - **`pubky-app-specs` dependency removed** from `paykit-lib`.
 - **FFI:** `paykit_get_profile`, `paykit_get_contacts`, `FfiProfile`,
   `FfiProfileLink`, and `PaykitFfiError::ProfileError` removed from bindings.
+
+## [0.1.0-rc1] - 2026-03-04
 
 ### Changed (BREAKING)
 - **`MethodId` is now validated at construction time.** The inner field is private;
@@ -70,4 +74,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
+[0.1.0-rc2]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc2
+[0.1.0-rc1]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc1
 [0.1.0]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0
