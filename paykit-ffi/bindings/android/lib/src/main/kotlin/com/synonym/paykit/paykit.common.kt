@@ -109,29 +109,6 @@ public data class FfiPaymentEntry (
 
 
 
-@kotlinx.serialization.Serializable
-public data class FfiProfile (
-    val `name`: kotlin.String, 
-    val `bio`: kotlin.String?, 
-    val `image`: kotlin.String?, 
-    val `links`: List<FfiProfileLink>?, 
-    val `status`: kotlin.String?
-) {
-    public companion object
-}
-
-
-
-@kotlinx.serialization.Serializable
-public data class FfiProfileLink (
-    val `title`: kotlin.String, 
-    val `url`: kotlin.String
-) {
-    public companion object
-}
-
-
-
 
 
 public sealed class PaykitFfiException: kotlin.Exception() {
@@ -157,13 +134,6 @@ public sealed class PaykitFfiException: kotlin.Exception() {
             get() = "reason=${ `reason` }"
     }
     
-    public class ProfileException(
-        public val `reason`: kotlin.String,
-    ) : PaykitFfiException() {
-        override val message: String
-            get() = "reason=${ `reason` }"
-    }
-    
     public class Validation(
         public val `reason`: kotlin.String,
     ) : PaykitFfiException() {
@@ -179,12 +149,6 @@ public sealed class PaykitFfiException: kotlin.Exception() {
     }
     
 }
-
-
-
-
-
-
 
 
 

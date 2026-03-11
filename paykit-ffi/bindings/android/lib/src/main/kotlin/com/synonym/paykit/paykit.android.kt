@@ -980,10 +980,6 @@ internal interface UniffiForeignFutureCompleteVoid: com.sun.jna.Callback {
 
 
 
-
-
-
-
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1029,9 +1025,6 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_force_sign_out() != 30515.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_paykit_get_contacts() != 53232.toShort()) {
-            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-        }
         if (uniffi_paykit_checksum_func_paykit_get_current_public_key() != 28037.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1039,9 +1032,6 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 63326.toShort()) {
-            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-        }
-        if (uniffi_paykit_checksum_func_paykit_get_profile() != 26566.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_import_session() != 29532.toShort()) {
@@ -1078,9 +1068,6 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_func_paykit_force_sign_out(
     ): Short
     @JvmStatic
-    external fun uniffi_paykit_checksum_func_paykit_get_contacts(
-    ): Short
-    @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_get_current_public_key(
     ): Short
     @JvmStatic
@@ -1088,9 +1075,6 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_get_payment_list(
-    ): Short
-    @JvmStatic
-    external fun uniffi_paykit_checksum_func_paykit_get_profile(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_import_session(
@@ -1138,10 +1122,6 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_func_paykit_force_sign_out(
     ): Long
     @JvmStatic
-    external fun uniffi_paykit_fn_func_paykit_get_contacts(
-        `publicKey`: RustBufferByValue,
-    ): Long
-    @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_get_current_public_key(
     ): Long
     @JvmStatic
@@ -1151,10 +1131,6 @@ internal object UniffiLib : Library {
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_get_payment_list(
-        `publicKey`: RustBufferByValue,
-    ): Long
-    @JvmStatic
-    external fun uniffi_paykit_fn_func_paykit_get_profile(
         `publicKey`: RustBufferByValue,
     ): Long
     @JvmStatic
@@ -1560,59 +1536,6 @@ public object FfiConverterTypeFfiPaymentEntry: FfiConverterRustBuffer<FfiPayment
 
 
 
-public object FfiConverterTypeFfiProfile: FfiConverterRustBuffer<FfiProfile> {
-    override fun read(buf: ByteBuffer): FfiProfile {
-        return FfiProfile(
-            FfiConverterString.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalSequenceTypeFfiProfileLink.read(buf),
-            FfiConverterOptionalString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiProfile): ULong = (
-            FfiConverterString.allocationSize(value.`name`) +
-            FfiConverterOptionalString.allocationSize(value.`bio`) +
-            FfiConverterOptionalString.allocationSize(value.`image`) +
-            FfiConverterOptionalSequenceTypeFfiProfileLink.allocationSize(value.`links`) +
-            FfiConverterOptionalString.allocationSize(value.`status`)
-    )
-
-    override fun write(value: FfiProfile, buf: ByteBuffer) {
-        FfiConverterString.write(value.`name`, buf)
-        FfiConverterOptionalString.write(value.`bio`, buf)
-        FfiConverterOptionalString.write(value.`image`, buf)
-        FfiConverterOptionalSequenceTypeFfiProfileLink.write(value.`links`, buf)
-        FfiConverterOptionalString.write(value.`status`, buf)
-    }
-}
-
-
-
-
-public object FfiConverterTypeFfiProfileLink: FfiConverterRustBuffer<FfiProfileLink> {
-    override fun read(buf: ByteBuffer): FfiProfileLink {
-        return FfiProfileLink(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiProfileLink): ULong = (
-            FfiConverterString.allocationSize(value.`title`) +
-            FfiConverterString.allocationSize(value.`url`)
-    )
-
-    override fun write(value: FfiProfileLink, buf: ByteBuffer) {
-        FfiConverterString.write(value.`title`, buf)
-        FfiConverterString.write(value.`url`, buf)
-    }
-}
-
-
-
-
 public object PaykitFfiExceptionErrorHandler : UniffiRustCallStatusErrorHandler<PaykitFfiException> {
     override fun lift(errorBuf: RustBufferByValue): PaykitFfiException = FfiConverterTypePaykitFfiError.lift(errorBuf)
 }
@@ -1629,13 +1552,10 @@ public object FfiConverterTypePaykitFfiError : FfiConverterRustBuffer<PaykitFfiE
             3 -> PaykitFfiException.InvalidData(
                 FfiConverterString.read(buf),
                 )
-            4 -> PaykitFfiException.ProfileException(
+            4 -> PaykitFfiException.Validation(
                 FfiConverterString.read(buf),
                 )
-            5 -> PaykitFfiException.Validation(
-                FfiConverterString.read(buf),
-                )
-            6 -> PaykitFfiException.Session(
+            5 -> PaykitFfiException.Session(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -1655,11 +1575,6 @@ public object FfiConverterTypePaykitFfiError : FfiConverterRustBuffer<PaykitFfiE
                 + FfiConverterString.allocationSize(value.`reason`)
             )
             is PaykitFfiException.InvalidData -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`reason`)
-            )
-            is PaykitFfiException.ProfileException -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
                 + FfiConverterString.allocationSize(value.`reason`)
@@ -1694,18 +1609,13 @@ public object FfiConverterTypePaykitFfiError : FfiConverterRustBuffer<PaykitFfiE
                 FfiConverterString.write(value.`reason`, buf)
                 Unit
             }
-            is PaykitFfiException.ProfileException -> {
+            is PaykitFfiException.Validation -> {
                 buf.putInt(4)
                 FfiConverterString.write(value.`reason`, buf)
                 Unit
             }
-            is PaykitFfiException.Validation -> {
-                buf.putInt(5)
-                FfiConverterString.write(value.`reason`, buf)
-                Unit
-            }
             is PaykitFfiException.Session -> {
-                buf.putInt(6)
+                buf.putInt(5)
                 FfiConverterString.write(value.`reason`, buf)
                 Unit
             }
@@ -1745,60 +1655,6 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 
 
 
-public object FfiConverterOptionalSequenceTypeFfiProfileLink: FfiConverterRustBuffer<List<FfiProfileLink>?> {
-    override fun read(buf: ByteBuffer): List<FfiProfileLink>? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterSequenceTypeFfiProfileLink.read(buf)
-    }
-
-    override fun allocationSize(value: List<FfiProfileLink>?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterSequenceTypeFfiProfileLink.allocationSize(value)
-        }
-    }
-
-    override fun write(value: List<FfiProfileLink>?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterSequenceTypeFfiProfileLink.write(value, buf)
-        }
-    }
-}
-
-
-
-
-public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
-    override fun read(buf: ByteBuffer): List<kotlin.String> {
-        val len = buf.getInt()
-        return List<kotlin.String>(len) {
-            FfiConverterString.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<kotlin.String>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.sumOf { FfiConverterString.allocationSize(it) }
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterString.write(it, buf)
-        }
-    }
-}
-
-
-
-
 public object FfiConverterSequenceTypeFfiPaymentEntry: FfiConverterRustBuffer<List<FfiPaymentEntry>> {
     override fun read(buf: ByteBuffer): List<FfiPaymentEntry> {
         val len = buf.getInt()
@@ -1817,31 +1673,6 @@ public object FfiConverterSequenceTypeFfiPaymentEntry: FfiConverterRustBuffer<Li
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFfiPaymentEntry.write(it, buf)
-        }
-    }
-}
-
-
-
-
-public object FfiConverterSequenceTypeFfiProfileLink: FfiConverterRustBuffer<List<FfiProfileLink>> {
-    override fun read(buf: ByteBuffer): List<FfiProfileLink> {
-        val len = buf.getInt()
-        return List<FfiProfileLink>(len) {
-            FfiConverterTypeFfiProfileLink.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<FfiProfileLink>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.sumOf { FfiConverterTypeFfiProfileLink.allocationSize(it) }
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<FfiProfileLink>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeFfiProfileLink.write(it, buf)
         }
     }
 }
@@ -1902,26 +1733,6 @@ public suspend fun `paykitForceSignOut`() {
 }
 
 /**
- * Fetch a user's contact list (public keys they follow).
- */
-@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-public suspend fun `paykitGetContacts`(`publicKey`: kotlin.String): List<kotlin.String> {
-    return uniffiRustCallAsync(
-        UniffiLib.uniffi_paykit_fn_func_paykit_get_contacts(
-            FfiConverterString.lower(`publicKey`),
-        ),
-        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
-        { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
-        // lift function
-        { FfiConverterSequenceString.lift(it) },
-        // Error FFI converter
-        PaykitFfiExceptionErrorHandler,
-    )
-}
-
-/**
  * Returns the public key of the currently authenticated user, or `None`.
  */
 public suspend fun `paykitGetCurrentPublicKey`(): kotlin.String? {
@@ -1975,26 +1786,6 @@ public suspend fun `paykitGetPaymentList`(`publicKey`: kotlin.String): List<FfiP
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeFfiPaymentEntry.lift(it) },
-        // Error FFI converter
-        PaykitFfiExceptionErrorHandler,
-    )
-}
-
-/**
- * Fetch a user's profile from the routing network.
- */
-@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-public suspend fun `paykitGetProfile`(`publicKey`: kotlin.String): FfiProfile {
-    return uniffiRustCallAsync(
-        UniffiLib.uniffi_paykit_fn_func_paykit_get_profile(
-            FfiConverterString.lower(`publicKey`),
-        ),
-        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
-        { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
-        // lift function
-        { FfiConverterTypeFfiProfile.lift(it) },
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )

@@ -7,13 +7,11 @@ use pubky::{
     errors::RequestError, Error as PubkyError, PubkyResource,
     PublicStorage as SdkUnauthenticatedTransport, StatusCode,
 };
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace};
 
-use pubky_app_specs::PubkyAppObject;
-
-use super::{PAYKIT_PATH_PREFIX, PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE};
+use super::PAYKIT_PATH_PREFIX;
 use crate::transport::traits::UnauthenticatedTransportRead;
-use crate::{EndpointData, MethodId, PaykitError, Profile, PublicKey, Result, SupportedPayments};
+use crate::{EndpointData, MethodId, PaykitError, PublicKey, Result, SupportedPayments};
 
 /// Adapter around `pubky::PublicStorage` implementing `UnauthenticatedTransportRead`.
 #[derive(Clone)]
@@ -206,97 +204,6 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
             None => {
                 debug!("payment endpoint not found");
                 Ok(None)
-            }
-        }
-    }
-
-    #[instrument(skip(self), fields(owner = %owner))]
-    async fn fetch_known_contacts(&self, owner: &PublicKey) -> Result<Vec<PublicKey>> {
-        let addr = format!("{owner}{PUBKY_FOLLOWS_PATH}");
-        debug!(addr = %addr, "listing known contacts");
-        let entries = self.list_entries(addr, "list known contacts").await?;
-
-        let mut contacts = Vec::new();
-        for resource in entries {
-            if resource.path.as_str().ends_with('/') {
-                trace!(path = %resource.path, "skipping directory entry");
-                continue;
-            }
-            let name = resource
-                .path
-                .as_str()
-                .rsplit('/')
-                .next()
-                .filter(|segment| !segment.is_empty());
-            if let Some(pk_str) = name {
-                match pk_str.parse::<PublicKey>() {
-                    Ok(pk) => contacts.push(pk),
-                    Err(err) => {
-                        error!(entry = %pk_str, error = %err, "skipping invalid contact entry, cannot parse as PublicKey");
-                        continue;
-                    }
-                }
-            }
-        }
-
-        debug!(count = contacts.len(), "known contacts collected");
-        Ok(contacts)
-    }
-
-    #[instrument(skip(self), fields(user = %user))]
-    async fn fetch_profile(&self, user: &PublicKey) -> Result<Profile> {
-        debug!("constructing profile resource");
-        let resource = PubkyResource::new(user.clone(), PUBKY_PROFILE_FILE).map_err(|e| {
-            error!(error = %e, "failed to construct profile resource");
-            PaykitError::Transport {
-                context: format!("failed to construct profile resource for {user}"),
-                source: e.into(),
-            }
-        })?;
-
-        debug!("fetching profile blob from storage");
-        let blob = match self.inner.get(&resource).await {
-            Ok(resp) => resp
-                .bytes()
-                .await
-                .map_err(|err| {
-                    error!(error = %err, "failed to read profile response bytes");
-                    PaykitError::Transport {
-                        context: "fetch profile bytes failed".into(),
-                        source: err.into(),
-                    }
-                })?
-                .to_vec(),
-            Err(err) if is_not_found(&err) => {
-                debug!("profile not found (404/GONE)");
-                return Err(PaykitError::NotFound("profile not found".into()));
-            }
-            Err(err) => {
-                error!(error = %err, "transport error fetching profile");
-                return Err(PaykitError::Transport {
-                    context: "fetch profile failed".into(),
-                    source: err.into(),
-                });
-            }
-        };
-
-        debug!(blob_len = blob.len(), "parsing profile blob");
-        match PubkyAppObject::from_uri(&resource.to_pubky_url(), &blob) {
-            Ok(PubkyAppObject::User(profile)) => {
-                debug!("profile parsed successfully");
-                Ok(profile)
-            }
-            Ok(_) => {
-                warn!("resource exists but is not a user profile");
-                Err(PaykitError::Profile(
-                    "resource is not a user profile".into(),
-                ))
-            }
-            Err(e) => {
-                warn!(error = %e, "failed to parse profile data");
-                Err(PaykitError::Profile(format!(
-                    "failed to parse profile: {e}"
-                )))
             }
         }
     }

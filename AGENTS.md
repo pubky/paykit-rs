@@ -4,13 +4,14 @@
 - Workspace root hosts `Cargo.toml` that pins resolver `2` and registers members.
 - Core library lives in `paykit-lib/` with its own `Cargo.toml` and `src/lib.rs`; treat this crate as the canonical abstraction over the routing network.
 - Transport abstractions live in `paykit-lib/src/transport/`: `traits.rs` defines the public interfaces, while feature-gated adapters (e.g., `transport/pubky/*`) provide concrete implementations.
-- `transport/pubky/mod.rs` exports `PAYKIT_PATH_PREFIX` (`/pub/paykit.app/v0/`) and `PUBKY_FOLLOWS_PATH` (`/pub/pubky.app/follows/`) to keep all Pubky paths consistent—reuse them instead of hard-coding strings.
+- `transport/pubky/mod.rs` exports `PAYKIT_PATH_PREFIX` (`/pub/paykit.app/v0/`) to keep all Pubky paths consistent—reuse it instead of hard-coding strings.
 
 ## Build, Test, and Development Commands
 - `cargo fmt` — run rustfmt on every crate; required before submitting changes.
 - `cargo clippy --all-targets --all-features` — lint with the default warning set; fix or allow with justification.
 - `cargo test` — executes unit tests + doc tests; use `cargo test mod_name::case` for focused runs.
 - `cargo doc --no-deps` — verify public API docs compile; treat warnings as blockers because Paykit is SDK-facing.
+- **Platform bindings**: Always build **all** platform bindings (`cd paykit-ffi && ./build.sh all`), never just one target. This ensures iOS and Android bindings stay in sync.
 
 ## Coding Style & Naming Conventions
 - Follow Rust 2021 defaults: four-space indentation, snake_case for functions/modules, UpperCamelCase for types/traits, SCREAMING_SNAKE_CASE for consts.
@@ -21,7 +22,7 @@
 ## Transport Abstraction & Dependency Injection
 - Keep the library stateless. Functions that touch remote state must accept `AuthenticatedTransport` or `UnauthenticatedTransportRead` implementors instead of concrete SDK types.
 - Pubky support lives behind the default `pubky` feature; adapters such as `PubkyAuthenticatedTransport` and `PubkyUnauthenticatedTransport` simply wrap `PubkySession` and `pubky::PublicStorage`. Disable the feature if you need to compile without the SDK.
-- When adding or updating adapters, follow the convention: `fetch_payment_endpoint` returns `Option`, list operations treat 404s as empty, and contact discovery relies on directory listings rather than file contents.
+- When adding or updating adapters, follow the convention: `fetch_payment_endpoint` returns `Option` and list operations treat 404s as empty.
 - Document in each API that session creation, capability scope, and key rotation remain the caller’s responsibility; Paykit only consumes the trait methods it needs.
 - Timeout handling is the transport layer’s responsibility, not Paykit’s. The traits do not enforce any deadline — implementations must configure their own timeouts. The Pubky SDK exposes [`PubkyHttpClientBuilder::request_timeout`](https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout) for this purpose.
 
@@ -37,7 +38,7 @@
 - Highlight any changes to exposed structs or capability strings so downstream bindings (Swift/RN/Kotlin) can be updated in sync.
 
 ## Error Handling
-- `PaykitError` has five variants: `Transport`, `NotFound`, `InvalidData`, `Profile`, and `Validation`. Any exhaustive `match` must cover all five.
+- `PaykitError` has four variants: `Transport`, `NotFound`, `InvalidData`, and `Validation`. Any exhaustive `match` must cover all four.
 - Use `PaykitError::Validation` for caller-supplied input that fails structural checks (e.g. invalid `MethodId`). Use `PaykitError::InvalidData` for data fetched from the network that turns out to be corrupt.
 
 ## Security & Configuration Tips

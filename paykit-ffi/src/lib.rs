@@ -40,8 +40,6 @@ pub enum PaykitFfiError {
     NotFound { reason: String },
     #[error("Invalid data: {reason}")]
     InvalidData { reason: String },
-    #[error("Profile error: {reason}")]
-    ProfileError { reason: String },
     #[error("Validation error: {reason}")]
     Validation { reason: String },
     #[error("Session error: {reason}")]
@@ -59,25 +57,9 @@ impl From<paykit_lib::PaykitError> for PaykitFfiError {
                 let detail = source.map(|s| format!("{context}: {s}")).unwrap_or(context);
                 PaykitFfiError::InvalidData { reason: detail }
             }
-            paykit_lib::PaykitError::Profile(msg) => PaykitFfiError::ProfileError { reason: msg },
             paykit_lib::PaykitError::Validation(msg) => PaykitFfiError::Validation { reason: msg },
         }
     }
-}
-
-#[derive(uniffi::Record, Debug, Clone)]
-pub struct FfiProfileLink {
-    pub title: String,
-    pub url: String,
-}
-
-#[derive(uniffi::Record, Debug, Clone)]
-pub struct FfiProfile {
-    pub name: String,
-    pub bio: Option<String>,
-    pub image: Option<String>,
-    pub links: Option<Vec<FfiProfileLink>>,
-    pub status: Option<String>,
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
@@ -221,50 +203,6 @@ pub async fn paykit_export_session() -> Result<String, PaykitFfiError> {
 // ---------------------------------------------------------------------------
 // Read operations
 // ---------------------------------------------------------------------------
-
-/// Fetch a user's profile from the routing network.
-#[uniffi::export]
-pub async fn paykit_get_profile(public_key: String) -> Result<FfiProfile, PaykitFfiError> {
-    let rt = ensure_runtime();
-    rt.spawn(async move {
-        let pubky = get_pubky_client()?;
-        let pk = parse_public_key(&public_key)?;
-        let reader = make_reader(pubky);
-        let profile = paykit_lib::get_profile(&reader, &pk).await?;
-        Ok(FfiProfile {
-            name: profile.name,
-            bio: profile.bio,
-            image: profile.image,
-            links: profile.links.map(|links| {
-                links
-                    .into_iter()
-                    .map(|l| FfiProfileLink {
-                        title: l.title,
-                        url: l.url,
-                    })
-                    .collect()
-            }),
-            status: profile.status,
-        })
-    })
-    .await
-    .unwrap_or_else(|e| Err(runtime_err(e)))
-}
-
-/// Fetch a user's contact list (public keys they follow).
-#[uniffi::export]
-pub async fn paykit_get_contacts(public_key: String) -> Result<Vec<String>, PaykitFfiError> {
-    let rt = ensure_runtime();
-    rt.spawn(async move {
-        let pubky = get_pubky_client()?;
-        let pk = parse_public_key(&public_key)?;
-        let reader = make_reader(pubky);
-        let contacts = paykit_lib::get_known_contacts(&reader, &pk).await?;
-        Ok(contacts.into_iter().map(|c| c.to_string()).collect())
-    })
-    .await
-    .unwrap_or_else(|e| Err(runtime_err(e)))
-}
 
 /// Fetch all published payment methods for a user.
 #[uniffi::export]
