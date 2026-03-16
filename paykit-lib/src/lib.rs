@@ -459,7 +459,7 @@ pub async fn set_private_payments(
         )));
     }
 
-    let success = link.encryptor.send_message(plaintext).await;
+    let success = link.encryptor.send_message(&plaintext).await;
 
     if !success {
         return Err(PaykitError::Transport {
@@ -706,7 +706,7 @@ pub fn initiate_encrypted_link(
     let config = pubky_data::PubkyDataConfig::new_with_paths(
         sender_secret_key,
         0,
-        "XX".to_string(),
+        "XX",
         session,
         write_path,
         read_path,
@@ -720,7 +720,6 @@ pub fn initiate_encrypted_link(
     let encryptor = pubky_data::PubkyDataEncryptor::new(
         config,
         sender_secret_key,
-        receiver_pubkey.clone(),
         true,
         receiver_pubkey.clone(),
     )
@@ -771,7 +770,7 @@ pub fn accept_encrypted_link(
     let config = pubky_data::PubkyDataConfig::new_with_paths(
         receiver_secret_key,
         0,
-        "XX".to_string(),
+        "XX",
         session,
         write_path,
         read_path,
@@ -785,7 +784,6 @@ pub fn accept_encrypted_link(
     let encryptor = pubky_data::PubkyDataEncryptor::new(
         config,
         receiver_secret_key,
-        sender_pubkey.clone(),
         false,
         sender_pubkey.clone(),
     )
@@ -852,22 +850,8 @@ pub fn accept_encrypted_link(
 #[instrument(skip(handshake), fields(remote = %handshake.remote_pubkey))]
 pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
     // Check whether the handshake has already finished.
-    match handshake.encryptor.is_handshake() {
-        Ok(()) => {
-            // Still in handshake phase — drive it forward.
-            debug!("advancing handshake step");
-        }
-        Err(pubky_data::PubkyDataError::IsTransport) => {
-            // Handshake already finished — transition to transport.
-            debug!("handshake complete, transitioning to transport");
-            return finish_handshake(handshake);
-        }
-        Err(err) => {
-            return Err(PaykitError::Transport {
-                context: format!("handshake context error: {err:?}"),
-                source: anyhow::anyhow!("pubky-data is_handshake failed: {err:?}"),
-            });
-        }
+    if handshake.encryptor.is_handshake_complete() {
+        return finish_handshake(handshake);
     }
 
     // Process the next handshake step.
