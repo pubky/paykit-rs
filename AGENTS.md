@@ -11,6 +11,7 @@
 - `cargo clippy --all-targets --all-features` — lint with the default warning set; fix or allow with justification.
 - `cargo test` — executes unit tests + doc tests; use `cargo test mod_name::case` for focused runs.
 - `cargo doc --no-deps` — verify public API docs compile; treat warnings as blockers because Paykit is SDK-facing.
+- **Platform bindings**: Always build **all** platform bindings (`cd paykit-ffi && ./build.sh all`), never just one target. This ensures iOS and Android bindings stay in sync.
 
 ## Coding Style & Naming Conventions
 - Follow Rust 2021 defaults: four-space indentation, snake_case for functions/modules, UpperCamelCase for types/traits, SCREAMING_SNAKE_CASE for consts.
@@ -44,7 +45,7 @@
 - Highlight any changes to exposed structs or capability strings so downstream bindings (Swift/RN/Kotlin) can be updated in sync.
 
 ## Error Handling
-- `PaykitError` has five variants: `Transport`, `NotFound`, `InvalidData`, `Profile`, and `Validation`. Any exhaustive `match` must cover all five.
+- `PaykitError` has four variants: `Transport`, `NotFound`, `InvalidData`, and `Validation`. Any exhaustive `match` must cover all four.
 - Use `PaykitError::Validation` for caller-supplied input that fails structural checks (e.g. invalid `MethodId`). Use `PaykitError::InvalidData` for data fetched from the network that turns out to be corrupt.
 
 ## Security & Configuration Tips

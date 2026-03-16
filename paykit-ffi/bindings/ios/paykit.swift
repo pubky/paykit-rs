@@ -535,174 +535,6 @@ public func FfiConverterTypeFfiPaymentEntry_lower(_ value: FfiPaymentEntry) -> R
 }
 
 
-public struct FfiProfile {
-    public var name: String
-    public var bio: String?
-    public var image: String?
-    public var links: [FfiProfileLink]?
-    public var status: String?
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(name: String, bio: String?, image: String?, links: [FfiProfileLink]?, status: String?) {
-        self.name = name
-        self.bio = bio
-        self.image = image
-        self.links = links
-        self.status = status
-    }
-}
-
-#if compiler(>=6)
-extension FfiProfile: Sendable {}
-#endif
-
-
-extension FfiProfile: Equatable, Hashable {
-    public static func ==(lhs: FfiProfile, rhs: FfiProfile) -> Bool {
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.bio != rhs.bio {
-            return false
-        }
-        if lhs.image != rhs.image {
-            return false
-        }
-        if lhs.links != rhs.links {
-            return false
-        }
-        if lhs.status != rhs.status {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(name)
-        hasher.combine(bio)
-        hasher.combine(image)
-        hasher.combine(links)
-        hasher.combine(status)
-    }
-}
-
-extension FfiProfile: Codable {}
-
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiProfile: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiProfile {
-        return
-            try FfiProfile(
-                name: FfiConverterString.read(from: &buf), 
-                bio: FfiConverterOptionString.read(from: &buf), 
-                image: FfiConverterOptionString.read(from: &buf), 
-                links: FfiConverterOptionSequenceTypeFfiProfileLink.read(from: &buf), 
-                status: FfiConverterOptionString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiProfile, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.name, into: &buf)
-        FfiConverterOptionString.write(value.bio, into: &buf)
-        FfiConverterOptionString.write(value.image, into: &buf)
-        FfiConverterOptionSequenceTypeFfiProfileLink.write(value.links, into: &buf)
-        FfiConverterOptionString.write(value.status, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiProfile_lift(_ buf: RustBuffer) throws -> FfiProfile {
-    return try FfiConverterTypeFfiProfile.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiProfile_lower(_ value: FfiProfile) -> RustBuffer {
-    return FfiConverterTypeFfiProfile.lower(value)
-}
-
-
-public struct FfiProfileLink {
-    public var title: String
-    public var url: String
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(title: String, url: String) {
-        self.title = title
-        self.url = url
-    }
-}
-
-#if compiler(>=6)
-extension FfiProfileLink: Sendable {}
-#endif
-
-
-extension FfiProfileLink: Equatable, Hashable {
-    public static func ==(lhs: FfiProfileLink, rhs: FfiProfileLink) -> Bool {
-        if lhs.title != rhs.title {
-            return false
-        }
-        if lhs.url != rhs.url {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(title)
-        hasher.combine(url)
-    }
-}
-
-extension FfiProfileLink: Codable {}
-
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiProfileLink: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiProfileLink {
-        return
-            try FfiProfileLink(
-                title: FfiConverterString.read(from: &buf), 
-                url: FfiConverterString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiProfileLink, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.title, into: &buf)
-        FfiConverterString.write(value.url, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiProfileLink_lift(_ buf: RustBuffer) throws -> FfiProfileLink {
-    return try FfiConverterTypeFfiProfileLink.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiProfileLink_lower(_ value: FfiProfileLink) -> RustBuffer {
-    return FfiConverterTypeFfiProfileLink.lower(value)
-}
-
-
 public enum PaykitFfiError: Swift.Error {
 
     
@@ -712,8 +544,6 @@ public enum PaykitFfiError: Swift.Error {
     case NotFound(reason: String
     )
     case InvalidData(reason: String
-    )
-    case ProfileError(reason: String
     )
     case Validation(reason: String
     )
@@ -744,13 +574,10 @@ public struct FfiConverterTypePaykitFfiError: FfiConverterRustBuffer {
         case 3: return .InvalidData(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 4: return .ProfileError(
+        case 4: return .Validation(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 5: return .Validation(
-            reason: try FfiConverterString.read(from: &buf)
-            )
-        case 6: return .Session(
+        case 5: return .Session(
             reason: try FfiConverterString.read(from: &buf)
             )
 
@@ -780,18 +607,13 @@ public struct FfiConverterTypePaykitFfiError: FfiConverterRustBuffer {
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .ProfileError(reason):
+        case let .Validation(reason):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Validation(reason):
-            writeInt(&buf, Int32(5))
-            FfiConverterString.write(reason, into: &buf)
-            
-        
         case let .Session(reason):
-            writeInt(&buf, Int32(6))
+            writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
             
         }
@@ -857,55 +679,6 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterOptionSequenceTypeFfiProfileLink: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiProfileLink]?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterSequenceTypeFfiProfileLink.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterSequenceTypeFfiProfileLink.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
-    typealias SwiftType = [String]
-
-    public static func write(_ value: [String], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterString.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [String]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterString.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterSequenceTypeFfiPaymentEntry: FfiConverterRustBuffer {
     typealias SwiftType = [FfiPaymentEntry]
 
@@ -923,31 +696,6 @@ fileprivate struct FfiConverterSequenceTypeFfiPaymentEntry: FfiConverterRustBuff
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiPaymentEntry.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypeFfiProfileLink: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiProfileLink]
-
-    public static func write(_ value: [FfiProfileLink], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFfiProfileLink.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiProfileLink] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiProfileLink]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeFfiProfileLink.read(from: &buf))
         }
         return seq
     }
@@ -1040,23 +788,6 @@ public func paykitForceSignOut()async   {
         )
 }
 /**
- * Fetch a user's contact list (public keys they follow).
- */
-public func paykitGetContacts(publicKey: String)async throws  -> [String]  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_paykit_fn_func_paykit_get_contacts(FfiConverterString.lower(publicKey)
-                )
-            },
-            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
-            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
-            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceString.lift,
-            errorHandler: FfiConverterTypePaykitFfiError_lift
-        )
-}
-/**
  * Returns the public key of the currently authenticated user, or `None`.
  */
 public func paykitGetCurrentPublicKey()async  -> String?  {
@@ -1105,23 +836,6 @@ public func paykitGetPaymentList(publicKey: String)async throws  -> [FfiPaymentE
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeFfiPaymentEntry.lift,
-            errorHandler: FfiConverterTypePaykitFfiError_lift
-        )
-}
-/**
- * Fetch a user's profile from the routing network.
- */
-public func paykitGetProfile(publicKey: String)async throws  -> FfiProfile  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_paykit_fn_func_paykit_get_profile(FfiConverterString.lower(publicKey)
-                )
-            },
-            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
-            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
-            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeFfiProfile_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1299,9 +1013,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_force_sign_out() != 30515) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_paykit_get_contacts() != 53232) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_paykit_checksum_func_paykit_get_current_public_key() != 28037) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1309,9 +1020,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 63326) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_paykit_checksum_func_paykit_get_profile() != 26566) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_import_session() != 29532) {

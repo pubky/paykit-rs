@@ -263,11 +263,6 @@ uint64_t uniffi_paykit_fn_func_paykit_force_sign_out(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_CONTACTS
-#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_CONTACTS
-uint64_t uniffi_paykit_fn_func_paykit_get_contacts(RustBuffer public_key
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_CURRENT_PUBLIC_KEY
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_CURRENT_PUBLIC_KEY
 uint64_t uniffi_paykit_fn_func_paykit_get_current_public_key(void
@@ -282,11 +277,6 @@ uint64_t uniffi_paykit_fn_func_paykit_get_payment_endpoint(RustBuffer public_key
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_PAYMENT_LIST
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_PAYMENT_LIST
 uint64_t uniffi_paykit_fn_func_paykit_get_payment_list(RustBuffer public_key
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_PROFILE
-#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_PROFILE
-uint64_t uniffi_paykit_fn_func_paykit_get_profile(RustBuffer public_key
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_IMPORT_SESSION
@@ -624,12 +614,6 @@ uint16_t uniffi_paykit_checksum_func_paykit_force_sign_out(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_CONTACTS
-#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_CONTACTS
-uint16_t uniffi_paykit_checksum_func_paykit_get_contacts(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_CURRENT_PUBLIC_KEY
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_CURRENT_PUBLIC_KEY
 uint16_t uniffi_paykit_checksum_func_paykit_get_current_public_key(void
@@ -645,12 +629,6 @@ uint16_t uniffi_paykit_checksum_func_paykit_get_payment_endpoint(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_PAYMENT_LIST
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_PAYMENT_LIST
 uint16_t uniffi_paykit_checksum_func_paykit_get_payment_list(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_PROFILE
-#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_PROFILE
-uint16_t uniffi_paykit_checksum_func_paykit_get_profile(void
     
 );
 #endif

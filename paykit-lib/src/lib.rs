@@ -57,10 +57,6 @@ impl std::str::FromStr for PublicKey {
     }
 }
 
-#[cfg(feature = "pubky")]
-/// Re-export pubky sdk to allow for non accounted usecases on transport level
-pub use pubky;
-
 mod transport;
 
 pub use transport::{AuthenticatedTransport, UnauthenticatedTransportRead};
@@ -97,19 +93,16 @@ pub enum PaykitError {
 
     /// The requested resource does not exist.
     ///
-    /// Returned when a profile or other resource is not found (404/GONE).
-    /// Distinct from [`PaykitError::Profile`] which indicates the data exists but is malformed.
+    /// Returned when a payment endpoint or other resource is not found (404/GONE).
     #[error("not found: {0}")]
     NotFound(String),
 
     /// Retrieved data is corrupt or structurally invalid.
     ///
     /// Returned when a resource was successfully fetched from the network but its
-    /// content cannot be interpreted — for example invalid UTF-8 bytes, an
-    /// unparseable resource path, or a contact entry that is not a valid public
-    /// key. This is distinct from [`PaykitError::Transport`] (the network call
-    /// itself failed) and [`PaykitError::Profile`] (profile-specific parse
-    /// errors).
+    /// content cannot be interpreted — for example invalid UTF-8 bytes or an
+    /// unparseable resource path. This is distinct from
+    /// [`PaykitError::Transport`] (the network call itself failed).
     #[error("invalid data: {context}")]
     InvalidData {
         /// Human-readable description of the data problem.
@@ -118,14 +111,6 @@ pub enum PaykitError {
         #[source]
         source: Option<anyhow::Error>,
     },
-
-    /// Profile data is malformed or invalid.
-    ///
-    /// Returned when profile data exists but cannot be parsed or validated.
-    /// Distinct from [`PaykitError::NotFound`] which indicates the resource doesn't exist,
-    /// and [`PaykitError::Transport`] which covers network/SDK errors.
-    #[error("profile error: {0}")]
-    Profile(String),
 
     /// Input failed validation.
     ///
@@ -604,70 +589,6 @@ where
     Ok(result)
 }
 
-/// Returns known contacts of a given public key.
-///
-/// # Semantics
-/// - Returns an empty vector when no contacts are stored under the follows path
-///   or the directory does not exist yet.
-/// - Returns `Err(PaykitError::InvalidData)` when a contact entry cannot be parsed
-///   as a valid [`PublicKey`].
-/// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
-///
-/// # Examples
-/// ```
-/// # use paykit_lib::{get_known_contacts, PublicKey};
-/// # use paykit_lib::UnauthenticatedTransportRead;
-/// # async fn contacts(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
-/// for contact in get_known_contacts(reader, pk).await? {
-///     println!("known contact: {}", contact);
-/// }
-/// # Ok(())
-/// # }
-/// ```
-#[instrument(skip(reader), fields(owner = %key))]
-pub async fn get_known_contacts<R>(reader: &R, key: &PublicKey) -> Result<Vec<PublicKey>>
-where
-    R: UnauthenticatedTransportRead,
-{
-    debug!("fetching known contacts");
-    let result = reader
-        .fetch_known_contacts(key)
-        .await
-        .map_err(|err| map_error("get_known_contacts", err))?;
-    debug!(count = result.len(), "known contacts retrieved");
-    Ok(result)
-}
-
-/// Returns the profile of a given public key.
-///
-/// # Semantics
-/// - Returns `Ok(Profile)` when the profile exists and is valid.
-/// - Returns `Err(PaykitError::NotFound)` if the profile does not exist.
-/// - Returns `Err(PaykitError::Profile)` if the profile exists but is malformed.
-/// - Returns `Err(PaykitError::Transport)` for network or transport-layer failures.
-///
-/// # Examples
-/// ```
-/// # use paykit_lib::{get_profile, PublicKey, Profile};
-/// # use paykit_lib::UnauthenticatedTransportRead;
-/// # async fn demo(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
-/// let profile = get_profile(reader, pk).await?;
-/// println!("user name: {}", profile.name);
-/// # Ok(())
-/// # }
-/// ```
-#[instrument(skip(reader), fields(user = %key))]
-pub async fn get_profile<R>(reader: &R, key: &PublicKey) -> Result<Profile>
-where
-    R: UnauthenticatedTransportRead,
-{
-    debug!("fetching user profile");
-    reader
-        .fetch_profile(key)
-        .await
-        .map_err(|err| map_error("get_profile", err))
-}
-
 #[cfg(feature = "pubky")]
 /// Initiates a Noise XX handshake with a remote peer (initiator role).
 ///
@@ -914,7 +835,6 @@ fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
             context: format!("{label}: {context}"),
             source,
         },
-        PaykitError::Profile(msg) => PaykitError::Profile(format!("{label}: {msg}")),
         PaykitError::Validation(msg) => PaykitError::Validation(format!("{label}: {msg}")),
     }
 }
@@ -1077,7 +997,6 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::transport::pubky::{PUBKY_FOLLOWS_PATH, PUBKY_PROFILE_FILE};
     use pubky::PubkySession;
     use pubky_testnet::{pubky::Keypair, EphemeralTestnet};
 
@@ -1236,157 +1155,6 @@ mod tests {
         remove_payment_endpoint(&setup.session_transport, method)
             .await
             .expect_err("removing non-existent endpoint should fail");
-
-        setup.raw_session.signout().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn lists_known_contacts() {
-        let setup = TestSetup::new().await;
-
-        let contacts = get_known_contacts(&setup.reader_transport, &setup.public_key)
-            .await
-            .unwrap();
-        assert!(contacts.is_empty());
-
-        // Seed two contacts under the follows path using the authenticated session.
-        let contact_a = Keypair::random().public_key();
-        let contact_b = Keypair::random().public_key();
-        setup
-            .raw_session
-            .storage()
-            .put(format!("{PUBKY_FOLLOWS_PATH}{}", contact_a), "")
-            .await
-            .unwrap();
-        setup
-            .raw_session
-            .storage()
-            .put(format!("{PUBKY_FOLLOWS_PATH}{}", contact_b), "")
-            .await
-            .unwrap();
-
-        let contacts = get_known_contacts(&setup.reader_transport, &setup.public_key)
-            .await
-            .unwrap();
-
-        assert!(contacts.contains(&contact_a));
-        assert!(contacts.contains(&contact_b));
-
-        setup.raw_session.signout().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn known_contacts_skips_invalid_entries() {
-        let setup = TestSetup::new().await;
-
-        // Seed one valid contact.
-        let valid_contact = Keypair::random().public_key();
-        setup
-            .raw_session
-            .storage()
-            .put(format!("{PUBKY_FOLLOWS_PATH}{}", valid_contact), "")
-            .await
-            .unwrap();
-
-        // Seed an entry that cannot be parsed as a PublicKey.
-        setup
-            .raw_session
-            .storage()
-            .put(format!("{PUBKY_FOLLOWS_PATH}not-a-valid-public-key"), "")
-            .await
-            .unwrap();
-
-        // fetch_known_contacts should succeed, returning only the valid contact.
-        let contacts = get_known_contacts(&setup.reader_transport, &setup.public_key)
-            .await
-            .unwrap();
-
-        assert_eq!(contacts.len(), 1, "invalid entry should be skipped");
-        assert!(contacts.contains(&valid_contact));
-
-        setup.raw_session.signout().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_fetch_profile_success() {
-        let setup = TestSetup::new().await;
-
-        // Seed a valid profile using raw session
-        let profile_json =
-            r#"{"name":"Alice","bio":"Hello world","image":null,"links":null,"status":"online"}"#;
-        setup
-            .raw_session
-            .storage()
-            .put(PUBKY_PROFILE_FILE, profile_json)
-            .await
-            .unwrap();
-
-        let profile = get_profile(&setup.reader_transport, &setup.public_key)
-            .await
-            .unwrap();
-
-        assert_eq!(profile.name, "Alice");
-        assert_eq!(profile.bio, Some("Hello world".into()));
-        assert_eq!(profile.status, Some("online".into()));
-
-        setup.raw_session.signout().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_fetch_profile_not_found() {
-        let setup = TestSetup::new().await;
-
-        let result = get_profile(&setup.reader_transport, &setup.public_key).await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, PaykitError::NotFound(msg) if msg.contains("not found")));
-
-        setup.raw_session.signout().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_fetch_profile_invalid_json() {
-        let setup = TestSetup::new().await;
-
-        // Seed malformed JSON
-        setup
-            .raw_session
-            .storage()
-            .put(PUBKY_PROFILE_FILE, "not valid json {{{")
-            .await
-            .unwrap();
-
-        let result = get_profile(&setup.reader_transport, &setup.public_key).await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, PaykitError::Profile(msg) if msg.contains("parse")));
-
-        setup.raw_session.signout().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_fetch_profile_minimal() {
-        let setup = TestSetup::new().await;
-
-        let profile_json = r#"{"name":"Bob"}"#;
-        setup
-            .raw_session
-            .storage()
-            .put(PUBKY_PROFILE_FILE, profile_json)
-            .await
-            .unwrap();
-
-        let profile = get_profile(&setup.reader_transport, &setup.public_key)
-            .await
-            .unwrap();
-
-        assert_eq!(profile.name, "Bob");
-        assert!(profile.bio.is_none());
-        assert!(profile.image.is_none());
-        assert!(profile.links.is_none());
-        assert!(profile.status.is_none());
 
         setup.raw_session.signout().await.unwrap();
     }

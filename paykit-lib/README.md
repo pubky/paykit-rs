@@ -2,10 +2,9 @@
 
 Stateless Rust crate that implements the Paykit transport layer. It provides helpers for both **public** payment endpoints (stored as plaintext files on the homeserver) and **private** payment endpoints (end-to-end encrypted via `pubky-data`'s Noise protocol), while delegating authentication and session management to callers.
 
-Paykit replies on **transport** protocol for network *communication* between peers and on **social media** protocol for bootstrap of *profile* and *social graph*. 
+Paykit relies on a **transport** protocol for network *communication* between peers.
 
-The default transport protocol in this implementation is [pubky](https://pubky.org/) and default social media protocol is [pubky.app](https://pubky.app/).
-Both of them are enabled via default feature flag `pubky`.
+The default transport protocol in this implementation is [pubky](https://pubky.org/), enabled via the default feature flag `pubky`.
 
 ## Auth & Dependency Injection
 
@@ -67,7 +66,6 @@ Domain error enum with the following variants:
 | `Transport { context, source }` | Network or SDK failure |
 | `NotFound(String)` | Requested resource does not exist (404/GONE) |
 | `InvalidData { context, source }` | Fetched data is corrupt or structurally invalid |
-| `Profile(String)` | Profile data is malformed |
 | `Validation(String)` | Caller-supplied input failed validation (e.g. invalid `MethodId`) |
 
 ## API Surface
