@@ -12,7 +12,7 @@
 //!   [`AuthenticatedTransport`].
 //! - Keep storage/session management outside of the crate so integrators can inject their
 //!   own security model, capability scoping, caching, or telemetry.
-//! - Export the standard Pubky path prefixes (e.g. `/pub/paykit.app/v0/`) to keep file layout
+//! - Export the standard Pubky path prefixes (e.g. `/pub/paykit/v0/`) to keep file layout
 //!   consistent across bindings.
 //!
 //! For an architectural overview and example workflows, see `paykit-lib/README.md`.
@@ -138,7 +138,7 @@ pub enum PaykitError {
 
 /// Identifier for a payment method specification.
 ///
-/// A `MethodId` is a single, safe path segment stored under `/pub/paykit.app/v0/…`.
+/// A `MethodId` is a single, safe path segment stored under `/pub/paykit/v0/…`.
 /// It is validated at construction time to prevent path injection attacks.
 ///
 /// # Allowed characters

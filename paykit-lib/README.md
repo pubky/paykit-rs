@@ -102,7 +102,7 @@ Private payments are end-to-end encrypted via a Noise protocol handshake managed
 - `get_private_payments(link: &mut EncryptedLink) -> Result<SupportedPayments>`  
   Receives and decrypts the private payments map from the remote peer. Returns an empty map when no messages are available.
 
-Storage paths for private data are derived per-peer-pair using `pubky_data::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit.app/v0/private`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-data` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private data.
+Storage paths for private data are derived per-peer-pair using `pubky_data::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-data` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private data.
 
 ### Contacts & Profiles
 
@@ -114,7 +114,7 @@ Storage paths for private data are derived per-peer-pair using `pubky_data::path
 Method/endpoint naming follows the PMIP consensus described in the repository root `README.md`. Each API returns well-typed structures (enums/structs) that mirror the protocol specification so downstream clients can share the same serialization layer.  
 When the `pubky` feature is enabled the crate exports:
 
-- `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit.app/v0/`) and `PUBKY_FOLLOWS_PATH` (`/pub/pubky.app/follows/`) to standardize path construction.  
+- `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) and `PUBKY_FOLLOWS_PATH` (`/pub/pubky.app/follows/`) to standardize path construction.  
 - `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the public payment traits above.
 - `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `set_private_payments`, `get_private_payments` for private encrypted payment operations.
 - `pubky_data` re-export for advanced callers that need direct access to the encryption layer.
