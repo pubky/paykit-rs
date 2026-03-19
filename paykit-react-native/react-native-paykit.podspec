@@ -18,7 +18,6 @@ Pod::Spec.new do |s|
   s.source       = { :git => "https://github.com/pubky/paykit-rs.git", :tag => "#{s.version}" }
 
   s.source_files = "ios/**/*.{h,m,mm,swift}"
-  s.ios.source_files = "ios/**/*.{h,m,mm,swift}"
   s.ios.vendored_frameworks = "ios/Paykit.xcframework"
 
   s.pod_target_xcconfig = {

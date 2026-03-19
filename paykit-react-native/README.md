@@ -97,7 +97,7 @@ After rebuilding `paykit-ffi` (`cd paykit-ffi && ./build.sh all`), copy the fres
 ```
 
 This copies:
-- **iOS**: `paykit.swift`, `paykitFFI.h`, `Paykit.xcframework`
+- **iOS**: `PaykitUniFFI.swift`, `paykitFFI.h`, `Paykit.xcframework`
 - **Android**: Generated `.kt` files, `jniLibs/*.so` for all architectures
 
 ## Architecture

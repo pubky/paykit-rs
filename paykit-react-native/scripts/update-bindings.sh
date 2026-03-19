@@ -17,9 +17,10 @@ echo "Into:                   $RN_DIR"
 echo ""
 echo "=== iOS ==="
 
-# UniFFI-generated Swift binding
-cp "$FFI_DIR/bindings/ios/paykit.swift" "$RN_DIR/ios/"
-echo "  Copied paykit.swift"
+# UniFFI-generated Swift binding (renamed to avoid case-insensitive
+# collision with the hand-written Paykit.swift bridge on macOS)
+cp "$FFI_DIR/bindings/ios/paykit.swift" "$RN_DIR/ios/PaykitUniFFI.swift"
+echo "  Copied paykit.swift → PaykitUniFFI.swift"
 
 # UniFFI-generated C header
 cp "$FFI_DIR/bindings/ios/paykitFFI.h" "$RN_DIR/ios/"

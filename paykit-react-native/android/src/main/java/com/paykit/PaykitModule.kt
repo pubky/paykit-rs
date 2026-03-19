@@ -9,6 +9,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import com.synonym.paykit.*
 
 class PaykitModule(reactContext: ReactApplicationContext) :
@@ -193,9 +195,14 @@ class PaykitModule(reactContext: ReactApplicationContext) :
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val entries = paykitGetPaymentList(publicKey)
-                val jsonArray = entries.joinToString(",", "[", "]") { entry ->
-                    """{"method_id":"${entry.methodId.replace("\"", "\\\"")}","endpoint_data":"${entry.endpointData.replace("\"", "\\\"")}"}"""
-                }
+                val jsonArray = JSONArray().apply {
+                    entries.forEach { entry ->
+                        put(JSONObject().apply {
+                            put("method_id", entry.methodId)
+                            put("endpoint_data", entry.endpointData)
+                        })
+                    }
+                }.toString()
                 withContext(Dispatchers.Main) {
                     promise.resolve(resultArray(jsonArray))
                 }
