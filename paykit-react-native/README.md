@@ -100,6 +100,29 @@ This copies:
 - **iOS**: `PaykitUniFFI.swift`, `paykitFFI.h`, `Paykit.xcframework`
 - **Android**: Generated `.kt` files, `jniLibs/*.so` for all architectures
 
+## Publishing to npm
+
+Requires npm publish access to the `@pubky` org.
+
+```sh
+# 1. Build FFI bindings for all platforms
+cd paykit-ffi && ./build.sh all
+
+# 2. Copy bindings into the RN package
+cd ../paykit-react-native
+./scripts/update-bindings.sh
+
+# 3. Install dependencies and build TypeScript
+npm install
+npm run prepare
+
+# 4. Bump version
+npm version patch  # or minor/major
+
+# 5. Publish
+npm publish
+```
+
 ## Architecture
 
 ```
