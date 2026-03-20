@@ -1210,7 +1210,11 @@ mod tests {
 
     impl PrivateTestSetup {
         async fn new() -> Self {
-            let testnet = EphemeralTestnet::builder().build().await.unwrap();
+            let testnet = EphemeralTestnet::builder()
+                .with_embedded_postgres()
+                .build()
+                .await
+                .unwrap();
             let homeserver = testnet.homeserver_app();
 
             // Each user gets its own Pubky SDK instance.
@@ -1456,7 +1460,11 @@ mod tests {
     async fn test_parallel_writer_reader_happy_path() {
         // ── Shared infrastructure (main task) ───────────────────────────
 
-        let testnet = EphemeralTestnet::builder().build().await.unwrap();
+        let testnet = EphemeralTestnet::builder()
+            .with_embedded_postgres()
+            .build()
+            .await
+            .unwrap();
         let homeserver = testnet.homeserver_app();
 
         // Writer (Alice): authenticated session + SDK for outbox reads.
