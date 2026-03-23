@@ -1,13 +1,13 @@
-# @pubky/react-native-paykit
+# @synonymdev/react-native-paykit
 
 React Native Native Module wrapping [paykit-ffi](../paykit-ffi/) UniFFI bindings. Provides a TypeScript API for PayKit payment routing on iOS and Android.
 
 ## Installation
 
 ```sh
-npm install @pubky/react-native-paykit
+npm install @synonymdev/react-native-paykit
 # or
-yarn add @pubky/react-native-paykit
+yarn add @synonymdev/react-native-paykit
 ```
 
 ### iOS
@@ -30,7 +30,7 @@ import {
   getPaymentEndpoint,
   setPaymentEndpoint,
   removePaymentEndpoint,
-} from '@pubky/react-native-paykit';
+} from '@synonymdev/react-native-paykit';
 
 // Initialize the SDK (call once at app startup)
 const initResult = await initialize();
@@ -102,7 +102,7 @@ This copies:
 
 ## Publishing to npm
 
-Requires npm publish access to the `@pubky` org.
+Requires npm publish access to the `@synonymdev` org.
 
 ```sh
 # 1. Build FFI bindings for all platforms

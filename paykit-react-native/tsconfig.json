@@ -2,7 +2,7 @@
   "compilerOptions": {
     "rootDir": ".",
     "paths": {
-      "@pubky/react-native-paykit": ["./src/index"]
+      "@synonymdev/react-native-paykit": ["./src/index"]
     },
     "allowUnreachableCode": false,
     "allowUnusedLabels": false,

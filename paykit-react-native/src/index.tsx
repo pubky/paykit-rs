@@ -2,7 +2,7 @@ import { NativeModules, Platform } from 'react-native';
 import { ok, err, type Result } from '@synonymdev/result';
 
 const LINKING_ERROR =
-  `The package '@pubky/react-native-paykit' doesn't seem to be linked. Make sure: \n\n` +
+  `The package '@synonymdev/react-native-paykit' doesn't seem to be linked. Make sure: \n\n` +
   Platform.select({ ios: "- You have run 'pod install'\n", default: '' }) +
   '- You rebuilt the app after installing the package\n' +
   '- You are not using Expo Go\n';
