@@ -547,7 +547,11 @@ mod tests {
 
     impl TestSetup {
         async fn new() -> Self {
-            let testnet = EphemeralTestnet::builder().build().await.unwrap();
+            let testnet = EphemeralTestnet::builder()
+                .with_embedded_postgres()
+                .build()
+                .await
+                .unwrap();
 
             let homeserver = testnet.homeserver_app();
             let sdk = testnet.sdk().unwrap();
