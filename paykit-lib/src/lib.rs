@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use thiserror::Error;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 #[cfg(feature = "pubky")]
 pub use pubky::PublicKey;
@@ -268,6 +268,13 @@ pub struct EncryptedLink {
 }
 
 #[cfg(feature = "pubky")]
+/// Default maximum number of consecutive automatic recovery attempts before
+/// [`advance_handshake`] gives up and returns an error.
+///
+/// Override per-handshake via [`EncryptedLinkHandshake::set_max_recovery_attempts`].
+pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
+
+#[cfg(feature = "pubky")]
 /// Handle to an in-progress Noise handshake.
 ///
 /// Created by [`initiate_encrypted_link`] (initiator) or
@@ -277,11 +284,41 @@ pub struct EncryptedLink {
 ///
 /// The caller controls the polling strategy — timing between retries, timeouts,
 /// back-off, etc. are all the caller's responsibility.
+///
+/// # Automatic recovery
+///
+/// If a homeserver write fails during the handshake (corrupting the internal
+/// Noise state), [`advance_handshake`] automatically restores from a
+/// pre-mutation snapshot and returns [`HandshakeProgress::Pending`] so the
+/// caller's polling loop retries transparently. The maximum number of
+/// consecutive recovery attempts is configurable via
+/// [`set_max_recovery_attempts`](Self::set_max_recovery_attempts) (default:
+/// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`]).
 pub struct EncryptedLinkHandshake {
     /// The Noise session manager in handshake mode.
     encryptor: pubky_noise::PubkyNoiseEncryptor,
     /// The counterparty's public key (used for homeserver path construction).
     remote_pubkey: PublicKey,
+    /// Shared Noise configuration needed for snapshot-based recovery.
+    config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    /// Number of consecutive recovery attempts so far.
+    recovery_attempts: u32,
+    /// Maximum consecutive recovery attempts before giving up.
+    max_recovery_attempts: u32,
+}
+
+#[cfg(feature = "pubky")]
+impl EncryptedLinkHandshake {
+    /// Set the maximum number of consecutive automatic recovery attempts
+    /// before [`advance_handshake`] gives up and returns
+    /// [`PaykitError::Transport`].
+    ///
+    /// The counter resets to zero after every successful handshake step.
+    /// Default: [`DEFAULT_MAX_RECOVERY_ATTEMPTS`] (3).
+    pub fn set_max_recovery_attempts(&mut self, max: u32) -> &mut Self {
+        self.max_recovery_attempts = max;
+        self
+    }
 }
 
 #[cfg(feature = "pubky")]
@@ -639,7 +676,7 @@ pub fn initiate_encrypted_link(
     })?;
 
     let encryptor = pubky_noise::PubkyNoiseEncryptor::new(
-        config,
+        config.clone(),
         sender_secret_key,
         true,
         receiver_pubkey.clone(),
@@ -653,6 +690,9 @@ pub fn initiate_encrypted_link(
     Ok(EncryptedLinkHandshake {
         encryptor,
         remote_pubkey: receiver_pubkey.clone(),
+        config,
+        recovery_attempts: 0,
+        max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })
 }
 
@@ -703,7 +743,7 @@ pub fn accept_encrypted_link(
     })?;
 
     let encryptor = pubky_noise::PubkyNoiseEncryptor::new(
-        config,
+        config.clone(),
         receiver_secret_key,
         false,
         sender_pubkey.clone(),
@@ -717,6 +757,9 @@ pub fn accept_encrypted_link(
     Ok(EncryptedLinkHandshake {
         encryptor,
         remote_pubkey: sender_pubkey.clone(),
+        config,
+        recovery_attempts: 0,
+        max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })
 }
 
@@ -726,6 +769,21 @@ pub fn accept_encrypted_link(
 /// This function is **polling-safe**: calling it when the remote peer has not
 /// written their next message yet returns [`HandshakeProgress::Pending`] without
 /// corrupting internal state. The caller can safely retry after a delay.
+///
+/// # Automatic recovery
+///
+/// If the homeserver write fails during a handshake step
+/// (`HomeserverWriteError`), the internal Noise state is irreversibly
+/// corrupted. This function automatically recovers by restoring from the
+/// pre-mutation snapshot captured at the start of the failed step and returns
+/// [`HandshakeProgress::Pending`] so the caller's polling loop retries
+/// transparently.
+///
+/// The maximum number of **consecutive** recovery attempts is configurable via
+/// [`EncryptedLinkHandshake::set_max_recovery_attempts`] (default:
+/// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`]). The counter resets to zero after every
+/// successful step. If the limit is exceeded, the function returns
+/// [`PaykitError::Transport`].
 ///
 /// # Polling strategy
 ///
@@ -766,8 +824,8 @@ pub fn accept_encrypted_link(
 ///   [`HandshakeProgress::Pending`] if the handshake is not yet finished).
 ///
 /// # Errors
-/// Returns [`PaykitError::Transport`] if the handshake processing fails or if
-/// the context is in an invalid state.
+/// - Returns [`PaykitError::Transport`] if the handshake processing fails, if
+///   the context is in an invalid state, or if automatic recovery is exhausted.
 #[instrument(skip(handshake), fields(remote = %handshake.remote_pubkey))]
 pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
     // Check whether the handshake has already finished.
@@ -779,11 +837,60 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
     match handshake.encryptor.handle_handshake().await {
         Ok(pubky_noise::HandshakeResult::Pending) => {
             debug!("handshake step pending (waiting for peer)");
+            handshake.recovery_attempts = 0;
             Ok(HandshakeProgress::Pending(handshake))
         }
         Ok(pubky_noise::HandshakeResult::Terminal) => {
             debug!("handshake terminal, transitioning to transport");
             finish_handshake(handshake)
+        }
+        Err(pubky_noise::PubkyNoiseError::HomeserverWriteError) => {
+            handshake.recovery_attempts += 1;
+
+            if handshake.recovery_attempts > handshake.max_recovery_attempts {
+                return Err(PaykitError::Transport {
+                    context: format!(
+                        "handshake recovery exhausted after {} consecutive attempts",
+                        handshake.max_recovery_attempts,
+                    ),
+                    source: anyhow::anyhow!(
+                        "HomeserverWriteError persisted beyond recovery limit ({})",
+                        handshake.max_recovery_attempts,
+                    ),
+                });
+            }
+
+            warn!(
+                attempts = handshake.recovery_attempts,
+                max = handshake.max_recovery_attempts,
+                "handshake write failed, attempting automatic recovery from snapshot"
+            );
+
+            let snapshot = handshake
+                .encryptor
+                .last_good_snapshot()
+                .expect("snapshot must exist after handle_handshake call")
+                .clone();
+
+            let restored = pubky_noise::PubkyNoiseEncryptor::restore(
+                handshake.config.clone(),
+                snapshot,
+                handshake.remote_pubkey.clone(),
+            )
+            .await
+            .map_err(|err| PaykitError::Transport {
+                context: format!("handshake recovery via restore() failed: {err:?}"),
+                source: anyhow::anyhow!("restore after HomeserverWriteError failed: {err:?}"),
+            })?;
+
+            debug!("handshake recovered successfully, returning Pending");
+            Ok(HandshakeProgress::Pending(EncryptedLinkHandshake {
+                encryptor: restored,
+                config: handshake.config,
+                remote_pubkey: handshake.remote_pubkey,
+                recovery_attempts: handshake.recovery_attempts,
+                max_recovery_attempts: handshake.max_recovery_attempts,
+            }))
         }
         Err(err) => Err(PaykitError::Transport {
             context: format!("handshake step failed: {err:?}"),
