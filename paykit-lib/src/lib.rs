@@ -260,12 +260,161 @@ pub struct SupportedPayments {
 /// when no longer needed.
 ///
 /// The link wraps a [`pubky_noise::PubkyNoiseEncryptor`] in transport mode.
+///
+/// # Session resumption
+///
+/// An established link can be snapshotted via [`snapshot`](Self::snapshot) (or
+/// serialized directly via [`serialize`](Self::serialize)) and later restored
+/// with [`restore_encrypted_link`] or [`restore_encrypted_link_from_config`]
+/// without re-doing the Noise handshake.
+///
+/// # Automatic send retry
+///
+/// [`set_private_payments`] automatically retries failed `send_message` calls
+/// up to [`max_send_retries`](Self::set_max_send_retries) times (default:
+/// [`DEFAULT_MAX_SEND_RETRIES`]). Since transport-phase send failures do not
+/// corrupt the Noise state, retries are safe without snapshot-based recovery.
 pub struct EncryptedLink {
     /// The Noise session manager in transport mode.
     encryptor: pubky_noise::PubkyNoiseEncryptor,
     /// The counterparty's public key.
     recipient: PublicKey,
+    /// Shared Noise configuration retained for snapshot-based session resumption.
+    config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    /// Maximum number of automatic `send_message` retries in
+    /// [`set_private_payments`].
+    max_send_retries: u32,
 }
+
+#[cfg(feature = "pubky")]
+impl EncryptedLink {
+    /// Set the maximum number of automatic `send_message` retries before
+    /// [`set_private_payments`] gives up and returns [`PaykitError::Transport`].
+    ///
+    /// Transport-phase send failures do not corrupt the Noise state, so retries
+    /// are safe without snapshot-based recovery.
+    ///
+    /// Default: [`DEFAULT_MAX_SEND_RETRIES`] (3).
+    pub fn set_max_send_retries(&mut self, max: u32) -> &mut Self {
+        self.max_send_retries = max;
+        self
+    }
+
+    /// Capture the current link state as a serializable snapshot.
+    ///
+    /// The snapshot contains everything needed to restore the session later
+    /// via [`restore_encrypted_link`] or [`restore_encrypted_link_from_config`]
+    /// without re-doing the Noise handshake.
+    ///
+    /// # When to snapshot
+    ///
+    /// Take a snapshot after the link is established and periodically after
+    /// exchanging messages (the snapshot includes nonce counters that must stay
+    /// in sync). Persist the serialized bytes to durable storage so the session
+    /// can be resumed after an app restart.
+    pub fn snapshot(&self) -> EncryptedLinkSnapshot {
+        EncryptedLinkSnapshot {
+            state: self.encryptor.snapshot(),
+            recipient: self.recipient.clone(),
+        }
+    }
+
+    /// Serialize the current link state to bytes for persistence.
+    ///
+    /// Convenience method equivalent to `self.snapshot().serialize()`.
+    pub fn serialize(&self) -> Vec<u8> {
+        self.snapshot().serialize()
+    }
+
+    /// Access the shared Noise configuration for this link.
+    ///
+    /// Useful for passing to [`restore_encrypted_link_from_config`] when
+    /// performing in-process session recovery without an app restart.
+    pub fn config(&self) -> &std::sync::Arc<pubky_noise::PubkyNoiseConfig> {
+        &self.config
+    }
+}
+
+#[cfg(feature = "pubky")]
+/// Serializable snapshot of an established [`EncryptedLink`].
+///
+/// Created by [`EncryptedLink::snapshot`]. Can be serialized to a compact
+/// binary format via [`serialize`](Self::serialize) for durable storage, and
+/// deserialized back via [`deserialize`](Self::deserialize).
+///
+/// Pass to [`restore_encrypted_link`] or [`restore_encrypted_link_from_config`]
+/// to resume the session after an app restart without re-doing the Noise
+/// handshake.
+///
+/// # Wire format
+///
+/// The serialized representation is the 189-byte
+/// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
+/// binary format produced by `pubky-noise`. The remote peer's public key is
+/// embedded in the snapshot (bytes 157–188) and reconstructed automatically
+/// during deserialization.
+pub struct EncryptedLinkSnapshot {
+    /// The underlying pubky-noise session state.
+    state: pubky_noise::serializer::PubkyNoiseSessionState,
+    /// The counterparty's public key (derived from `state.endpoint_pubkey`).
+    recipient: PublicKey,
+}
+
+#[cfg(feature = "pubky")]
+impl std::fmt::Debug for EncryptedLinkSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedLinkSnapshot")
+            .field("recipient", &self.recipient)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "pubky")]
+impl EncryptedLinkSnapshot {
+    /// Serialize to a compact binary format for durable storage.
+    ///
+    /// The output is 189 bytes and can be passed to
+    /// [`deserialize`](Self::deserialize) to reconstruct the snapshot.
+    pub fn serialize(&self) -> Vec<u8> {
+        self.state.serialize()
+    }
+
+    /// Deserialize from bytes previously produced by [`serialize`](Self::serialize).
+    ///
+    /// # Errors
+    /// Returns [`PaykitError::InvalidData`] if the bytes are malformed or
+    /// the embedded public key cannot be reconstructed.
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        let state =
+            pubky_noise::serializer::PubkyNoiseSessionState::deserialize(bytes).map_err(|err| {
+                PaykitError::InvalidData {
+                    context: format!("failed to deserialize encrypted link snapshot: {err:?}"),
+                    source: None,
+                }
+            })?;
+
+        let pkarr_pk = pubky::pkarr::PublicKey::try_from(state.endpoint_pubkey.as_slice())
+            .map_err(|err| PaykitError::InvalidData {
+                context: format!("failed to reconstruct recipient public key from snapshot: {err}"),
+                source: Some(err.into()),
+            })?;
+        let recipient = PublicKey::from(pkarr_pk);
+
+        Ok(Self { state, recipient })
+    }
+
+    /// Access the counterparty's public key embedded in the snapshot.
+    pub fn recipient(&self) -> &PublicKey {
+        &self.recipient
+    }
+}
+
+#[cfg(feature = "pubky")]
+/// Default maximum number of automatic `send_message` retries before
+/// [`set_private_payments`] gives up and returns an error.
+///
+/// Override per-link via [`EncryptedLink::set_max_send_retries`].
+pub const DEFAULT_MAX_SEND_RETRIES: u32 = 3;
 
 #[cfg(feature = "pubky")]
 /// Default maximum number of consecutive automatic recovery attempts before
@@ -446,6 +595,14 @@ where
 /// [`pubky_noise::PubkyNoiseEncryptor::send_message`], and pubky-noise handles
 /// file naming and storage location on the homeserver.
 ///
+/// # Automatic retry
+///
+/// If `send_message` fails, this function automatically retries up to
+/// [`EncryptedLink::set_max_send_retries`] times (default:
+/// [`DEFAULT_MAX_SEND_RETRIES`]). Transport-phase send failures do not
+/// corrupt the Noise state, so retries are safe without snapshot-based
+/// recovery.
+///
 /// # Payload size
 ///
 /// The serialized JSON must fit within a single pubky-noise message
@@ -460,7 +617,8 @@ where
 /// - Returns [`PaykitError::Validation`] if the serialized payload exceeds
 ///   the maximum message size.
 /// - Returns [`PaykitError::InvalidData`] if the map cannot be serialized.
-/// - Returns [`PaykitError::Transport`] if `send_message` fails.
+/// - Returns [`PaykitError::Transport`] if `send_message` fails after all
+///   retry attempts are exhausted.
 #[instrument(skip(link, entries), fields(recipient = %link.recipient, count = entries.len()))]
 pub async fn set_private_payments(
     link: &mut EncryptedLink,
@@ -481,17 +639,32 @@ pub async fn set_private_payments(
         )));
     }
 
-    let success = link.encryptor.send_message(&plaintext).await;
+    let max_attempts = link.max_send_retries + 1; // first try + retries
+    for attempt in 1..=max_attempts {
+        if link.encryptor.send_message(&plaintext).await {
+            debug!("private payments map sent successfully");
+            return Ok(());
+        }
 
-    if !success {
-        return Err(PaykitError::Transport {
-            context: "failed to send private payments via encrypted link".into(),
-            source: anyhow::anyhow!("pubky-noise send_message returned false"),
-        });
+        if attempt < max_attempts {
+            warn!(
+                attempt,
+                max_retries = link.max_send_retries,
+                "send_message failed, retrying"
+            );
+        }
     }
 
-    debug!("private payments map sent successfully");
-    Ok(())
+    Err(PaykitError::Transport {
+        context: format!(
+            "failed to send private payments after {} attempts",
+            max_attempts,
+        ),
+        source: anyhow::anyhow!(
+            "pubky-noise send_message returned false on all {} attempts",
+            max_attempts,
+        ),
+    })
 }
 
 /// Removes a payment endpoint via the injected authenticated client.
@@ -915,6 +1088,8 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
     Ok(HandshakeProgress::Complete(EncryptedLink {
         encryptor: handshake.encryptor,
         recipient: handshake.remote_pubkey,
+        config: handshake.config,
+        max_send_retries: DEFAULT_MAX_SEND_RETRIES,
     }))
 }
 
@@ -929,6 +1104,120 @@ pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
     link.encryptor.close();
     debug!("encrypted link closed successfully");
     Ok(())
+}
+
+#[cfg(feature = "pubky")]
+/// Restores an [`EncryptedLink`] from a previously saved snapshot.
+///
+/// Use this to resume an encrypted session after an app restart without
+/// re-doing the Noise handshake. The restore mechanism replays all handshake
+/// messages from the homeservers through a fresh Noise state built with the
+/// same ephemeral key material, then transitions to transport mode and sets
+/// the nonces/counter from the saved state.
+///
+/// # Parameters
+/// - `session` — authenticated Pubky session for writing messages
+///   (a fresh session after app restart).
+/// - `secret_key` — 32-byte Ed25519 secret key of the local peer (same key
+///   used in the original [`initiate_encrypted_link`] or
+///   [`accept_encrypted_link`] call).
+/// - `remote_pubkey` — public key of the remote peer.
+/// - `outbox_client` — HTTP client for reading from the remote homeserver.
+/// - `snapshot` — the saved snapshot (from [`EncryptedLink::snapshot`] or
+///   [`EncryptedLinkSnapshot::deserialize`]).
+///
+/// # Errors
+/// Returns [`PaykitError::Transport`] if the Noise configuration cannot be
+/// created or if the underlying `restore()` fails (e.g. handshake messages
+/// are no longer available on the homeservers, or the replayed handshake
+/// hash does not match the saved one).
+#[instrument(
+    skip(session, secret_key, outbox_client, snapshot),
+    fields(remote = %remote_pubkey)
+)]
+pub async fn restore_encrypted_link(
+    session: pubky::PubkySession,
+    secret_key: [u8; 32],
+    remote_pubkey: &PublicKey,
+    outbox_client: pubky::Pubky,
+    snapshot: EncryptedLinkSnapshot,
+) -> Result<EncryptedLink> {
+    debug!("restoring encrypted link from snapshot (raw params)");
+
+    let (write_path, read_path) = compute_private_paths(&secret_key, remote_pubkey);
+
+    let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
+        secret_key,
+        0,
+        "XX",
+        session,
+        write_path,
+        read_path,
+        outbox_client,
+    )
+    .map_err(|err| PaykitError::Transport {
+        context: format!("failed to create encryptor config for restore: {err:?}"),
+        source: anyhow::anyhow!("pubky-noise PubkyNoiseConfig::new failed: {err:?}"),
+    })?;
+
+    restore_encrypted_link_inner(config, remote_pubkey, snapshot).await
+}
+
+#[cfg(feature = "pubky")]
+/// Restores an [`EncryptedLink`] from a previously saved snapshot using an
+/// existing Noise configuration.
+///
+/// This is the in-process variant of [`restore_encrypted_link`] — use it when
+/// the original `Arc<PubkyNoiseConfig>` is still available (e.g. the link
+/// needs rebuilding without an app restart). For cross-restart recovery, use
+/// [`restore_encrypted_link`] instead.
+///
+/// # Parameters
+/// - `config` — the shared Noise configuration (must match the original
+///   session's write/read paths and keypair).
+/// - `remote_pubkey` — public key of the remote peer.
+/// - `snapshot` — the saved snapshot.
+///
+/// # Errors
+/// Returns [`PaykitError::Transport`] if the underlying `restore()` fails.
+#[instrument(
+    skip(config, snapshot),
+    fields(remote = %remote_pubkey)
+)]
+pub async fn restore_encrypted_link_from_config(
+    config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    remote_pubkey: &PublicKey,
+    snapshot: EncryptedLinkSnapshot,
+) -> Result<EncryptedLink> {
+    debug!("restoring encrypted link from snapshot (existing config)");
+    restore_encrypted_link_inner(config, remote_pubkey, snapshot).await
+}
+
+/// Shared implementation for both restore variants.
+#[cfg(feature = "pubky")]
+async fn restore_encrypted_link_inner(
+    config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    remote_pubkey: &PublicKey,
+    snapshot: EncryptedLinkSnapshot,
+) -> Result<EncryptedLink> {
+    let encryptor = pubky_noise::PubkyNoiseEncryptor::restore(
+        config.clone(),
+        snapshot.state,
+        remote_pubkey.clone(),
+    )
+    .await
+    .map_err(|err| PaykitError::Transport {
+        context: format!("failed to restore encrypted link: {err:?}"),
+        source: anyhow::anyhow!("pubky-noise restore failed: {err:?}"),
+    })?;
+
+    debug!("encrypted link restored successfully");
+    Ok(EncryptedLink {
+        encryptor,
+        recipient: remote_pubkey.clone(),
+        config,
+        max_send_retries: DEFAULT_MAX_SEND_RETRIES,
+    })
 }
 
 fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
@@ -1677,5 +1966,145 @@ mod tests {
         reader_result.expect("reader task panicked");
 
         // Testnet drops here, cleaning up the ephemeral homeserver.
+    }
+
+    // ── Snapshot / restore tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_encrypted_link_snapshot_serialize_roundtrip() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        // Send a message to advance nonces beyond zero.
+        let mut entries = HashMap::new();
+        entries.insert(
+            MethodId::new("lightning").unwrap(),
+            EndpointData::new("{\"bolt11\":\"ln...\"}"),
+        );
+        set_private_payments(&mut setup.sender_link, &entries)
+            .await
+            .unwrap();
+
+        // Take a snapshot and serialize.
+        let snapshot = setup.sender_link.snapshot();
+        let bytes = snapshot.serialize();
+        assert_eq!(bytes.len(), 189, "snapshot should be 189 bytes");
+
+        // Deserialize and verify the recipient is reconstructed correctly.
+        let restored_snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
+        assert_eq!(
+            restored_snapshot.recipient(),
+            snapshot.recipient(),
+            "recipient public key should survive serialize/deserialize"
+        );
+
+        // Re-serialize and verify byte-level equality.
+        let bytes2 = restored_snapshot.serialize();
+        assert_eq!(
+            bytes, bytes2,
+            "double round-trip should produce identical bytes"
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_link_restore_and_continue() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        // Send a message before snapshotting.
+        let mut entries_v1 = HashMap::new();
+        entries_v1.insert(
+            MethodId::new("lightning").unwrap(),
+            EndpointData::new("{\"bolt11\":\"ln_v1...\"}"),
+        );
+        set_private_payments(&mut setup.sender_link, &entries_v1)
+            .await
+            .unwrap();
+
+        // Consume the message on the receiver side.
+        let received_v1 = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap();
+        assert_eq!(received_v1.entries.len(), 1);
+
+        // Snapshot both sides after the first exchange.
+        let sender_snapshot = setup.sender_link.snapshot();
+        let receiver_snapshot = setup.receiver_link.snapshot();
+
+        // Serialize and deserialize (simulating persistence).
+        let sender_bytes = sender_snapshot.serialize();
+        let receiver_bytes = receiver_snapshot.serialize();
+        let sender_state = EncryptedLinkSnapshot::deserialize(&sender_bytes).unwrap();
+        let receiver_state = EncryptedLinkSnapshot::deserialize(&receiver_bytes).unwrap();
+
+        // Restore both sides using the in-process config variant.
+        let sender_config = setup.sender_link.config().clone();
+        let receiver_config = setup.receiver_link.config().clone();
+        let sender_recipient = sender_state.recipient().clone();
+        let receiver_recipient = receiver_state.recipient().clone();
+
+        let mut restored_sender =
+            restore_encrypted_link_from_config(sender_config, &sender_recipient, sender_state)
+                .await
+                .unwrap();
+        let mut restored_receiver = restore_encrypted_link_from_config(
+            receiver_config,
+            &receiver_recipient,
+            receiver_state,
+        )
+        .await
+        .unwrap();
+
+        // Send a new message from the restored sender.
+        let mut entries_v2 = HashMap::new();
+        entries_v2.insert(
+            MethodId::new("onchain").unwrap(),
+            EndpointData::new("{\"address\":\"bc1_v2...\"}"),
+        );
+        set_private_payments(&mut restored_sender, &entries_v2)
+            .await
+            .unwrap();
+
+        // Receive on the restored receiver.
+        let received_v2 = get_private_payments(&mut restored_receiver).await.unwrap();
+        assert_eq!(received_v2.entries.len(), 1);
+        assert_eq!(
+            received_v2.entries.get(&MethodId::new("onchain").unwrap()),
+            Some(&EndpointData::new("{\"address\":\"bc1_v2...\"}")),
+        );
+
+        // Clean up.
+        close_encrypted_link(restored_sender).await.unwrap();
+        close_encrypted_link(restored_receiver).await.unwrap();
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_link_serialize_convenience() {
+        let setup = PrivateTestSetup::new().await;
+
+        // The convenience method should produce the same bytes as snapshot().serialize().
+        let via_snapshot = setup.sender_link.snapshot().serialize();
+        let via_convenience = setup.sender_link.serialize();
+        assert_eq!(
+            via_snapshot, via_convenience,
+            "serialize() should equal snapshot().serialize()"
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_link_snapshot_deserialize_rejects_garbage() {
+        let result = EncryptedLinkSnapshot::deserialize(&[0u8; 10]);
+        assert!(result.is_err(), "deserializing garbage should fail");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { .. }),
+            "expected InvalidData error, got: {err}"
+        );
     }
 }
