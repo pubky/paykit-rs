@@ -6,27 +6,46 @@ Paykit relies on a **transport** protocol for network *communication* between pe
 
 The default transport protocol in this implementation is [pubky](https://pubky.org/), enabled via the default feature flag `pubky`.
 
-## Auth & Dependency Injection
+## Quick Start
 
-- **Public endpoints** use the generic transport traits (`AuthenticatedTransport` / `UnauthenticatedTransportRead`). Instead of hard-coding `PubkySession`, public APIs accept any type implementing these traits. The crate provides adapters so callers can wrap [`pubky::PubkySession`](https://docs.rs/pubky/0.6.0/pubky/struct.PubkySession.html) or provide mocks for tests.
-- **Private endpoints** bypass the transport traits entirely. They use `pubky-noise`'s `PubkyNoiseEncryptor` for Noise-encrypted messaging, which handles both encryption and homeserver I/O. Private payment functions accept an `EncryptedLink` (established via a Noise handshake) and are gated behind the `pubky` feature.
-- Public reads only require the `UnauthenticatedTransportRead` trait, keeping unauthenticated flows lightweight. Session lifecycle, capability scoping, and key rotation stay outside this crate.
-- The `pubky` feature flag (enabled by default) wires in Pubky adapters under `transport::pubky` and enables the private payment helpers. Disable it if you want to use custom transports for public endpoints only.
+Add `paykit-lib` to your `Cargo.toml`:
 
-## Timeout Handling
-
-The transport traits intentionally do **not** enforce timeouts. Each transport implementation is responsible for configuring appropriate timeout behaviour at its own layer. A slow or unresponsive backend will block the caller indefinitely unless the underlying transport applies a timeout.
-
-For the Pubky adapter the underlying SDK handles this via [`PubkyHttpClientBuilder::request_timeout`](https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout):
-
-```rust
-use std::time::Duration;
-let client = PubkyHttpClient::builder()
-    .request_timeout(Duration::from_secs(10))
-    .build()?;
+```toml
+[dependencies]
+paykit-lib = "0.1.0-rc2"
 ```
 
-Custom transport implementations should apply equivalent safeguards (e.g. per-request deadlines, connect timeouts) before passing the transport to Paykit APIs.
+To use only the generic transport traits without the Pubky adapters:
+
+```toml
+[dependencies]
+paykit-lib = { version = "0.1.0-rc2", default-features = false }
+```
+
+Minimal example — store and retrieve a public payment endpoint:
+
+```rust,ignore
+use paykit_lib::{
+    set_payment_endpoint, get_payment_endpoint, get_payment_list,
+    MethodId, EndpointData,
+};
+
+// Create validated types.
+let method = MethodId::new("lightning")?;
+let data = EndpointData::new("{\"bolt11\":\"lnbc1...\"}");
+
+// Store an endpoint (requires an AuthenticatedTransport).
+set_payment_endpoint(&client, method.clone(), data).await?;
+
+// Read it back (requires an UnauthenticatedTransportRead).
+let endpoint = get_payment_endpoint(&reader, &payee_pubkey, &method).await?;
+
+// List all published endpoints for a payee.
+let payments = get_payment_list(&reader, &payee_pubkey).await?;
+for (method, data) in &payments.entries {
+    println!("{}: {}", method.as_str(), data.as_str());
+}
+```
 
 ## Core Types
 
@@ -36,26 +55,55 @@ Identifier for a payment method specification (e.g. `"lightning"`, `"onchain"`, 
 `MethodId` is validated at construction time to prevent path injection attacks.
 
 ```rust
-// Construction is fallible:
-let method = MethodId::new("lightning")?;
+use paykit_lib::MethodId;
 
-// Read access via as_str(), Display, or AsRef<str>:
-println!("{}", method.as_str());
+// Construction is fallible:
+let method = MethodId::new("lightning").unwrap();
+assert_eq!(method.as_str(), "lightning");
+
+// Path traversal is rejected:
+assert!(MethodId::new("../etc/passwd").is_err());
 ```
 
 **Allowed values:** 1-64 ASCII characters from the set `[a-zA-Z0-9_-.]`. The value must not consist solely of dots (`.` and `..` are rejected as path traversal components). Slashes, null bytes, spaces, and other special characters are rejected.
 
 `MethodId::new()` returns `Err(PaykitError::Validation(...))` for invalid input.
 
+Read access is available via `as_str()`, `Display`, and `AsRef<str>`.
+
 ### `EndpointData`
 
 Serialized payload served by a payment endpoint (UTF-8 text such as JSON, lnurl, etc.).
 
 ```rust
+use paykit_lib::EndpointData;
+
 let data = EndpointData::new("{\"bolt11\":\"ln...\"}");
 let payload: &str = data.as_str();
 let owned: String = data.into_inner();
 ```
+
+### `SupportedPayments`
+
+Collection of payment entries keyed by method identifiers. Returned by `get_payment_list` and `get_private_payments`.
+
+```rust,ignore
+use paykit_lib::SupportedPayments;
+
+let payments: SupportedPayments = get_payment_list(&reader, &payee).await?;
+
+// Access the underlying map:
+for (method, data) in &payments.entries {
+    println!("method={} payload={}", method.as_str(), data.as_str());
+}
+
+// Check if empty:
+if payments.entries.is_empty() {
+    println!("no endpoints published");
+}
+```
+
+The `entries` field is a `HashMap<MethodId, EndpointData>`.
 
 ### `PaykitError`
 
@@ -68,20 +116,118 @@ Domain error enum with the following variants:
 | `InvalidData { context, source }` | Fetched data is corrupt or structurally invalid |
 | `Validation(String)` | Caller-supplied input failed validation (e.g. invalid `MethodId`) |
 
+The `source` field on `Transport` and `InvalidData` is backed by [`anyhow::Error`] so callers can downcast via `anyhow::Error::downcast_ref` when they need the original typed error.
+
+### `Result<T>`
+
+All public APIs return `paykit_lib::Result<T>`, which is an alias for `std::result::Result<T, PaykitError>`.
+
+## Auth & Dependency Injection
+
+- **Public endpoints** use the generic transport traits (`AuthenticatedTransport` / `UnauthenticatedTransportRead`). Instead of hard-coding `PubkySession`, public APIs accept any type implementing these traits. The crate provides adapters so callers can wrap [`pubky::PubkySession`](https://docs.rs/pubky/latest/pubky/struct.PubkySession.html) or provide mocks for tests.
+- **Private endpoints** bypass the transport traits entirely. They use `pubky-noise`'s `PubkyNoiseEncryptor` for Noise-encrypted messaging, which handles both encryption and homeserver I/O. Private payment functions accept an `EncryptedLink` (established via a Noise handshake) and are gated behind the `pubky` feature.
+- Public reads only require the `UnauthenticatedTransportRead` trait, keeping unauthenticated flows lightweight. Session lifecycle, capability scoping, and key rotation stay outside this crate.
+- The `pubky` feature flag (enabled by default) wires in Pubky adapters under `transport::pubky` and enables the private payment helpers. Disable it if you want to use custom transports for public endpoints only.
+
+## Timeout Handling
+
+The transport traits intentionally do **not** enforce timeouts. Each transport implementation is responsible for configuring appropriate timeout behaviour at its own layer. A slow or unresponsive backend will block the caller indefinitely unless the underlying transport applies a timeout.
+
+For the Pubky adapter the underlying SDK handles this via [`PubkyHttpClientBuilder::request_timeout`](https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout):
+
+```rust,ignore
+use std::time::Duration;
+let client = PubkyHttpClient::builder()
+    .request_timeout(Duration::from_secs(10))
+    .build()?;
+```
+
+Custom transport implementations should apply equivalent safeguards (e.g. per-request deadlines, connect timeouts) before passing the transport to Paykit APIs.
+
 ## API Surface
 
 ### Public Payment Endpoints
 
 These functions use the transport traits (`AuthenticatedTransport` / `UnauthenticatedTransportRead`) and work with any backend.
 
-- `set_payment_endpoint(client: impl AuthenticatedTransport, method: MethodId, data: EndpointData) -> Result<()>`  
-  Store or update a payee-owned endpoint using the caller's authenticated client.
-- `remove_payment_endpoint(client: impl AuthenticatedTransport, method: MethodId) -> Result<()>`  
-  Remove previously published endpoint data for a given method.
-- `get_payment_list(reader: impl UnauthenticatedTransportRead, payee: PublicKey) -> Result<SupportedPayments>`  
-  Resolve the supported methods document for a public key. The result is empty when no endpoints are published.
-- `get_payment_endpoint(reader: impl UnauthenticatedTransportRead, payee: PublicKey, method: &MethodId) -> Result<Option<EndpointData>>`  
-  Convenience resolver for a single method. Returns `Ok(None)` when the endpoint is missing or empty.
+#### `set_payment_endpoint`
+
+Store or update a payee-owned endpoint using the caller's authenticated client.
+
+```rust,ignore
+use paykit_lib::{set_payment_endpoint, MethodId, EndpointData, AuthenticatedTransport};
+
+async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
+    let method = MethodId::new("lightning")?;
+    let data = EndpointData::new("{\"bolt11\":\"ln...\"}");
+    set_payment_endpoint(client, method, data).await?;
+    Ok(())
+}
+```
+
+#### `remove_payment_endpoint`
+
+Remove previously published endpoint data for a given method.
+
+```rust,ignore
+use paykit_lib::{remove_payment_endpoint, MethodId, AuthenticatedTransport};
+
+async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
+    let method = MethodId::new("lightning")?;
+    remove_payment_endpoint(client, method).await?;
+    Ok(())
+}
+```
+
+**Note:** Removing a non-existent endpoint returns an error (`PaykitError::NotFound` or `PaykitError::Transport` depending on the transport implementation).
+
+#### `get_payment_list`
+
+Resolve the supported methods document for a public key. The result is empty when no endpoints are published.
+
+```rust,ignore
+use paykit_lib::{get_payment_list, UnauthenticatedTransportRead, PublicKey};
+
+async fn demo(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
+    let payments = get_payment_list(reader, pk).await?;
+    if payments.entries.is_empty() {
+        println!("payee published no endpoints yet");
+    } else {
+        for (method, data) in &payments.entries {
+            println!("method={} payload={}", method.as_str(), data.as_str());
+        }
+    }
+    Ok(())
+}
+```
+
+#### `get_payment_endpoint`
+
+Convenience resolver for a single method. Returns `Ok(None)` when the endpoint is missing or empty.
+
+```rust,ignore
+use paykit_lib::{get_payment_endpoint, MethodId, PublicKey, UnauthenticatedTransportRead};
+
+async fn inspect(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
+    let lightning = MethodId::new("lightning")?;
+    if let Some(endpoint) = get_payment_endpoint(reader, pk, &lightning).await? {
+        println!("lightning endpoint: {}", endpoint.as_str());
+    } else {
+        println!("no lightning endpoint published");
+    }
+    Ok(())
+}
+```
+
+#### Consistency Note
+
+`get_payment_list` first lists available payment method entries and then fetches each one individually. Because the underlying transport does not support atomic reads, a **race condition** exists: between the directory listing and the individual fetches, endpoints may be added, removed, or modified by the payee. The returned `SupportedPayments` is therefore a **best-effort snapshot**.
+
+If a payment execution fails with an error suggesting the endpoint has been consumed or is no longer valid, callers should:
+
+1. Re-fetch the specific endpoint via `get_payment_endpoint`.
+2. Compare the newly retrieved `EndpointData` with the value used in the failed attempt.
+3. If the endpoint data differs, retry the payment with the updated value.
 
 ### Private Payment Endpoints (`pubky` feature)
 
@@ -101,6 +247,55 @@ Private payments are end-to-end encrypted via a Noise protocol handshake managed
   Receives and decrypts the private payments map from the remote peer. Returns an empty map when no messages are available.
 
 Storage paths for private data are derived per-peer-pair using `pubky_noise::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-noise` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private data.
+
+### Handshake Polling Patterns
+
+The caller controls the polling strategy for `advance_handshake`. Two common patterns:
+
+**Fixed interval:**
+
+```rust,ignore
+use std::time::Duration;
+use paykit_lib::{advance_handshake, HandshakeProgress, EncryptedLinkHandshake};
+
+async fn poll_fixed(mut handshake: EncryptedLinkHandshake) -> paykit_lib::Result<paykit_lib::EncryptedLink> {
+    loop {
+        match advance_handshake(handshake).await? {
+            HandshakeProgress::Pending(h) => {
+                handshake = h;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            HandshakeProgress::Complete(link) => return Ok(link),
+        }
+    }
+}
+```
+
+**With timeout:**
+
+```rust,ignore
+use std::time::{Duration, Instant};
+use paykit_lib::{advance_handshake, HandshakeProgress, EncryptedLinkHandshake};
+
+async fn poll_with_timeout(mut handshake: EncryptedLinkHandshake) -> paykit_lib::Result<paykit_lib::EncryptedLink> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if Instant::now() > deadline {
+            return Err(paykit_lib::PaykitError::Transport {
+                context: "handshake timed out".into(),
+                source: anyhow::anyhow!("deadline exceeded"),
+            });
+        }
+        match advance_handshake(handshake).await? {
+            HandshakeProgress::Pending(h) => {
+                handshake = h;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            HandshakeProgress::Complete(link) => return Ok(link),
+        }
+    }
+}
+```
 
 ### Session Resumption (`pubky` feature)
 
@@ -151,18 +346,13 @@ let mut link = restore_encrypted_link(
 // Continue using set_private_payments / get_private_payments
 ```
 
-### Contacts & Profiles
+## Exports (`pubky` feature)
 
-- `get_known_contacts(reader: impl UnauthenticatedTransportRead, owner: &PublicKey) -> Result<Vec<PublicKey>>`  
-  Retrieve all known contacts by listing `/pub/pubky.app/follows/`. Returns an empty vector when none are stored.
-- `get_profile(reader: &PubkyUnauthenticatedTransport, user: &PublicKey) -> Result<Profile>` *(pubky feature)*  
-  Fetch and parse a user's profile from `/pub/pubky.app/profile.json`.
-
-Method/endpoint naming follows the PMIP consensus described in the repository root `README.md`. Each API returns well-typed structures (enums/structs) that mirror the protocol specification so downstream clients can share the same serialization layer.  
 When the `pubky` feature is enabled the crate exports:
 
-- `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) and `PUBKY_FOLLOWS_PATH` (`/pub/pubky.app/follows/`) to standardize path construction.  
+- `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) to standardize path construction.
 - `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the public payment traits above.
+- `Profile` (re-export of `pubky_app_specs::PubkyAppUser`) for user profile data.
 - `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot` for private encrypted payment types.
 - `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `set_private_payments`, `get_private_payments` for private encrypted payment operations.
 - `restore_encrypted_link`, `restore_encrypted_link_from_config` for session resumption after app restart or in-process recovery.

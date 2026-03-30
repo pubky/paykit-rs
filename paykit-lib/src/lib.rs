@@ -1,21 +1,4 @@
-//! Paykit library.
-//!
-//! `paykit-lib` is a stateless Rust SDK that focuses on the transport layer of the
-//! Paykit protocol. It defines ergonomic helper types plus a pair of tiny traits that
-//! callers implement (or wrap) to perform reads and writes against the routing network.
-//! The crate includes first-party adapters for the Pubky SDK behind the default
-//! `pubky` feature while remaining open for custom transports or mocks.
-//!
-//! ## Design goals
-//! - Provide high-level helpers such as [`get_payment_list`] and [`set_payment_endpoint`]
-//!   that work with any type implementing [`UnauthenticatedTransportRead`] or
-//!   [`AuthenticatedTransport`].
-//! - Keep storage/session management outside of the crate so integrators can inject their
-//!   own security model, capability scoping, caching, or telemetry.
-//! - Export the standard Pubky path prefixes (e.g. `/pub/paykit/v0/`) to keep file layout
-//!   consistent across bindings.
-//!
-//! For an architectural overview and example workflows, see `paykit-lib/README.md`.
+#![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
 #[cfg(not(feature = "pubky"))]
