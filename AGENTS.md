@@ -28,10 +28,10 @@
 
 ### Public vs. Private Payload Types
 - **Public** payment methods use `EndpointData` (a UTF-8 `String` wrapper) at the transport trait level. Each method is stored as a separate file at a well-known path. The transport traits (`AuthenticatedTransport`, `UnauthenticatedTransportRead`) handle public payment storage.
-- **Private** payment methods bypass the transport traits entirely. They are handled by `pubky-data`'s `PubkyDataEncryptor`, which manages encryption, file naming, and storage via `send_message`/`receive_message`. The plaintext format is JSON (`{ "method_id": "endpoint_value", ... }`). The `write_path` and `read_path` (asymmetric folder prefixes derived per-peer-pair via `pubky_data::path_derivation::derive_asymmetric_paths`) are set during `initiate_encrypted_link` / `accept_encrypted_link`; pubky-data manages individual file slots within those folders using a counter-based scheme.
-- The helper functions `set_private_payments` and `get_private_payments` in `lib.rs` compose JSON serialization with `PubkyDataEncryptor::send_message`/`receive_message`. The caller is responsible for managing the payments map (adding/removing entries) and passing the complete map to `set_private_payments`.
-- Private payment helper functions are `#[cfg(feature = "pubky")]` and accept concrete Pubky types (not generic over the transport traits) because they depend on `pubky-data` for Noise encryption.
-- The serialized private payments JSON must fit within a single pubky-data message (`PUBKY_DATA_MSG_LEN`, currently 1000 bytes).
+- **Private** payment methods bypass the transport traits entirely. They are handled by `pubky-noise`'s `PubkyNoiseEncryptor`, which manages encryption, file naming, and storage via `send_message`/`receive_message`. The plaintext format is JSON (`{ "method_id": "endpoint_value", ... }`). The `write_path` and `read_path` (asymmetric folder prefixes derived per-peer-pair via `pubky_noise::path_derivation::derive_asymmetric_paths`) are set during `initiate_encrypted_link` / `accept_encrypted_link`; pubky-noise manages individual file slots within those folders using a counter-based scheme.
+- The helper functions `set_private_payments` and `get_private_payments` in `lib.rs` compose JSON serialization with `PubkyNoiseEncryptor::send_message`/`receive_message`. The caller is responsible for managing the payments map (adding/removing entries) and passing the complete map to `set_private_payments`.
+- Private payment helper functions are `#[cfg(feature = "pubky")]` and accept concrete Pubky types (not generic over the transport traits) because they depend on `pubky-noise` for Noise encryption.
+- The serialized private payments JSON must fit within a single pubky-noise message (`PUBKY_NOISE_MSG_LEN`, currently 1000 bytes).
 
 ## Testing Guidelines
 - Rely on the standard Rust test harness; embed minimal reproducible examples in doc comments so `cargo test` exercises them automatically.

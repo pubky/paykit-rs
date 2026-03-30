@@ -31,7 +31,7 @@ pub use pubky::PublicKey;
 pub use pubky_app_specs::PubkyAppUser as Profile;
 
 #[cfg(feature = "pubky")]
-pub use pubky_data;
+pub use pubky_noise;
 
 #[cfg(not(feature = "pubky"))]
 /// Public key placeholder used when the `pubky` feature is disabled.
@@ -259,10 +259,10 @@ pub struct SupportedPayments {
 /// encrypt and decrypt payment data. Must be closed via [`close_encrypted_link`]
 /// when no longer needed.
 ///
-/// The link wraps a [`pubky_data::PubkyDataEncryptor`] in transport mode.
+/// The link wraps a [`pubky_noise::PubkyNoiseEncryptor`] in transport mode.
 pub struct EncryptedLink {
     /// The Noise session manager in transport mode.
-    encryptor: pubky_data::PubkyDataEncryptor,
+    encryptor: pubky_noise::PubkyNoiseEncryptor,
     /// The counterparty's public key.
     recipient: PublicKey,
 }
@@ -279,7 +279,7 @@ pub struct EncryptedLink {
 /// back-off, etc. are all the caller's responsibility.
 pub struct EncryptedLinkHandshake {
     /// The Noise session manager in handshake mode.
-    encryptor: pubky_data::PubkyDataEncryptor,
+    encryptor: pubky_noise::PubkyNoiseEncryptor,
     /// The counterparty's public key (used for homeserver path construction).
     remote_pubkey: PublicKey,
 }
@@ -307,7 +307,7 @@ const PAYKIT_PATH_DOMAIN: &[u8] = b"paykit-path-v0";
 #[cfg(feature = "pubky")]
 /// Computes the write and read path components for private payment storage.
 ///
-/// Uses [`pubky_data::path_derivation::derive_asymmetric_paths`] to derive
+/// Uses [`pubky_noise::path_derivation::derive_asymmetric_paths`] to derive
 /// per-peer-pair paths from a DH shared secret. The derivation formula is:
 ///
 /// ```text
@@ -331,7 +331,7 @@ fn compute_private_paths(
     local_secret_key: &[u8; 32],
     remote_pubkey: &PublicKey,
 ) -> (String, String) {
-    pubky_data::path_derivation::derive_asymmetric_paths(
+    pubky_noise::path_derivation::derive_asymmetric_paths(
         local_secret_key,
         remote_pubkey,
         PAYKIT_PATH_DOMAIN,
@@ -406,13 +406,13 @@ where
 ///
 /// The caller is responsible for managing the map contents (adding/removing
 /// entries). This function serializes the map to JSON, encrypts it using
-/// [`pubky_data::PubkyDataEncryptor::send_message`], and pubky-data handles
+/// [`pubky_noise::PubkyNoiseEncryptor::send_message`], and pubky-noise handles
 /// file naming and storage location on the homeserver.
 ///
 /// # Payload size
 ///
-/// The serialized JSON must fit within a single pubky-data message
-/// (`PUBKY_DATA_MSG_LEN`, currently 1000 bytes). Exceeding this limit
+/// The serialized JSON must fit within a single pubky-noise message
+/// (`PUBKY_NOISE_MSG_LEN`, currently 1000 bytes). Exceeding this limit
 /// returns [`PaykitError::Validation`].
 ///
 /// # Parameters
@@ -436,11 +436,11 @@ pub async fn set_private_payments(
 
     let plaintext = json.into_bytes();
 
-    if plaintext.len() > pubky_data::snow_crypto::PUBKY_DATA_MSG_LEN {
+    if plaintext.len() > pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
         return Err(PaykitError::Validation(format!(
             "private payments payload ({} bytes) exceeds max message size ({} bytes)",
             plaintext.len(),
-            pubky_data::snow_crypto::PUBKY_DATA_MSG_LEN,
+            pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN,
         )));
     }
 
@@ -449,7 +449,7 @@ pub async fn set_private_payments(
     if !success {
         return Err(PaykitError::Transport {
             context: "failed to send private payments via encrypted link".into(),
-            source: anyhow::anyhow!("pubky-data send_message returned false"),
+            source: anyhow::anyhow!("pubky-noise send_message returned false"),
         });
     }
 
@@ -538,7 +538,7 @@ pub async fn get_private_payments(link: &mut EncryptedLink) -> Result<SupportedP
     // Take the last message (latest state of the payments map).
     let raw = &messages[messages.len() - 1];
 
-    // Trim trailing zero-padding added by pubky-data's fixed-size buffers.
+    // Trim trailing zero-padding added by pubky-noise's fixed-size buffers.
     let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     let plaintext = std::str::from_utf8(&raw[..end]).map_err(|err| PaykitError::InvalidData {
         context: format!("private payments plaintext is not valid UTF-8: {err}"),
@@ -624,7 +624,7 @@ pub fn initiate_encrypted_link(
 
     let (write_path, read_path) = compute_private_paths(&sender_secret_key, receiver_pubkey);
 
-    let config = pubky_data::PubkyDataConfig::new_with_paths(
+    let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         sender_secret_key,
         0,
         "XX",
@@ -635,10 +635,10 @@ pub fn initiate_encrypted_link(
     )
     .map_err(|err| PaykitError::Transport {
         context: format!("failed to create encryptor config: {err:?}"),
-        source: anyhow::anyhow!("pubky-data PubkyDataConfig::new failed: {err:?}"),
+        source: anyhow::anyhow!("pubky-noise PubkyNoiseConfig::new failed: {err:?}"),
     })?;
 
-    let encryptor = pubky_data::PubkyDataEncryptor::new(
+    let encryptor = pubky_noise::PubkyNoiseEncryptor::new(
         config,
         sender_secret_key,
         true,
@@ -646,7 +646,7 @@ pub fn initiate_encrypted_link(
     )
     .map_err(|err| PaykitError::Transport {
         context: format!("failed to initialize encryptor: {err:?}"),
-        source: anyhow::anyhow!("pubky-data PubkyDataEncryptor::new failed: {err:?}"),
+        source: anyhow::anyhow!("pubky-noise PubkyNoiseEncryptor::new failed: {err:?}"),
     })?;
 
     debug!("handshake context initialized (initiator)");
@@ -688,7 +688,7 @@ pub fn accept_encrypted_link(
 
     let (write_path, read_path) = compute_private_paths(&receiver_secret_key, sender_pubkey);
 
-    let config = pubky_data::PubkyDataConfig::new_with_paths(
+    let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         receiver_secret_key,
         0,
         "XX",
@@ -699,10 +699,10 @@ pub fn accept_encrypted_link(
     )
     .map_err(|err| PaykitError::Transport {
         context: format!("failed to create encryptor config: {err:?}"),
-        source: anyhow::anyhow!("pubky-data PubkyDataConfig::new failed: {err:?}"),
+        source: anyhow::anyhow!("pubky-noise PubkyNoiseConfig::new failed: {err:?}"),
     })?;
 
-    let encryptor = pubky_data::PubkyDataEncryptor::new(
+    let encryptor = pubky_noise::PubkyNoiseEncryptor::new(
         config,
         receiver_secret_key,
         false,
@@ -710,7 +710,7 @@ pub fn accept_encrypted_link(
     )
     .map_err(|err| PaykitError::Transport {
         context: format!("failed to initialize encryptor: {err:?}"),
-        source: anyhow::anyhow!("pubky-data PubkyDataEncryptor::new failed: {err:?}"),
+        source: anyhow::anyhow!("pubky-noise PubkyNoiseEncryptor::new failed: {err:?}"),
     })?;
 
     debug!("handshake context initialized (responder)");
@@ -777,17 +777,17 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
 
     // Process the next handshake step.
     match handshake.encryptor.handle_handshake().await {
-        Ok(pubky_data::HandshakeResult::Pending) => {
+        Ok(pubky_noise::HandshakeResult::Pending) => {
             debug!("handshake step pending (waiting for peer)");
             Ok(HandshakeProgress::Pending(handshake))
         }
-        Ok(pubky_data::HandshakeResult::Terminal) => {
+        Ok(pubky_noise::HandshakeResult::Terminal) => {
             debug!("handshake terminal, transitioning to transport");
             finish_handshake(handshake)
         }
         Err(err) => Err(PaykitError::Transport {
             context: format!("handshake step failed: {err:?}"),
-            source: anyhow::anyhow!("pubky-data handle_handshake failed: {err:?}"),
+            source: anyhow::anyhow!("pubky-noise handle_handshake failed: {err:?}"),
         }),
     }
 }
@@ -801,7 +801,7 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
             .transition_transport()
             .map_err(|err| PaykitError::Transport {
                 context: format!("failed to transition to transport mode: {err:?}"),
-                source: anyhow::anyhow!("pubky-data transition_transport failed: {err:?}"),
+                source: anyhow::anyhow!("pubky-noise transition_transport failed: {err:?}"),
             })?;
 
     debug!("encrypted link established");
@@ -1380,7 +1380,7 @@ mod tests {
             .await
             .unwrap();
 
-        // pubky-data's receive_message reads one slot per call (counter-based).
+        // pubky-noise's receive_message reads one slot per call (counter-based).
         // The first call consumes v1 (slot N), the second reads v2 (slot N+1).
         let _v1 = get_private_payments(&mut setup.receiver_link)
             .await
@@ -1404,7 +1404,7 @@ mod tests {
     async fn private_payments_rejects_oversized_payload() {
         let mut setup = PrivateTestSetup::new().await;
 
-        // Build a map whose serialized JSON exceeds PUBKY_DATA_MSG_LEN (1000 bytes).
+        // Build a map whose serialized JSON exceeds PUBKY_NOISE_MSG_LEN (1000 bytes).
         let method = MethodId::new("lightning").unwrap();
         let oversized_value = "x".repeat(1000);
         let mut entries = HashMap::new();

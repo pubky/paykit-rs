@@ -25,14 +25,14 @@
 //!
 //! ## Private payment methods
 //!
-//! Private payment methods are handled entirely by [`pubky-data`]'s encrypted
-//! messaging layer via `PubkyDataEncryptor::send_message` and `receive_message`.
+//! Private payment methods are handled entirely by [`pubky-noise`]'s encrypted
+//! messaging layer via `PubkyNoiseEncryptor::send_message` and `receive_message`.
 //! This layer manages file naming, storage locations, and end-to-end encryption
 //! independently. **The transport traits have no involvement with private
 //! payments.**
 //!
 //! Higher-level helper functions in [`crate`] (e.g.
-//! [`crate::set_private_payments`]) compose `pubky-data` encryption
+//! [`crate::set_private_payments`]) compose `pubky-noise` encryption
 //! directly with storage operations, bypassing the transport traits entirely.
 //! This keeps the transport traits focused on public, unencrypted storage
 //! operations.

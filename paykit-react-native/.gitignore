@@ -1,0 +1,19 @@
+node_modules/
+lib/
+
+# iOS build artifacts
+ios/build/
+ios/Paykit.xcframework/
+ios/PaykitUniFFI.swift
+ios/paykitFFI.h
+ios/module.modulemap
+
+# Android build artifacts
+android/build/
+android/src/main/jniLibs/
+android/src/main/java/uniffi/
+
+# IDE
+.idea/
+*.xcworkspace
+*.xcuserdata
