@@ -239,20 +239,29 @@ If a payment execution fails with an error suggesting the endpoint has been cons
 
 Private payments are end-to-end encrypted via a Noise protocol handshake managed by `pubky-noise`. They bypass the transport traits entirely — `PubkyNoiseEncryptor` handles encryption, file naming, and homeserver storage via `send_message`/`receive_message`.
 
+Storage paths for private data are derived per-peer-pair using `pubky_noise::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-noise` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private data.
+
+#### Handshake Initiation
 - `initiate_encrypted_link(session, sender_secret_key, receiver_pubkey, outbox_client) -> Result<EncryptedLinkHandshake>`  
   Initializes a Noise XX handshake as the **initiator**. Returns a handshake handle to be driven forward with `advance_handshake`.
 - `accept_encrypted_link(session, receiver_secret_key, sender_pubkey, outbox_client) -> Result<EncryptedLinkHandshake>`  
   Initializes a Noise XX handshake as the **responder**. Returns a handshake handle to be driven forward with `advance_handshake`.
+
+**NOTE**: Due to nature of noise it is important that one of the peers is "initiator" and another is "responder". Sometimes it is impossible to determine who is who based on user flow. One option is to compare counterparty key to own key let initiator be the one with lexicographically bigger public key.
+
+#### Handshake advancing
 - `advance_handshake(handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress>`  
   Advances the handshake by one step. Returns `HandshakeProgress::Pending(handle)` when waiting for the peer, or `HandshakeProgress::Complete(EncryptedLink)` when finished. Polling-safe — the caller controls retry timing and timeouts. If a homeserver write fails during the handshake (`HomeserverWriteError`), the function automatically recovers from a pre-mutation snapshot and returns `Pending` so the caller's polling loop retries transparently. The maximum number of consecutive recovery attempts is configurable via `EncryptedLinkHandshake::set_max_recovery_attempts` (default: `DEFAULT_MAX_RECOVERY_ATTEMPTS`, 3). The counter resets to zero after every successful step.
-- `close_encrypted_link(link: EncryptedLink) -> Result<()>`  
-  Closes the Noise session and releases resources.
+
+#### Payment endpoint exchange
 - `set_private_payments(link: &mut EncryptedLink, entries: &HashMap<MethodId, EndpointData>) -> Result<()>`  
   Serializes the complete payments map to JSON, encrypts it, and sends it via the encrypted link. The caller is responsible for managing the map (adding/removing entries) and passing the full map each time. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient `send_message` failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase send failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery.
 - `get_private_payments(link: &mut EncryptedLink) -> Result<SupportedPayments>`  
   Receives and decrypts the private payments map from the remote peer. Returns an empty map when no messages are available.
 
-Storage paths for private data are derived per-peer-pair using `pubky_noise::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-noise` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private data.
+#### Termination
+- `close_encrypted_link(link: EncryptedLink) -> Result<()>`  
+  Closes the Noise session and releases resources.
 
 ### Handshake Polling Patterns
 
