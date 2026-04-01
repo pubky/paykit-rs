@@ -8,18 +8,13 @@ The default transport protocol in this implementation is [pubky](https://pubky.o
 
 ## Quick Start
 
-Add `paykit-lib` to your `Cargo.toml`:
-
-```toml
-[dependencies]
-paykit-lib = "0.1.0-rc2"
-```
+Add `paykit-lib` to your `Cargo.toml`.
 
 To use only the generic transport traits without the Pubky adapters:
 
 ```toml
 [dependencies]
-paykit-lib = { version = "0.1.0-rc2", default-features = false }
+paykit-lib = { version = "x.x.x", default-features = false }
 ```
 
 Minimal example — store and retrieve a public payment endpoint:
@@ -31,8 +26,8 @@ use paykit_lib::{
 };
 
 // Create validated types.
-let method = MethodId::new("lightning")?;
-let data = EndpointData::new("{\"bolt11\":\"lnbc1...\"}");
+let method = MethodId::new("bold11")?;
+let data = EndpointData::new("lnbc1...");
 
 // Store an endpoint (requires an AuthenticatedTransport).
 set_payment_endpoint(&client, method.clone(), data).await?;
@@ -51,15 +46,15 @@ for (method, data) in &payments.entries {
 
 ### `MethodId`
 
-Identifier for a payment method specification (e.g. `"lightning"`, `"onchain"`, `"bolt11"`).
+Identifier for a payment method specification (e.g. `"onchain"`, `"bolt11"` basically anything parties agree on).
 `MethodId` is validated at construction time to prevent path injection attacks.
 
 ```rust
 use paykit_lib::MethodId;
 
 // Construction is fallible:
-let method = MethodId::new("lightning").unwrap();
-assert_eq!(method.as_str(), "lightning");
+let method = MethodId::new("bolt11").unwrap();
+assert_eq!(method.as_str(), "bolt11");
 
 // Path traversal is rejected:
 assert!(MethodId::new("../etc/passwd").is_err());
@@ -78,7 +73,7 @@ Serialized payload served by a payment endpoint (UTF-8 text such as JSON, lnurl,
 ```rust
 use paykit_lib::EndpointData;
 
-let data = EndpointData::new("{\"bolt11\":\"ln...\"}");
+let data = EndpointData::new("ln...");
 let payload: &str = data.as_str();
 let owned: String = data.into_inner();
 ```
@@ -158,9 +153,20 @@ Store or update a payee-owned endpoint using the caller's authenticated client.
 use paykit_lib::{set_payment_endpoint, MethodId, EndpointData, AuthenticatedTransport};
 
 async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
-    let method = MethodId::new("lightning")?;
-    let data = EndpointData::new("{\"bolt11\":\"ln...\"}");
+    // NOTE: parties need to agree on method ids in order to understand each other
+
+    let method = MethodId::new("bolt11")?;
+    let data = EndpointData::new("ln...");
     set_payment_endpoint(client, method, data).await?;
+
+    let method = MethodId::new("p2wpkh")?;
+    let data = EndpointData::new("bc1...");
+    set_payment_endpoint(client, method, data).await?;
+    // or 
+    let method = MethodId::new("onchain")?;
+    let data = EndpointData::new("bc1...");
+    set_payment_endpoint(client, method, data).await?;
+
     Ok(())
 }
 ```
@@ -173,7 +179,7 @@ Remove previously published endpoint data for a given method.
 use paykit_lib::{remove_payment_endpoint, MethodId, AuthenticatedTransport};
 
 async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
-    let method = MethodId::new("lightning")?;
+    let method = MethodId::new("bolt11")?;
     remove_payment_endpoint(client, method).await?;
     Ok(())
 }
@@ -209,11 +215,11 @@ Convenience resolver for a single method. Returns `Ok(None)` when the endpoint i
 use paykit_lib::{get_payment_endpoint, MethodId, PublicKey, UnauthenticatedTransportRead};
 
 async fn inspect(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
-    let lightning = MethodId::new("lightning")?;
-    if let Some(endpoint) = get_payment_endpoint(reader, pk, &lightning).await? {
-        println!("lightning endpoint: {}", endpoint.as_str());
+    let bolt11 = MethodId::new("bolt11")?;
+    if let Some(endpoint) = get_payment_endpoint(reader, pk, &bolt11).await? {
+        println!("bolt11 endpoint: {}", endpoint.as_str());
     } else {
-        println!("no lightning endpoint published");
+        println!("no bolt11 endpoint published");
     }
     Ok(())
 }
