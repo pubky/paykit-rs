@@ -26,7 +26,7 @@ use paykit_lib::{
 };
 
 // Create validated types.
-let method = MethodId::new("bold11")?;
+let method = MethodId::new("bolt11")?;
 let data = EndpointData::new("lnbc1...");
 
 // Store an endpoint (requires an AuthenticatedTransport).
