@@ -1032,8 +1032,13 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
             let snapshot = handshake
                 .encryptor
                 .last_good_snapshot()
-                .expect("snapshot must exist after handle_handshake call")
-                .clone();
+                .cloned()
+                .ok_or_else(|| PaykitError::Transport {
+                    context: "handshake recovery failed: missing last-good snapshot".into(),
+                    source: anyhow::anyhow!(
+                        "pubky-noise returned HomeserverWriteError but no recovery snapshot"
+                    ),
+                })?;
 
             let restored = pubky_noise::PubkyNoiseEncryptor::restore(
                 handshake.config.clone(),
@@ -1116,11 +1121,15 @@ pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
 /// - `snapshot` — the saved snapshot (from [`EncryptedLink::snapshot`] or
 ///   [`EncryptedLinkSnapshot::deserialize`]).
 ///
+/// The `remote_pubkey` must match `snapshot.recipient()`. A mismatch indicates
+/// inconsistent caller input and is rejected.
+///
 /// # Errors
 /// Returns [`PaykitError::Transport`] if the Noise configuration cannot be
 /// created or if the underlying `restore()` fails (e.g. handshake messages
 /// are no longer available on the homeservers, or the replayed handshake
-/// hash does not match the saved one).
+/// hash does not match the saved one). Returns [`PaykitError::Validation`]
+/// when `remote_pubkey` does not match the recipient embedded in `snapshot`.
 #[instrument(
     skip(session, secret_key, outbox_client, snapshot),
     fields(remote = %remote_pubkey)
@@ -1168,8 +1177,13 @@ pub async fn restore_encrypted_link(
 /// - `remote_pubkey` — public key of the remote peer.
 /// - `snapshot` — the saved snapshot.
 ///
+/// The `remote_pubkey` must match `snapshot.recipient()`. A mismatch indicates
+/// inconsistent caller input and is rejected.
+///
 /// # Errors
 /// Returns [`PaykitError::Transport`] if the underlying `restore()` fails.
+/// Returns [`PaykitError::Validation`] when `remote_pubkey` does not match the
+/// recipient embedded in `snapshot`.
 #[instrument(
     skip(config, snapshot),
     fields(remote = %remote_pubkey)
@@ -1190,6 +1204,14 @@ async fn restore_encrypted_link_inner(
     remote_pubkey: &PublicKey,
     snapshot: EncryptedLinkSnapshot,
 ) -> Result<EncryptedLink> {
+    if snapshot.recipient() != remote_pubkey {
+        return Err(PaykitError::Validation(format!(
+            "remote_pubkey does not match snapshot recipient (remote={}, snapshot={})",
+            remote_pubkey,
+            snapshot.recipient(),
+        )));
+    }
+
     let encryptor = pubky_noise::PubkyNoiseEncryptor::restore(
         config.clone(),
         snapshot.state,
@@ -2073,6 +2095,31 @@ mod tests {
         // Clean up.
         close_encrypted_link(restored_sender).await.unwrap();
         close_encrypted_link(restored_receiver).await.unwrap();
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_link_restore_rejects_mismatched_remote_pubkey() {
+        let setup = PrivateTestSetup::new().await;
+
+        let snapshot = setup.sender_link.snapshot();
+        let sender_config = setup.sender_link.config().clone();
+        let wrong_remote = setup.sender_session.info().public_key().clone();
+
+        let result =
+            restore_encrypted_link_from_config(sender_config, &wrong_remote, snapshot).await;
+        let err = match result {
+            Ok(_) => panic!("restore should reject mismatched remote pubkey"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("does not match snapshot recipient")),
+            "expected Validation mismatch error, got: {err}"
+        );
+
+        close_encrypted_link(setup.sender_link).await.unwrap();
+        close_encrypted_link(setup.receiver_link).await.unwrap();
         setup.sender_session.signout().await.unwrap();
         setup.receiver_session.signout().await.unwrap();
     }
