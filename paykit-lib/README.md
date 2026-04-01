@@ -60,7 +60,7 @@ assert_eq!(method.as_str(), "bolt11");
 assert!(MethodId::new("../etc/passwd").is_err());
 ```
 
-**Allowed values:** 1-64 ASCII characters from the set `[a-zA-Z0-9_-.]`. The value must not consist solely of dots (`.` and `..` are rejected as path traversal components). Slashes, null bytes, spaces, and other special characters are rejected.
+**Allowed values:** 1-64 ASCII characters from the set `[a-zA-Z0-9_-.]`. The value must not consist solely of dots (`.` and `..` are rejected as path traversal components), and must not be the reserved identifier `private` (used by private payment storage). Slashes, null bytes, spaces, and other special characters are rejected.
 
 `MethodId::new()` returns `Err(PaykitError::Validation(...))` for invalid input.
 

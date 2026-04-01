@@ -7,6 +7,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Changed
+- `MethodId::new("private")` is now rejected with `PaykitError::Validation` because
+  `private` is reserved for private-payment storage paths.
+
 ## [0.1.0-rc2] - 2026-03-10
 
 ### Removed (BREAKING)

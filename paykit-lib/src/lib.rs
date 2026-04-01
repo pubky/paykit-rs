@@ -117,6 +117,7 @@ pub enum PaykitError {
 /// # Limits
 /// - Must not be empty.
 /// - Must not exceed 64 characters.
+/// - Must not be the reserved value `"private"`.
 ///
 /// # Examples
 /// ```
@@ -132,12 +133,15 @@ pub struct MethodId(String);
 
 /// Maximum length (in bytes) of a [`MethodId`] value.
 const METHOD_ID_MAX_LEN: usize = 64;
+/// Reserved [`MethodId`] value used by private-payment storage.
+const METHOD_ID_RESERVED_PRIVATE: &str = "private";
 
 impl MethodId {
     /// Create a new `MethodId` after validating the identifier.
     ///
     /// Returns `Err(PaykitError::Validation)` if the value is empty, too long,
-    /// contains forbidden characters, or resembles a path-traversal component.
+    /// contains forbidden characters, resembles a path-traversal component,
+    /// or collides with a reserved identifier.
     pub fn new(id: impl Into<String>) -> Result<Self> {
         let id = id.into();
 
@@ -149,6 +153,12 @@ impl MethodId {
             return Err(PaykitError::Validation(format!(
                 "MethodId must not exceed {METHOD_ID_MAX_LEN} characters, got {}",
                 id.chars().count()
+            )));
+        }
+
+        if id == METHOD_ID_RESERVED_PRIVATE {
+            return Err(PaykitError::Validation(format!(
+                "MethodId '{METHOD_ID_RESERVED_PRIVATE}' is reserved for private payments"
             )));
         }
 
@@ -1345,6 +1355,12 @@ mod validation_tests {
     #[test]
     fn test_method_id_reject_triple_dots() {
         assert!(MethodId::new("...").is_err());
+    }
+
+    #[test]
+    fn test_method_id_reject_reserved_private() {
+        let err = MethodId::new("private").unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("reserved")));
     }
 
     // ── EndpointData: basic accessors ───────────────────────────────────
