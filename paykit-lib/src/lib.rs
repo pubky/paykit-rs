@@ -551,6 +551,11 @@ fn serialize_private_payments_json(entries: &HashMap<MethodId, EndpointData>) ->
     })
 }
 
+#[cfg(feature = "pubky")]
+fn send_attempts_from_retries(max_send_retries: u32) -> u32 {
+    max_send_retries.saturating_add(1)
+}
+
 /// Stores or updates a payment endpoint via the injected authenticated client.
 ///
 /// # Examples
@@ -629,7 +634,7 @@ pub async fn set_private_payments(
         )));
     }
 
-    let max_attempts = link.max_send_retries + 1; // first try + retries
+    let max_attempts = send_attempts_from_retries(link.max_send_retries); // first try + retries
     for attempt in 1..=max_attempts {
         if link.encryptor.send_message(&plaintext).await {
             debug!("private payments map sent successfully");
@@ -1448,6 +1453,13 @@ mod tests {
                 public_key: pair.public_key(),
             }
         }
+    }
+
+    #[test]
+    fn test_send_attempts_from_retries_bounds() {
+        assert_eq!(send_attempts_from_retries(0), 1);
+        assert_eq!(send_attempts_from_retries(3), 4);
+        assert_eq!(send_attempts_from_retries(u32::MAX), u32::MAX);
     }
 
     #[tokio::test]
