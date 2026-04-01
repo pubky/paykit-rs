@@ -3235,7 +3235,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "pubky",
- "pubky-app-specs",
  "pubky-noise",
  "pubky-testnet",
  "serde_json",
@@ -3709,24 +3708,6 @@ dependencies = [
  "url",
  "wasm-bindgen-futures",
  "web-time",
-]
-
-[[package]]
-name = "pubky-app-specs"
-version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1a959e3635b64772f48812728c27172a2269117f16741c5ef49378369b3db60"
-dependencies = [
- "base32",
- "blake3",
- "js-sys",
- "mime",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "url",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
@@ -4661,17 +4642,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde-wasm-bindgen"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
-dependencies = [
- "js-sys",
- "serde",
- "wasm-bindgen",
 ]
 
 [[package]]

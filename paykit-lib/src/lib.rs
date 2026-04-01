@@ -11,9 +11,6 @@ use tracing::{debug, instrument, warn};
 pub use pubky::PublicKey;
 
 #[cfg(feature = "pubky")]
-pub use pubky_app_specs::PubkyAppUser as Profile;
-
-#[cfg(feature = "pubky")]
 pub use pubky_noise;
 
 #[cfg(not(feature = "pubky"))]

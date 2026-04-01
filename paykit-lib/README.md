@@ -367,7 +367,6 @@ When the `pubky` feature is enabled the crate exports:
 
 - `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) to standardize path construction.
 - `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the public payment traits above.
-- `Profile` (re-export of `pubky_app_specs::PubkyAppUser`) for user profile data.
 - `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot` for private encrypted payment types.
 - `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `set_private_payments`, `get_private_payments` for private encrypted payment operations.
 - `restore_encrypted_link`, `restore_encrypted_link_from_config` for session resumption after app restart or in-process recovery.
