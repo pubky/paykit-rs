@@ -351,6 +351,23 @@ pub struct EncryptedLinkSnapshot {
 }
 
 #[cfg(feature = "pubky")]
+fn recipient_from_snapshot_state(
+    state: &pubky_noise::serializer::PubkyNoiseSessionState,
+    snapshot_kind: &'static str,
+) -> Result<PublicKey> {
+    let pkarr_pk =
+        pubky::pkarr::PublicKey::try_from(state.endpoint_pubkey.as_slice()).map_err(|err| {
+            PaykitError::InvalidData {
+                context: format!(
+                    "failed to reconstruct recipient public key from {snapshot_kind}: {err}"
+                ),
+                source: Some(err.into()),
+            }
+        })?;
+    Ok(PublicKey::from(pkarr_pk))
+}
+
+#[cfg(feature = "pubky")]
 impl std::fmt::Debug for EncryptedLinkSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptedLinkSnapshot")
@@ -383,12 +400,78 @@ impl EncryptedLinkSnapshot {
                 }
             })?;
 
-        let pkarr_pk = pubky::pkarr::PublicKey::try_from(state.endpoint_pubkey.as_slice())
-            .map_err(|err| PaykitError::InvalidData {
-                context: format!("failed to reconstruct recipient public key from snapshot: {err}"),
-                source: Some(err.into()),
+        let recipient = recipient_from_snapshot_state(&state, "encrypted link snapshot")?;
+
+        Ok(Self { state, recipient })
+    }
+
+    /// Access the counterparty's public key embedded in the snapshot.
+    pub fn recipient(&self) -> &PublicKey {
+        &self.recipient
+    }
+}
+
+#[cfg(feature = "pubky")]
+/// Serializable snapshot of an in-progress [`EncryptedLinkHandshake`].
+///
+/// Created by [`EncryptedLinkHandshake::snapshot`]. Can be serialized to a
+/// compact binary format via [`serialize`](Self::serialize) for durable
+/// storage, and deserialized back via [`deserialize`](Self::deserialize).
+///
+/// Pass to [`restore_encrypted_link_handshake`] or
+/// [`restore_encrypted_link_handshake_from_config`] to resume the handshake
+/// after an app restart without starting over.
+///
+/// # Wire format
+///
+/// The serialized representation is the 189-byte
+/// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
+/// binary format produced by `pubky-noise`. The remote peer's public key is
+/// embedded in the snapshot (bytes 157-188) and reconstructed automatically
+/// during deserialization.
+pub struct EncryptedLinkHandshakeSnapshot {
+    /// The underlying pubky-noise session state.
+    state: pubky_noise::serializer::PubkyNoiseSessionState,
+    /// The counterparty's public key (derived from `state.endpoint_pubkey`).
+    recipient: PublicKey,
+}
+
+#[cfg(feature = "pubky")]
+impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedLinkHandshakeSnapshot")
+            .field("recipient", &self.recipient)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "pubky")]
+impl EncryptedLinkHandshakeSnapshot {
+    /// Serialize to a compact binary format for durable storage.
+    ///
+    /// The output is 189 bytes and can be passed to
+    /// [`deserialize`](Self::deserialize) to reconstruct the snapshot.
+    pub fn serialize(&self) -> Vec<u8> {
+        self.state.serialize()
+    }
+
+    /// Deserialize from bytes previously produced by [`serialize`](Self::serialize).
+    ///
+    /// # Errors
+    /// Returns [`PaykitError::InvalidData`] if the bytes are malformed or
+    /// the embedded public key cannot be reconstructed.
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        let state =
+            pubky_noise::serializer::PubkyNoiseSessionState::deserialize(bytes).map_err(|err| {
+                PaykitError::InvalidData {
+                    context: format!(
+                        "failed to deserialize encrypted link handshake snapshot: {err:?}"
+                    ),
+                    source: None,
+                }
             })?;
-        let recipient = PublicKey::from(pkarr_pk);
+
+        let recipient = recipient_from_snapshot_state(&state, "encrypted link handshake snapshot")?;
 
         Ok(Self { state, recipient })
     }
@@ -433,6 +516,17 @@ pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 /// consecutive recovery attempts is configurable via
 /// [`set_max_recovery_attempts`](Self::set_max_recovery_attempts) (default:
 /// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`]).
+///
+/// # Session resumption
+///
+/// An in-progress handshake can be snapshotted via [`snapshot`](Self::snapshot)
+/// (or serialized directly via [`serialize`](Self::serialize)) and later
+/// restored with [`restore_encrypted_link_handshake`] or
+/// [`restore_encrypted_link_handshake_from_config`].
+///
+/// Restored handshakes always reset recovery tuning to defaults:
+/// `recovery_attempts` starts at `0` and `max_recovery_attempts` is set to
+/// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`].
 pub struct EncryptedLinkHandshake {
     /// The Noise session manager in handshake mode.
     encryptor: pubky_noise::PubkyNoiseEncryptor,
@@ -457,6 +551,33 @@ impl EncryptedLinkHandshake {
     pub fn set_max_recovery_attempts(&mut self, max: u32) -> &mut Self {
         self.max_recovery_attempts = max;
         self
+    }
+
+    /// Capture the current handshake state as a serializable snapshot.
+    ///
+    /// The snapshot contains everything needed to restore and continue the
+    /// handshake later via [`restore_encrypted_link_handshake`] or
+    /// [`restore_encrypted_link_handshake_from_config`].
+    pub fn snapshot(&self) -> EncryptedLinkHandshakeSnapshot {
+        EncryptedLinkHandshakeSnapshot {
+            state: self.encryptor.snapshot(),
+            recipient: self.remote_pubkey.clone(),
+        }
+    }
+
+    /// Serialize the current handshake state to bytes for persistence.
+    ///
+    /// Convenience method equivalent to `self.snapshot().serialize()`.
+    pub fn serialize(&self) -> Vec<u8> {
+        self.snapshot().serialize()
+    }
+
+    /// Access the shared Noise configuration for this handshake.
+    ///
+    /// Useful for passing to [`restore_encrypted_link_handshake_from_config`]
+    /// when performing in-process recovery without an app restart.
+    pub fn config(&self) -> &std::sync::Arc<pubky_noise::PubkyNoiseConfig> {
+        &self.config
     }
 }
 
@@ -1094,6 +1215,157 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
 }
 
 #[cfg(feature = "pubky")]
+/// Restores an [`EncryptedLinkHandshake`] from a previously saved snapshot.
+///
+/// Use this to resume an in-progress handshake after an app restart. A fresh
+/// [`pubky_noise::PubkyNoiseConfig`] is built from the supplied session and key
+/// material, then replay restore reconstructs the handshake state from the
+/// persisted snapshot and homeserver data.
+///
+/// # Parameters
+/// - `session` — authenticated Pubky session for writing handshake messages
+///   (a fresh session after app restart).
+/// - `secret_key` — 32-byte Ed25519 secret key of the local peer (same key
+///   used in the original [`initiate_encrypted_link`] or
+///   [`accept_encrypted_link`] call).
+/// - `remote_pubkey` — public key of the remote peer.
+/// - `outbox_client` — HTTP client for reading from the remote homeserver.
+/// - `snapshot` — saved in-progress handshake snapshot (from
+///   [`EncryptedLinkHandshake::snapshot`] or
+///   [`EncryptedLinkHandshakeSnapshot::deserialize`]).
+///
+/// The `remote_pubkey` must match `snapshot.recipient()`. A mismatch indicates
+/// inconsistent caller input and is rejected.
+///
+/// # Restore behavior
+///
+/// Restored handshakes always reset recovery tuning to defaults:
+/// - `recovery_attempts = 0`
+/// - `max_recovery_attempts = DEFAULT_MAX_RECOVERY_ATTEMPTS`
+///
+/// # Errors
+/// Returns [`PaykitError::Transport`] if the Noise configuration cannot be
+/// created or if the underlying `restore()` fails. Returns
+/// [`PaykitError::Validation`] when `remote_pubkey` does not match the
+/// recipient embedded in `snapshot`, or when the snapshot is not in handshake
+/// phase.
+#[instrument(
+    skip(session, secret_key, outbox_client, snapshot),
+    fields(remote = %remote_pubkey)
+)]
+pub async fn restore_encrypted_link_handshake(
+    session: pubky::PubkySession,
+    secret_key: [u8; 32],
+    remote_pubkey: &PublicKey,
+    outbox_client: pubky::Pubky,
+    snapshot: EncryptedLinkHandshakeSnapshot,
+) -> Result<EncryptedLinkHandshake> {
+    debug!("restoring encrypted link handshake from snapshot (raw params)");
+
+    let (write_path, read_path) = compute_private_paths(&secret_key, remote_pubkey);
+
+    let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
+        secret_key,
+        0,
+        "XX",
+        session,
+        write_path,
+        read_path,
+        outbox_client,
+    )
+    .map_err(|err| PaykitError::Transport {
+        context: format!("failed to create encryptor config for handshake restore: {err:?}"),
+        source: anyhow::anyhow!("pubky-noise PubkyNoiseConfig::new failed: {err:?}"),
+    })?;
+
+    restore_encrypted_link_handshake_inner(config, remote_pubkey, snapshot).await
+}
+
+#[cfg(feature = "pubky")]
+/// Restores an [`EncryptedLinkHandshake`] from a previously saved snapshot
+/// using an existing Noise configuration.
+///
+/// This is the in-process variant of [`restore_encrypted_link_handshake`] — use
+/// it when the original `Arc<PubkyNoiseConfig>` is still available.
+///
+/// # Parameters
+/// - `config` — shared Noise configuration matching the original handshake
+///   session.
+/// - `remote_pubkey` — public key of the remote peer.
+/// - `snapshot` — saved in-progress handshake snapshot.
+///
+/// # Restore behavior
+///
+/// Restored handshakes always reset recovery tuning to defaults:
+/// - `recovery_attempts = 0`
+/// - `max_recovery_attempts = DEFAULT_MAX_RECOVERY_ATTEMPTS`
+///
+/// # Errors
+/// Returns [`PaykitError::Transport`] if the underlying `restore()` fails.
+/// Returns [`PaykitError::Validation`] when `remote_pubkey` does not match the
+/// recipient embedded in `snapshot`, or when the snapshot is not in handshake
+/// phase.
+#[instrument(
+    skip(config, snapshot),
+    fields(remote = %remote_pubkey)
+)]
+pub async fn restore_encrypted_link_handshake_from_config(
+    config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    remote_pubkey: &PublicKey,
+    snapshot: EncryptedLinkHandshakeSnapshot,
+) -> Result<EncryptedLinkHandshake> {
+    debug!("restoring encrypted link handshake from snapshot (existing config)");
+    restore_encrypted_link_handshake_inner(config, remote_pubkey, snapshot).await
+}
+
+/// Shared implementation for both handshake restore variants.
+#[cfg(feature = "pubky")]
+async fn restore_encrypted_link_handshake_inner(
+    config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    remote_pubkey: &PublicKey,
+    snapshot: EncryptedLinkHandshakeSnapshot,
+) -> Result<EncryptedLinkHandshake> {
+    if snapshot.recipient() != remote_pubkey {
+        return Err(PaykitError::Validation(format!(
+            "remote_pubkey does not match snapshot recipient (remote={}, snapshot={})",
+            remote_pubkey,
+            snapshot.recipient(),
+        )));
+    }
+
+    if !matches!(
+        snapshot.state.phase,
+        pubky_noise::snow_crypto::NoisePhase::HandShake
+    ) {
+        return Err(PaykitError::Validation(format!(
+            "handshake restore requires handshake-phase snapshot, got {:?}",
+            snapshot.state.phase,
+        )));
+    }
+
+    let encryptor = pubky_noise::PubkyNoiseEncryptor::restore(
+        config.clone(),
+        snapshot.state,
+        remote_pubkey.clone(),
+    )
+    .await
+    .map_err(|err| PaykitError::Transport {
+        context: format!("failed to restore encrypted link handshake: {err:?}"),
+        source: anyhow::anyhow!("pubky-noise handshake restore failed: {err:?}"),
+    })?;
+
+    debug!("encrypted link handshake restored successfully (recovery tuning reset to defaults)");
+
+    Ok(EncryptedLinkHandshake {
+        encryptor,
+        remote_pubkey: remote_pubkey.clone(),
+        config,
+        recovery_attempts: 0,
+        max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
+    })
+}
+
+#[cfg(feature = "pubky")]
 /// Closes an encrypted link and cleans up the Noise session state.
 ///
 /// After calling this function, the [`EncryptedLink`] is consumed and can no
@@ -1591,6 +1863,71 @@ mod tests {
 
     // ── Private payments test infrastructure ────────────────────────────
 
+    /// Test setup that creates two users and initializes handshake handles
+    /// without driving them to completion.
+    struct InProgressHandshakeSetup {
+        _testnet: EphemeralTestnet,
+        initiator_session: PubkySession,
+        responder_session: PubkySession,
+        initiator_handshake: EncryptedLinkHandshake,
+        responder_handshake: EncryptedLinkHandshake,
+    }
+
+    impl InProgressHandshakeSetup {
+        async fn new() -> Self {
+            let testnet = EphemeralTestnet::builder()
+                .with_embedded_postgres()
+                .build()
+                .await
+                .unwrap();
+            let homeserver = testnet.homeserver_app();
+
+            let initiator_sdk = testnet.sdk().unwrap();
+            let responder_sdk = testnet.sdk().unwrap();
+
+            let initiator_keypair = Keypair::random();
+            let initiator_signer = initiator_sdk.signer(initiator_keypair.clone());
+            let initiator_session = initiator_signer
+                .signup(&homeserver.public_key(), None)
+                .await
+                .unwrap();
+
+            let responder_keypair = Keypair::random();
+            let responder_signer = responder_sdk.signer(responder_keypair.clone());
+            let responder_session = responder_signer
+                .signup(&homeserver.public_key(), None)
+                .await
+                .unwrap();
+
+            let initiator_public_key = initiator_session.info().public_key();
+            let responder_public_key = responder_session.info().public_key();
+
+            let initiator_handshake = initiate_encrypted_link(
+                initiator_session.clone(),
+                initiator_keypair.secret_key(),
+                responder_public_key,
+                initiator_sdk,
+            )
+            .unwrap();
+
+            let responder_handshake = accept_encrypted_link(
+                responder_session.clone(),
+                responder_keypair.secret_key(),
+                initiator_public_key,
+                responder_sdk,
+            )
+            .unwrap();
+
+            Self {
+                _testnet: testnet,
+                initiator_session,
+                responder_session,
+                initiator_handshake,
+                responder_handshake,
+            }
+        }
+    }
+
     /// Test setup for private (encrypted) payment flows.
     ///
     /// Creates two users on the same ephemeral testnet, performs a full Noise XX
@@ -1999,6 +2336,198 @@ mod tests {
     }
 
     // ── Snapshot / restore tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_handshake_snapshot_serialize_roundtrip() {
+        let InProgressHandshakeSetup {
+            _testnet,
+            initiator_session,
+            responder_session,
+            initiator_handshake,
+            responder_handshake: _responder_handshake,
+        } = InProgressHandshakeSetup::new().await;
+
+        let snapshot = initiator_handshake.snapshot();
+        let bytes = snapshot.serialize();
+        assert_eq!(bytes.len(), 189, "snapshot should be 189 bytes");
+
+        let restored_snapshot = EncryptedLinkHandshakeSnapshot::deserialize(&bytes).unwrap();
+        assert_eq!(
+            restored_snapshot.recipient(),
+            snapshot.recipient(),
+            "recipient public key should survive serialize/deserialize"
+        );
+
+        let bytes2 = restored_snapshot.serialize();
+        assert_eq!(
+            bytes, bytes2,
+            "double round-trip should produce identical bytes"
+        );
+
+        initiator_session.signout().await.unwrap();
+        responder_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handshake_restore_and_complete() {
+        let InProgressHandshakeSetup {
+            _testnet,
+            initiator_session,
+            responder_session,
+            mut initiator_handshake,
+            responder_handshake,
+        } = InProgressHandshakeSetup::new().await;
+
+        // Set a non-default value before snapshotting to verify restore resets
+        // this knob back to the default.
+        initiator_handshake.set_max_recovery_attempts(99);
+
+        // Advance both sides once so snapshots capture an in-flight handshake.
+        let initiator_handshake = match advance_handshake(initiator_handshake).await.unwrap() {
+            HandshakeProgress::Pending(h) => h,
+            HandshakeProgress::Complete(_) => {
+                panic!("initiator handshake unexpectedly completed in one step")
+            }
+        };
+        let responder_handshake = match advance_handshake(responder_handshake).await.unwrap() {
+            HandshakeProgress::Pending(h) => h,
+            HandshakeProgress::Complete(_) => {
+                panic!("responder handshake unexpectedly completed in one step")
+            }
+        };
+
+        let initiator_config = initiator_handshake.config().clone();
+        let responder_config = responder_handshake.config().clone();
+
+        let initiator_snapshot_bytes = initiator_handshake.serialize();
+        let responder_snapshot_bytes = responder_handshake.serialize();
+        let initiator_snapshot =
+            EncryptedLinkHandshakeSnapshot::deserialize(&initiator_snapshot_bytes).unwrap();
+        let responder_snapshot =
+            EncryptedLinkHandshakeSnapshot::deserialize(&responder_snapshot_bytes).unwrap();
+
+        let initiator_remote = initiator_snapshot.recipient().clone();
+        let responder_remote = responder_snapshot.recipient().clone();
+
+        let restored_initiator = restore_encrypted_link_handshake_from_config(
+            initiator_config,
+            &initiator_remote,
+            initiator_snapshot,
+        )
+        .await
+        .unwrap();
+        let restored_responder = restore_encrypted_link_handshake_from_config(
+            responder_config,
+            &responder_remote,
+            responder_snapshot,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(restored_initiator.recovery_attempts, 0);
+        assert_eq!(
+            restored_initiator.max_recovery_attempts,
+            DEFAULT_MAX_RECOVERY_ATTEMPTS
+        );
+
+        let (mut initiator_link, mut responder_link) = tokio::join!(
+            drive_handshake_to_completion(restored_initiator),
+            drive_handshake_to_completion(restored_responder),
+        );
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            MethodId::new("lightning").unwrap(),
+            EndpointData::new("{\"bolt11\":\"ln_restored...\"}"),
+        );
+        set_private_payments(&mut initiator_link, &entries)
+            .await
+            .unwrap();
+
+        let received = get_private_payments(&mut responder_link).await.unwrap();
+        assert_eq!(received.entries.len(), 1);
+        assert_eq!(
+            received.entries.get(&MethodId::new("lightning").unwrap()),
+            Some(&EndpointData::new("{\"bolt11\":\"ln_restored...\"}"))
+        );
+
+        close_encrypted_link(initiator_link).await.unwrap();
+        close_encrypted_link(responder_link).await.unwrap();
+        initiator_session.signout().await.unwrap();
+        responder_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handshake_restore_rejects_mismatched_remote_pubkey() {
+        let InProgressHandshakeSetup {
+            _testnet,
+            initiator_session,
+            responder_session,
+            initiator_handshake,
+            responder_handshake: _responder_handshake,
+        } = InProgressHandshakeSetup::new().await;
+
+        let snapshot = initiator_handshake.snapshot();
+        let config = initiator_handshake.config().clone();
+        let wrong_remote = initiator_session.info().public_key().clone();
+
+        let result =
+            restore_encrypted_link_handshake_from_config(config, &wrong_remote, snapshot).await;
+        let err = match result {
+            Ok(_) => panic!("restore should reject mismatched remote pubkey"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("does not match snapshot recipient")),
+            "expected Validation mismatch error, got: {err}"
+        );
+
+        initiator_session.signout().await.unwrap();
+        responder_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handshake_restore_rejects_transport_phase_snapshot() {
+        let setup = PrivateTestSetup::new().await;
+
+        // Build a handshake snapshot value from a transport-mode link snapshot.
+        let transport_bytes = setup.sender_link.serialize();
+        let handshake_snapshot =
+            EncryptedLinkHandshakeSnapshot::deserialize(&transport_bytes).unwrap();
+        let sender_config = setup.sender_link.config().clone();
+        let remote = handshake_snapshot.recipient().clone();
+
+        let result = restore_encrypted_link_handshake_from_config(
+            sender_config,
+            &remote,
+            handshake_snapshot,
+        )
+        .await;
+        let err = match result {
+            Ok(_) => panic!("handshake restore should reject transport-phase snapshot"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("handshake-phase snapshot")),
+            "expected handshake-phase validation error, got: {err}"
+        );
+
+        close_encrypted_link(setup.sender_link).await.unwrap();
+        close_encrypted_link(setup.receiver_link).await.unwrap();
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handshake_snapshot_deserialize_rejects_garbage() {
+        let result = EncryptedLinkHandshakeSnapshot::deserialize(&[0u8; 10]);
+        assert!(result.is_err(), "deserializing garbage should fail");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { .. }),
+            "expected InvalidData error, got: {err}"
+        );
+    }
 
     #[tokio::test]
     async fn test_encrypted_link_snapshot_serialize_roundtrip() {

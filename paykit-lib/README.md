@@ -253,6 +253,22 @@ Storage paths for private data are derived per-peer-pair using `pubky_noise::pat
 - `advance_handshake(handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress>`  
   Advances the handshake by one step. Returns `HandshakeProgress::Pending(handle)` when waiting for the peer, or `HandshakeProgress::Complete(EncryptedLink)` when finished. Polling-safe — the caller controls retry timing and timeouts. If a homeserver write fails during the handshake (`HomeserverWriteError`), the function automatically recovers from a pre-mutation snapshot and returns `Pending` so the caller's polling loop retries transparently. The maximum number of consecutive recovery attempts is configurable via `EncryptedLinkHandshake::set_max_recovery_attempts` (default: `DEFAULT_MAX_RECOVERY_ATTEMPTS`, 3). The counter resets to zero after every successful step.
 
+#### Handshake checkpointing / resumption
+- `EncryptedLinkHandshake::snapshot() -> EncryptedLinkHandshakeSnapshot`  
+  Captures the current in-progress handshake state.
+- `EncryptedLinkHandshake::serialize() -> Vec<u8>`  
+  Convenience method equivalent to `self.snapshot().serialize()`.
+- `EncryptedLinkHandshake::config() -> &Arc<PubkyNoiseConfig>`  
+  Access the shared Noise configuration for in-process handshake restore.
+- `EncryptedLinkHandshakeSnapshot::serialize() -> Vec<u8>` / `EncryptedLinkHandshakeSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkHandshakeSnapshot>` / `EncryptedLinkHandshakeSnapshot::recipient() -> &PublicKey`  
+  Snapshot wire format helpers (same compact 189-byte `PubkyNoiseSessionState` format as link snapshots).
+- `restore_encrypted_link_handshake(session, secret_key, remote_pubkey, outbox_client, snapshot) -> Result<EncryptedLinkHandshake>`  
+  Cross-restart restore for an in-progress handshake.
+- `restore_encrypted_link_handshake_from_config(config, remote_pubkey, snapshot) -> Result<EncryptedLinkHandshake>`  
+  In-process restore for an in-progress handshake.
+
+After handshake restore, recovery tuning resets to defaults: `recovery_attempts = 0` and `max_recovery_attempts = DEFAULT_MAX_RECOVERY_ATTEMPTS`.
+
 #### Payment endpoint exchange
 - `set_private_payments(link: &mut EncryptedLink, entries: &HashMap<MethodId, EndpointData>) -> Result<()>`  
   Serializes the complete payments map to JSON, encrypts it, and sends it via the encrypted link. The caller is responsible for managing the map (adding/removing entries) and passing the full map each time. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient `send_message` failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase send failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery.
@@ -314,6 +330,8 @@ async fn poll_with_timeout(mut handshake: EncryptedLinkHandshake) -> paykit_lib:
 
 ### Session Resumption (`pubky` feature)
 
+The handshake checkpointing API above covers **in-progress** handshakes.
+
 An established `EncryptedLink` can be snapshotted, serialized to bytes, persisted to durable storage, and later restored without re-doing the Noise handshake. This enables session resumption after app restarts or in-process recovery.
 
 **Snapshot and serialize:**
@@ -367,8 +385,8 @@ When the `pubky` feature is enabled the crate exports:
 
 - `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) to standardize path construction.
 - `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the public payment traits above.
-- `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot` for private encrypted payment types.
+- `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot`, `EncryptedLinkHandshakeSnapshot` for private encrypted payment types.
 - `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `set_private_payments`, `get_private_payments` for private encrypted payment operations.
-- `restore_encrypted_link`, `restore_encrypted_link_from_config` for session resumption after app restart or in-process recovery.
+- `restore_encrypted_link`, `restore_encrypted_link_from_config`, `restore_encrypted_link_handshake`, `restore_encrypted_link_handshake_from_config` for session resumption after app restart or in-process recovery.
 - `DEFAULT_MAX_RECOVERY_ATTEMPTS`, `DEFAULT_MAX_SEND_RETRIES` for configurable retry/recovery limits.
 - `pubky_noise` re-export for advanced callers that need direct access to the encryption layer.
