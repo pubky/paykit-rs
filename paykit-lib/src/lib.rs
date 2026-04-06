@@ -300,8 +300,9 @@ impl EncryptedLink {
     ///
     /// Take a snapshot after the link is established and periodically after
     /// exchanging messages (the snapshot includes nonce counters that must stay
-    /// in sync). Persist the serialized bytes to durable storage so the session
-    /// can be resumed after an app restart.
+    /// in sync). Persist serialized bytes only in encrypted durable storage.
+    /// Snapshot bytes include sensitive key material and must be treated as
+    /// secrets (never log or expose them in telemetry/crash reports).
     pub fn snapshot(&self) -> EncryptedLinkSnapshot {
         EncryptedLinkSnapshot {
             state: self.encryptor.snapshot(),
@@ -331,6 +332,9 @@ impl EncryptedLink {
 /// Created by [`EncryptedLink::snapshot`]. Can be serialized to a compact
 /// binary format via [`serialize`](Self::serialize) for durable storage, and
 /// deserialized back via [`deserialize`](Self::deserialize).
+///
+/// Snapshot bytes include sensitive key material and must be treated as
+/// secrets (store encrypted at rest; never log or expose them).
 ///
 /// Pass to [`restore_encrypted_link`] or [`restore_encrypted_link_from_config`]
 /// to resume the session after an app restart without re-doing the Noise
@@ -417,6 +421,9 @@ impl EncryptedLinkSnapshot {
 /// Created by [`EncryptedLinkHandshake::snapshot`]. Can be serialized to a
 /// compact binary format via [`serialize`](Self::serialize) for durable
 /// storage, and deserialized back via [`deserialize`](Self::deserialize).
+///
+/// Snapshot bytes include sensitive key material and must be treated as
+/// secrets (store encrypted at rest; never log or expose them).
 ///
 /// Pass to [`restore_encrypted_link_handshake`] or
 /// [`restore_encrypted_link_handshake_from_config`] to resume the handshake
@@ -847,6 +854,8 @@ where
 ///
 /// # Semantics
 /// - Returns an empty [`SupportedPayments`] when no messages are available.
+/// - Drains all currently unread queued updates and returns the latest map.
+///   Intermediate queued updates are consumed.
 /// - Returns `Err(PaykitError::InvalidData)` when the decrypted payload
 ///   is not valid UTF-8 or cannot be parsed as a payments JSON map.
 /// - Returns `Err(PaykitError::Transport)` for decryption or I/O failures.
@@ -854,15 +863,23 @@ where
 pub async fn get_private_payments(link: &mut EncryptedLink) -> Result<SupportedPayments> {
     debug!("receiving private payments map");
 
-    let messages = link.encryptor.receive_message().await;
+    let mut latest: Option<[u8; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN]> = None;
+    let mut drained = 0usize;
 
-    if messages.is_empty() {
-        debug!("no private payments messages available, returning empty map");
-        return Ok(SupportedPayments::default());
+    loop {
+        let messages = link.encryptor.receive_message().await;
+        if messages.is_empty() {
+            break;
+        }
+
+        drained += messages.len();
+        latest = messages.into_iter().last();
     }
 
-    // Take the last message (latest state of the payments map).
-    let raw = &messages[messages.len() - 1];
+    let Some(raw) = latest else {
+        debug!("no private payments messages available, returning empty map");
+        return Ok(SupportedPayments::default());
+    };
 
     // Trim trailing zero-padding added by pubky-noise's fixed-size buffers.
     let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
@@ -872,7 +889,10 @@ pub async fn get_private_payments(link: &mut EncryptedLink) -> Result<SupportedP
     })?;
 
     let entries = parse_private_payments_json(plaintext)?;
-    debug!(count = entries.len(), "private payments map received");
+    debug!(
+        count = entries.len(),
+        drained, "private payments map received"
+    );
     Ok(SupportedPayments { entries })
 }
 
@@ -2143,13 +2163,7 @@ mod tests {
             .await
             .unwrap();
 
-        // pubky-noise's receive_message reads one slot per call (counter-based).
-        // The first call consumes v1 (slot N), the second reads v2 (slot N+1).
-        let _v1 = get_private_payments(&mut setup.receiver_link)
-            .await
-            .unwrap();
-
-        // Second call should yield the latest map.
+        // The helper drains queued unread updates and returns the latest map.
         let received = get_private_payments(&mut setup.receiver_link)
             .await
             .unwrap();
@@ -2158,6 +2172,12 @@ mod tests {
             received.entries.get(&onchain),
             Some(&EndpointData::new("v2"))
         );
+
+        // Backlog is drained, so a second immediate call returns empty.
+        let empty = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap();
+        assert!(empty.entries.is_empty());
 
         setup.sender_session.signout().await.unwrap();
         setup.receiver_session.signout().await.unwrap();

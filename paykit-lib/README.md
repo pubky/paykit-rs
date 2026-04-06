@@ -269,11 +269,13 @@ Storage paths for private data are derived per-peer-pair using `pubky_noise::pat
 
 After handshake restore, recovery tuning resets to defaults: `recovery_attempts = 0` and `max_recovery_attempts = DEFAULT_MAX_RECOVERY_ATTEMPTS`.
 
+Snapshot bytes include sensitive key material and must be treated as secrets (store encrypted at rest; never log or expose them).
+
 #### Payment endpoint exchange
 - `set_private_payments(link: &mut EncryptedLink, entries: &HashMap<MethodId, EndpointData>) -> Result<()>`  
   Serializes the complete payments map to JSON, encrypts it, and sends it via the encrypted link. The caller is responsible for managing the map (adding/removing entries) and passing the full map each time. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient `send_message` failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase send failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery.
 - `get_private_payments(link: &mut EncryptedLink) -> Result<SupportedPayments>`  
-  Receives and decrypts the private payments map from the remote peer. Returns an empty map when no messages are available.
+  Receives and decrypts private payments updates from the remote peer, drains currently unread queued updates, and returns the latest map. Returns an empty map when no messages are available.
 
 #### Termination
 - `close_encrypted_link(link: EncryptedLink) -> Result<()>`  
@@ -362,6 +364,8 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
 **When to snapshot:**
 
 Take a snapshot after the link is established and periodically after exchanging messages. The snapshot includes nonce counters that must stay in sync with the remote peer — restoring from a stale snapshot may cause nonce desynchronization. Persist the serialized bytes to durable storage so the session can be resumed after an app restart.
+
+Snapshot bytes include sensitive key material and must be treated as secrets (store encrypted at rest; never log or expose them).
 
 ```rust,ignore
 // After establishing the link:
