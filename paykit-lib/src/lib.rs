@@ -631,7 +631,7 @@ const PAYKIT_PATH_DOMAIN: &[u8] = b"paykit-path-v0";
 /// For parties Alice and Bob:
 /// - `compute_private_paths(alice_sk, bob_pk).write == compute_private_paths(bob_sk, alice_pk).read`
 /// - `compute_private_paths(alice_sk, bob_pk).read == compute_private_paths(bob_sk, alice_pk).write`
-fn compute_private_paths(
+fn compute_private_payment_paths(
     local_secret_key: &[u8; 32],
     remote_pubkey: &PublicKey,
 ) -> (String, String) {
@@ -965,7 +965,8 @@ pub fn initiate_encrypted_link(
 ) -> Result<EncryptedLinkHandshake> {
     debug!("initializing encrypted link handshake (initiator)");
 
-    let (write_path, read_path) = compute_private_paths(&sender_secret_key, receiver_pubkey);
+    let (write_path, read_path) =
+        compute_private_payment_paths(&sender_secret_key, receiver_pubkey);
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         sender_secret_key,
@@ -1029,7 +1030,8 @@ pub fn accept_encrypted_link(
 ) -> Result<EncryptedLinkHandshake> {
     debug!("initializing encrypted link handshake (responder)");
 
-    let (write_path, read_path) = compute_private_paths(&receiver_secret_key, sender_pubkey);
+    let (write_path, read_path) =
+        compute_private_payment_paths(&receiver_secret_key, sender_pubkey);
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         receiver_secret_key,
@@ -1273,7 +1275,7 @@ pub async fn restore_encrypted_link_handshake(
 ) -> Result<EncryptedLinkHandshake> {
     debug!("restoring encrypted link handshake from snapshot (raw params)");
 
-    let (write_path, read_path) = compute_private_paths(&secret_key, remote_pubkey);
+    let (write_path, read_path) = compute_private_payment_paths(&secret_key, remote_pubkey);
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         secret_key,
@@ -1425,7 +1427,7 @@ pub async fn restore_encrypted_link(
 ) -> Result<EncryptedLink> {
     debug!("restoring encrypted link from snapshot (raw params)");
 
-    let (write_path, read_path) = compute_private_paths(&secret_key, remote_pubkey);
+    let (write_path, read_path) = compute_private_payment_paths(&secret_key, remote_pubkey);
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         secret_key,
