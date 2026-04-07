@@ -828,7 +828,7 @@ where
 /// # Ok(())
 /// # }
 /// ```
-#[instrument(skip(reader), fields(payee = %payee))]
+#[instrument(skip(reader))]
 pub async fn get_payment_list<R>(reader: &R, payee: &PublicKey) -> Result<SupportedPayments>
 where
     R: UnauthenticatedTransportRead,
@@ -917,7 +917,7 @@ pub async fn get_private_payments(link: &mut EncryptedLink) -> Result<SupportedP
 /// # Ok(())
 /// # }
 /// ```
-#[instrument(skip(reader), fields(payee = %payee, method = %method))]
+#[instrument(skip(reader), fields(method = %method))]
 pub async fn get_payment_endpoint<R>(
     reader: &R,
     payee: &PublicKey,
@@ -956,10 +956,7 @@ where
 /// # Errors
 /// Returns [`PaykitError::Transport`] if the encryption stack cannot be
 /// initialized or if the context creation fails.
-#[instrument(
-    skip(session, sender_secret_key, outbox_client),
-    fields(receiver = %receiver_pubkey)
-)]
+#[instrument(skip(session, sender_secret_key, outbox_client))]
 pub fn initiate_encrypted_link(
     session: pubky::PubkySession,
     sender_secret_key: [u8; 32],
@@ -1023,10 +1020,7 @@ pub fn initiate_encrypted_link(
 /// # Errors
 /// Returns [`PaykitError::Transport`] if the encryption stack cannot be
 /// initialized or if the context creation fails.
-#[instrument(
-    skip(session, receiver_secret_key, outbox_client),
-    fields(sender = %sender_pubkey)
-)]
+#[instrument(skip(session, receiver_secret_key, outbox_client))]
 pub fn accept_encrypted_link(
     session: pubky::PubkySession,
     receiver_secret_key: [u8; 32],
@@ -1135,7 +1129,7 @@ pub fn accept_encrypted_link(
 /// # Errors
 /// - Returns [`PaykitError::Transport`] if the handshake processing fails, if
 ///   the context is in an invalid state, or if automatic recovery is exhausted.
-#[instrument(skip(handshake), fields(remote = %handshake.remote_pubkey))]
+#[instrument(skip(handshake))]
 pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
     // Check whether the handshake has already finished.
     if handshake.encryptor.is_handshake_complete() {
@@ -1269,10 +1263,7 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
 /// [`PaykitError::Validation`] when `remote_pubkey` does not match the
 /// recipient embedded in `snapshot`, or when the snapshot is not in handshake
 /// phase.
-#[instrument(
-    skip(session, secret_key, outbox_client, snapshot),
-    fields(remote = %remote_pubkey)
-)]
+#[instrument(skip(session, secret_key, outbox_client, snapshot))]
 pub async fn restore_encrypted_link_handshake(
     session: pubky::PubkySession,
     secret_key: [u8; 32],
@@ -1325,10 +1316,7 @@ pub async fn restore_encrypted_link_handshake(
 /// Returns [`PaykitError::Validation`] when `remote_pubkey` does not match the
 /// recipient embedded in `snapshot`, or when the snapshot is not in handshake
 /// phase.
-#[instrument(
-    skip(config, snapshot),
-    fields(remote = %remote_pubkey)
-)]
+#[instrument(skip(config, snapshot))]
 pub async fn restore_encrypted_link_handshake_from_config(
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
     remote_pubkey: &PublicKey,
@@ -1427,10 +1415,7 @@ pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
 /// are no longer available on the homeservers, or the replayed handshake
 /// hash does not match the saved one). Returns [`PaykitError::Validation`]
 /// when `remote_pubkey` does not match the recipient embedded in `snapshot`.
-#[instrument(
-    skip(session, secret_key, outbox_client, snapshot),
-    fields(remote = %remote_pubkey)
-)]
+#[instrument(skip(session, secret_key, outbox_client, snapshot))]
 pub async fn restore_encrypted_link(
     session: pubky::PubkySession,
     secret_key: [u8; 32],
@@ -1481,10 +1466,7 @@ pub async fn restore_encrypted_link(
 /// Returns [`PaykitError::Transport`] if the underlying `restore()` fails.
 /// Returns [`PaykitError::Validation`] when `remote_pubkey` does not match the
 /// recipient embedded in `snapshot`.
-#[instrument(
-    skip(config, snapshot),
-    fields(remote = %remote_pubkey)
-)]
+#[instrument(skip(config, snapshot))]
 pub async fn restore_encrypted_link_from_config(
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
     remote_pubkey: &PublicKey,
