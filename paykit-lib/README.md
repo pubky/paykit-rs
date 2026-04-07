@@ -26,7 +26,7 @@ use paykit_lib::{
 };
 
 // Create validated types.
-let method = MethodId::new("bolt11")?;
+let method = MethodId::new("bitcoin-bolt11")?;
 let data = EndpointData::new("lnbc1...");
 
 // Store an endpoint (requires an AuthenticatedTransport).
@@ -46,15 +46,15 @@ for (method, data) in &payments.entries {
 
 ### `MethodId`
 
-Identifier for a payment method specification (e.g. `"onchain"`, `"bolt11"` basically anything parties agree on).
+Identifier for a payment method specification (e.g. `"bitcoin-p2sh"`, `"bitcoin-bolt11"` basically anything parties agree on).
 `MethodId` is validated at construction time to prevent path injection attacks.
 
 ```rust
 use paykit_lib::MethodId;
 
 // Construction is fallible:
-let method = MethodId::new("bolt11").unwrap();
-assert_eq!(method.as_str(), "bolt11");
+let method = MethodId::new("bitcoin-bolt11").unwrap();
+assert_eq!(method.as_str(), "bitcoin-bolt11");
 
 // Path traversal is rejected:
 assert!(MethodId::new("../etc/passwd").is_err());
@@ -171,15 +171,15 @@ use paykit_lib::{set_payment_endpoint, MethodId, EndpointData, AuthenticatedTran
 async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
     // NOTE: parties need to agree on method ids in order to understand each other
 
-    let method = MethodId::new("bolt11")?;
+    let method = MethodId::new("bitcoint-bolt11")?;
     let data = EndpointData::new("ln...");
     set_payment_endpoint(client, method, data).await?;
 
-    let method = MethodId::new("p2wpkh")?;
+    let method = MethodId::new("bitcoin-p2wpkh")?;
     let data = EndpointData::new("bc1...");
     set_payment_endpoint(client, method, data).await?;
     // or 
-    let method = MethodId::new("onchain")?;
+    let method = MethodId::new("bitcoin-p2tr")?;
     let data = EndpointData::new("bc1...");
     set_payment_endpoint(client, method, data).await?;
 
@@ -195,7 +195,7 @@ Remove previously published endpoint data for a given method.
 use paykit_lib::{remove_payment_endpoint, MethodId, AuthenticatedTransport};
 
 async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
-    let method = MethodId::new("bolt11")?;
+    let method = MethodId::new("bitcoin-bolt11")?;
     remove_payment_endpoint(client, method).await?;
     Ok(())
 }
@@ -231,7 +231,7 @@ Convenience resolver for a single method. Returns `Ok(None)` when the endpoint i
 use paykit_lib::{get_payment_endpoint, MethodId, PublicKey, UnauthenticatedTransportRead};
 
 async fn inspect(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
-    let bolt11 = MethodId::new("bolt11")?;
+    let bolt11 = MethodId::new("bitcoin-bolt11")?;
     if let Some(endpoint) = get_payment_endpoint(reader, pk, &bolt11).await? {
         println!("bolt11 endpoint: {}", endpoint.as_str());
     } else {

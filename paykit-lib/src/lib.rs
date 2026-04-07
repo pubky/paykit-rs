@@ -691,8 +691,8 @@ fn send_attempts_from_retries(max_send_retries: u32) -> u32 {
 /// # use paykit_lib::{set_payment_endpoint, MethodId, EndpointData, PublicKey};
 /// # use paykit_lib::AuthenticatedTransport;
 /// # async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
-/// let method = MethodId::new("lightning")?;
-/// let data = EndpointData::new("{\"bolt11\":\"ln...\"}");
+/// let method = MethodId::new("bitcoin-bolt11")?;
+/// let data = EndpointData::new("ln...");
 /// set_payment_endpoint(client, method, data).await?;
 /// # Ok(())
 /// # }
@@ -1563,7 +1563,7 @@ mod validation_tests {
 
     #[test]
     fn test_method_id_valid_simple_names() {
-        for name in ["lightning", "onchain", "bolt11", "lnurl-pay"] {
+        for name in ["bitcoin-bolt11", "bitcoin-bolt12", "bitcoin-p2tr"] {
             assert!(MethodId::new(name).is_ok(), "expected '{name}' to be valid");
         }
     }
@@ -1693,9 +1693,9 @@ mod validation_tests {
 
     #[test]
     fn test_endpoint_data_new_and_accessors() {
-        let d = EndpointData::new("{\"bolt11\":\"ln...\"}");
-        assert_eq!(d.as_str(), "{\"bolt11\":\"ln...\"}");
-        assert_eq!(format!("{d}"), "{\"bolt11\":\"ln...\"}");
+        let d = EndpointData::new("ln...");
+        assert_eq!(d.as_str(), "ln...");
+        assert_eq!(format!("{d}"), "ln...");
     }
 
     #[test]
@@ -1813,7 +1813,7 @@ mod tests {
     #[tokio::test]
     async fn missing_endpoint_returns_none() {
         let setup = TestSetup::new().await;
-        let method = MethodId::new("bolt11").unwrap();
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
 
         let missing = get_payment_endpoint(&setup.reader_transport, &setup.public_key, &method)
             .await
@@ -1827,10 +1827,10 @@ mod tests {
     async fn list_reflects_additions_and_removals() {
         let setup = TestSetup::new().await;
 
-        let onchain = MethodId::new("onchain").unwrap();
-        let lightning = MethodId::new("lightning").unwrap();
-        let onchain_data = EndpointData::new("{\"address\":\"bc1...\"}");
-        let lightning_data = EndpointData::new("{\"bolt11\":\"ln...\"}");
+        let onchain = MethodId::new("bitcoin-p2tr").unwrap();
+        let lightning = MethodId::new("bitcoin-bolt11").unwrap();
+        let onchain_data = EndpointData::new("bc1p...");
+        let lightning_data = EndpointData::new("ln...");
 
         set_payment_endpoint(
             &setup.session_transport,
@@ -2088,8 +2088,8 @@ mod tests {
     async fn private_payments_round_trip() {
         let mut setup = PrivateTestSetup::new().await;
 
-        let method = MethodId::new("lightning").unwrap();
-        let data = EndpointData::new("{\"bolt11\":\"lnbc1...\"}");
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
         let mut entries = HashMap::new();
         entries.insert(method.clone(), data.clone());
 
@@ -2111,19 +2111,13 @@ mod tests {
     async fn private_payments_multiple_methods() {
         let mut setup = PrivateTestSetup::new().await;
 
-        let lightning = MethodId::new("lightning").unwrap();
-        let onchain = MethodId::new("onchain").unwrap();
-        let cashu = MethodId::new("cashu").unwrap();
+        let lightning = MethodId::new("bitcoin-bolt11").unwrap();
+        let onchain = MethodId::new("bitcoin-p2tr").unwrap();
+        let cashu = MethodId::new("cashu-mint_id").unwrap();
 
         let mut entries = HashMap::new();
-        entries.insert(
-            lightning.clone(),
-            EndpointData::new("{\"bolt11\":\"ln...\"}"),
-        );
-        entries.insert(
-            onchain.clone(),
-            EndpointData::new("{\"address\":\"bc1...\"}"),
-        );
+        entries.insert(lightning.clone(), EndpointData::new("ln..."));
+        entries.insert(onchain.clone(), EndpointData::new("bc1p..."));
         entries.insert(
             cashu.clone(),
             EndpointData::new("{\"mint\":\"https://...\"}"),
@@ -2139,11 +2133,11 @@ mod tests {
         assert_eq!(received.entries.len(), 3);
         assert_eq!(
             received.entries.get(&lightning),
-            Some(&EndpointData::new("{\"bolt11\":\"ln...\"}"))
+            Some(&EndpointData::new("ln..."))
         );
         assert_eq!(
             received.entries.get(&onchain),
-            Some(&EndpointData::new("{\"address\":\"bc1...\"}"))
+            Some(&EndpointData::new("bc1p..."))
         );
         assert_eq!(
             received.entries.get(&cashu),
@@ -2160,13 +2154,16 @@ mod tests {
 
         // First write: lightning only.
         let mut entries_v1 = HashMap::new();
-        entries_v1.insert(MethodId::new("lightning").unwrap(), EndpointData::new("v1"));
+        entries_v1.insert(
+            MethodId::new("bitcoin-lightning").unwrap(),
+            EndpointData::new("v1"),
+        );
         set_private_payments(&mut setup.sender_link, &entries_v1)
             .await
             .unwrap();
 
         // Second write: completely different map (onchain only).
-        let onchain = MethodId::new("onchain").unwrap();
+        let onchain = MethodId::new("bitcoin-p2tr").unwrap();
         let mut entries_v2 = HashMap::new();
         entries_v2.insert(onchain.clone(), EndpointData::new("v2"));
         set_private_payments(&mut setup.sender_link, &entries_v2)
@@ -2198,7 +2195,7 @@ mod tests {
         let mut setup = PrivateTestSetup::new().await;
 
         // Build a map whose serialized JSON exceeds PUBKY_NOISE_MSG_LEN (1000 bytes).
-        let method = MethodId::new("lightning").unwrap();
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
         let oversized_value = "x".repeat(1000);
         let mut entries = HashMap::new();
         entries.insert(method, EndpointData::new(oversized_value));
@@ -2302,12 +2299,12 @@ mod tests {
             // 3. Send private payments.
             let mut entries = HashMap::new();
             entries.insert(
-                MethodId::new("lightning").unwrap(),
-                EndpointData::new("{\"bolt11\":\"lnbc_priv...\"}"),
+                MethodId::new("bitcoin-bolt11").unwrap(),
+                EndpointData::new("lnbcpriv..."),
             );
             entries.insert(
-                MethodId::new("onchain").unwrap(),
-                EndpointData::new("{\"address\":\"bc1_priv...\"}"),
+                MethodId::new("bitcoin-p2tr").unwrap(),
+                EndpointData::new("bc1priv..."),
             );
             set_private_payments(&mut link, &entries).await.unwrap();
 
@@ -2343,12 +2340,14 @@ mod tests {
                 private.entries.len()
             );
             assert_eq!(
-                private.entries.get(&MethodId::new("lightning").unwrap()),
-                Some(&EndpointData::new("{\"bolt11\":\"lnbc_priv...\"}")),
+                private
+                    .entries
+                    .get(&MethodId::new("bitcoin-bolt11").unwrap()),
+                Some(&EndpointData::new("lnbcpriv...")),
             );
             assert_eq!(
-                private.entries.get(&MethodId::new("onchain").unwrap()),
-                Some(&EndpointData::new("{\"address\":\"bc1_priv...\"}")),
+                private.entries.get(&MethodId::new("bitcoin-p2tr").unwrap()),
+                Some(&EndpointData::new("bc1priv...")),
             );
 
             // 4. Clean up.
@@ -2467,8 +2466,8 @@ mod tests {
 
         let mut entries = HashMap::new();
         entries.insert(
-            MethodId::new("lightning").unwrap(),
-            EndpointData::new("{\"bolt11\":\"ln_restored...\"}"),
+            MethodId::new("bitcoin-bolt11").unwrap(),
+            EndpointData::new("lnrestored..."),
         );
         set_private_payments(&mut initiator_link, &entries)
             .await
@@ -2477,8 +2476,10 @@ mod tests {
         let received = get_private_payments(&mut responder_link).await.unwrap();
         assert_eq!(received.entries.len(), 1);
         assert_eq!(
-            received.entries.get(&MethodId::new("lightning").unwrap()),
-            Some(&EndpointData::new("{\"bolt11\":\"ln_restored...\"}"))
+            received
+                .entries
+                .get(&MethodId::new("bitcoin-bolt11").unwrap()),
+            Some(&EndpointData::new("lnrestored..."))
         );
 
         close_encrypted_link(initiator_link).await.unwrap();
@@ -2566,8 +2567,8 @@ mod tests {
         // Send a message to advance nonces beyond zero.
         let mut entries = HashMap::new();
         entries.insert(
-            MethodId::new("lightning").unwrap(),
-            EndpointData::new("{\"bolt11\":\"ln...\"}"),
+            MethodId::new("bitcoin-bolt11").unwrap(),
+            EndpointData::new("ln..."),
         );
         set_private_payments(&mut setup.sender_link, &entries)
             .await
@@ -2604,8 +2605,8 @@ mod tests {
         // Send a message before snapshotting.
         let mut entries_v1 = HashMap::new();
         entries_v1.insert(
-            MethodId::new("lightning").unwrap(),
-            EndpointData::new("{\"bolt11\":\"ln_v1...\"}"),
+            MethodId::new("bitcoin-bolt11").unwrap(),
+            EndpointData::new("lnv1..."),
         );
         set_private_payments(&mut setup.sender_link, &entries_v1)
             .await
@@ -2648,8 +2649,8 @@ mod tests {
         // Send a new message from the restored sender.
         let mut entries_v2 = HashMap::new();
         entries_v2.insert(
-            MethodId::new("onchain").unwrap(),
-            EndpointData::new("{\"address\":\"bc1_v2...\"}"),
+            MethodId::new("bitcoin-p2tr").unwrap(),
+            EndpointData::new("bc1pv2..."),
         );
         set_private_payments(&mut restored_sender, &entries_v2)
             .await
@@ -2659,8 +2660,10 @@ mod tests {
         let received_v2 = get_private_payments(&mut restored_receiver).await.unwrap();
         assert_eq!(received_v2.entries.len(), 1);
         assert_eq!(
-            received_v2.entries.get(&MethodId::new("onchain").unwrap()),
-            Some(&EndpointData::new("{\"address\":\"bc1_v2...\"}")),
+            received_v2
+                .entries
+                .get(&MethodId::new("bitcoin-p2tr").unwrap()),
+            Some(&EndpointData::new("bc1pv2...")),
         );
 
         // Clean up.
