@@ -742,7 +742,7 @@ where
 /// - Returns [`PaykitError::InvalidData`] if the map cannot be serialized.
 /// - Returns [`PaykitError::Transport`] if `send_message` fails after all
 ///   retry attempts are exhausted.
-#[instrument(skip(link, entries), fields(recipient = %link.recipient, count = entries.len()))]
+#[instrument(skip(link, entries), fields(count = entries.len()))]
 pub async fn set_private_payments(
     link: &mut EncryptedLink,
     entries: &HashMap<MethodId, EndpointData>,
@@ -859,7 +859,7 @@ where
 /// - Returns `Err(PaykitError::InvalidData)` when the decrypted payload
 ///   is not valid UTF-8 or cannot be parsed as a payments JSON map.
 /// - Returns `Err(PaykitError::Transport)` for decryption or I/O failures.
-#[instrument(skip(link), fields(recipient = %link.recipient))]
+#[instrument(skip(link))]
 pub async fn get_private_payments(link: &mut EncryptedLink) -> Result<SupportedPayments> {
     debug!("receiving private payments map");
 
@@ -1390,7 +1390,7 @@ async fn restore_encrypted_link_handshake_inner(
 ///
 /// After calling this function, the [`EncryptedLink`] is consumed and can no
 /// longer be used for encryption or decryption.
-#[instrument(skip(link), fields(recipient = %link.recipient))]
+#[instrument(skip(link))]
 pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
     debug!("closing encrypted link");
     link.encryptor.close();
