@@ -98,6 +98,22 @@ if payments.entries.is_empty() {
 }
 ```
 
+Private payments follow the same `SupportedPayments` layout:
+
+```rust,ignore
+use paykit_lib::{get_private_payments, SupportedPayments};
+
+let payments: SupportedPayments = get_private_payments(&mut link).await?;
+for (method, data) in &payments.entries {
+    println!("method={} payload={}", method.as_str(), data.as_str());
+}
+
+// Check if empty:
+if payments.entries.is_empty() {
+    println!("no endpoints published");
+}
+```
+
 The `entries` field is a `HashMap<MethodId, EndpointData>`.
 
 ### `PaykitError`
@@ -247,7 +263,7 @@ Storage paths for private data are derived per-peer-pair using `pubky_noise::pat
 - `accept_encrypted_link(session, receiver_secret_key, sender_pubkey, outbox_client) -> Result<EncryptedLinkHandshake>`  
   Initializes a Noise XX handshake as the **responder**. Returns a handshake handle to be driven forward with `advance_handshake`.
 
-**NOTE**: Due to nature of noise it is important that one of the peers is "initiator" and another is "responder". Sometimes it is impossible to determine who is who based on user flow. One option is to compare counterparty key to own key let initiator be the one with lexicographically bigger public key.
+**NOTE**: Due to nature of noise it is important that one of the peers is "initiator" and another is "responder". Sometimes it is impossible to determine who is who based on user flow. One option is to compare counterparty key to own key and let the initiator be the one with lexicographically bigger public key.
 
 #### Handshake advancing
 - `advance_handshake(handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress>`  
