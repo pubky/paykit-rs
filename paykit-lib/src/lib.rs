@@ -1509,6 +1509,16 @@ async fn restore_encrypted_link_inner(
         )));
     }
 
+    if !matches!(
+        snapshot.state.phase,
+        pubky_noise::snow_crypto::NoisePhase::Transport
+    ) {
+        return Err(PaykitError::Validation(format!(
+            "encrypted link restore requires transport-phase snapshot, got {:?}",
+            snapshot.state.phase,
+        )));
+    }
+
     let encryptor = pubky_noise::PubkyNoiseEncryptor::restore(
         config.clone(),
         snapshot.state,
