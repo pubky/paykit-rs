@@ -763,18 +763,25 @@ pub async fn set_private_payments(
     }
 
     let max_attempts = send_attempts_from_retries(link.max_send_retries); // first try + retries
-    for attempt in 1..=max_attempts {
-        if link.encryptor.send_message(&plaintext).await {
-            debug!("private payments map sent successfully");
-            return Ok(());
-        }
+    let mut last_error: Option<String> = None;
 
-        if attempt < max_attempts {
-            warn!(
-                attempt,
-                max_retries = link.max_send_retries,
-                "send_message failed, retrying"
-            );
+    for attempt in 1..=max_attempts {
+        match link.encryptor.send_message(&plaintext).await {
+            Ok(()) => {
+                debug!("private payments map sent successfully");
+                return Ok(());
+            }
+            Err(err) => {
+                last_error = Some(format!("{err:?}"));
+                if attempt < max_attempts {
+                    warn!(
+                        attempt,
+                        max_retries = link.max_send_retries,
+                        error = ?err,
+                        "send_message failed, retrying"
+                    );
+                }
+            }
         }
     }
 
@@ -784,8 +791,9 @@ pub async fn set_private_payments(
             max_attempts,
         ),
         source: anyhow::anyhow!(
-            "pubky-noise send_message returned false on all {} attempts",
+            "pubky-noise send_message failed on all {} attempts; last error: {}",
             max_attempts,
+            last_error.unwrap_or_else(|| "unknown error".to_string())
         ),
     })
 }
@@ -867,7 +875,14 @@ pub async fn get_private_payments(link: &mut EncryptedLink) -> Result<SupportedP
     let mut drained = 0usize;
 
     loop {
-        let messages = link.encryptor.receive_message().await;
+        let messages =
+            link.encryptor
+                .receive_message()
+                .await
+                .map_err(|err| PaykitError::Transport {
+                    context: format!("failed to receive private payments: {err:?}"),
+                    source: anyhow::anyhow!("pubky-noise receive_message failed: {err:?}"),
+                })?;
         if messages.is_empty() {
             break;
         }
