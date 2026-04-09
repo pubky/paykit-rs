@@ -171,7 +171,7 @@ use paykit_lib::{set_payment_endpoint, MethodId, EndpointData, AuthenticatedTran
 async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
     // NOTE: parties need to agree on method ids in order to understand each other
 
-    let method = MethodId::new("bitcoint-bolt11")?;
+    let method = MethodId::new("bitcoin-bolt11")?;
     let data = EndpointData::new("ln...");
     set_payment_endpoint(client, method, data).await?;
 
@@ -376,6 +376,8 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
   Cross-restart restore. Accepts a fresh `PubkySession` and the same secret key used in the original `initiate_encrypted_link` or `accept_encrypted_link` call. Internally builds a new `PubkyNoiseConfig`, replays all handshake messages from the homeservers through a fresh Noise state with the same ephemeral key material, transitions to transport mode, and sets nonces/counter from the saved state.
 - `restore_encrypted_link_from_config(config, remote_pubkey, snapshot) -> Result<EncryptedLink>`  
   In-process restore. Reuses an existing `Arc<PubkyNoiseConfig>` (obtainable via `EncryptedLink::config()`) when the link needs rebuilding without an app restart.
+
+After link restore, `max_send_retries` resets to `DEFAULT_MAX_SEND_RETRIES`. Call `EncryptedLink::set_max_send_retries` after restore if you need a non-default value.
 
 **When to snapshot:**
 

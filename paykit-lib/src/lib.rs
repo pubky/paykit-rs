@@ -345,7 +345,7 @@ impl EncryptedLink {
 /// The serialized representation is the 189-byte
 /// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
 /// binary format produced by `pubky-noise`. The remote peer's public key is
-/// embedded in the snapshot (bytes 157–188) and reconstructed automatically
+/// embedded in the snapshot (bytes 157-188) and reconstructed automatically
 /// during deserialization.
 pub struct EncryptedLinkSnapshot {
     /// The underlying pubky-noise session state.
@@ -629,8 +629,8 @@ const PAYKIT_PATH_DOMAIN: &[u8] = b"paykit-path-v0";
 /// # Correctness
 ///
 /// For parties Alice and Bob:
-/// - `compute_private_paths(alice_sk, bob_pk).write == compute_private_paths(bob_sk, alice_pk).read`
-/// - `compute_private_paths(alice_sk, bob_pk).read == compute_private_paths(bob_sk, alice_pk).write`
+/// - `compute_private_paths(alice_sk, bob_pk).0 == compute_private_paths(bob_sk, alice_pk).1`
+/// - `compute_private_paths(alice_sk, bob_pk).1 == compute_private_paths(bob_sk, alice_pk).0`
 fn compute_private_payment_paths(
     local_secret_key: &[u8; 32],
     remote_pubkey: &PublicKey,
@@ -1426,6 +1426,12 @@ pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
 /// The `remote_pubkey` must match `snapshot.recipient()`. A mismatch indicates
 /// inconsistent caller input and is rejected.
 ///
+/// # Restore behavior
+///
+/// Restored links reset `max_send_retries` to [`DEFAULT_MAX_SEND_RETRIES`].
+/// Call [`EncryptedLink::set_max_send_retries`] after restore if you need a
+/// non-default value.
+///
 /// # Errors
 /// Returns [`PaykitError::Transport`] if the Noise configuration cannot be
 /// created or if the underlying `restore()` fails (e.g. handshake messages
@@ -1478,6 +1484,12 @@ pub async fn restore_encrypted_link(
 ///
 /// The `remote_pubkey` must match `snapshot.recipient()`. A mismatch indicates
 /// inconsistent caller input and is rejected.
+///
+/// # Restore behavior
+///
+/// Restored links reset `max_send_retries` to [`DEFAULT_MAX_SEND_RETRIES`].
+/// Call [`EncryptedLink::set_max_send_retries`] after restore if you need a
+/// non-default value.
 ///
 /// # Errors
 /// Returns [`PaykitError::Transport`] if the underlying `restore()` fails.
