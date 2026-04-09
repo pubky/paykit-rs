@@ -2734,4 +2734,163 @@ mod tests {
             "expected InvalidData parse error for empty string, got: {err}"
         );
     }
+
+    // ── Malformed JSON ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_private_payments_json_truncated_object() {
+        let err = parse_private_payments_json("{").unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
+            "expected InvalidData for truncated JSON, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_array_instead_of_object() {
+        let err = parse_private_payments_json(r#"["lightning","onchain"]"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
+            "expected InvalidData for JSON array, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_plain_string() {
+        let err = parse_private_payments_json(r#""just a string""#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
+            "expected InvalidData for plain JSON string, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_number() {
+        let err = parse_private_payments_json("42").unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
+            "expected InvalidData for JSON number, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_non_string_values() {
+        let err =
+            parse_private_payments_json(r#"{"lightning": 123, "onchain": true}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
+            "expected InvalidData for non-string values, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_trailing_comma() {
+        let err = parse_private_payments_json(r#"{"lightning": "ln...",}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
+            "expected InvalidData for trailing comma, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_null() {
+        let err = parse_private_payments_json("null").unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
+            "expected InvalidData for JSON null, got: {err}"
+        );
+    }
+
+    // ── Invalid method IDs inside valid JSON ────────────────────────────
+
+    #[test]
+    fn test_parse_private_payments_json_empty_key() {
+        let err = parse_private_payments_json(r#"{"": "ln..."}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
+            "expected InvalidData for empty key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_path_traversal_key() {
+        let err = parse_private_payments_json(r#"{"..": "ln..."}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
+            "expected InvalidData for path-traversal key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_slash_in_key() {
+        let err = parse_private_payments_json(r#"{"foo/bar": "ln..."}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
+            "expected InvalidData for key with slash, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_reserved_private_key() {
+        let err = parse_private_payments_json(r#"{"private": "secret..."}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
+            "expected InvalidData for reserved 'private' key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_oversized_key() {
+        let long_key = "a".repeat(65);
+        let json = format!(r#"{{"{long_key}": "ln..."}}"#);
+        let err = parse_private_payments_json(&json).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
+            "expected InvalidData for oversized key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_one_valid_one_invalid_key() {
+        // The valid key should not mask the invalid one.
+        let err =
+            parse_private_payments_json(r#"{"lightning": "ln...", "": "bc1..."}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
+            "expected InvalidData when one key is invalid, got: {err}"
+        );
+    }
+
+    // ── Happy path ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_private_payments_json_valid_single_entry() {
+        let result = parse_private_payments_json(r#"{"lightning": "ln..."}"#).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get(&MethodId::new("lightning").unwrap()),
+            Some(&EndpointData::new("ln..."))
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_valid_multiple_entries() {
+        let result =
+            parse_private_payments_json(r#"{"lightning": "ln...", "onchain": "bc1..."}"#).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.get(&MethodId::new("lightning").unwrap()),
+            Some(&EndpointData::new("ln..."))
+        );
+        assert_eq!(
+            result.get(&MethodId::new("onchain").unwrap()),
+            Some(&EndpointData::new("bc1..."))
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_empty_object() {
+        let result = parse_private_payments_json("{}").unwrap();
+        assert!(result.is_empty());
+    }
 }
