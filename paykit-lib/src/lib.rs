@@ -2723,4 +2723,15 @@ mod tests {
             "expected InvalidData error, got: {err}"
         );
     }
+
+    // ── parse_private_payments_json tests ───────────────────────────────
+
+    #[test]
+    fn test_parse_private_payments_json_empty_string() {
+        let err = parse_private_payments_json("").unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
+            "expected InvalidData parse error for empty string, got: {err}"
+        );
+    }
 }
