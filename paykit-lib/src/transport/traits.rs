@@ -9,6 +9,33 @@
 //! all HTTP requests made through the client.
 //!
 //! [pubky-timeout]: https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout
+//!
+//! # Public vs. private payload types
+//!
+//! ## Public payment methods
+//!
+//! Public payment methods use [`EndpointData`] — a validated UTF-8 string wrapper
+//! representing human-readable payment endpoint payloads (addresses, invoices,
+//! JSON, etc.). Each public method is stored as a separate file at a well-known
+//! path (one file per [`MethodId`]).
+//!
+//! The transport traits in this module handle **only public payment endpoints**.
+//! All public endpoint operations go through [`UnauthenticatedTransportRead`]
+//! and [`AuthenticatedTransport`].
+//!
+//! ## Private payment methods
+//!
+//! Private payment methods are handled entirely by [`pubky-noise`]'s encrypted
+//! messaging layer via `PubkyNoiseEncryptor::send_message` and `receive_message`.
+//! This layer manages file naming, storage locations, and end-to-end encryption
+//! independently. **The transport traits have no involvement with private
+//! payments.**
+//!
+//! Higher-level helper functions in [`crate`] (e.g.
+//! [`crate::set_private_payments`]) compose `pubky-noise` encryption
+//! directly with storage operations, bypassing the transport traits entirely.
+//! This keeps the transport traits focused on public, unencrypted storage
+//! operations.
 
 use async_trait::async_trait;
 
