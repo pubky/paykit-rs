@@ -66,6 +66,8 @@ assert!(MethodId::new("../etc/passwd").is_err());
 
 Read access is available via `as_str()`, `Display`, and `AsRef<str>`.
 
+**Naming convention:** `MethodId` values are opaque to the library, but peers need to agree on them to interoperate. A recommended (non-obligatory) convention for the shape of these identifiers is described in [../specs/payment-endpoint-identifier.md](../specs/payment-endpoint-identifier.md).
+
 ### `EndpointData`
 
 Serialized payload served by a payment endpoint (UTF-8 text such as JSON, lnurl, etc.).
