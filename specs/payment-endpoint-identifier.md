@@ -158,8 +158,9 @@ and arrays are not valid payloads.
 ### 7.2 Recommended field names
 
 Beyond `value`, a payload MAY contain any fields the endpoint format
-requires. Unknown fields MUST be ignored by receivers that do not recognise
-them.
+requires. Additional fields MAY be of any JSON type (string, number,
+boolean, array, or object), chosen to fit the data being represented.
+Unknown fields MUST be ignored by receivers that do not recognise them.
 
 The following field names are not required, but SHOULD be used where they
 apply, to keep naming consistent across endpoints:
