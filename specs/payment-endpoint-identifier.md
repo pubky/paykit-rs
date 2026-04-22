@@ -16,7 +16,7 @@ accompanies each identifier.
 
 The intent is to give implementers and downstream bindings (Swift, Kotlin,
 React Native) a single, consistent vocabulary to exchange, so that a payer
-and payee who independently support "`bitcoin-lightning-bolt12`" can recognise
+and payee who independently support "`btc-lightning-bolt12`" can recognise
 each other without side-channel coordination.
 
 ## 1. Status of this document
@@ -44,7 +44,7 @@ only when, they appear in all capitals.
 ## 3. Terminology
 
 - **Payment endpoint identifier** (or *identifier*): the three-segment string
-  that names a payment endpoint type, e.g. `bitcoin-onchain-p2tr`. In the
+  that names a payment endpoint type, e.g. `btc-bitcoin-p2tr`. In the
   Paykit library this is represented by the `MethodId` type.
 - **Payload**: the JSON object stored alongside the identifier, describing
   the specific payee handle for an endpoint of that type.
@@ -84,7 +84,7 @@ The following rules apply:
 
 The *asset* segment names the unit of value being transferred.
 
-- For cryptoassets, use the lowercased ticker (`bitcoin`, `usdt`, `eth`).
+- For cryptoassets, use the lowercased ticker (`btc`, `usdt`, `eth`).
 - For fiat, use the lowercased [ISO 4217] code (`usd`, `eur`, `gbp`).
 - The asset segment MUST NOT encode the chain or token standard; the rail
   segment disambiguates those.
@@ -93,7 +93,7 @@ The *asset* segment names the unit of value being transferred.
 
 The *rail* segment names the settlement system carrying the asset. Examples:
 
-- Base chain: `onchain`, `ethereum`, `solana`, `tron`.
+- Base chain: `bitcoin`, `ethereum`, `solana`, `tron`.
 - Layer-2 or off-chain: `lightning`, `liquid`, `arbitrum`.
 - Fiat network: `sepa`, `ach`, `fps`.
 - Custodial provider: `revolut`, `cashapp`, `wise`.
@@ -121,9 +121,9 @@ ambiguity or breaking changes.
 ### 6.1 Valid
 
 ```
-bitcoin-onchain-p2tr
-bitcoin-lightning-bolt11
-bitcoin-lightning-bolt12
+btc-bitcoin-p2tr
+btc-lightning-bolt11
+btc-lightning-bolt12
 usdt-ethereum-address
 usdt-tron-address
 usdc-solana-address
@@ -136,12 +136,12 @@ gbp-fps-sortcode
 
 | Identifier                     | Reason                                  |
 | ------------------------------ | --------------------------------------- |
-| `Bitcoin-onchain-p2tr`         | Uppercase characters are not permitted. |
+| `Btc-bitcoin-p2tr`             | Uppercase characters are not permitted. |
 | `usdt-ethereum`                | Endpoint segment is missing.            |
 | `gbp-faster-payments-sortcode` | Rail segment contains an internal `-`.  |
 | `usd-revolut-pay_link`         | Underscores are not permitted.          |
-| `-bitcoin-onchain-p2tr`        | Empty leading segment.                  |
-| `bitcoin--p2tr`                | Empty middle segment.                   |
+| `-btc-bitcoin-p2tr`            | Empty leading segment.                  |
+| `btc--p2tr`                    | Empty middle segment.                   |
 
 ## 7. Payload
 
@@ -186,12 +186,12 @@ the request describes a specific transfer.
 ### 7.4 Examples
 
 ```json
-// bitcoin-onchain-p2tr
+// btc-bitcoin-p2tr
 { "value": "bc1p..." }
 ```
 
 ```json
-// bitcoin-lightning-bolt12
+// btc-lightning-bolt12
 {
   "value": "lno1...",
   "min": "0.0001",
