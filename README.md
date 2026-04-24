@@ -49,6 +49,8 @@ The term "**Payment Method**" refers to the general concept of the medium throug
 To prevent miscommunication between payer and payee which will result in inability to execute payments. The terms used on both ends of the payment are to be decided by the developers community.   
 Given that both the payer and payee may have preferences regarding payment media based on a virtually infinite number of factors—such as market conditions, address types, and interbank settlement times—it is up to social consensus to determine the naming conventions for payment methods and the structure of payment endpoints. Therefore, the examples provided in this document are for illustrative purposes only.
 
+An initial draft convention is available in [specs/payment-endpoint-identifier.md](specs/payment-endpoint-identifier.md). It is recommended but not obligatory, and is intended as the first such proposal rather than a final format.
+
 ## Payment Method Lists
 
 Paykit can support virtually any payment method as long as payer and payee can mutually describe and identify it. Paykit users create the **Supported Payments Lists** \- minimum necessary data related to their supported payment methods and publish them as records on **Paykit routing** network.
