@@ -99,9 +99,21 @@ public object NoPointer
 
 
 
+
+
+@kotlinx.serialization.Serializable
+public data class FfiHandshakeProgress (
+    val `status`: kotlin.String,
+    val `handleId`: kotlin.String
+) {
+    public companion object
+}
+
+
+
 @kotlinx.serialization.Serializable
 public data class FfiPaymentEntry (
-    val `methodId`: kotlin.String, 
+    val `methodId`: kotlin.String,
     val `endpointData`: kotlin.String
 ) {
     public companion object
@@ -112,42 +124,42 @@ public data class FfiPaymentEntry (
 
 
 public sealed class PaykitFfiException: kotlin.Exception() {
-    
+
     public class Transport(
         public val `reason`: kotlin.String,
     ) : PaykitFfiException() {
         override val message: String
             get() = "reason=${ `reason` }"
     }
-    
+
     public class NotFound(
         public val `reason`: kotlin.String,
     ) : PaykitFfiException() {
         override val message: String
             get() = "reason=${ `reason` }"
     }
-    
+
     public class InvalidData(
         public val `reason`: kotlin.String,
     ) : PaykitFfiException() {
         override val message: String
             get() = "reason=${ `reason` }"
     }
-    
+
     public class Validation(
         public val `reason`: kotlin.String,
     ) : PaykitFfiException() {
         override val message: String
             get() = "reason=${ `reason` }"
     }
-    
+
     public class Session(
         public val `reason`: kotlin.String,
     ) : PaykitFfiException() {
         override val message: String
             get() = "reason=${ `reason` }"
     }
-    
+
 }
 
 

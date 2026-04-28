@@ -52,6 +52,79 @@ RCT_EXTERN_METHOD(removePaymentEndpoint:(NSString *)methodId
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(defaultMaxSendRetries:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(defaultMaxRecoveryAttempts:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(initiateEncryptedLink:(NSString *)secretKeyHex
+                  receiverPublicKey:(NSString *)receiverPublicKey
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(acceptEncryptedLink:(NSString *)secretKeyHex
+                  senderPublicKey:(NSString *)senderPublicKey
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(advanceHandshake:(NSString *)handshakeId
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(setEncryptedLinkHandshakeMaxRecoveryAttempts:(NSString *)handshakeId
+                  max:(nonnull NSNumber *)max
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(setEncryptedLinkMaxSendRetries:(NSString *)linkId
+                  max:(nonnull NSNumber *)max
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(setPrivatePayments:(NSString *)linkId
+                  entriesJson:(NSString *)entriesJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(getPrivatePayments:(NSString *)linkId
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(serializeEncryptedLinkHandshake:(NSString *)handshakeId
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(serializeEncryptedLink:(NSString *)linkId
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(encryptedLinkSnapshotRecipient:(NSString *)snapshotHex
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(encryptedLinkHandshakeSnapshotRecipient:(NSString *)snapshotHex
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(restoreEncryptedLink:(NSString *)secretKeyHex
+                  snapshotHex:(NSString *)snapshotHex
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(restoreEncryptedLinkHandshake:(NSString *)secretKeyHex
+                  snapshotHex:(NSString *)snapshotHex
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(closeEncryptedLink:(NSString *)linkId
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(dropEncryptedLinkHandshake:(NSString *)handshakeId
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
 + (BOOL)requiresMainQueueSetup
 {
   return NO;

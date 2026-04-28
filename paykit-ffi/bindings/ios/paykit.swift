@@ -400,6 +400,22 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -463,6 +479,78 @@ fileprivate struct FfiConverterString: FfiConverter {
 }
 
 
+public struct FfiHandshakeProgress {
+    public var status: String
+    public var handleId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(status: String, handleId: String) {
+        self.status = status
+        self.handleId = handleId
+    }
+}
+
+#if compiler(>=6)
+extension FfiHandshakeProgress: Sendable {}
+#endif
+
+
+extension FfiHandshakeProgress: Equatable, Hashable {
+    public static func ==(lhs: FfiHandshakeProgress, rhs: FfiHandshakeProgress) -> Bool {
+        if lhs.status != rhs.status {
+            return false
+        }
+        if lhs.handleId != rhs.handleId {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(status)
+        hasher.combine(handleId)
+    }
+}
+
+extension FfiHandshakeProgress: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiHandshakeProgress: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiHandshakeProgress {
+        return
+            try FfiHandshakeProgress(
+                status: FfiConverterString.read(from: &buf),
+                handleId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiHandshakeProgress, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterString.write(value.handleId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiHandshakeProgress_lift(_ buf: RustBuffer) throws -> FfiHandshakeProgress {
+    return try FfiConverterTypeFfiHandshakeProgress.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiHandshakeProgress_lower(_ value: FfiHandshakeProgress) -> RustBuffer {
+    return FfiConverterTypeFfiHandshakeProgress.lower(value)
+}
+
+
 public struct FfiPaymentEntry {
     public var methodId: String
     public var endpointData: String
@@ -508,7 +596,7 @@ public struct FfiConverterTypeFfiPaymentEntry: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentEntry {
         return
             try FfiPaymentEntry(
-                methodId: FfiConverterString.read(from: &buf), 
+                methodId: FfiConverterString.read(from: &buf),
                 endpointData: FfiConverterString.read(from: &buf)
         )
     }
@@ -537,8 +625,8 @@ public func FfiConverterTypeFfiPaymentEntry_lower(_ value: FfiPaymentEntry) -> R
 
 public enum PaykitFfiError: Swift.Error {
 
-    
-    
+
+
     case Transport(reason: String
     )
     case NotFound(reason: String
@@ -562,9 +650,9 @@ public struct FfiConverterTypePaykitFfiError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Transport(
             reason: try FfiConverterString.read(from: &buf)
             )
@@ -588,34 +676,34 @@ public struct FfiConverterTypePaykitFfiError: FfiConverterRustBuffer {
     public static func write(_ value: PaykitFfiError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
-        
+
+
+
         case let .Transport(reason):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(reason, into: &buf)
-            
-        
+
+
         case let .NotFound(reason):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(reason, into: &buf)
-            
-        
+
+
         case let .InvalidData(reason):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(reason, into: &buf)
-            
-        
+
+
         case let .Validation(reason):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
-            
-        
+
+
         case let .Session(reason):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
-            
+
         }
     }
 }
@@ -747,6 +835,115 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
+ * Start a private-payment encrypted link as the responder.
+ */
+public func paykitAcceptEncryptedLink(secretKeyHex: String, senderPublicKey: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_accept_encrypted_link(FfiConverterString.lower(secretKeyHex),FfiConverterString.lower(senderPublicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Advance an encrypted-link handshake by one polling-safe step.
+ *
+ * Returns status `"pending"` with the same handshake handle, or `"complete"`
+ * with a new encrypted-link handle.
+ */
+public func paykitAdvanceHandshake(handshakeId: String)async throws  -> FfiHandshakeProgress  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_advance_handshake(FfiConverterString.lower(handshakeId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiHandshakeProgress_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Close an established encrypted link and remove its FFI handle.
+ */
+public func paykitCloseEncryptedLink(linkId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_close_encrypted_link(FfiConverterString.lower(linkId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Default maximum number of consecutive handshake recovery attempts.
+ */
+public func paykitDefaultMaxRecoveryAttempts() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+    uniffi_paykit_fn_func_paykit_default_max_recovery_attempts($0
+    )
+})
+}
+/**
+ * Default maximum number of automatic private-payment send retries.
+ */
+public func paykitDefaultMaxSendRetries() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+    uniffi_paykit_fn_func_paykit_default_max_send_retries($0
+    )
+})
+}
+/**
+ * Drop an in-progress encrypted-link handshake handle.
+ */
+public func paykitDropEncryptedLinkHandshake(handshakeId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_drop_encrypted_link_handshake(FfiConverterString.lower(handshakeId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Return the remote peer embedded in a handshake snapshot.
+ */
+public func paykitEncryptedLinkHandshakeSnapshotRecipient(snapshotHex: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_func_paykit_encrypted_link_handshake_snapshot_recipient(
+        FfiConverterString.lower(snapshotHex),$0
+    )
+})
+}
+/**
+ * Return the remote peer embedded in an encrypted-link snapshot.
+ */
+public func paykitEncryptedLinkSnapshotRecipient(snapshotHex: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_func_paykit_encrypted_link_snapshot_recipient(
+        FfiConverterString.lower(snapshotHex),$0
+    )
+})
+}
+/**
  * Exports the current session secret for persistence across app restarts.
  *
  * Returns the compact `<pubkey_z32>:<cookie_secret>` string that can be
@@ -784,7 +981,7 @@ public func paykitForceSignOut()async   {
             freeFunc: ffi_paykit_rust_future_free_void,
             liftFunc: { $0 },
             errorHandler: nil
-            
+
         )
 }
 /**
@@ -802,7 +999,7 @@ public func paykitGetCurrentPublicKey()async  -> String?  {
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionString.lift,
             errorHandler: nil
-            
+
         )
 }
 /**
@@ -830,6 +1027,23 @@ public func paykitGetPaymentList(publicKey: String)async throws  -> [FfiPaymentE
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_func_paykit_get_payment_list(FfiConverterString.lower(publicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiPaymentEntry.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Receive and decrypt the latest private payments map from an established link.
+ */
+public func paykitGetPrivatePayments(linkId: String)async throws  -> [FfiPaymentEntry]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_get_private_payments(FfiConverterString.lower(linkId)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -883,6 +1097,23 @@ public func paykitInitialize()async throws   {
         )
 }
 /**
+ * Start a private-payment encrypted link as the initiator.
+ */
+public func paykitInitiateEncryptedLink(secretKeyHex: String, receiverPublicKey: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_initiate_encrypted_link(FfiConverterString.lower(secretKeyHex),FfiConverterString.lower(receiverPublicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
  * Returns `true` if an authenticated session is currently active.
  */
 public func paykitIsAuthenticated()async  -> Bool  {
@@ -897,7 +1128,7 @@ public func paykitIsAuthenticated()async  -> Bool  {
             freeFunc: ffi_paykit_rust_future_free_i8,
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
-            
+
         )
 }
 /**
@@ -918,6 +1149,108 @@ public func paykitRemovePaymentEndpoint(methodId: String)async throws   {
         )
 }
 /**
+ * Restore an established encrypted link from a serialized snapshot.
+ */
+public func paykitRestoreEncryptedLink(secretKeyHex: String, snapshotHex: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_restore_encrypted_link(FfiConverterString.lower(secretKeyHex),FfiConverterString.lower(snapshotHex)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Restore an in-progress encrypted-link handshake from a serialized snapshot.
+ */
+public func paykitRestoreEncryptedLinkHandshake(secretKeyHex: String, snapshotHex: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_restore_encrypted_link_handshake(FfiConverterString.lower(secretKeyHex),FfiConverterString.lower(snapshotHex)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Serialize an established encrypted link snapshot for durable storage.
+ */
+public func paykitSerializeEncryptedLink(linkId: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_serialize_encrypted_link(FfiConverterString.lower(linkId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Serialize an in-progress handshake snapshot for durable storage.
+ */
+public func paykitSerializeEncryptedLinkHandshake(handshakeId: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_serialize_encrypted_link_handshake(FfiConverterString.lower(handshakeId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Configure automatic recovery attempts for a pending encrypted-link handshake.
+ */
+public func paykitSetEncryptedLinkHandshakeMaxRecoveryAttempts(handshakeId: String, max: UInt32)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_set_encrypted_link_handshake_max_recovery_attempts(FfiConverterString.lower(handshakeId),FfiConverterUInt32.lower(max)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Configure automatic send retries for an established encrypted link.
+ */
+public func paykitSetEncryptedLinkMaxSendRetries(linkId: String, max: UInt32)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_set_encrypted_link_max_send_retries(FfiConverterString.lower(linkId),FfiConverterUInt32.lower(max)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
  * Publish or update a payment endpoint for the authenticated user.
  */
 public func paykitSetPaymentEndpoint(methodId: String, endpointData: String)async throws   {
@@ -925,6 +1258,23 @@ public func paykitSetPaymentEndpoint(methodId: String, endpointData: String)asyn
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_func_paykit_set_payment_endpoint(FfiConverterString.lower(methodId),FfiConverterString.lower(endpointData)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Encrypt and send the complete private payments map over an established link.
+ */
+public func paykitSetPrivatePayments(linkId: String, entries: [FfiPaymentEntry])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_set_private_payments(FfiConverterString.lower(linkId),FfiConverterSequenceTypeFfiPaymentEntry.lower(entries)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_void,
@@ -1007,6 +1357,30 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_paykit_checksum_func_paykit_accept_encrypted_link() != 21287) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_advance_handshake() != 29494) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_close_encrypted_link() != 14508) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_default_max_recovery_attempts() != 23339) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_default_max_send_retries() != 12386) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_drop_encrypted_link_handshake() != 43355) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_encrypted_link_handshake_snapshot_recipient() != 33656) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_encrypted_link_snapshot_recipient() != 21528) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_paykit_export_session() != 8374) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1022,10 +1396,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 63326) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_func_paykit_get_private_payments() != 29940) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_paykit_import_session() != 29532) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_initialize() != 62040) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_initiate_encrypted_link() != 52625) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_is_authenticated() != 34745) {
@@ -1034,7 +1414,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_remove_payment_endpoint() != 52853) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_func_paykit_restore_encrypted_link() != 31079) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_restore_encrypted_link_handshake() != 23271) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_serialize_encrypted_link() != 33771) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_serialize_encrypted_link_handshake() != 27705) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_set_encrypted_link_handshake_max_recovery_attempts() != 38386) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_set_encrypted_link_max_send_retries() != 4305) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_paykit_set_payment_endpoint() != 62857) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_set_private_payments() != 41261) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_sign_in() != 50011) {

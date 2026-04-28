@@ -435,11 +435,11 @@ internal open class UniffiForeignFutureStruct(
     @JvmField public var `free`: UniffiForeignFutureFree?,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `handle` = 0.toLong(),
-        
+
         `free` = null,
-        
+
     )
 
     internal class UniffiByValue(
@@ -466,11 +466,11 @@ internal open class UniffiForeignFutureStructU8Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = 0.toByte(),
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -500,11 +500,11 @@ internal open class UniffiForeignFutureStructI8Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = 0.toByte(),
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -534,11 +534,11 @@ internal open class UniffiForeignFutureStructU16Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = 0.toShort(),
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -568,11 +568,11 @@ internal open class UniffiForeignFutureStructI16Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = 0.toShort(),
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -602,11 +602,11 @@ internal open class UniffiForeignFutureStructU32Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = 0,
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -636,11 +636,11 @@ internal open class UniffiForeignFutureStructI32Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = 0,
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -670,11 +670,11 @@ internal open class UniffiForeignFutureStructU64Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = 0.toLong(),
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -704,11 +704,11 @@ internal open class UniffiForeignFutureStructI64Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = 0.toLong(),
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -738,11 +738,11 @@ internal open class UniffiForeignFutureStructF32Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = 0.0f,
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -772,11 +772,11 @@ internal open class UniffiForeignFutureStructF64Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = 0.0,
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -806,11 +806,11 @@ internal open class UniffiForeignFutureStructPointerStruct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = NullPointer,
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -840,11 +840,11 @@ internal open class UniffiForeignFutureStructRustBufferStruct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `returnValue` = RustBufferHelper.allocValue(),
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -873,9 +873,9 @@ internal open class UniffiForeignFutureStructVoidStruct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-        
+
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-        
+
     )
 
     internal class UniffiByValue(
@@ -896,6 +896,40 @@ internal typealias UniffiForeignFutureStructVoidUniffiByValue = UniffiForeignFut
 internal interface UniffiForeignFutureCompleteVoid: com.sun.jna.Callback {
     public fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructVoidUniffiByValue,)
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1019,6 +1053,30 @@ internal object IntegrityCheckingUniffiLib : Library {
         }
     }
     private fun uniffiCheckApiChecksums() {
+        if (uniffi_paykit_checksum_func_paykit_accept_encrypted_link() != 21287.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_advance_handshake() != 29494.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_close_encrypted_link() != 14508.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_default_max_recovery_attempts() != 23339.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_default_max_send_retries() != 12386.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_drop_encrypted_link_handshake() != 43355.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_encrypted_link_handshake_snapshot_recipient() != 33656.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_encrypted_link_snapshot_recipient() != 21528.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_func_paykit_export_session() != 8374.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1034,10 +1092,16 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 63326.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_func_paykit_get_private_payments() != 29940.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_func_paykit_import_session() != 29532.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_initialize() != 62040.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_initiate_encrypted_link() != 52625.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_is_authenticated() != 34745.toShort()) {
@@ -1046,7 +1110,28 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_remove_payment_endpoint() != 52853.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_func_paykit_restore_encrypted_link() != 31079.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_restore_encrypted_link_handshake() != 23271.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_serialize_encrypted_link() != 33771.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_serialize_encrypted_link_handshake() != 27705.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_set_encrypted_link_handshake_max_recovery_attempts() != 38386.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_set_encrypted_link_max_send_retries() != 4305.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_func_paykit_set_payment_endpoint() != 62857.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_paykit_set_private_payments() != 41261.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_sign_in() != 50011.toShort()) {
@@ -1061,6 +1146,30 @@ internal object IntegrityCheckingUniffiLib : Library {
     }
 
     // Integrity check functions only
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_accept_encrypted_link(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_advance_handshake(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_close_encrypted_link(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_default_max_recovery_attempts(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_default_max_send_retries(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_drop_encrypted_link_handshake(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_encrypted_link_handshake_snapshot_recipient(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_encrypted_link_snapshot_recipient(
+    ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_export_session(
     ): Short
@@ -1077,10 +1186,16 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_func_paykit_get_payment_list(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_get_private_payments(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_import_session(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_initialize(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_initiate_encrypted_link(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_is_authenticated(
@@ -1089,7 +1204,28 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_func_paykit_remove_payment_endpoint(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_restore_encrypted_link(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_restore_encrypted_link_handshake(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_serialize_encrypted_link(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_serialize_encrypted_link_handshake(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_set_encrypted_link_handshake_max_recovery_attempts(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_set_encrypted_link_max_send_retries(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_set_payment_endpoint(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_set_private_payments(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_sign_in(
@@ -1116,6 +1252,41 @@ internal object UniffiLib : Library {
         // we already did that with `IntegrityCheckingUniffiLib` above.
     }
     @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_accept_encrypted_link(
+        `secretKeyHex`: RustBufferByValue,
+        `senderPublicKey`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_advance_handshake(
+        `handshakeId`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_close_encrypted_link(
+        `linkId`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_default_max_recovery_attempts(
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Int
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_default_max_send_retries(
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Int
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_drop_encrypted_link_handshake(
+        `handshakeId`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_encrypted_link_handshake_snapshot_recipient(
+        `snapshotHex`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_encrypted_link_snapshot_recipient(
+        `snapshotHex`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_export_session(
     ): Long
     @JvmStatic
@@ -1134,11 +1305,20 @@ internal object UniffiLib : Library {
         `publicKey`: RustBufferByValue,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_get_private_payments(
+        `linkId`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_import_session(
         `sessionSecret`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_initialize(
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_initiate_encrypted_link(
+        `secretKeyHex`: RustBufferByValue,
+        `receiverPublicKey`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_is_authenticated(
@@ -1148,9 +1328,42 @@ internal object UniffiLib : Library {
         `methodId`: RustBufferByValue,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_restore_encrypted_link(
+        `secretKeyHex`: RustBufferByValue,
+        `snapshotHex`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_restore_encrypted_link_handshake(
+        `secretKeyHex`: RustBufferByValue,
+        `snapshotHex`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_serialize_encrypted_link(
+        `linkId`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_serialize_encrypted_link_handshake(
+        `handshakeId`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_set_encrypted_link_handshake_max_recovery_attempts(
+        `handshakeId`: RustBufferByValue,
+        `max`: Int,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_set_encrypted_link_max_send_retries(
+        `linkId`: RustBufferByValue,
+        `max`: Int,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_set_payment_endpoint(
         `methodId`: RustBufferByValue,
         `endpointData`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_set_private_payments(
+        `linkId`: RustBufferByValue,
+        `entries`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_sign_in(
@@ -1442,6 +1655,27 @@ public fun uniffiEnsureInitialized() {
 
 
 
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
+
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
+
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
+
+    override fun allocationSize(value: UInt): ULong = 4UL
+
+    override fun write(value: UInt, buf: ByteBuffer) {
+        buf.putInt(value.toInt())
+    }
+}
+
+
 public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
     override fun lift(value: Byte): Boolean {
         return value.toInt() != 0
@@ -1508,6 +1742,28 @@ public object FfiConverterString: FfiConverter<String, RustBufferByValue> {
         val encoded = value.encodeToByteArray(throwOnInvalidSequence = true)
         buf.putInt(encoded.size)
         buf.put(encoded)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiHandshakeProgress: FfiConverterRustBuffer<FfiHandshakeProgress> {
+    override fun read(buf: ByteBuffer): FfiHandshakeProgress {
+        return FfiHandshakeProgress(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiHandshakeProgress): ULong = (
+            FfiConverterString.allocationSize(value.`status`) +
+            FfiConverterString.allocationSize(value.`handleId`)
+    )
+
+    override fun write(value: FfiHandshakeProgress, buf: ByteBuffer) {
+        FfiConverterString.write(value.`status`, buf)
+        FfiConverterString.write(value.`handleId`, buf)
     }
 }
 
@@ -1689,6 +1945,140 @@ public object FfiConverterSequenceTypeFfiPaymentEntry: FfiConverterRustBuffer<Li
 
 
 /**
+ * Start a private-payment encrypted link as the responder.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitAcceptEncryptedLink`(`secretKeyHex`: kotlin.String, `senderPublicKey`: kotlin.String): kotlin.String {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_accept_encrypted_link(
+            FfiConverterString.lower(`secretKeyHex`),
+            FfiConverterString.lower(`senderPublicKey`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Advance an encrypted-link handshake by one polling-safe step.
+ *
+ * Returns status `"pending"` with the same handshake handle, or `"complete"`
+ * with a new encrypted-link handle.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitAdvanceHandshake`(`handshakeId`: kotlin.String): FfiHandshakeProgress {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_advance_handshake(
+            FfiConverterString.lower(`handshakeId`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeFfiHandshakeProgress.lift(it) },
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Close an established encrypted link and remove its FFI handle.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitCloseEncryptedLink`(`linkId`: kotlin.String) {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_close_encrypted_link(
+            FfiConverterString.lower(`linkId`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_void(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Default maximum number of consecutive handshake recovery attempts.
+ */
+public fun `paykitDefaultMaxRecoveryAttempts`(): kotlin.UInt {
+    return FfiConverterUInt.lift(uniffiRustCall { uniffiRustCallStatus ->
+        UniffiLib.uniffi_paykit_fn_func_paykit_default_max_recovery_attempts(
+            uniffiRustCallStatus,
+        )
+    })
+}
+
+/**
+ * Default maximum number of automatic private-payment send retries.
+ */
+public fun `paykitDefaultMaxSendRetries`(): kotlin.UInt {
+    return FfiConverterUInt.lift(uniffiRustCall { uniffiRustCallStatus ->
+        UniffiLib.uniffi_paykit_fn_func_paykit_default_max_send_retries(
+            uniffiRustCallStatus,
+        )
+    })
+}
+
+/**
+ * Drop an in-progress encrypted-link handshake handle.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitDropEncryptedLinkHandshake`(`handshakeId`: kotlin.String) {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_drop_encrypted_link_handshake(
+            FfiConverterString.lower(`handshakeId`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_void(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Return the remote peer embedded in a handshake snapshot.
+ */
+@Throws(PaykitFfiException::class)
+public fun `paykitEncryptedLinkHandshakeSnapshotRecipient`(`snapshotHex`: kotlin.String): kotlin.String {
+    return FfiConverterString.lift(uniffiRustCallWithError(PaykitFfiExceptionErrorHandler) { uniffiRustCallStatus ->
+        UniffiLib.uniffi_paykit_fn_func_paykit_encrypted_link_handshake_snapshot_recipient(
+            FfiConverterString.lower(`snapshotHex`),
+            uniffiRustCallStatus,
+        )
+    })
+}
+
+/**
+ * Return the remote peer embedded in an encrypted-link snapshot.
+ */
+@Throws(PaykitFfiException::class)
+public fun `paykitEncryptedLinkSnapshotRecipient`(`snapshotHex`: kotlin.String): kotlin.String {
+    return FfiConverterString.lift(uniffiRustCallWithError(PaykitFfiExceptionErrorHandler) { uniffiRustCallStatus ->
+        UniffiLib.uniffi_paykit_fn_func_paykit_encrypted_link_snapshot_recipient(
+            FfiConverterString.lower(`snapshotHex`),
+            uniffiRustCallStatus,
+        )
+    })
+}
+
+/**
  * Exports the current session secret for persistence across app restarts.
  *
  * Returns the compact `<pubkey_z32>:<cookie_secret>` string that can be
@@ -1726,7 +2116,7 @@ public suspend fun `paykitForceSignOut`() {
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-        
+
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
@@ -1792,6 +2182,26 @@ public suspend fun `paykitGetPaymentList`(`publicKey`: kotlin.String): List<FfiP
 }
 
 /**
+ * Receive and decrypt the latest private payments map from an established link.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitGetPrivatePayments`(`linkId`: kotlin.String): List<FfiPaymentEntry> {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_get_private_payments(
+            FfiConverterString.lower(`linkId`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeFfiPaymentEntry.lift(it) },
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
  * Import a session from a Pubky Ring auth flow.
  *
  * Accepts a compact session secret (`<pubkey_z32>:<cookie_secret>`) produced
@@ -1834,7 +2244,28 @@ public suspend fun `paykitInitialize`() {
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-        
+
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Start a private-payment encrypted link as the initiator.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitInitiateEncryptedLink`(`secretKeyHex`: kotlin.String, `receiverPublicKey`: kotlin.String): kotlin.String {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_initiate_encrypted_link(
+            FfiConverterString.lower(`secretKeyHex`),
+            FfiConverterString.lower(`receiverPublicKey`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -1873,7 +2304,133 @@ public suspend fun `paykitRemovePaymentEndpoint`(`methodId`: kotlin.String) {
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-        
+
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Restore an established encrypted link from a serialized snapshot.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitRestoreEncryptedLink`(`secretKeyHex`: kotlin.String, `snapshotHex`: kotlin.String): kotlin.String {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_restore_encrypted_link(
+            FfiConverterString.lower(`secretKeyHex`),
+            FfiConverterString.lower(`snapshotHex`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Restore an in-progress encrypted-link handshake from a serialized snapshot.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitRestoreEncryptedLinkHandshake`(`secretKeyHex`: kotlin.String, `snapshotHex`: kotlin.String): kotlin.String {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_restore_encrypted_link_handshake(
+            FfiConverterString.lower(`secretKeyHex`),
+            FfiConverterString.lower(`snapshotHex`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Serialize an established encrypted link snapshot for durable storage.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitSerializeEncryptedLink`(`linkId`: kotlin.String): kotlin.String {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_serialize_encrypted_link(
+            FfiConverterString.lower(`linkId`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Serialize an in-progress handshake snapshot for durable storage.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitSerializeEncryptedLinkHandshake`(`handshakeId`: kotlin.String): kotlin.String {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_serialize_encrypted_link_handshake(
+            FfiConverterString.lower(`handshakeId`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Configure automatic recovery attempts for a pending encrypted-link handshake.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitSetEncryptedLinkHandshakeMaxRecoveryAttempts`(`handshakeId`: kotlin.String, `max`: kotlin.UInt) {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_set_encrypted_link_handshake_max_recovery_attempts(
+            FfiConverterString.lower(`handshakeId`),
+            FfiConverterUInt.lower(`max`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_void(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Configure automatic send retries for an established encrypted link.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitSetEncryptedLinkMaxSendRetries`(`linkId`: kotlin.String, `max`: kotlin.UInt) {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_set_encrypted_link_max_send_retries(
+            FfiConverterString.lower(`linkId`),
+            FfiConverterUInt.lower(`max`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_void(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
+        // lift function
+        { Unit },
+
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -1895,7 +2452,29 @@ public suspend fun `paykitSetPaymentEndpoint`(`methodId`: kotlin.String, `endpoi
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-        
+
+        // Error FFI converter
+        PaykitFfiExceptionErrorHandler,
+    )
+}
+
+/**
+ * Encrypt and send the complete private payments map over an established link.
+ */
+@Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+public suspend fun `paykitSetPrivatePayments`(`linkId`: kotlin.String, `entries`: List<FfiPaymentEntry>) {
+    return uniffiRustCallAsync(
+        UniffiLib.uniffi_paykit_fn_func_paykit_set_private_payments(
+            FfiConverterString.lower(`linkId`),
+            FfiConverterSequenceTypeFfiPaymentEntry.lower(`entries`),
+        ),
+        { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_paykit_rust_future_free_void(future) },
+        { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
+        // lift function
+        { Unit },
+
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -1940,7 +2519,7 @@ public suspend fun `paykitSignOut`() {
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-        
+
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
