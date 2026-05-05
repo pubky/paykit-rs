@@ -1,3 +1,6 @@
+import groovy.json.JsonSlurper
+import java.util.zip.ZipFile
+
 plugins {
     id("com.android.library")
     kotlin("android")
@@ -32,6 +35,12 @@ android {
         jvmTarget = "1.8"
     }
 
+    sourceSets {
+        getByName("main") {
+            java.srcDir("src/main/kotlin-manual")
+        }
+    }
+
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
@@ -47,6 +56,66 @@ android {
     }
 }
 
+val rustlsPlatformVerifierClassesJar =
+    layout.buildDirectory.file("rustls-platform-verifier/rustls-platform-verifier.jar")
+
+val extractRustlsPlatformVerifierClasses by tasks.registering {
+    val outputFile = rustlsPlatformVerifierClassesJar
+
+    outputs.file(outputFile)
+
+    doLast {
+        val metadataText = providers.exec {
+            workingDir = rootProject.file("../..")
+            commandLine(
+                "cargo",
+                "metadata",
+                "--format-version",
+                "1",
+                "--filter-platform",
+                "aarch64-linux-android",
+                "--manifest-path",
+                "Cargo.toml"
+            )
+        }.standardOutput.asText.get()
+
+        @Suppress("UNCHECKED_CAST")
+        val metadata = JsonSlurper().parseText(metadataText) as Map<String, Any>
+
+        @Suppress("UNCHECKED_CAST")
+        val packages = metadata["packages"] as List<Map<String, Any>>
+        val rustlsAndroidPackage = packages.first {
+            it["name"] == "rustls-platform-verifier-android"
+        }
+        val manifestPath = file(rustlsAndroidPackage["manifest_path"] as String)
+        val version = rustlsAndroidPackage["version"] as String
+        val aarPath = File(
+            manifestPath.parentFile,
+            "maven/rustls/rustls-platform-verifier/$version/rustls-platform-verifier-$version.aar"
+        )
+
+        require(aarPath.isFile) {
+            "rustls-platform-verifier Android AAR not found at $aarPath"
+        }
+
+        val target = outputFile.get().asFile
+        target.parentFile.mkdirs()
+        ZipFile(aarPath).use { aar ->
+            val classesJar = aar.getEntry("classes.jar")
+                ?: error("classes.jar missing from $aarPath")
+            aar.getInputStream(classesJar).use { input ->
+                target.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(extractRustlsPlatformVerifierClasses)
+}
+
 dependencies {
     implementation("net.java.dev.jna:jna:5.17.0@aar")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
@@ -55,6 +124,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("org.jetbrains.kotlinx:atomicfu:0.23.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
+    implementation(files(rustlsPlatformVerifierClassesJar))
     api("org.slf4j:slf4j-api:1.7.36")
 }
 

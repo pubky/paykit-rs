@@ -115,11 +115,12 @@ dependencies {
 }
 ```
 
-Then import and use:
+Then initialize the Android platform verifier once before Paykit networking, then use Paykit:
 
 ```kotlin
 import com.synonym.paykit.*
 
+check(PaykitAndroid.initialize(applicationContext))
 paykitInitialize()
 val payments = paykitGetPaymentList(publicKey = pk)
 ```
