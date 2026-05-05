@@ -12,6 +12,7 @@ ios/module.modulemap
 android/build/
 android/src/main/jniLibs/
 android/src/main/java/uniffi/
+android/libs/
 
 # IDE
 .idea/

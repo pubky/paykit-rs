@@ -1,6 +1,6 @@
 [package]
 name = "paykit-ffi"
-version = "0.1.0-rc3"
+version = "0.1.0-rc4"
 edition = "2021"
 rust-version = "1.91.1"
 description = "UniFFI bindings for paykit-lib targeting iOS and Android"
@@ -32,3 +32,5 @@ tracing = { version = "0.1", features = ["log"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
+jni = "0.21"
+rustls-platform-verifier = "0.6.2"

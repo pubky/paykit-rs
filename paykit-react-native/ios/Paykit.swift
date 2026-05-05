@@ -40,7 +40,7 @@ class Paykit: RCTEventEmitter {
                     NSLocalizedDescriptionKey: "payment entries must include string method_id and endpoint_data fields"
                 ])
             }
-            FfiPaymentEntry(
+            return FfiPaymentEntry(
                 methodId: methodId,
                 endpointData: endpointData
             )

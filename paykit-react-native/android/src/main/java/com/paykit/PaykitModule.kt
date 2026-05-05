@@ -1,17 +1,17 @@
 package com.paykit
 
 import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
-import com.facebook.react.bridge.Promise
+import com.synonym.paykit.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import com.synonym.paykit.*
 
 class PaykitModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
@@ -75,6 +75,9 @@ class PaykitModule(reactContext: ReactApplicationContext) :
     fun initialize(promise: Promise) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                check(PaykitAndroid.initialize(reactApplicationContext)) {
+                    "Failed to initialize Android platform verifier"
+                }
                 paykitInitialize()
                 withContext(Dispatchers.Main) {
                     promise.resolve(resultArray(""))

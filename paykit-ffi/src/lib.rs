@@ -34,6 +34,29 @@ fn init_android_logger() {
     });
 }
 
+/// Initialize Android-specific runtime hooks required by native dependencies.
+///
+/// Must be called from Android with an application `Context` before any Pubky
+/// networking occurs so rustls-platform-verifier can call Android's certificate
+/// verifier through the JVM.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_synonym_paykit_PaykitAndroid_nativeInitialize(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    context: jni::objects::JObject,
+) -> jni::sys::jboolean {
+    init_android_logger();
+
+    match rustls_platform_verifier::android::init_with_env(&mut env, context) {
+        Ok(()) => jni::sys::JNI_TRUE,
+        Err(err) => {
+            log::error!("Failed to initialize rustls-platform-verifier: {err:?}");
+            jni::sys::JNI_FALSE
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FFI-safe types
 // ---------------------------------------------------------------------------

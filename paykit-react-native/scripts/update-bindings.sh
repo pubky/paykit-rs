@@ -55,6 +55,25 @@ for kt_file in "$KOTLIN_SRC"/*.kt; do
   fi
 done
 
+MANUAL_KOTLIN_SRC="$FFI_DIR/bindings/android/lib/src/main/kotlin-manual/com/synonym/paykit"
+for kt_file in "$MANUAL_KOTLIN_SRC"/*.kt; do
+  if [ -f "$kt_file" ]; then
+    cp "$kt_file" "$KOTLIN_DST/"
+    echo "  Copied manual $(basename "$kt_file")"
+  fi
+done
+
+RUSTLS_JAR_SRC="$FFI_DIR/bindings/android/lib/build/rustls-platform-verifier/rustls-platform-verifier.jar"
+RUSTLS_JAR_DST="$RN_DIR/android/libs/rustls-platform-verifier.jar"
+if [ -f "$RUSTLS_JAR_SRC" ]; then
+  mkdir -p "$(dirname "$RUSTLS_JAR_DST")"
+  cp "$RUSTLS_JAR_SRC" "$RUSTLS_JAR_DST"
+  echo "  Copied rustls-platform-verifier.jar"
+else
+  echo "  ERROR: $RUSTLS_JAR_SRC not found" >&2
+  exit 1
+fi
+
 # Pre-built native .so libraries
 JNILIBS_SRC="$FFI_DIR/bindings/android/lib/src/main/jniLibs"
 JNILIBS_DST="$RN_DIR/android/src/main/jniLibs"
