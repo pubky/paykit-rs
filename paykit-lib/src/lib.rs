@@ -342,10 +342,10 @@ impl EncryptedLink {
 ///
 /// # Wire format
 ///
-/// The serialized representation is the 189-byte
+/// The serialized representation is the 197-byte
 /// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
 /// binary format produced by `pubky-noise`. The remote peer's public key is
-/// embedded in the snapshot (bytes 157-188) and reconstructed automatically
+/// embedded in the snapshot (bytes 165-196) and reconstructed automatically
 /// during deserialization.
 pub struct EncryptedLinkSnapshot {
     /// The underlying pubky-noise session state.
@@ -384,7 +384,7 @@ impl std::fmt::Debug for EncryptedLinkSnapshot {
 impl EncryptedLinkSnapshot {
     /// Serialize to a compact binary format for durable storage.
     ///
-    /// The output is 189 bytes and can be passed to
+    /// The output is 197 bytes and can be passed to
     /// [`deserialize`](Self::deserialize) to reconstruct the snapshot.
     pub fn serialize(&self) -> Vec<u8> {
         self.state.serialize()
@@ -431,10 +431,10 @@ impl EncryptedLinkSnapshot {
 ///
 /// # Wire format
 ///
-/// The serialized representation is the 189-byte
+/// The serialized representation is the 197-byte
 /// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
 /// binary format produced by `pubky-noise`. The remote peer's public key is
-/// embedded in the snapshot (bytes 157-188) and reconstructed automatically
+/// embedded in the snapshot (bytes 165-196) and reconstructed automatically
 /// during deserialization.
 pub struct EncryptedLinkHandshakeSnapshot {
     /// The underlying pubky-noise session state.
@@ -456,7 +456,7 @@ impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
 impl EncryptedLinkHandshakeSnapshot {
     /// Serialize to a compact binary format for durable storage.
     ///
-    /// The output is 189 bytes and can be passed to
+    /// The output is 197 bytes and can be passed to
     /// [`deserialize`](Self::deserialize) to reconstruct the snapshot.
     pub fn serialize(&self) -> Vec<u8> {
         self.state.serialize()
@@ -2389,7 +2389,7 @@ mod tests {
 
         let snapshot = initiator_handshake.snapshot();
         let bytes = snapshot.serialize();
-        assert_eq!(bytes.len(), 189, "snapshot should be 189 bytes");
+        assert_eq!(bytes.len(), 197, "snapshot should be 197 bytes");
 
         let restored_snapshot = EncryptedLinkHandshakeSnapshot::deserialize(&bytes).unwrap();
         assert_eq!(
@@ -2588,7 +2588,7 @@ mod tests {
         // Take a snapshot and serialize.
         let snapshot = setup.sender_link.snapshot();
         let bytes = snapshot.serialize();
-        assert_eq!(bytes.len(), 189, "snapshot should be 189 bytes");
+        assert_eq!(bytes.len(), 197, "snapshot should be 197 bytes");
 
         // Deserialize and verify the recipient is reconstructed correctly.
         let restored_snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();

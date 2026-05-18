@@ -279,7 +279,7 @@ Storage paths for private data are derived per-peer-pair using `pubky_noise::pat
 - `EncryptedLinkHandshake::config() -> &Arc<PubkyNoiseConfig>`  
   Access the shared Noise configuration for in-process handshake restore.
 - `EncryptedLinkHandshakeSnapshot::serialize() -> Vec<u8>` / `EncryptedLinkHandshakeSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkHandshakeSnapshot>` / `EncryptedLinkHandshakeSnapshot::recipient() -> &PublicKey`  
-  Snapshot wire format helpers (same compact 189-byte `PubkyNoiseSessionState` format as link snapshots).
+  Snapshot wire format helpers (same compact 197-byte `PubkyNoiseSessionState` format as link snapshots).
 - `restore_encrypted_link_handshake(session, secret_key, remote_pubkey, outbox_client, snapshot) -> Result<EncryptedLinkHandshake>`  
   Cross-restart restore for an in-progress handshake.
 - `restore_encrypted_link_handshake_from_config(config, remote_pubkey, snapshot) -> Result<EncryptedLinkHandshake>`  
@@ -366,7 +366,7 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
 **Snapshot type:**
 
 - `EncryptedLinkSnapshot::serialize() -> Vec<u8>`  
-  Serializes to a compact 189-byte binary format (the `pubky-noise` `PubkyNoiseSessionState` wire format). The remote peer's public key is embedded at bytes 157-188.
+  Serializes to a compact 197-byte binary format (the `pubky-noise` `PubkyNoiseSessionState` wire format). The remote peer's public key is embedded at bytes 165-196.
 - `EncryptedLinkSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkSnapshot>`  
   Reconstructs a snapshot from bytes, including the embedded recipient public key.
 - `EncryptedLinkSnapshot::recipient() -> &PublicKey`  
