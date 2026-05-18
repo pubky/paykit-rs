@@ -13,8 +13,8 @@ use tokio::sync::Mutex as TokioMutex;
 
 use paykit_lib::{
     EncryptedLink, EncryptedLinkHandshake, EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot,
-    EndpointData, HandshakeProgress, MethodId, PubkyAuthenticatedTransport,
-    PubkyUnauthenticatedTransport,
+    EndpointData, HandshakeProgress, MethodId, PaymentReference, PrivatePaymentsPayload,
+    PubkyAuthenticatedTransport, PubkyUnauthenticatedTransport,
 };
 
 // ---------------------------------------------------------------------------
@@ -95,6 +95,12 @@ impl From<paykit_lib::PaykitError> for PaykitFfiError {
 pub struct FfiPaymentEntry {
     pub method_id: String,
     pub endpoint_data: String,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct FfiPrivatePaymentsPayload {
+    pub reference: String,
+    pub entries: Vec<FfiPaymentEntry>,
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
@@ -245,14 +251,33 @@ fn entries_to_map(
 }
 
 fn map_to_entries(payments: paykit_lib::SupportedPayments) -> Vec<FfiPaymentEntry> {
-    payments
-        .entries
+    entries_map_to_entries(payments.entries)
+}
+
+fn entries_map_to_entries(entries: HashMap<MethodId, EndpointData>) -> Vec<FfiPaymentEntry> {
+    entries
         .into_iter()
         .map(|(method, data)| FfiPaymentEntry {
             method_id: method.as_str().to_string(),
             endpoint_data: data.into_inner(),
         })
         .collect()
+}
+
+fn private_payload_to_lib(
+    payload: FfiPrivatePaymentsPayload,
+) -> Result<PrivatePaymentsPayload, PaykitFfiError> {
+    Ok(PrivatePaymentsPayload::new(
+        PaymentReference::new(payload.reference)?,
+        entries_to_map(payload.entries)?,
+    ))
+}
+
+fn private_payload_to_ffi(payload: PrivatePaymentsPayload) -> FfiPrivatePaymentsPayload {
+    FfiPrivatePaymentsPayload {
+        reference: payload.reference.as_str().to_string(),
+        entries: entries_map_to_entries(payload.entries),
+    }
 }
 
 async fn get_link_handle(link_id: u64) -> Result<LinkHandle, PaykitFfiError> {
@@ -788,18 +813,18 @@ pub async fn paykit_set_encrypted_link_max_send_retries(
 #[uniffi::export]
 pub async fn paykit_set_private_payments(
     link_id: String,
-    entries: Vec<FfiPaymentEntry>,
+    payload: FfiPrivatePaymentsPayload,
 ) -> Result<(), PaykitFfiError> {
     let rt = ensure_runtime();
     rt.spawn(async move {
         let link_id = parse_handle_id(&link_id, "link")?;
-        let entries = entries_to_map(entries)?;
+        let payload = private_payload_to_lib(payload)?;
         let handle = get_link_handle(link_id).await?;
         let mut guard = handle.lock().await;
         let link = guard.as_mut().ok_or_else(|| PaykitFfiError::Validation {
             reason: format!("Encrypted-link handle is closed: {link_id}"),
         })?;
-        paykit_lib::set_private_payments(link, &entries).await?;
+        paykit_lib::set_private_payments(link, &payload).await?;
         Ok(())
     })
     .await
@@ -810,7 +835,7 @@ pub async fn paykit_set_private_payments(
 #[uniffi::export]
 pub async fn paykit_get_private_payments(
     link_id: String,
-) -> Result<Vec<FfiPaymentEntry>, PaykitFfiError> {
+) -> Result<Option<FfiPrivatePaymentsPayload>, PaykitFfiError> {
     let rt = ensure_runtime();
     rt.spawn(async move {
         let link_id = parse_handle_id(&link_id, "link")?;
@@ -820,7 +845,7 @@ pub async fn paykit_get_private_payments(
             reason: format!("Encrypted-link handle is closed: {link_id}"),
         })?;
         let payments = paykit_lib::get_private_payments(link).await?;
-        Ok(map_to_entries(payments))
+        Ok(payments.map(private_payload_to_ffi))
     })
     .await
     .unwrap_or_else(|e| Err(runtime_err(e)))
