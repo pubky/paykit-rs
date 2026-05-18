@@ -345,9 +345,9 @@ impl EncryptedLink {
 ///
 /// The serialized representation is the 197-byte
 /// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
-/// binary format produced by `pubky-noise`. The remote peer's public key is
-/// embedded in the snapshot (bytes 165-196) and reconstructed automatically
-/// during deserialization.
+/// binary format produced by `pubky-noise` 0.1.0-rc4. The remote peer's public
+/// key is embedded in the snapshot (bytes 165-196) and reconstructed
+/// automatically during deserialization.
 pub struct EncryptedLinkSnapshot {
     /// The underlying pubky-noise session state.
     state: pubky_noise::serializer::PubkyNoiseSessionState,
@@ -435,9 +435,9 @@ impl EncryptedLinkSnapshot {
 ///
 /// The serialized representation is the 197-byte
 /// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
-/// binary format produced by `pubky-noise`. The remote peer's public key is
-/// embedded in the snapshot (bytes 165-196) and reconstructed automatically
-/// during deserialization.
+/// binary format produced by `pubky-noise` 0.1.0-rc4. The remote peer's public
+/// key is embedded in the snapshot (bytes 165-196) and reconstructed
+/// automatically during deserialization.
 pub struct EncryptedLinkHandshakeSnapshot {
     /// The underlying pubky-noise session state.
     state: pubky_noise::serializer::PubkyNoiseSessionState,
@@ -2618,6 +2618,30 @@ mod tests {
         );
     }
 
+    fn transport_snapshot_state_with_nonces(
+        sending_nonce: u64,
+        receiving_nonce: u64,
+    ) -> pubky_noise::serializer::PubkyNoiseSessionState {
+        pubky_noise::serializer::PubkyNoiseSessionState {
+            version: pubky_noise::serializer::SESSION_STATE_VERSION,
+            phase: pubky_noise::snow_crypto::NoisePhase::Transport,
+            pattern: pubky_noise::snow_crypto::HandshakePattern::PatternXX,
+            initiator: true,
+            ephemeral_secret: [1; 32],
+            static_secret: Some([2; 32]),
+            counter: 2,
+            noise_step: pubky_noise::snow_crypto::NoiseStep::Final,
+            sub_step_index: 0,
+            handshake_hash: Some([3; 32]),
+            link_id: Some([4; 32]),
+            sending_nonce,
+            receiving_nonce,
+            write_counter: 3,
+            read_counter: 3,
+            endpoint_pubkey: Keypair::random().public_key().as_inner().to_bytes(),
+        }
+    }
+
     #[tokio::test]
     async fn test_encrypted_link_snapshot_serialize_roundtrip() {
         let mut setup = PrivateTestSetup::new().await;
@@ -2790,6 +2814,32 @@ mod tests {
             matches!(result, Err(PaykitError::InvalidData { .. })),
             "legacy 189-byte snapshots should fail under the 197-byte format"
         );
+    }
+
+    #[test]
+    fn test_encrypted_link_snapshot_deserialize_accepts_max_usable_noise_nonce() {
+        let state = transport_snapshot_state_with_nonces(u64::MAX - 1, u64::MAX - 1);
+        let bytes = state.serialize();
+
+        let snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
+
+        assert_eq!(snapshot.serialize(), bytes);
+    }
+
+    #[test]
+    fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
+        for (sending_nonce, receiving_nonce) in [(u64::MAX, 0), (0, u64::MAX)] {
+            let bytes =
+                transport_snapshot_state_with_nonces(sending_nonce, receiving_nonce).serialize();
+
+            assert!(
+                matches!(
+                    EncryptedLinkSnapshot::deserialize(&bytes),
+                    Err(PaykitError::InvalidData { .. })
+                ),
+                "reserved Noise nonce should be rejected"
+            );
+        }
     }
 
     // ── parse_private_payments_json tests ───────────────────────────────
