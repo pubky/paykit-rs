@@ -3214,7 +3214,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "paykit-ffi"
-version = "0.1.0-rc5"
+version = "0.1.0-rc7"
 dependencies = [
  "android_logger",
  "hex",
@@ -3232,7 +3232,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-lib"
-version = "0.1.0-rc5"
+version = "0.1.0-rc7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3802,9 +3802,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-noise"
-version = "0.1.0-rc3"
+version = "0.1.0-rc4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2232b31f9a3cd09c93f532394b4b77165dfec5f85be11e516280bb6b64f456"
+checksum = "4112d796f85d9e35c876ba9b414462824ff93c62f26c888be6a9e01a6e6ff745"
 dependencies = [
  "curve25519-dalek 5.0.0-pre.5",
  "ed25519-dalek",

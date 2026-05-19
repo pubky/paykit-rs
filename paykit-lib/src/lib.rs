@@ -419,8 +419,9 @@ struct PrivateMessageHeader {
 ///
 /// [`set_private_payments`] automatically retries failed `send_message` calls
 /// up to [`max_send_retries`](Self::set_max_send_retries) times (default:
-/// [`DEFAULT_MAX_SEND_RETRIES`]). Since transport-phase send failures do not
-/// corrupt the Noise state, retries are safe without snapshot-based recovery.
+/// [`DEFAULT_MAX_SEND_RETRIES`]). Homeserver write failures in transport phase
+/// do not corrupt the Noise state, so retries are safe without snapshot-based
+/// recovery.
 pub struct EncryptedLink {
     /// The Noise session manager in transport mode.
     encryptor: pubky_noise::PubkyNoiseEncryptor,
@@ -506,11 +507,11 @@ impl EncryptedLink {
 ///
 /// # Wire format
 ///
-/// The serialized representation is the 189-byte
+/// The serialized representation is the 197-byte
 /// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
-/// binary format produced by `pubky-noise`. The remote peer's public key is
-/// embedded in the snapshot (bytes 157-188) and reconstructed automatically
-/// during deserialization.
+/// binary format produced by `pubky-noise` 0.1.0-rc4. The remote peer's public
+/// key is embedded in the snapshot (bytes 165-196) and reconstructed
+/// automatically during deserialization.
 pub struct EncryptedLinkSnapshot {
     /// The underlying pubky-noise session state.
     state: pubky_noise::serializer::PubkyNoiseSessionState,
@@ -548,7 +549,7 @@ impl std::fmt::Debug for EncryptedLinkSnapshot {
 impl EncryptedLinkSnapshot {
     /// Serialize to a compact binary format for durable storage.
     ///
-    /// The output is 189 bytes and can be passed to
+    /// The output is 197 bytes and can be passed to
     /// [`deserialize`](Self::deserialize) to reconstruct the snapshot.
     pub fn serialize(&self) -> Vec<u8> {
         self.state.serialize()
@@ -558,7 +559,8 @@ impl EncryptedLinkSnapshot {
     ///
     /// # Errors
     /// Returns [`PaykitError::InvalidData`] if the bytes are malformed or
-    /// the embedded public key cannot be reconstructed.
+    /// the embedded public key cannot be reconstructed. Snapshots using the
+    /// older 189-byte `pubky-noise` `0.1.0-rc3` format are rejected.
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
         let state =
             pubky_noise::serializer::PubkyNoiseSessionState::deserialize(bytes).map_err(|err| {
@@ -595,11 +597,11 @@ impl EncryptedLinkSnapshot {
 ///
 /// # Wire format
 ///
-/// The serialized representation is the 189-byte
+/// The serialized representation is the 197-byte
 /// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
-/// binary format produced by `pubky-noise`. The remote peer's public key is
-/// embedded in the snapshot (bytes 157-188) and reconstructed automatically
-/// during deserialization.
+/// binary format produced by `pubky-noise` 0.1.0-rc4. The remote peer's public
+/// key is embedded in the snapshot (bytes 165-196) and reconstructed
+/// automatically during deserialization.
 pub struct EncryptedLinkHandshakeSnapshot {
     /// The underlying pubky-noise session state.
     state: pubky_noise::serializer::PubkyNoiseSessionState,
@@ -620,7 +622,7 @@ impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
 impl EncryptedLinkHandshakeSnapshot {
     /// Serialize to a compact binary format for durable storage.
     ///
-    /// The output is 189 bytes and can be passed to
+    /// The output is 197 bytes and can be passed to
     /// [`deserialize`](Self::deserialize) to reconstruct the snapshot.
     pub fn serialize(&self) -> Vec<u8> {
         self.state.serialize()
@@ -630,7 +632,8 @@ impl EncryptedLinkHandshakeSnapshot {
     ///
     /// # Errors
     /// Returns [`PaykitError::InvalidData`] if the bytes are malformed or
-    /// the embedded public key cannot be reconstructed.
+    /// the embedded public key cannot be reconstructed. Snapshots using the
+    /// older 189-byte `pubky-noise` `0.1.0-rc3` format are rejected.
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
         let state =
             pubky_noise::serializer::PubkyNoiseSessionState::deserialize(bytes).map_err(|err| {
@@ -717,7 +720,8 @@ impl EncryptedLinkHandshake {
     /// before [`advance_handshake`] gives up and returns
     /// [`PaykitError::Transport`].
     ///
-    /// The counter resets to zero after every successful handshake step.
+    /// The recovery-attempt counter resets to zero after every successful
+    /// handshake step.
     /// Default: [`DEFAULT_MAX_RECOVERY_ATTEMPTS`] (3).
     pub fn set_max_recovery_attempts(&mut self, max: u32) -> &mut Self {
         self.max_recovery_attempts = max;
@@ -984,6 +988,11 @@ fn send_attempts_from_retries(max_send_retries: u32) -> u32 {
     max_send_retries.saturating_add(1)
 }
 
+#[cfg(feature = "pubky")]
+fn is_retryable_private_send_error(err: &pubky_noise::PubkyNoiseError) -> bool {
+    matches!(err, pubky_noise::PubkyNoiseError::HomeserverWriteError)
+}
+
 /// Stores or updates a payment endpoint via the injected authenticated client.
 ///
 /// # Examples
@@ -1041,11 +1050,12 @@ where
 ///
 /// # Automatic retry
 ///
-/// If `send_message` fails, this function automatically retries up to
-/// [`EncryptedLink::set_max_send_retries`] times (default:
-/// [`DEFAULT_MAX_SEND_RETRIES`]). Transport-phase send failures do not
-/// corrupt the Noise state, so retries are safe without snapshot-based
-/// recovery.
+/// If `send_message` fails because the homeserver write fails, this function
+/// automatically retries up to [`EncryptedLink::set_max_send_retries`] times
+/// (default: [`DEFAULT_MAX_SEND_RETRIES`]). Transport-phase homeserver write
+/// failures do not corrupt the Noise state, so retries are safe without
+/// snapshot-based recovery. Deterministic state, counter, nonce, or encryption
+/// errors are returned immediately.
 ///
 /// # Payload size
 ///
@@ -1093,7 +1103,7 @@ pub async fn set_private_payments(
                 debug!("private payments envelope sent successfully");
                 return Ok(());
             }
-            Err(err) => {
+            Err(err) if is_retryable_private_send_error(&err) => {
                 last_error = Some(format!("{err:?}"));
                 if attempt < max_attempts {
                     warn!(
@@ -1103,6 +1113,14 @@ pub async fn set_private_payments(
                         "send_message failed, retrying"
                     );
                 }
+            }
+            Err(err) => {
+                return Err(PaykitError::Transport {
+                    context: format!("failed to send private payments: {err:?}"),
+                    source: anyhow::anyhow!(
+                        "pubky-noise send_message failed with non-retryable error: {err:?}"
+                    ),
+                });
             }
         }
     }
@@ -1205,7 +1223,8 @@ where
 /// - Malformed unrelated private application messages are ignored with
 ///   diagnostics so one bad message does not prevent later valid messages from
 ///   being dispatched.
-/// - Returns `Err(PaykitError::Transport)` for decryption or I/O failures.
+/// - Returns `Err(PaykitError::Transport)` for decryption, counter/nonce, or
+///   I/O failures.
 #[instrument(skip(link))]
 pub async fn get_private_payments(
     link: &mut EncryptedLink,
@@ -1421,8 +1440,8 @@ pub fn accept_encrypted_link(
 ///
 /// The maximum number of **consecutive** recovery attempts is configurable via
 /// [`EncryptedLinkHandshake::set_max_recovery_attempts`] (default:
-/// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`]). The counter resets to zero after every
-/// successful step. If the limit is exceeded, the function returns
+/// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`]). The recovery-attempt counter resets to
+/// zero after every successful step. If the limit is exceeded, the function returns
 /// [`PaykitError::Transport`].
 ///
 /// # Polling strategy
@@ -1731,7 +1750,7 @@ pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
 /// re-doing the Noise handshake. The restore mechanism replays all handshake
 /// messages from the homeservers through a fresh Noise state built with the
 /// same ephemeral key material, then transitions to transport mode and sets
-/// the nonces/counter from the saved state.
+/// the nonces and transport slot counters from the saved state.
 ///
 /// # Parameters
 /// - `session` — authenticated Pubky session for writing messages
@@ -2095,6 +2114,25 @@ mod tests {
         assert_eq!(send_attempts_from_retries(0), 1);
         assert_eq!(send_attempts_from_retries(3), 4);
         assert_eq!(send_attempts_from_retries(u32::MAX), u32::MAX);
+    }
+
+    #[test]
+    fn test_private_send_retry_classification() {
+        assert!(is_retryable_private_send_error(
+            &pubky_noise::PubkyNoiseError::HomeserverWriteError,
+        ));
+
+        for err in [
+            pubky_noise::PubkyNoiseError::IsHandshake,
+            pubky_noise::PubkyNoiseError::EncryptionError,
+            pubky_noise::PubkyNoiseError::CounterOverflow,
+            pubky_noise::PubkyNoiseError::NonceOverflow,
+        ] {
+            assert!(
+                !is_retryable_private_send_error(&err),
+                "{err:?} should not be retried"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2890,7 +2928,7 @@ mod tests {
 
         let snapshot = initiator_handshake.snapshot();
         let bytes = snapshot.serialize();
-        assert_eq!(bytes.len(), 189, "snapshot should be 189 bytes");
+        assert_eq!(bytes.len(), 197, "snapshot should be 197 bytes");
 
         let restored_snapshot = EncryptedLinkHandshakeSnapshot::deserialize(&bytes).unwrap();
         assert_eq!(
@@ -3076,6 +3114,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handshake_snapshot_deserialize_rejects_legacy_rc3_length() {
+        let result = EncryptedLinkHandshakeSnapshot::deserialize(&[0u8; 189]);
+        assert!(
+            matches!(result, Err(PaykitError::InvalidData { .. })),
+            "legacy 189-byte snapshots should fail under the 197-byte format"
+        );
+    }
+
+    fn transport_snapshot_state_with_nonces(
+        sending_nonce: u64,
+        receiving_nonce: u64,
+    ) -> pubky_noise::serializer::PubkyNoiseSessionState {
+        pubky_noise::serializer::PubkyNoiseSessionState {
+            version: pubky_noise::serializer::SESSION_STATE_VERSION,
+            phase: pubky_noise::snow_crypto::NoisePhase::Transport,
+            pattern: pubky_noise::snow_crypto::HandshakePattern::PatternXX,
+            initiator: true,
+            ephemeral_secret: [1; 32],
+            static_secret: Some([2; 32]),
+            counter: 2,
+            noise_step: pubky_noise::snow_crypto::NoiseStep::Final,
+            sub_step_index: 0,
+            handshake_hash: Some([3; 32]),
+            link_id: Some([4; 32]),
+            sending_nonce,
+            receiving_nonce,
+            write_counter: 3,
+            read_counter: 3,
+            endpoint_pubkey: Keypair::random().public_key().as_inner().to_bytes(),
+        }
+    }
+
+    #[tokio::test]
     async fn test_encrypted_link_snapshot_serialize_roundtrip() {
         let mut setup = PrivateTestSetup::new().await;
 
@@ -3092,7 +3163,7 @@ mod tests {
         // Take a snapshot and serialize.
         let snapshot = setup.sender_link.snapshot();
         let bytes = snapshot.serialize();
-        assert_eq!(bytes.len(), 189, "snapshot should be 189 bytes");
+        assert_eq!(bytes.len(), 197, "snapshot should be 197 bytes");
 
         // Deserialize and verify the recipient is reconstructed correctly.
         let restored_snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
@@ -3242,6 +3313,41 @@ mod tests {
             matches!(err, PaykitError::InvalidData { .. }),
             "expected InvalidData error, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_link_snapshot_deserialize_rejects_legacy_rc3_length() {
+        let result = EncryptedLinkSnapshot::deserialize(&[0u8; 189]);
+        assert!(
+            matches!(result, Err(PaykitError::InvalidData { .. })),
+            "legacy 189-byte snapshots should fail under the 197-byte format"
+        );
+    }
+
+    #[test]
+    fn test_encrypted_link_snapshot_deserialize_accepts_max_usable_noise_nonce() {
+        let state = transport_snapshot_state_with_nonces(u64::MAX - 1, u64::MAX - 1);
+        let bytes = state.serialize();
+
+        let snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
+
+        assert_eq!(snapshot.serialize(), bytes);
+    }
+
+    #[test]
+    fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
+        for (sending_nonce, receiving_nonce) in [(u64::MAX, 0), (0, u64::MAX)] {
+            let bytes =
+                transport_snapshot_state_with_nonces(sending_nonce, receiving_nonce).serialize();
+
+            assert!(
+                matches!(
+                    EncryptedLinkSnapshot::deserialize(&bytes),
+                    Err(PaykitError::InvalidData { .. })
+                ),
+                "reserved Noise nonce should be rejected"
+            );
+        }
     }
 
     // ── PaymentReference tests ──────────────────────────────────────────

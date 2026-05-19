@@ -1014,6 +1014,8 @@ internal interface UniffiForeignFutureCompleteVoid: com.sun.jna.Callback {
 
 
 
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1083,6 +1085,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_force_sign_out() != 30515.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_func_paykit_generate_payment_reference() != 10899.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_func_paykit_get_current_public_key() != 28037.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1092,7 +1097,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 63326.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_paykit_get_private_payments() != 29940.toShort()) {
+        if (uniffi_paykit_checksum_func_paykit_get_private_payments() != 50390.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_import_session() != 29532.toShort()) {
@@ -1131,7 +1136,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_set_payment_endpoint() != 62857.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_paykit_set_private_payments() != 41261.toShort()) {
+        if (uniffi_paykit_checksum_func_paykit_set_private_payments() != 52873.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_sign_in() != 50011.toShort()) {
@@ -1175,6 +1180,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_force_sign_out(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_paykit_generate_payment_reference(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_paykit_get_current_public_key(
@@ -1293,6 +1301,10 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_func_paykit_force_sign_out(
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_func_paykit_generate_payment_reference(
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_get_current_public_key(
     ): Long
     @JvmStatic
@@ -1363,7 +1375,7 @@ internal object UniffiLib : Library {
     @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_set_private_payments(
         `linkId`: RustBufferByValue,
-        `entries`: RustBufferByValue,
+        `payload`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_func_paykit_sign_in(
@@ -1792,6 +1804,28 @@ public object FfiConverterTypeFfiPaymentEntry: FfiConverterRustBuffer<FfiPayment
 
 
 
+public object FfiConverterTypeFfiPrivatePaymentsPayload: FfiConverterRustBuffer<FfiPrivatePaymentsPayload> {
+    override fun read(buf: ByteBuffer): FfiPrivatePaymentsPayload {
+        return FfiPrivatePaymentsPayload(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeFfiPaymentEntry.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPrivatePaymentsPayload): ULong = (
+            FfiConverterString.allocationSize(value.`reference`) +
+            FfiConverterSequenceTypeFfiPaymentEntry.allocationSize(value.`entries`)
+    )
+
+    override fun write(value: FfiPrivatePaymentsPayload, buf: ByteBuffer) {
+        FfiConverterString.write(value.`reference`, buf)
+        FfiConverterSequenceTypeFfiPaymentEntry.write(value.`entries`, buf)
+    }
+}
+
+
+
+
 public object PaykitFfiExceptionErrorHandler : UniffiRustCallStatusErrorHandler<PaykitFfiException> {
     override fun lift(errorBuf: RustBufferByValue): PaykitFfiException = FfiConverterTypePaykitFfiError.lift(errorBuf)
 }
@@ -1904,6 +1938,35 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiPrivatePaymentsPayload: FfiConverterRustBuffer<FfiPrivatePaymentsPayload?> {
+    override fun read(buf: ByteBuffer): FfiPrivatePaymentsPayload? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiPrivatePaymentsPayload.read(buf)
+    }
+
+    override fun allocationSize(value: FfiPrivatePaymentsPayload?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiPrivatePaymentsPayload.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiPrivatePaymentsPayload?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiPrivatePaymentsPayload.write(value, buf)
         }
     }
 }
@@ -2123,6 +2186,17 @@ public suspend fun `paykitForceSignOut`() {
 }
 
 /**
+ * Generate a fresh UUID-v4 payment reference for private payment correlation.
+ */
+public fun `paykitGeneratePaymentReference`(): kotlin.String {
+    return FfiConverterString.lift(uniffiRustCall { uniffiRustCallStatus ->
+        UniffiLib.uniffi_paykit_fn_func_paykit_generate_payment_reference(
+            uniffiRustCallStatus,
+        )
+    })
+}
+
+/**
  * Returns the public key of the currently authenticated user, or `None`.
  */
 public suspend fun `paykitGetCurrentPublicKey`(): kotlin.String? {
@@ -2182,10 +2256,10 @@ public suspend fun `paykitGetPaymentList`(`publicKey`: kotlin.String): List<FfiP
 }
 
 /**
- * Receive and decrypt the latest private payments map from an established link.
+ * Receive and decrypt the latest private payments envelope from an established link.
  */
 @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-public suspend fun `paykitGetPrivatePayments`(`linkId`: kotlin.String): List<FfiPaymentEntry> {
+public suspend fun `paykitGetPrivatePayments`(`linkId`: kotlin.String): FfiPrivatePaymentsPayload? {
     return uniffiRustCallAsync(
         UniffiLib.uniffi_paykit_fn_func_paykit_get_private_payments(
             FfiConverterString.lower(`linkId`),
@@ -2195,7 +2269,7 @@ public suspend fun `paykitGetPrivatePayments`(`linkId`: kotlin.String): List<Ffi
         { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
         // lift function
-        { FfiConverterSequenceTypeFfiPaymentEntry.lift(it) },
+        { FfiConverterOptionalTypeFfiPrivatePaymentsPayload.lift(it) },
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -2459,14 +2533,14 @@ public suspend fun `paykitSetPaymentEndpoint`(`methodId`: kotlin.String, `endpoi
 }
 
 /**
- * Encrypt and send the complete private payments map over an established link.
+ * Encrypt and send the complete private payments envelope over an established link.
  */
 @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-public suspend fun `paykitSetPrivatePayments`(`linkId`: kotlin.String, `entries`: List<FfiPaymentEntry>) {
+public suspend fun `paykitSetPrivatePayments`(`linkId`: kotlin.String, `payload`: FfiPrivatePaymentsPayload) {
     return uniffiRustCallAsync(
         UniffiLib.uniffi_paykit_fn_func_paykit_set_private_payments(
             FfiConverterString.lower(`linkId`),
-            FfiConverterSequenceTypeFfiPaymentEntry.lower(`entries`),
+            FfiConverterTypeFfiPrivatePaymentsPayload.lower(`payload`),
         ),
         { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_void(future, continuation) },

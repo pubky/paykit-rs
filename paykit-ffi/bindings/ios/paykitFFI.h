@@ -305,6 +305,12 @@ uint64_t uniffi_paykit_fn_func_paykit_force_sign_out(void
 
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GENERATE_PAYMENT_REFERENCE
+#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GENERATE_PAYMENT_REFERENCE
+RustBuffer uniffi_paykit_fn_func_paykit_generate_payment_reference(RustCallStatus *_Nonnull out_status
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_CURRENT_PUBLIC_KEY
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_CURRENT_PUBLIC_KEY
 uint64_t uniffi_paykit_fn_func_paykit_get_current_public_key(void
@@ -390,7 +396,7 @@ uint64_t uniffi_paykit_fn_func_paykit_set_payment_endpoint(RustBuffer method_id,
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_SET_PRIVATE_PAYMENTS
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_SET_PRIVATE_PAYMENTS
-uint64_t uniffi_paykit_fn_func_paykit_set_private_payments(RustBuffer link_id, RustBuffer entries
+uint64_t uniffi_paykit_fn_func_paykit_set_private_payments(RustBuffer link_id, RustBuffer payload
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_SIGN_IN
@@ -746,6 +752,12 @@ uint16_t uniffi_paykit_checksum_func_paykit_export_session(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_FORCE_SIGN_OUT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_FORCE_SIGN_OUT
 uint16_t uniffi_paykit_checksum_func_paykit_force_sign_out(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GENERATE_PAYMENT_REFERENCE
+#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GENERATE_PAYMENT_REFERENCE
+uint16_t uniffi_paykit_checksum_func_paykit_generate_payment_reference(void
 
 );
 #endif
