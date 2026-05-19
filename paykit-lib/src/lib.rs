@@ -300,7 +300,9 @@ pub enum PrivateMessageKind {
 #[cfg(feature = "pubky")]
 impl PrivateMessageKind {
     fn as_str(self) -> &'static str {
-        "paykit.private_payments"
+        match self {
+            Self::PrivatePayments => "paykit.private_payments",
+        }
     }
 }
 
