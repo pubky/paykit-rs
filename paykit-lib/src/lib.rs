@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
+#[cfg(feature = "pubky")]
+use std::collections::VecDeque;
 #[cfg(not(feature = "pubky"))]
 use std::fmt;
 
@@ -12,6 +14,9 @@ pub use pubky::PublicKey;
 
 #[cfg(feature = "pubky")]
 pub use pubky_noise;
+
+#[cfg(feature = "pubky")]
+use serde::{Deserialize, Serialize};
 
 #[cfg(not(feature = "pubky"))]
 /// Public key placeholder used when the `pubky` feature is disabled.
@@ -242,6 +247,146 @@ pub struct SupportedPayments {
 }
 
 #[cfg(feature = "pubky")]
+/// UUID-v4 correlation reference used to connect private payment offers and receipts.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PaymentReference(String);
+
+#[cfg(feature = "pubky")]
+impl PaymentReference {
+    /// Create a payment reference after validating that the input is a UUID v4 string.
+    ///
+    /// Accepted UUID-v4 inputs are canonicalized to lowercase hyphenated form.
+    pub fn new(reference: impl Into<String>) -> Result<Self> {
+        let reference = reference.into();
+        let uuid = uuid::Uuid::try_parse(&reference).map_err(|err| {
+            PaykitError::Validation(format!("payment reference must be a UUID v4 string: {err}"))
+        })?;
+        if uuid.get_version_num() != 4 || uuid.get_variant() != uuid::Variant::RFC4122 {
+            return Err(PaykitError::Validation(
+                "payment reference must be an RFC4122 UUID v4 string".into(),
+            ));
+        }
+        Ok(Self(uuid.hyphenated().to_string()))
+    }
+
+    /// Generate a fresh random UUID-v4 payment reference.
+    pub fn new_v4() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// Access the inner UUID string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(feature = "pubky")]
+impl std::fmt::Display for PaymentReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[cfg(feature = "pubky")]
+impl AsRef<str> for PaymentReference {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(feature = "pubky")]
+/// Private Noise message kinds understood by Paykit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivateMessageKind {
+    /// Latest-state private payment endpoint envelope (`paykit.private_payments`).
+    PrivatePayments,
+}
+
+#[cfg(feature = "pubky")]
+impl PrivateMessageKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PrivatePayments => "paykit.private_payments",
+        }
+    }
+}
+
+#[cfg(feature = "pubky")]
+/// Versioned private payments payload sent over an established Noise link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrivatePaymentsPayload {
+    version: u8,
+    kind: PrivateMessageKind,
+    /// UUID-v4 correlation reference for this latest private-payment state.
+    pub reference: PaymentReference,
+    /// Complete latest-state map of private payment entries keyed by method ID.
+    pub entries: HashMap<MethodId, EndpointData>,
+}
+
+#[cfg(feature = "pubky")]
+impl PrivatePaymentsPayload {
+    /// Construct a private payments payload using protocol version 1 and the
+    /// `paykit.private_payments` message kind.
+    ///
+    /// `entries` must be the complete desired latest-state map; callers should
+    /// include all private payment methods they want the counterparty to see,
+    /// not just an incremental patch.
+    pub fn new(reference: PaymentReference, entries: HashMap<MethodId, EndpointData>) -> Self {
+        Self {
+            version: 1,
+            kind: PrivateMessageKind::PrivatePayments,
+            reference,
+            entries,
+        }
+    }
+
+    /// Protocol envelope version used for private payment messages.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
+    /// Protocol message kind used for private payment messages.
+    pub fn kind(&self) -> PrivateMessageKind {
+        self.kind
+    }
+
+    /// Number of private payment entries in this payload.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true when this payload contains no payment entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Look up an endpoint by method ID.
+    pub fn get(&self, method: &MethodId) -> Option<&EndpointData> {
+        self.entries.get(method)
+    }
+}
+
+#[cfg(feature = "pubky")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BufferedPrivateMessage {
+    kind: String,
+    plaintext: String,
+}
+
+#[cfg(feature = "pubky")]
+impl BufferedPrivateMessage {
+    fn is_kind(&self, kind: PrivateMessageKind) -> bool {
+        self.kind == kind.as_str()
+    }
+}
+
+#[cfg(feature = "pubky")]
+#[derive(Deserialize)]
+struct PrivateMessageHeader {
+    kind: String,
+}
+
+#[cfg(feature = "pubky")]
 /// Handle to an established encrypted Noise link with a peer.
 ///
 /// Created by [`advance_handshake`] (via [`HandshakeProgress::Complete`]) after
@@ -257,6 +402,18 @@ pub struct SupportedPayments {
 /// serialized directly via [`serialize`](Self::serialize)) and later restored
 /// with [`restore_encrypted_link`] or [`restore_encrypted_link_from_config`]
 /// without re-doing the Noise handshake.
+///
+/// # Private message dispatch
+///
+/// All Paykit application messages on this Noise link share one ordered stream.
+/// The link therefore buffers decrypted messages after low-level receipt and
+/// lets typed helpers consume only their own message kind. This prevents future
+/// helpers (for example receipt access) from losing messages simply because a
+/// different typed getter was called first.
+///
+/// The buffer is in-memory only. If callers need crash-safe processing of
+/// event-like message kinds, they must persist handled/unhandled application
+/// state before dropping or serializing the link.
 ///
 /// # Automatic send retry
 ///
@@ -274,6 +431,13 @@ pub struct EncryptedLink {
     /// Maximum number of automatic `send_message` retries in
     /// [`set_private_payments`].
     max_send_retries: u32,
+    /// Decrypted application messages that have been read from the ordered
+    /// Noise stream but not yet consumed by a typed Paykit helper.
+    ///
+    /// This prevents a typed receiver such as [`get_private_payments`] from
+    /// discarding unrelated message kinds (for example future receipt-access
+    /// messages) after the underlying Noise read counter has advanced.
+    pending_private_messages: VecDeque<BufferedPrivateMessage>,
 }
 
 #[cfg(feature = "pubky")]
@@ -644,39 +808,175 @@ fn compute_private_payment_paths(
 }
 
 #[cfg(feature = "pubky")]
-/// Deserializes a private payments JSON blob into a map of method IDs to
-/// endpoint data.
-///
-/// The expected format is `{ "method_id": "endpoint_value", ... }`.
-fn parse_private_payments_json(json: &str) -> Result<HashMap<MethodId, EndpointData>> {
-    let map: HashMap<String, String> =
-        serde_json::from_str(json).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to parse private payments JSON: {err}"),
-            source: Some(err.into()),
-        })?;
-
-    let mut result = HashMap::new();
-    for (key, value) in map {
-        let method_id = MethodId::new(&key).map_err(|err| PaykitError::InvalidData {
-            context: format!("private payments blob contains invalid method identifier '{key}'"),
-            source: Some(err.into()),
-        })?;
-        result.insert(method_id, EndpointData::new(value));
-    }
-    Ok(result)
+#[derive(Deserialize)]
+struct PrivatePaymentsWire {
+    version: u8,
+    kind: String,
+    reference: String,
+    entries: HashMap<String, String>,
 }
 
-/// Serializes a map of method IDs to endpoint data into a JSON string.
 #[cfg(feature = "pubky")]
-fn serialize_private_payments_json(entries: &HashMap<MethodId, EndpointData>) -> Result<String> {
-    let map: HashMap<&str, &str> = entries
+#[derive(Serialize)]
+struct PrivatePaymentsWireRef<'a> {
+    version: u8,
+    kind: &'static str,
+    reference: &'a str,
+    entries: HashMap<&'a str, &'a str>,
+}
+
+#[cfg(feature = "pubky")]
+/// Deserializes a versioned private payments JSON envelope.
+fn parse_private_payments_json(json: &str) -> Result<PrivatePaymentsPayload> {
+    let wire: PrivatePaymentsWire =
+        serde_json::from_str(json).map_err(|err| PaykitError::InvalidData {
+            context: format!("failed to parse private payments envelope JSON: {err}"),
+            source: Some(err.into()),
+        })?;
+    if wire.version != 1 {
+        return Err(PaykitError::InvalidData {
+            context: format!(
+                "unsupported private payments envelope version {}",
+                wire.version
+            ),
+            source: None,
+        });
+    }
+    if wire.kind != PrivateMessageKind::PrivatePayments.as_str() {
+        return Err(PaykitError::InvalidData {
+            context: format!("unsupported private payments envelope kind '{}'", wire.kind),
+            source: None,
+        });
+    }
+    let reference =
+        PaymentReference::new(&wire.reference).map_err(|err| PaykitError::InvalidData {
+            context: format!(
+                "private payments envelope contains invalid payment reference '{}'",
+                wire.reference
+            ),
+            source: Some(err.into()),
+        })?;
+    let mut entries = HashMap::new();
+    for (key, value) in wire.entries {
+        let method_id = MethodId::new(&key).map_err(|err| PaykitError::InvalidData {
+            context: format!(
+                "private payments envelope contains invalid method identifier '{key}'"
+            ),
+            source: Some(err.into()),
+        })?;
+        entries.insert(method_id, EndpointData::new(value));
+    }
+    Ok(PrivatePaymentsPayload::new(reference, entries))
+}
+
+/// Serializes private payments into a versioned JSON envelope.
+#[cfg(feature = "pubky")]
+fn serialize_private_payments_json(payload: &PrivatePaymentsPayload) -> Result<String> {
+    let entries = payload
+        .entries
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    serde_json::to_string(&map).map_err(|err| PaykitError::InvalidData {
-        context: format!("failed to serialize private payments JSON: {err}"),
+    let wire = PrivatePaymentsWireRef {
+        version: payload.version,
+        kind: payload.kind.as_str(),
+        reference: payload.reference.as_str(),
+        entries,
+    };
+    serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
+        context: format!("failed to serialize private payments envelope JSON: {err}"),
         source: Some(err.into()),
     })
+}
+
+#[cfg(feature = "pubky")]
+fn decode_private_message(
+    raw: &[u8; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN],
+) -> Result<BufferedPrivateMessage> {
+    // Trim trailing zero-padding added by pubky-noise's fixed-size buffers.
+    // Paykit application messages are JSON, so trailing NUL bytes are not valid
+    // payload content.
+    let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let plaintext = std::str::from_utf8(&raw[..end]).map_err(|err| PaykitError::InvalidData {
+        context: format!("private message plaintext is not valid UTF-8: {err}"),
+        source: Some(err.into()),
+    })?;
+
+    let header: PrivateMessageHeader =
+        serde_json::from_str(plaintext).map_err(|err| PaykitError::InvalidData {
+            context: format!("failed to parse private message header JSON: {err}"),
+            source: Some(err.into()),
+        })?;
+
+    Ok(BufferedPrivateMessage {
+        kind: header.kind,
+        plaintext: plaintext.to_owned(),
+    })
+}
+
+#[cfg(feature = "pubky")]
+async fn receive_private_messages(link: &mut EncryptedLink) -> Result<usize> {
+    let mut received = 0usize;
+    let mut malformed = 0usize;
+
+    loop {
+        let messages =
+            link.encryptor
+                .receive_message()
+                .await
+                .map_err(|err| PaykitError::Transport {
+                    context: format!("failed to receive private messages: {err:?}"),
+                    source: anyhow::anyhow!("pubky-noise receive_message failed: {err:?}"),
+                })?;
+
+        if messages.is_empty() {
+            break;
+        }
+
+        received += messages.len();
+        for raw in messages {
+            match decode_private_message(&raw) {
+                Ok(message) => link.pending_private_messages.push_back(message),
+                Err(err) => {
+                    malformed += 1;
+                    warn!(
+                        error = ?err,
+                        "dropping malformed private application message"
+                    );
+                }
+            }
+        }
+    }
+
+    if malformed > 0 {
+        warn!(
+            received,
+            malformed,
+            "ignored malformed private application messages while preserving later valid messages"
+        );
+    }
+
+    Ok(received)
+}
+
+#[cfg(feature = "pubky")]
+fn take_latest_pending_message(
+    pending: &mut VecDeque<BufferedPrivateMessage>,
+    kind: PrivateMessageKind,
+) -> Option<BufferedPrivateMessage> {
+    let mut retained = VecDeque::with_capacity(pending.len());
+    let mut latest = None;
+
+    while let Some(message) = pending.pop_front() {
+        if message.is_kind(kind) {
+            latest = Some(message);
+        } else {
+            retained.push_back(message);
+        }
+    }
+
+    *pending = retained;
+    latest
 }
 
 #[cfg(feature = "pubky")]
@@ -710,11 +1010,32 @@ where
 }
 
 #[cfg(feature = "pubky")]
-/// Encrypts and sends the complete private payments map via the established
+/// Encrypts and sends a complete private payments envelope via the established
 /// encrypted link.
 ///
-/// The caller is responsible for managing the map contents (adding/removing
-/// entries). This function serializes the map to JSON, encrypts it using
+/// The caller must pass a [`PrivatePaymentsPayload`] containing a validated
+/// [`PaymentReference`] and the complete map of private payment entries. The
+/// caller is still responsible for managing the map contents (adding/removing
+/// entries) and should pass the full desired entries map in `payload.entries`
+/// on every update.
+///
+/// The payload is serialized as a versioned envelope before being sent over
+/// pubky-noise:
+///
+/// ```json
+/// {
+///   "version": 1,
+///   "kind": "paykit.private_payments",
+///   "reference": "550e8400-e29b-41d4-a716-446655440000",
+///   "entries": {
+///     "lightning": "ln..."
+///   }
+/// }
+/// ```
+///
+/// `reference` is a UUID-v4 [`PaymentReference`] used to correlate the private
+/// payment offer with later protocol artifacts such as receipts. This function
+/// serializes the envelope to JSON, encrypts it using
 /// [`pubky_noise::PubkyNoiseEncryptor::send_message`], and pubky-noise handles
 /// file naming and storage location on the homeserver.
 ///
@@ -728,28 +1049,29 @@ where
 ///
 /// # Payload size
 ///
-/// The serialized JSON must fit within a single pubky-noise message
+/// The serialized envelope JSON must fit within a single pubky-noise message
 /// (`PUBKY_NOISE_MSG_LEN`, currently 1000 bytes). Exceeding this limit
 /// returns [`PaykitError::Validation`].
 ///
 /// # Parameters
 /// - `link` — an established [`EncryptedLink`] for encryption and I/O.
-/// - `entries` — the complete map of payment methods to store.
+/// - `payload` — the complete private payments envelope, including the
+///   required [`PaymentReference`] and complete entries map.
 ///
 /// # Errors
-/// - Returns [`PaykitError::Validation`] if the serialized payload exceeds
+/// - Returns [`PaykitError::Validation`] if the serialized envelope exceeds
 ///   the maximum message size.
-/// - Returns [`PaykitError::InvalidData`] if the map cannot be serialized.
+/// - Returns [`PaykitError::InvalidData`] if the envelope cannot be serialized.
 /// - Returns [`PaykitError::Transport`] if `send_message` fails after all
 ///   retry attempts are exhausted.
-#[instrument(skip(link, entries), fields(count = entries.len()))]
+#[instrument(skip(link, payload), fields(count = payload.entries.len()))]
 pub async fn set_private_payments(
     link: &mut EncryptedLink,
-    entries: &HashMap<MethodId, EndpointData>,
+    payload: &PrivatePaymentsPayload,
 ) -> Result<()> {
-    debug!("sending private payments map");
+    debug!("sending private payments envelope");
 
-    let json = serialize_private_payments_json(entries)
+    let json = serialize_private_payments_json(payload)
         .map_err(|err| map_error("set_private_payments", err))?;
 
     let plaintext = json.into_bytes();
@@ -768,7 +1090,7 @@ pub async fn set_private_payments(
     for attempt in 1..=max_attempts {
         match link.encryptor.send_message(&plaintext).await {
             Ok(()) => {
-                debug!("private payments map sent successfully");
+                debug!("private payments envelope sent successfully");
                 return Ok(());
             }
             Err(err) => {
@@ -851,64 +1173,62 @@ where
 }
 
 #[cfg(feature = "pubky")]
-/// Receives and decrypts the private payments map from the remote peer
-/// via the established encrypted link.
+/// Receives and decrypts the latest private payments envelope from the remote
+/// peer via the established encrypted link.
 ///
-/// Returns the full map of payment methods. The caller can look up
-/// individual methods from the returned [`SupportedPayments`].
+/// Returns `Ok(Some(payload))` when a private payments message is available.
+/// The caller can access the correlation reference at `payload.reference` and
+/// look up payment methods from `payload.entries` or via
+/// [`PrivatePaymentsPayload::get`].
+///
+/// Returns `Ok(None)` when no private payments message is currently available.
+/// `None` means "no message yet"; it is distinct from receiving a payload whose
+/// `entries` map is empty.
 ///
 /// # Parameters
 /// - `link` — an established [`EncryptedLink`] for decryption and I/O.
 ///
 /// # Semantics
-/// - Returns an empty [`SupportedPayments`] when no messages are available.
-/// - Drains all currently unread queued updates and returns the latest map.
-///   Intermediate queued updates are consumed.
-/// - Returns `Err(PaykitError::InvalidData)` when the decrypted payload
-///   is not valid UTF-8 or cannot be parsed as a payments JSON map.
+/// - Receives and buffers all currently available application messages from the
+///   shared Noise stream before selecting private payments by message kind.
+/// - Returns `Ok(None)` when no private payments messages are available.
+/// - Returns the latest queued [`PrivatePaymentsPayload`]. Intermediate queued
+///   private payment updates are consumed because private payments are
+///   latest-state data.
+/// - Messages with other `kind` values are left buffered on the [`EncryptedLink`]
+///   for their own typed receivers. They are not parsed as private payments and
+///   are not discarded just because this function was called.
+/// - The returned payload is the full versioned private payments envelope,
+///   including its required [`PaymentReference`] and complete entries map.
+/// - Returns `Err(PaykitError::InvalidData)` when the selected private
+///   payments payload cannot be parsed as a private payments envelope.
+/// - Malformed unrelated private application messages are ignored with
+///   diagnostics so one bad message does not prevent later valid messages from
+///   being dispatched.
 /// - Returns `Err(PaykitError::Transport)` for decryption or I/O failures.
 #[instrument(skip(link))]
-pub async fn get_private_payments(link: &mut EncryptedLink) -> Result<SupportedPayments> {
-    debug!("receiving private payments map");
+pub async fn get_private_payments(
+    link: &mut EncryptedLink,
+) -> Result<Option<PrivatePaymentsPayload>> {
+    debug!("receiving private payments envelope");
 
-    let mut latest: Option<[u8; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN]> = None;
-    let mut drained = 0usize;
-
-    loop {
-        let messages =
-            link.encryptor
-                .receive_message()
-                .await
-                .map_err(|err| PaykitError::Transport {
-                    context: format!("failed to receive private payments: {err:?}"),
-                    source: anyhow::anyhow!("pubky-noise receive_message failed: {err:?}"),
-                })?;
-        if messages.is_empty() {
-            break;
-        }
-
-        drained += messages.len();
-        latest = messages.into_iter().last();
-    }
-
-    let Some(raw) = latest else {
-        debug!("no private payments messages available, returning empty map");
-        return Ok(SupportedPayments::default());
+    let received = receive_private_messages(link).await?;
+    let Some(raw) = take_latest_pending_message(
+        &mut link.pending_private_messages,
+        PrivateMessageKind::PrivatePayments,
+    ) else {
+        debug!(received, "no private payments messages available");
+        return Ok(None);
     };
 
-    // Trim trailing zero-padding added by pubky-noise's fixed-size buffers.
-    let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let plaintext = std::str::from_utf8(&raw[..end]).map_err(|err| PaykitError::InvalidData {
-        context: format!("private payments plaintext is not valid UTF-8: {err}"),
-        source: Some(err.into()),
-    })?;
-
-    let entries = parse_private_payments_json(plaintext)?;
+    let payload = parse_private_payments_json(&raw.plaintext)?;
     debug!(
-        count = entries.len(),
-        drained, "private payments map received"
+        count = payload.entries.len(),
+        received,
+        pending = link.pending_private_messages.len(),
+        "private payments envelope received"
     );
-    Ok(SupportedPayments { entries })
+    Ok(Some(payload))
 }
 
 /// Retrieves a specific payment endpoint for `payee` and `method`.
@@ -1242,6 +1562,7 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
         recipient: handshake.remote_pubkey,
         config: handshake.config,
         max_send_retries: DEFAULT_MAX_SEND_RETRIES,
+        pending_private_messages: VecDeque::new(),
     }))
 }
 
@@ -1547,6 +1868,7 @@ async fn restore_encrypted_link_inner(
         recipient: remote_pubkey.clone(),
         config,
         max_send_retries: DEFAULT_MAX_SEND_RETRIES,
+        pending_private_messages: VecDeque::new(),
     })
 }
 
@@ -2079,6 +2401,23 @@ mod tests {
 
     // ── Private payments tests ──────────────────────────────────────────
 
+    fn private_payload(entries: &HashMap<MethodId, EndpointData>) -> PrivatePaymentsPayload {
+        PrivatePaymentsPayload::new(PaymentReference::new_v4(), entries.clone())
+    }
+
+    const TEST_RECEIPT_ACCESS_JSON: &str = r#"{"version":1,"kind":"paykit.receipt_access","reference":"550e8400-e29b-41d4-a716-446655440000"}"#;
+
+    async fn send_raw_private_message(link: &mut EncryptedLink, json: &str) {
+        assert!(
+            json.len() <= pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN,
+            "test raw message exceeds pubky-noise message size"
+        );
+        link.encryptor
+            .send_message(json.as_bytes())
+            .await
+            .expect("raw private message should send");
+    }
+
     #[tokio::test]
     async fn private_payments_empty_returns_empty() {
         let mut setup = PrivateTestSetup::new().await;
@@ -2087,8 +2426,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            result.entries.is_empty(),
-            "fresh link with no messages should return empty map"
+            result.is_none(),
+            "fresh link with no messages should return no payload"
         );
 
         setup.sender_session.signout().await.unwrap();
@@ -2104,13 +2443,19 @@ mod tests {
         let mut entries = HashMap::new();
         entries.insert(method.clone(), data.clone());
 
-        set_private_payments(&mut setup.sender_link, &entries)
-            .await
-            .unwrap();
+        let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        set_private_payments(
+            &mut setup.sender_link,
+            &PrivatePaymentsPayload::new(reference.clone(), entries),
+        )
+        .await
+        .unwrap();
 
         let received = get_private_payments(&mut setup.receiver_link)
             .await
+            .unwrap()
             .unwrap();
+        assert_eq!(received.reference, reference);
         assert_eq!(received.entries.len(), 1);
         assert_eq!(received.entries.get(&method), Some(&data));
 
@@ -2134,12 +2479,13 @@ mod tests {
             EndpointData::new("{\"mint\":\"https://...\"}"),
         );
 
-        set_private_payments(&mut setup.sender_link, &entries)
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
             .await
             .unwrap();
 
         let received = get_private_payments(&mut setup.receiver_link)
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(received.entries.len(), 3);
         assert_eq!(
@@ -2169,7 +2515,7 @@ mod tests {
             MethodId::new("bitcoin-lightning").unwrap(),
             EndpointData::new("v1"),
         );
-        set_private_payments(&mut setup.sender_link, &entries_v1)
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries_v1))
             .await
             .unwrap();
 
@@ -2177,13 +2523,14 @@ mod tests {
         let onchain = MethodId::new("bitcoin-p2tr").unwrap();
         let mut entries_v2 = HashMap::new();
         entries_v2.insert(onchain.clone(), EndpointData::new("v2"));
-        set_private_payments(&mut setup.sender_link, &entries_v2)
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries_v2))
             .await
             .unwrap();
 
         // The helper drains queued unread updates and returns the latest map.
         let received = get_private_payments(&mut setup.receiver_link)
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(received.entries.len(), 1);
         assert_eq!(
@@ -2195,7 +2542,7 @@ mod tests {
         let empty = get_private_payments(&mut setup.receiver_link)
             .await
             .unwrap();
-        assert!(empty.entries.is_empty());
+        assert!(empty.is_none());
 
         setup.sender_session.signout().await.unwrap();
         setup.receiver_session.signout().await.unwrap();
@@ -2211,7 +2558,7 @@ mod tests {
         let mut entries = HashMap::new();
         entries.insert(method, EndpointData::new(oversized_value));
 
-        let result = set_private_payments(&mut setup.sender_link, &entries).await;
+        let result = set_private_payments(&mut setup.sender_link, &private_payload(&entries)).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -2223,11 +2570,162 @@ mod tests {
         setup.receiver_session.signout().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn get_private_payments_preserves_newer_unknown_messages() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+        send_raw_private_message(&mut setup.sender_link, TEST_RECEIPT_ACCESS_JSON).await;
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("private payments message should not be lost behind receipt message");
+        assert_eq!(received.entries.get(&method), Some(&data));
+        assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
+        assert_eq!(
+            setup.receiver_link.pending_private_messages[0]
+                .kind
+                .as_str(),
+            "paykit.receipt_access"
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_private_payments_preserves_older_unknown_messages() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        send_raw_private_message(&mut setup.sender_link, TEST_RECEIPT_ACCESS_JSON).await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("private payments message should be found without dropping receipt message");
+        assert_eq!(received.entries.get(&method), Some(&data));
+        assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
+        assert_eq!(
+            setup.receiver_link.pending_private_messages[0]
+                .kind
+                .as_str(),
+            "paykit.receipt_access"
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_private_payments_ignores_malformed_messages_before_valid_payment() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        send_raw_private_message(&mut setup.sender_link, "not-json").await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("valid private payments message should survive malformed earlier message");
+        assert_eq!(received.entries.get(&method), Some(&data));
+        assert!(setup.receiver_link.pending_private_messages.is_empty());
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_private_payments_ignores_malformed_messages_after_valid_payment() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+        send_raw_private_message(&mut setup.sender_link, "not-json").await;
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("valid private payments message should survive malformed later message");
+        assert_eq!(received.entries.get(&method), Some(&data));
+        assert!(setup.receiver_link.pending_private_messages.is_empty());
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_private_payments_keeps_latest_payment_without_dropping_other_kinds() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let mut entries_v1 = HashMap::new();
+        entries_v1.insert(method.clone(), EndpointData::new("v1"));
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries_v1))
+            .await
+            .unwrap();
+
+        send_raw_private_message(&mut setup.sender_link, TEST_RECEIPT_ACCESS_JSON).await;
+
+        let mut entries_v2 = HashMap::new();
+        entries_v2.insert(method.clone(), EndpointData::new("v2"));
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries_v2))
+            .await
+            .unwrap();
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("latest private payments message should be returned");
+        assert_eq!(
+            received.entries.get(&method),
+            Some(&EndpointData::new("v2"))
+        );
+        assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
+        assert_eq!(
+            setup.receiver_link.pending_private_messages[0]
+                .kind
+                .as_str(),
+            "paykit.receipt_access"
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
     // ── Parallel writer/reader happy-path test ──────────────────────────
 
     /// Polls [`get_private_payments`] until a non-empty result is returned.
     /// Panics on timeout (10 s).
-    async fn poll_private_payments(link: &mut EncryptedLink) -> SupportedPayments {
+    async fn poll_private_payments(link: &mut EncryptedLink) -> PrivatePaymentsPayload {
         use std::time::{Duration, Instant};
 
         let start = Instant::now();
@@ -2239,9 +2737,10 @@ mod tests {
                 "private payments poll timed out after {timeout:?}"
             );
 
-            let result = get_private_payments(link).await.unwrap();
-            if !result.entries.is_empty() {
-                return result;
+            if let Some(result) = get_private_payments(link).await.unwrap() {
+                if !result.entries.is_empty() {
+                    return result;
+                }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -2317,7 +2816,9 @@ mod tests {
                 MethodId::new("bitcoin-p2tr").unwrap(),
                 EndpointData::new("bc1priv..."),
             );
-            set_private_payments(&mut link, &entries).await.unwrap();
+            set_private_payments(&mut link, &private_payload(&entries))
+                .await
+                .unwrap();
 
             // 4. Clean up.
             close_encrypted_link(link).await.unwrap();
@@ -2480,11 +2981,14 @@ mod tests {
             MethodId::new("bitcoin-bolt11").unwrap(),
             EndpointData::new("lnrestored..."),
         );
-        set_private_payments(&mut initiator_link, &entries)
+        set_private_payments(&mut initiator_link, &private_payload(&entries))
             .await
             .unwrap();
 
-        let received = get_private_payments(&mut responder_link).await.unwrap();
+        let received = get_private_payments(&mut responder_link)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(received.entries.len(), 1);
         assert_eq!(
             received
@@ -2581,7 +3085,7 @@ mod tests {
             MethodId::new("bitcoin-bolt11").unwrap(),
             EndpointData::new("ln..."),
         );
-        set_private_payments(&mut setup.sender_link, &entries)
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
             .await
             .unwrap();
 
@@ -2619,13 +3123,14 @@ mod tests {
             MethodId::new("bitcoin-bolt11").unwrap(),
             EndpointData::new("lnv1..."),
         );
-        set_private_payments(&mut setup.sender_link, &entries_v1)
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries_v1))
             .await
             .unwrap();
 
         // Consume the message on the receiver side.
         let received_v1 = get_private_payments(&mut setup.receiver_link)
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(received_v1.entries.len(), 1);
 
@@ -2663,12 +3168,15 @@ mod tests {
             MethodId::new("bitcoin-p2tr").unwrap(),
             EndpointData::new("bc1pv2..."),
         );
-        set_private_payments(&mut restored_sender, &entries_v2)
+        set_private_payments(&mut restored_sender, &private_payload(&entries_v2))
             .await
             .unwrap();
 
         // Receive on the restored receiver.
-        let received_v2 = get_private_payments(&mut restored_receiver).await.unwrap();
+        let received_v2 = get_private_payments(&mut restored_receiver)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(received_v2.entries.len(), 1);
         assert_eq!(
             received_v2
@@ -2733,6 +3241,94 @@ mod tests {
         assert!(
             matches!(err, PaykitError::InvalidData { .. }),
             "expected InvalidData error, got: {err}"
+        );
+    }
+
+    // ── PaymentReference tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_payment_reference_accepts_uuid_v4() {
+        let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        assert_eq!(reference.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(
+            format!("{reference}"),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn test_payment_reference_canonicalizes_uuid_v4() {
+        let reference = PaymentReference::new("550E8400-E29B-41D4-A716-446655440000").unwrap();
+        assert_eq!(reference.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_payment_reference_rejects_non_uuid() {
+        let err = PaymentReference::new("not-a-uuid").unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("UUID v4")));
+    }
+
+    #[test]
+    fn test_payment_reference_rejects_uuid_v1() {
+        let err = PaymentReference::new("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("UUID v4")));
+    }
+
+    #[test]
+    fn test_payment_reference_rejects_non_rfc4122_variant() {
+        let err = PaymentReference::new("550e8400-e29b-41d4-0716-446655440000").unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("RFC4122 UUID v4")));
+    }
+
+    #[test]
+    fn test_serialize_private_payments_json_uses_versioned_envelope() {
+        let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let mut entries = HashMap::new();
+        entries.insert(
+            MethodId::new("lightning").unwrap(),
+            EndpointData::new("ln..."),
+        );
+        let payload = PrivatePaymentsPayload::new(reference.clone(), entries);
+        let json = serialize_private_payments_json(&payload).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["kind"], "paykit.private_payments");
+        assert_eq!(value["reference"], reference.as_str());
+        assert_eq!(value["entries"]["lightning"], "ln...");
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_requires_versioned_envelope() {
+        let err = parse_private_payments_json(r#"{"lightning": "ln..."}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("private payments envelope"))
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_rejects_unsupported_version() {
+        let err = parse_private_payments_json(r#"{"version":2,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{}}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported private payments envelope version 2")),
+            "expected unsupported version error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_rejects_unsupported_kind() {
+        let err = parse_private_payments_json(r#"{"version":1,"kind":"paykit.receipt","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{}}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported private payments envelope kind")),
+            "expected unsupported kind error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_rejects_invalid_reference() {
+        let err = parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"not-a-uuid","entries":{}}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid payment reference")),
+            "expected invalid reference error, got: {err}"
         );
     }
 
@@ -2817,7 +3413,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payments_json_empty_key() {
-        let err = parse_private_payments_json(r#"{"": "ln..."}"#).unwrap_err();
+        let err = parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"":"ln..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
             "expected InvalidData for empty key, got: {err}"
@@ -2826,7 +3422,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payments_json_path_traversal_key() {
-        let err = parse_private_payments_json(r#"{"..": "ln..."}"#).unwrap_err();
+        let err = parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"..":"ln..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
             "expected InvalidData for path-traversal key, got: {err}"
@@ -2835,7 +3431,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payments_json_slash_in_key() {
-        let err = parse_private_payments_json(r#"{"foo/bar": "ln..."}"#).unwrap_err();
+        let err = parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"foo/bar":"ln..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
             "expected InvalidData for key with slash, got: {err}"
@@ -2844,7 +3440,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payments_json_reserved_private_key() {
-        let err = parse_private_payments_json(r#"{"private": "secret..."}"#).unwrap_err();
+        let err = parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"private":"secret..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
             "expected InvalidData for reserved 'private' key, got: {err}"
@@ -2854,7 +3450,9 @@ mod tests {
     #[test]
     fn test_parse_private_payments_json_oversized_key() {
         let long_key = "a".repeat(65);
-        let json = format!(r#"{{"{long_key}": "ln..."}}"#);
+        let json = format!(
+            r#"{{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{{"{long_key}":"ln..."}}}}"#
+        );
         let err = parse_private_payments_json(&json).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
@@ -2866,7 +3464,7 @@ mod tests {
     fn test_parse_private_payments_json_one_valid_one_invalid_key() {
         // The valid key should not mask the invalid one.
         let err =
-            parse_private_payments_json(r#"{"lightning": "ln...", "": "bc1..."}"#).unwrap_err();
+            parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"lightning":"ln...","":"bc1..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
             "expected InvalidData when one key is invalid, got: {err}"
@@ -2877,7 +3475,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payments_json_valid_single_entry() {
-        let result = parse_private_payments_json(r#"{"lightning": "ln..."}"#).unwrap();
+        let result = parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"lightning":"ln..."}}"#).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(
             result.get(&MethodId::new("lightning").unwrap()),
@@ -2888,7 +3486,7 @@ mod tests {
     #[test]
     fn test_parse_private_payments_json_valid_multiple_entries() {
         let result =
-            parse_private_payments_json(r#"{"lightning": "ln...", "onchain": "bc1..."}"#).unwrap();
+            parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"lightning":"ln...","onchain":"bc1..."}}"#).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
             result.get(&MethodId::new("lightning").unwrap()),
@@ -2902,7 +3500,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payments_json_empty_object() {
-        let result = parse_private_payments_json("{}").unwrap();
+        let result = parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{}}"#).unwrap();
         assert!(result.is_empty());
     }
 }

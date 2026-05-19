@@ -15,16 +15,18 @@ categories = ["network-programming", "finance"]
 
 [features]
 default = ["pubky"]
-pubky = ["dep:pubky", "dep:pubky-noise", "dep:serde_json"]
+pubky = ["dep:pubky", "dep:pubky-noise", "dep:serde", "dep:serde_json", "dep:uuid"]
 
 [dependencies]
 anyhow = "1.0.102"
 async-trait = "0.1.89"
 pubky = { version = "0.7.0", optional = true }
 pubky-noise = { optional = true, version = "0.1.0-rc3" }
+serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 thiserror = "2.0.18"
 tracing = "0.1.44"
+uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
 pubky-testnet = { version = "0.7.0", features = ["embedded-postgres"] }
