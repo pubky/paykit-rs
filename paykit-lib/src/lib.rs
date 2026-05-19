@@ -310,8 +310,8 @@ impl PrivateMessageKind {
 /// Versioned private payments payload sent over an established Noise link.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrivatePaymentsPayload {
-    pub version: u8,
-    pub kind: PrivateMessageKind,
+    version: u8,
+    kind: PrivateMessageKind,
     pub reference: PaymentReference,
     pub entries: HashMap<MethodId, EndpointData>,
 }
@@ -325,6 +325,16 @@ impl PrivatePaymentsPayload {
             reference,
             entries,
         }
+    }
+
+    /// Protocol envelope version used for private payment messages.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
+    /// Protocol message kind used for private payment messages.
+    pub fn kind(&self) -> PrivateMessageKind {
+        self.kind
     }
 
     /// Number of private payment entries in this payload.
@@ -809,18 +819,16 @@ fn parse_private_payments_json(json: &str) -> Result<PrivatePaymentsPayload> {
 
 /// Serializes private payments into a versioned JSON envelope.
 #[cfg(feature = "pubky")]
-fn serialize_private_payments_json(
-    reference: &PaymentReference,
-    entries: &HashMap<MethodId, EndpointData>,
-) -> Result<String> {
-    let entries = entries
+fn serialize_private_payments_json(payload: &PrivatePaymentsPayload) -> Result<String> {
+    let entries = payload
+        .entries
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     let wire = PrivatePaymentsWireRef {
-        version: 1,
-        kind: PrivateMessageKind::PrivatePayments.as_str(),
-        reference: reference.as_str(),
+        version: payload.version,
+        kind: payload.kind.as_str(),
+        reference: payload.reference.as_str(),
         entries,
     };
     serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
@@ -921,7 +929,7 @@ pub async fn set_private_payments(
 ) -> Result<()> {
     debug!("sending private payments envelope");
 
-    let json = serialize_private_payments_json(&payload.reference, &payload.entries)
+    let json = serialize_private_payments_json(payload)
         .map_err(|err| map_error("set_private_payments", err))?;
 
     let plaintext = json.into_bytes();
@@ -2969,7 +2977,8 @@ mod tests {
             MethodId::new("lightning").unwrap(),
             EndpointData::new("ln..."),
         );
-        let json = serialize_private_payments_json(&reference, &entries).unwrap();
+        let payload = PrivatePaymentsPayload::new(reference.clone(), entries);
+        let json = serialize_private_payments_json(&payload).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["version"], 1);
         assert_eq!(value["kind"], "paykit.private_payments");
