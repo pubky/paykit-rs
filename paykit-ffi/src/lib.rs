@@ -809,6 +809,12 @@ pub async fn paykit_set_encrypted_link_max_send_retries(
     .unwrap_or_else(|e| Err(runtime_err(e)))
 }
 
+/// Generate a fresh UUID-v4 payment reference for private payment correlation.
+#[uniffi::export]
+pub fn paykit_generate_payment_reference() -> String {
+    PaymentReference::new_v4().to_string()
+}
+
 /// Encrypt and send the complete private payments map over an established link.
 #[uniffi::export]
 pub async fn paykit_set_private_payments(
