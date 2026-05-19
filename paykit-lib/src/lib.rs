@@ -1023,21 +1023,30 @@ where
 }
 
 #[cfg(feature = "pubky")]
-/// Receives and decrypts the private payments map from the remote peer
-/// via the established encrypted link.
+/// Receives and decrypts the latest private payments envelope from the remote
+/// peer via the established encrypted link.
 ///
-/// Returns the full map of payment methods. The caller can look up
-/// individual methods from the returned [`SupportedPayments`].
+/// Returns `Ok(Some(payload))` when a private payments message is available.
+/// The caller can access the correlation reference at `payload.reference` and
+/// look up payment methods from `payload.entries` or via
+/// [`PrivatePaymentsPayload::get`].
+///
+/// Returns `Ok(None)` when no private payments message is currently available.
+/// `None` means "no message yet"; it is distinct from receiving a payload whose
+/// `entries` map is empty.
 ///
 /// # Parameters
 /// - `link` — an established [`EncryptedLink`] for decryption and I/O.
 ///
 /// # Semantics
-/// - Returns an empty [`SupportedPayments`] when no messages are available.
-/// - Drains all currently unread queued updates and returns the latest map.
-///   Intermediate queued updates are consumed.
+/// - Returns `Ok(None)` when no private payments messages are available.
+/// - Drains all currently unread queued private payment updates and returns the
+///   latest [`PrivatePaymentsPayload`]. Intermediate queued private payment
+///   updates are consumed.
+/// - The returned payload is the full versioned private payments envelope,
+///   including its required [`PaymentReference`] and complete entries map.
 /// - Returns `Err(PaykitError::InvalidData)` when the decrypted payload
-///   is not valid UTF-8 or cannot be parsed as a payments JSON map.
+///   is not valid UTF-8 or cannot be parsed as a private payments envelope.
 /// - Returns `Err(PaykitError::Transport)` for decryption or I/O failures.
 #[instrument(skip(link))]
 pub async fn get_private_payments(
