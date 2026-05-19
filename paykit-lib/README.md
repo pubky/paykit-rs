@@ -82,7 +82,7 @@ let owned: String = data.into_inner();
 
 ### `SupportedPayments`
 
-Collection of payment entries keyed by method identifiers. Returned by `get_payment_list` and `get_private_payments`.
+Collection of public payment entries keyed by method identifiers. Returned by `get_payment_list`.
 
 ```rust,ignore
 use paykit_lib::SupportedPayments;
@@ -100,21 +100,22 @@ if payments.entries.is_empty() {
 }
 ```
 
-Private payments follow the same `SupportedPayments` layout:
+Private payments use a versioned `PrivatePaymentsPayload` envelope. The payment entries still use the same `HashMap<MethodId, EndpointData>` layout, but the envelope also carries a UUID-v4 `PaymentReference` for correlation with later protocol artifacts such as receipts:
 
 ```rust,ignore
-use paykit_lib::{get_private_payments, SupportedPayments};
+use paykit_lib::{get_private_payments, PrivatePaymentsPayload};
 
-let payments: SupportedPayments = get_private_payments(&mut link).await?;
-for (method, data) in &payments.entries {
-    println!("method={} payload={}", method.as_str(), data.as_str());
-}
-
-// Check if empty:
-if payments.entries.is_empty() {
-    println!("no endpoints published");
+if let Some(payload) = get_private_payments(&mut link).await? {
+    println!("reference={}", payload.reference.as_str());
+    for (method, data) in &payload.entries {
+        println!("method={} payload={}", method.as_str(), data.as_str());
+    }
+} else {
+    println!("no private payment update available yet");
 }
 ```
+
+Private payments are latest-state data: if several private payment envelopes are queued, `get_private_payments` returns the newest one and supersedes older private-payment envelopes. Future event-like message kinds (for example receipts) must use ordered/FIFO semantics instead of latest-wins.
 
 The `entries` field is a `HashMap<MethodId, EndpointData>`.
 
@@ -290,10 +291,12 @@ After handshake restore, recovery tuning resets to defaults: `recovery_attempts 
 Snapshot bytes include sensitive key material and must be treated as secrets (store encrypted at rest; never log or expose them).
 
 #### Payment endpoint exchange
-- `set_private_payments(link: &mut EncryptedLink, entries: &HashMap<MethodId, EndpointData>) -> Result<()>`  
-  Serializes the complete payments map to JSON, encrypts it, and sends it via the encrypted link. The caller is responsible for managing the map (adding/removing entries) and passing the full map each time. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient homeserver write failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase homeserver write failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery. Deterministic state, counter, nonce, or encryption errors fail immediately.
-- `get_private_payments(link: &mut EncryptedLink) -> Result<SupportedPayments>`  
-  Receives and decrypts private payments updates from the remote peer, drains currently unread queued updates, and returns the latest map. Returns an empty map when no messages are available.
+- `set_private_payments(link: &mut EncryptedLink, payload: &PrivatePaymentsPayload) -> Result<()>`
+  Serializes the complete private payments envelope to JSON, encrypts it, and sends it via the encrypted link. The caller is responsible for managing the map (adding/removing entries) and passing the full map each time in `payload.entries`. The envelope includes a UUID-v4 `PaymentReference`; `PaymentReference::new_v4()` generates a fresh canonical reference. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient homeserver write failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase homeserver write failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery. Deterministic state, counter, nonce, or encryption errors fail immediately.
+- `get_private_payments(link: &mut EncryptedLink) -> Result<Option<PrivatePaymentsPayload>>`
+  Receives and decrypts currently available private application messages from the remote peer and returns the latest private payments envelope, if one is available. `Ok(None)` means no private payments message is currently available; it is distinct from a payload with an empty `entries` map. Private payments are latest-state data: queued older private-payment envelopes are superseded by the newest one. Other recognized/unknown message kinds remain buffered for their own typed receivers. Malformed private application messages are ignored with diagnostics so they do not prevent later valid messages from being processed.
+
+All private application messages share one ordered encrypted stream. Event-like future kinds such as receipts must preserve all messages in send order. The in-memory buffer for messages dispatched but not yet consumed by a typed helper is not crash-durable; callers that add event-like kinds must define durable app-level handling around encrypted-link snapshots/read counters before performing irreversible side effects.
 
 #### Termination
 - `close_encrypted_link(link: EncryptedLink) -> Result<()>`  
