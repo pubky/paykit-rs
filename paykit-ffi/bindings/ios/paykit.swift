@@ -623,6 +623,78 @@ public func FfiConverterTypeFfiPaymentEntry_lower(_ value: FfiPaymentEntry) -> R
 }
 
 
+public struct FfiPrivatePaymentsPayload {
+    public var reference: String
+    public var entries: [FfiPaymentEntry]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(reference: String, entries: [FfiPaymentEntry]) {
+        self.reference = reference
+        self.entries = entries
+    }
+}
+
+#if compiler(>=6)
+extension FfiPrivatePaymentsPayload: Sendable {}
+#endif
+
+
+extension FfiPrivatePaymentsPayload: Equatable, Hashable {
+    public static func ==(lhs: FfiPrivatePaymentsPayload, rhs: FfiPrivatePaymentsPayload) -> Bool {
+        if lhs.reference != rhs.reference {
+            return false
+        }
+        if lhs.entries != rhs.entries {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(reference)
+        hasher.combine(entries)
+    }
+}
+
+extension FfiPrivatePaymentsPayload: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPrivatePaymentsPayload: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivatePaymentsPayload {
+        return
+            try FfiPrivatePaymentsPayload(
+                reference: FfiConverterString.read(from: &buf),
+                entries: FfiConverterSequenceTypeFfiPaymentEntry.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPrivatePaymentsPayload, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.reference, into: &buf)
+        FfiConverterSequenceTypeFfiPaymentEntry.write(value.entries, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentsPayload_lift(_ buf: RustBuffer) throws -> FfiPrivatePaymentsPayload {
+    return try FfiConverterTypeFfiPrivatePaymentsPayload.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentsPayload_lower(_ value: FfiPrivatePaymentsPayload) -> RustBuffer {
+    return FfiConverterTypeFfiPrivatePaymentsPayload.lower(value)
+}
+
+
 public enum PaykitFfiError: Swift.Error {
 
 
@@ -759,6 +831,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiPrivatePaymentsPayload: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPrivatePaymentsPayload?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiPrivatePaymentsPayload.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiPrivatePaymentsPayload.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -985,6 +1081,15 @@ public func paykitForceSignOut()async   {
         )
 }
 /**
+ * Generate a fresh UUID-v4 payment reference for private payment correlation.
+ */
+public func paykitGeneratePaymentReference() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_func_paykit_generate_payment_reference($0
+    )
+})
+}
+/**
  * Returns the public key of the currently authenticated user, or `None`.
  */
 public func paykitGetCurrentPublicKey()async  -> String?  {
@@ -1037,9 +1142,9 @@ public func paykitGetPaymentList(publicKey: String)async throws  -> [FfiPaymentE
         )
 }
 /**
- * Receive and decrypt the latest private payments map from an established link.
+ * Receive and decrypt the latest private payments envelope from an established link.
  */
-public func paykitGetPrivatePayments(linkId: String)async throws  -> [FfiPaymentEntry]  {
+public func paykitGetPrivatePayments(linkId: String)async throws  -> FfiPrivatePaymentsPayload?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -1049,7 +1154,7 @@ public func paykitGetPrivatePayments(linkId: String)async throws  -> [FfiPayment
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceTypeFfiPaymentEntry.lift,
+            liftFunc: FfiConverterOptionTypeFfiPrivatePaymentsPayload.lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1268,13 +1373,13 @@ public func paykitSetPaymentEndpoint(methodId: String, endpointData: String)asyn
         )
 }
 /**
- * Encrypt and send the complete private payments map over an established link.
+ * Encrypt and send the complete private payments envelope over an established link.
  */
-public func paykitSetPrivatePayments(linkId: String, entries: [FfiPaymentEntry])async throws   {
+public func paykitSetPrivatePayments(linkId: String, payload: FfiPrivatePaymentsPayload)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_paykit_fn_func_paykit_set_private_payments(FfiConverterString.lower(linkId),FfiConverterSequenceTypeFfiPaymentEntry.lower(entries)
+                uniffi_paykit_fn_func_paykit_set_private_payments(FfiConverterString.lower(linkId),FfiConverterTypeFfiPrivatePaymentsPayload_lower(payload)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_void,
@@ -1387,6 +1492,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_force_sign_out() != 30515) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_func_paykit_generate_payment_reference() != 10899) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_paykit_get_current_public_key() != 28037) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1396,7 +1504,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 63326) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_paykit_get_private_payments() != 29940) {
+    if (uniffi_paykit_checksum_func_paykit_get_private_payments() != 50390) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_import_session() != 29532) {
@@ -1435,7 +1543,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_set_payment_endpoint() != 62857) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_paykit_set_private_payments() != 41261) {
+    if (uniffi_paykit_checksum_func_paykit_set_private_payments() != 52873) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_sign_in() != 50011) {

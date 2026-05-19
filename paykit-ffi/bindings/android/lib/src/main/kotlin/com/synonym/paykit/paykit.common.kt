@@ -121,6 +121,16 @@ public data class FfiPaymentEntry (
 
 
 
+@kotlinx.serialization.Serializable
+public data class FfiPrivatePaymentsPayload (
+    val `reference`: kotlin.String,
+    val `entries`: List<FfiPaymentEntry>
+) {
+    public companion object
+}
+
+
+
 
 
 public sealed class PaykitFfiException: kotlin.Exception() {
@@ -161,8 +171,3 @@ public sealed class PaykitFfiException: kotlin.Exception() {
     }
 
 }
-
-
-
-
-
