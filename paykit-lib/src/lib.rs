@@ -261,9 +261,9 @@ impl PaymentReference {
         let uuid = uuid::Uuid::try_parse(&reference).map_err(|err| {
             PaykitError::Validation(format!("payment reference must be a UUID v4 string: {err}"))
         })?;
-        if uuid.get_version_num() != 4 {
+        if uuid.get_version_num() != 4 || uuid.get_variant() != uuid::Variant::RFC4122 {
             return Err(PaykitError::Validation(
-                "payment reference must be a UUID v4 string".into(),
+                "payment reference must be an RFC4122 UUID v4 string".into(),
             ));
         }
         Ok(Self(uuid.hyphenated().to_string()))
@@ -298,6 +298,7 @@ impl AsRef<str> for PaymentReference {
 /// Private Noise message kinds understood by Paykit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivateMessageKind {
+    /// Latest-state private payment endpoint envelope (`paykit.private_payments`).
     PrivatePayments,
 }
 
@@ -316,12 +317,20 @@ impl PrivateMessageKind {
 pub struct PrivatePaymentsPayload {
     version: u8,
     kind: PrivateMessageKind,
+    /// UUID-v4 correlation reference for this latest private-payment state.
     pub reference: PaymentReference,
+    /// Complete latest-state map of private payment entries keyed by method ID.
     pub entries: HashMap<MethodId, EndpointData>,
 }
 
 #[cfg(feature = "pubky")]
 impl PrivatePaymentsPayload {
+    /// Construct a private payments payload using protocol version 1 and the
+    /// `paykit.private_payments` message kind.
+    ///
+    /// `entries` must be the complete desired latest-state map; callers should
+    /// include all private payment methods they want the counterparty to see,
+    /// not just an incremental patch.
     pub fn new(reference: PaymentReference, entries: HashMap<MethodId, EndpointData>) -> Self {
         Self {
             version: 1,
@@ -1081,7 +1090,7 @@ pub async fn set_private_payments(
     for attempt in 1..=max_attempts {
         match link.encryptor.send_message(&plaintext).await {
             Ok(()) => {
-                debug!("private payments map sent successfully");
+                debug!("private payments envelope sent successfully");
                 return Ok(());
             }
             Err(err) => {
@@ -2434,14 +2443,19 @@ mod tests {
         let mut entries = HashMap::new();
         entries.insert(method.clone(), data.clone());
 
-        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
-            .await
-            .unwrap();
+        let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        set_private_payments(
+            &mut setup.sender_link,
+            &PrivatePaymentsPayload::new(reference.clone(), entries),
+        )
+        .await
+        .unwrap();
 
         let received = get_private_payments(&mut setup.receiver_link)
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(received.reference, reference);
         assert_eq!(received.entries.len(), 1);
         assert_eq!(received.entries.get(&method), Some(&data));
 
@@ -3261,6 +3275,12 @@ mod tests {
     }
 
     #[test]
+    fn test_payment_reference_rejects_non_rfc4122_variant() {
+        let err = PaymentReference::new("550e8400-e29b-41d4-0716-446655440000").unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("RFC4122 UUID v4")));
+    }
+
+    #[test]
     fn test_serialize_private_payments_json_uses_versioned_envelope() {
         let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let mut entries = HashMap::new();
@@ -3282,6 +3302,33 @@ mod tests {
         let err = parse_private_payments_json(r#"{"lightning": "ln..."}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("private payments envelope"))
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_rejects_unsupported_version() {
+        let err = parse_private_payments_json(r#"{"version":2,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{}}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported private payments envelope version 2")),
+            "expected unsupported version error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_rejects_unsupported_kind() {
+        let err = parse_private_payments_json(r#"{"version":1,"kind":"paykit.receipt","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{}}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported private payments envelope kind")),
+            "expected unsupported kind error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payments_json_rejects_invalid_reference() {
+        let err = parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"not-a-uuid","entries":{}}"#).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid payment reference")),
+            "expected invalid reference error, got: {err}"
         );
     }
 
