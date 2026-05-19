@@ -815,7 +815,7 @@ pub fn paykit_generate_payment_reference() -> String {
     PaymentReference::new_v4().to_string()
 }
 
-/// Encrypt and send the complete private payments map over an established link.
+/// Encrypt and send the complete private payments envelope over an established link.
 #[uniffi::export]
 pub async fn paykit_set_private_payments(
     link_id: String,
@@ -837,7 +837,7 @@ pub async fn paykit_set_private_payments(
     .unwrap_or_else(|e| Err(runtime_err(e)))
 }
 
-/// Receive and decrypt the latest private payments map from an established link.
+/// Receive and decrypt the latest private payments envelope from an established link.
 #[uniffi::export]
 pub async fn paykit_get_private_payments(
     link_id: String,
