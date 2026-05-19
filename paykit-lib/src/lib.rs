@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
+#[cfg(feature = "pubky")]
+use std::collections::VecDeque;
 #[cfg(not(feature = "pubky"))]
 use std::fmt;
 
@@ -354,6 +356,26 @@ impl PrivatePaymentsPayload {
 }
 
 #[cfg(feature = "pubky")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BufferedPrivateMessage {
+    kind: String,
+    plaintext: String,
+}
+
+#[cfg(feature = "pubky")]
+impl BufferedPrivateMessage {
+    fn is_kind(&self, kind: PrivateMessageKind) -> bool {
+        self.kind == kind.as_str()
+    }
+}
+
+#[cfg(feature = "pubky")]
+#[derive(Deserialize)]
+struct PrivateMessageHeader {
+    kind: String,
+}
+
+#[cfg(feature = "pubky")]
 /// Handle to an established encrypted Noise link with a peer.
 ///
 /// Created by [`advance_handshake`] (via [`HandshakeProgress::Complete`]) after
@@ -369,6 +391,18 @@ impl PrivatePaymentsPayload {
 /// serialized directly via [`serialize`](Self::serialize)) and later restored
 /// with [`restore_encrypted_link`] or [`restore_encrypted_link_from_config`]
 /// without re-doing the Noise handshake.
+///
+/// # Private message dispatch
+///
+/// All Paykit application messages on this Noise link share one ordered stream.
+/// The link therefore buffers decrypted messages after low-level receipt and
+/// lets typed helpers consume only their own message kind. This prevents future
+/// helpers (for example receipt access) from losing messages simply because a
+/// different typed getter was called first.
+///
+/// The buffer is in-memory only. If callers need crash-safe processing of
+/// event-like message kinds, they must persist handled/unhandled application
+/// state before dropping or serializing the link.
 ///
 /// # Automatic send retry
 ///
@@ -386,6 +420,13 @@ pub struct EncryptedLink {
     /// Maximum number of automatic `send_message` retries in
     /// [`set_private_payments`].
     max_send_retries: u32,
+    /// Decrypted application messages that have been read from the ordered
+    /// Noise stream but not yet consumed by a typed Paykit helper.
+    ///
+    /// This prevents a typed receiver such as [`get_private_payments`] from
+    /// discarding unrelated message kinds (for example future receipt-access
+    /// messages) after the underlying Noise read counter has advanced.
+    pending_private_messages: VecDeque<BufferedPrivateMessage>,
 }
 
 #[cfg(feature = "pubky")]
@@ -838,6 +879,79 @@ fn serialize_private_payments_json(payload: &PrivatePaymentsPayload) -> Result<S
 }
 
 #[cfg(feature = "pubky")]
+fn decode_private_message(
+    raw: &[u8; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN],
+) -> Result<BufferedPrivateMessage> {
+    // Trim trailing zero-padding added by pubky-noise's fixed-size buffers.
+    // Paykit application messages are JSON, so trailing NUL bytes are not valid
+    // payload content.
+    let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let plaintext = std::str::from_utf8(&raw[..end]).map_err(|err| PaykitError::InvalidData {
+        context: format!("private message plaintext is not valid UTF-8: {err}"),
+        source: Some(err.into()),
+    })?;
+
+    let header: PrivateMessageHeader =
+        serde_json::from_str(plaintext).map_err(|err| PaykitError::InvalidData {
+            context: format!("failed to parse private message header JSON: {err}"),
+            source: Some(err.into()),
+        })?;
+
+    Ok(BufferedPrivateMessage {
+        kind: header.kind,
+        plaintext: plaintext.to_owned(),
+    })
+}
+
+#[cfg(feature = "pubky")]
+async fn receive_private_messages(link: &mut EncryptedLink) -> Result<usize> {
+    let mut received = 0usize;
+
+    loop {
+        let messages =
+            link.encryptor
+                .receive_message()
+                .await
+                .map_err(|err| PaykitError::Transport {
+                    context: format!("failed to receive private messages: {err:?}"),
+                    source: anyhow::anyhow!("pubky-noise receive_message failed: {err:?}"),
+                })?;
+
+        if messages.is_empty() {
+            break;
+        }
+
+        received += messages.len();
+        for raw in messages {
+            link.pending_private_messages
+                .push_back(decode_private_message(&raw)?);
+        }
+    }
+
+    Ok(received)
+}
+
+#[cfg(feature = "pubky")]
+fn take_latest_pending_message(
+    pending: &mut VecDeque<BufferedPrivateMessage>,
+    kind: PrivateMessageKind,
+) -> Option<BufferedPrivateMessage> {
+    let mut retained = VecDeque::with_capacity(pending.len());
+    let mut latest = None;
+
+    while let Some(message) = pending.pop_front() {
+        if message.is_kind(kind) {
+            latest = Some(message);
+        } else {
+            retained.push_back(message);
+        }
+    }
+
+    *pending = retained;
+    latest
+}
+
+#[cfg(feature = "pubky")]
 fn send_attempts_from_retries(max_send_retries: u32) -> u32 {
     max_send_retries.saturating_add(1)
 }
@@ -1047,14 +1161,20 @@ where
 /// - `link` — an established [`EncryptedLink`] for decryption and I/O.
 ///
 /// # Semantics
+/// - Receives and buffers all currently available application messages from the
+///   shared Noise stream before selecting private payments by message kind.
 /// - Returns `Ok(None)` when no private payments messages are available.
-/// - Drains all currently unread queued private payment updates and returns the
-///   latest [`PrivatePaymentsPayload`]. Intermediate queued private payment
-///   updates are consumed.
+/// - Returns the latest queued [`PrivatePaymentsPayload`]. Intermediate queued
+///   private payment updates are consumed because private payments are
+///   latest-state data.
+/// - Messages with other `kind` values are left buffered on the [`EncryptedLink`]
+///   for their own typed receivers. They are not parsed as private payments and
+///   are not discarded just because this function was called.
 /// - The returned payload is the full versioned private payments envelope,
 ///   including its required [`PaymentReference`] and complete entries map.
-/// - Returns `Err(PaykitError::InvalidData)` when the decrypted payload
-///   is not valid UTF-8 or cannot be parsed as a private payments envelope.
+/// - Returns `Err(PaykitError::InvalidData)` when a newly decrypted message is
+///   not valid UTF-8, lacks a JSON `kind` header, or when the selected private
+///   payments payload cannot be parsed as a private payments envelope.
 /// - Returns `Err(PaykitError::Transport)` for decryption or I/O failures.
 #[instrument(skip(link))]
 pub async fn get_private_payments(
@@ -1062,43 +1182,22 @@ pub async fn get_private_payments(
 ) -> Result<Option<PrivatePaymentsPayload>> {
     debug!("receiving private payments envelope");
 
-    let mut latest: Option<[u8; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN]> = None;
-    let mut drained = 0usize;
-
-    loop {
-        let messages =
-            link.encryptor
-                .receive_message()
-                .await
-                .map_err(|err| PaykitError::Transport {
-                    context: format!("failed to receive private payments: {err:?}"),
-                    source: anyhow::anyhow!("pubky-noise receive_message failed: {err:?}"),
-                })?;
-        if messages.is_empty() {
-            break;
-        }
-
-        drained += messages.len();
-        latest = messages.into_iter().last();
-    }
-
-    let Some(raw) = latest else {
-        debug!("no private payments messages available");
+    let received = receive_private_messages(link).await?;
+    let Some(raw) = take_latest_pending_message(
+        &mut link.pending_private_messages,
+        PrivateMessageKind::PrivatePayments,
+    ) else {
+        debug!(received, "no private payments messages available");
         return Ok(None);
     };
 
-    // Trim trailing zero-padding added by pubky-noise's fixed-size buffers.
-    let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let plaintext = std::str::from_utf8(&raw[..end]).map_err(|err| PaykitError::InvalidData {
-        context: format!("private payments plaintext is not valid UTF-8: {err}"),
-        source: Some(err.into()),
-    })?;
-
-    let payload = parse_private_payments_json(plaintext)?;
+    let payload = parse_private_payments_json(&raw.plaintext)?;
     debug!(
         reference = %payload.reference,
         count = payload.entries.len(),
-        drained, "private payments envelope received"
+        received,
+        pending = link.pending_private_messages.len(),
+        "private payments envelope received"
     );
     Ok(Some(payload))
 }
@@ -1434,6 +1533,7 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
         recipient: handshake.remote_pubkey,
         config: handshake.config,
         max_send_retries: DEFAULT_MAX_SEND_RETRIES,
+        pending_private_messages: VecDeque::new(),
     }))
 }
 
@@ -1739,6 +1839,7 @@ async fn restore_encrypted_link_inner(
         recipient: remote_pubkey.clone(),
         config,
         max_send_retries: DEFAULT_MAX_SEND_RETRIES,
+        pending_private_messages: VecDeque::new(),
     })
 }
 
@@ -2275,6 +2376,19 @@ mod tests {
         PrivatePaymentsPayload::new(PaymentReference::new_v4(), entries.clone())
     }
 
+    const TEST_RECEIPT_ACCESS_JSON: &str = r#"{"version":1,"kind":"paykit.receipt_access","reference":"550e8400-e29b-41d4-a716-446655440000"}"#;
+
+    async fn send_raw_private_message(link: &mut EncryptedLink, json: &str) {
+        assert!(
+            json.len() <= pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN,
+            "test raw message exceeds pubky-noise message size"
+        );
+        link.encryptor
+            .send_message(json.as_bytes())
+            .await
+            .expect("raw private message should send");
+    }
+
     #[tokio::test]
     async fn private_payments_empty_returns_empty() {
         let mut setup = PrivateTestSetup::new().await;
@@ -2416,6 +2530,108 @@ mod tests {
         assert!(
             matches!(err, PaykitError::Validation(ref msg) if msg.contains("exceeds")),
             "expected Validation error about size, got: {err}"
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_private_payments_preserves_newer_unknown_messages() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+        send_raw_private_message(&mut setup.sender_link, TEST_RECEIPT_ACCESS_JSON).await;
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("private payments message should not be lost behind receipt message");
+        assert_eq!(received.entries.get(&method), Some(&data));
+        assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
+        assert_eq!(
+            setup.receiver_link.pending_private_messages[0]
+                .kind
+                .as_str(),
+            "paykit.receipt_access"
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_private_payments_preserves_older_unknown_messages() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        send_raw_private_message(&mut setup.sender_link, TEST_RECEIPT_ACCESS_JSON).await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("private payments message should be found without dropping receipt message");
+        assert_eq!(received.entries.get(&method), Some(&data));
+        assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
+        assert_eq!(
+            setup.receiver_link.pending_private_messages[0]
+                .kind
+                .as_str(),
+            "paykit.receipt_access"
+        );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_private_payments_keeps_latest_payment_without_dropping_other_kinds() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let mut entries_v1 = HashMap::new();
+        entries_v1.insert(method.clone(), EndpointData::new("v1"));
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries_v1))
+            .await
+            .unwrap();
+
+        send_raw_private_message(&mut setup.sender_link, TEST_RECEIPT_ACCESS_JSON).await;
+
+        let mut entries_v2 = HashMap::new();
+        entries_v2.insert(method.clone(), EndpointData::new("v2"));
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries_v2))
+            .await
+            .unwrap();
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("latest private payments message should be returned");
+        assert_eq!(
+            received.entries.get(&method),
+            Some(&EndpointData::new("v2"))
+        );
+        assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
+        assert_eq!(
+            setup.receiver_link.pending_private_messages[0]
+                .kind
+                .as_str(),
+            "paykit.receipt_access"
         );
 
         setup.sender_session.signout().await.unwrap();
