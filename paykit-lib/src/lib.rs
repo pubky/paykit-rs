@@ -254,7 +254,7 @@ impl PaymentReference {
     /// Create a payment reference after validating that the input is a UUID v4 string.
     pub fn new(reference: impl Into<String>) -> Result<Self> {
         let reference = reference.into();
-        let uuid = uuid::Uuid::parse_str(&reference).map_err(|err| {
+        let uuid = uuid::Uuid::try_parse(&reference).map_err(|err| {
             PaykitError::Validation(format!("payment reference must be a UUID v4 string: {err}"))
         })?;
         if uuid.get_version_num() != 4 {
