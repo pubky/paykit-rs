@@ -860,11 +860,32 @@ where
 }
 
 #[cfg(feature = "pubky")]
-/// Encrypts and sends the complete private payments map via the established
+/// Encrypts and sends a complete private payments envelope via the established
 /// encrypted link.
 ///
-/// The caller is responsible for managing the map contents (adding/removing
-/// entries). This function serializes the map to JSON, encrypts it using
+/// The caller must pass a [`PrivatePaymentsPayload`] containing a validated
+/// [`PaymentReference`] and the complete map of private payment entries. The
+/// caller is still responsible for managing the map contents (adding/removing
+/// entries) and should pass the full desired entries map in `payload.entries`
+/// on every update.
+///
+/// The payload is serialized as a versioned envelope before being sent over
+/// pubky-noise:
+///
+/// ```json
+/// {
+///   "version": 1,
+///   "kind": "paykit.private_payments",
+///   "reference": "550e8400-e29b-41d4-a716-446655440000",
+///   "entries": {
+///     "lightning": "ln..."
+///   }
+/// }
+/// ```
+///
+/// `reference` is a UUID-v4 [`PaymentReference`] used to correlate the private
+/// payment offer with later protocol artifacts such as receipts. This function
+/// serializes the envelope to JSON, encrypts it using
 /// [`pubky_noise::PubkyNoiseEncryptor::send_message`], and pubky-noise handles
 /// file naming and storage location on the homeserver.
 ///
@@ -878,18 +899,19 @@ where
 ///
 /// # Payload size
 ///
-/// The serialized JSON must fit within a single pubky-noise message
+/// The serialized envelope JSON must fit within a single pubky-noise message
 /// (`PUBKY_NOISE_MSG_LEN`, currently 1000 bytes). Exceeding this limit
 /// returns [`PaykitError::Validation`].
 ///
 /// # Parameters
 /// - `link` — an established [`EncryptedLink`] for encryption and I/O.
-/// - `entries` — the complete map of payment methods to store.
+/// - `payload` — the complete private payments envelope, including the
+///   required [`PaymentReference`] and complete entries map.
 ///
 /// # Errors
-/// - Returns [`PaykitError::Validation`] if the serialized payload exceeds
+/// - Returns [`PaykitError::Validation`] if the serialized envelope exceeds
 ///   the maximum message size.
-/// - Returns [`PaykitError::InvalidData`] if the map cannot be serialized.
+/// - Returns [`PaykitError::InvalidData`] if the envelope cannot be serialized.
 /// - Returns [`PaykitError::Transport`] if `send_message` fails after all
 ///   retry attempts are exhausted.
 #[instrument(skip(link, payload), fields(reference = %payload.reference, count = payload.entries.len()))]
