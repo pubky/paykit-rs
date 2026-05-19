@@ -254,6 +254,8 @@ pub struct PaymentReference(String);
 #[cfg(feature = "pubky")]
 impl PaymentReference {
     /// Create a payment reference after validating that the input is a UUID v4 string.
+    ///
+    /// Accepted UUID-v4 inputs are canonicalized to lowercase hyphenated form.
     pub fn new(reference: impl Into<String>) -> Result<Self> {
         let reference = reference.into();
         let uuid = uuid::Uuid::try_parse(&reference).map_err(|err| {
@@ -264,7 +266,7 @@ impl PaymentReference {
                 "payment reference must be a UUID v4 string".into(),
             ));
         }
-        Ok(Self(reference))
+        Ok(Self(uuid.hyphenated().to_string()))
     }
 
     /// Generate a fresh random UUID-v4 payment reference.
@@ -906,6 +908,7 @@ fn decode_private_message(
 #[cfg(feature = "pubky")]
 async fn receive_private_messages(link: &mut EncryptedLink) -> Result<usize> {
     let mut received = 0usize;
+    let mut malformed = 0usize;
 
     loop {
         let messages =
@@ -923,9 +926,25 @@ async fn receive_private_messages(link: &mut EncryptedLink) -> Result<usize> {
 
         received += messages.len();
         for raw in messages {
-            link.pending_private_messages
-                .push_back(decode_private_message(&raw)?);
+            match decode_private_message(&raw) {
+                Ok(message) => link.pending_private_messages.push_back(message),
+                Err(err) => {
+                    malformed += 1;
+                    warn!(
+                        error = ?err,
+                        "dropping malformed private application message"
+                    );
+                }
+            }
         }
+    }
+
+    if malformed > 0 {
+        warn!(
+            received,
+            malformed,
+            "ignored malformed private application messages while preserving later valid messages"
+        );
     }
 
     Ok(received)
@@ -1036,7 +1055,7 @@ where
 /// - Returns [`PaykitError::InvalidData`] if the envelope cannot be serialized.
 /// - Returns [`PaykitError::Transport`] if `send_message` fails after all
 ///   retry attempts are exhausted.
-#[instrument(skip(link, payload), fields(reference = %payload.reference, count = payload.entries.len()))]
+#[instrument(skip(link, payload), fields(count = payload.entries.len()))]
 pub async fn set_private_payments(
     link: &mut EncryptedLink,
     payload: &PrivatePaymentsPayload,
@@ -1172,9 +1191,11 @@ where
 ///   are not discarded just because this function was called.
 /// - The returned payload is the full versioned private payments envelope,
 ///   including its required [`PaymentReference`] and complete entries map.
-/// - Returns `Err(PaykitError::InvalidData)` when a newly decrypted message is
-///   not valid UTF-8, lacks a JSON `kind` header, or when the selected private
+/// - Returns `Err(PaykitError::InvalidData)` when the selected private
 ///   payments payload cannot be parsed as a private payments envelope.
+/// - Malformed unrelated private application messages are ignored with
+///   diagnostics so one bad message does not prevent later valid messages from
+///   being dispatched.
 /// - Returns `Err(PaykitError::Transport)` for decryption or I/O failures.
 #[instrument(skip(link))]
 pub async fn get_private_payments(
@@ -1193,7 +1214,6 @@ pub async fn get_private_payments(
 
     let payload = parse_private_payments_json(&raw.plaintext)?;
     debug!(
-        reference = %payload.reference,
         count = payload.entries.len(),
         received,
         pending = link.pending_private_messages.len(),
@@ -2600,6 +2620,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_private_payments_ignores_malformed_messages_before_valid_payment() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        send_raw_private_message(&mut setup.sender_link, "not-json").await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("valid private payments message should survive malformed earlier message");
+        assert_eq!(received.entries.get(&method), Some(&data));
+        assert!(setup.receiver_link.pending_private_messages.is_empty());
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_private_payments_ignores_malformed_messages_after_valid_payment() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+        send_raw_private_message(&mut setup.sender_link, "not-json").await;
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("valid private payments message should survive malformed later message");
+        assert_eq!(received.entries.get(&method), Some(&data));
+        assert!(setup.receiver_link.pending_private_messages.is_empty());
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn get_private_payments_keeps_latest_payment_without_dropping_other_kinds() {
         let mut setup = PrivateTestSetup::new().await;
 
@@ -3171,6 +3240,12 @@ mod tests {
             format!("{reference}"),
             "550e8400-e29b-41d4-a716-446655440000"
         );
+    }
+
+    #[test]
+    fn test_payment_reference_canonicalizes_uuid_v4() {
+        let reference = PaymentReference::new("550E8400-E29B-41D4-A716-446655440000").unwrap();
+        assert_eq!(reference.as_str(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
     #[test]
