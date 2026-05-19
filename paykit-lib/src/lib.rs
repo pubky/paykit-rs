@@ -960,23 +960,45 @@ async fn receive_private_messages(link: &mut EncryptedLink) -> Result<usize> {
 }
 
 #[cfg(feature = "pubky")]
-fn take_latest_pending_message(
+fn take_latest_valid_private_payments(
     pending: &mut VecDeque<BufferedPrivateMessage>,
-    kind: PrivateMessageKind,
-) -> Option<BufferedPrivateMessage> {
+) -> Result<Option<PrivatePaymentsPayload>> {
     let mut retained = VecDeque::with_capacity(pending.len());
     let mut latest = None;
+    let mut latest_error = None;
+    let mut malformed = 0usize;
 
     while let Some(message) = pending.pop_front() {
-        if message.is_kind(kind) {
-            latest = Some(message);
+        if message.is_kind(PrivateMessageKind::PrivatePayments) {
+            match parse_private_payments_json(&message.plaintext) {
+                Ok(payload) => latest = Some(payload),
+                Err(err) => {
+                    malformed += 1;
+                    latest_error = Some(err);
+                }
+            }
         } else {
             retained.push_back(message);
         }
     }
 
     *pending = retained;
-    latest
+
+    if malformed > 0 {
+        warn!(
+            malformed,
+            has_valid_payload = latest.is_some(),
+            "ignored malformed private payments envelopes while selecting latest valid private payments state"
+        );
+    }
+
+    if let Some(payload) = latest {
+        Ok(Some(payload))
+    } else if let Some(err) = latest_error {
+        Err(err)
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(feature = "pubky")]
@@ -1192,19 +1214,22 @@ where
 /// - Receives and buffers all currently available application messages from the
 ///   shared Noise stream before selecting private payments by message kind.
 /// - Returns `Ok(None)` when no private payments messages are available.
-/// - Returns the latest queued [`PrivatePaymentsPayload`]. Intermediate queued
-///   private payment updates are consumed because private payments are
-///   latest-state data.
+/// - Returns the newest valid queued [`PrivatePaymentsPayload`]. Intermediate
+///   valid private payment updates are consumed because private payments are
+///   latest-state data. Malformed private-payments envelopes are ignored while
+///   selecting the newest valid state; if only malformed private-payments
+///   envelopes are available, the latest parse error is returned.
 /// - Messages with other `kind` values are left buffered on the [`EncryptedLink`]
 ///   for their own typed receivers. They are not parsed as private payments and
 ///   are not discarded just because this function was called.
 /// - The returned payload is the full versioned private payments envelope,
 ///   including its required [`PaymentReference`] and complete entries map.
-/// - Returns `Err(PaykitError::InvalidData)` when the selected private
-///   payments payload cannot be parsed as a private payments envelope.
 /// - Malformed unrelated private application messages are ignored with
 ///   diagnostics so one bad message does not prevent later valid messages from
 ///   being dispatched.
+/// - Returns `Err(PaykitError::InvalidData)` when private-payments messages
+///   were available but none could be parsed as a valid private payments
+///   envelope.
 /// - Returns `Err(PaykitError::Transport)` for decryption or I/O failures.
 #[instrument(skip(link))]
 pub async fn get_private_payments(
@@ -1213,15 +1238,12 @@ pub async fn get_private_payments(
     debug!("receiving private payments envelope");
 
     let received = receive_private_messages(link).await?;
-    let Some(raw) = take_latest_pending_message(
-        &mut link.pending_private_messages,
-        PrivateMessageKind::PrivatePayments,
-    ) else {
+    let Some(payload) = take_latest_valid_private_payments(&mut link.pending_private_messages)?
+    else {
         debug!(received, "no private payments messages available");
         return Ok(None);
     };
 
-    let payload = parse_private_payments_json(&raw.plaintext)?;
     debug!(
         count = payload.entries.len(),
         received,
@@ -2675,6 +2697,34 @@ mod tests {
             .await
             .unwrap()
             .expect("valid private payments message should survive malformed later message");
+        assert_eq!(received.entries.get(&method), Some(&data));
+        assert!(setup.receiver_link.pending_private_messages.is_empty());
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_private_payments_ignores_malformed_same_kind_after_valid_payment() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+        send_raw_private_message(
+            &mut setup.sender_link,
+            r#"{"version":2,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"bitcoin-bolt11":"stale-malformed"}}"#,
+        )
+        .await;
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("latest valid private payments state should survive malformed newer same-kind envelope");
         assert_eq!(received.entries.get(&method), Some(&data));
         assert!(setup.receiver_link.pending_private_messages.is_empty());
 
