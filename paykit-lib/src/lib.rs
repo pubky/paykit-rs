@@ -1235,7 +1235,9 @@ fn encrypt_receipt(
 /// # Errors
 /// - Returns [`PaykitError::InvalidData`] if the encrypted envelope is malformed,
 ///   uses an unsupported version/kind/algorithm, has invalid base64url fields,
-///   fails authenticated decryption, or decrypts to malformed receipt JSON.
+///   fails authenticated decryption, decrypts to malformed receipt JSON, or
+///   decrypts to a receipt whose reference does not match the authenticated
+///   receipt location.
 pub fn decrypt_receipt(
     encrypted_json: &str,
     key: &ReceiptDecryptionKey,
@@ -1299,7 +1301,14 @@ pub fn decrypt_receipt(
             context: format!("failed to parse receipt plaintext JSON: {err}"),
             source: Some(err.into()),
         })?;
-    receipt_from_wire(receipt_wire)
+    let receipt = receipt_from_wire(receipt_wire)?;
+    if receipt_location(&receipt.reference) != location {
+        return Err(PaykitError::InvalidData {
+            context: "receipt reference does not match receipt location".into(),
+            source: None,
+        });
+    }
+    Ok(receipt)
 }
 
 #[cfg(feature = "pubky")]
@@ -1815,8 +1824,9 @@ pub async fn get_private_payments(
 ///
 /// Messages for other private app kinds remain buffered on the [`EncryptedLink`]
 /// for their own typed receiver. Malformed unrelated app messages are ignored by
-/// the shared dispatcher; malformed selected receipt-access JSON returns
-/// [`PaykitError::InvalidData`].
+/// the shared dispatcher. Malformed receipt-access messages are dropped with
+/// diagnostics while later valid receipt-access messages in the same batch are
+/// still returned.
 ///
 /// Each selected receipt access location must match the canonical Paykit receipt
 /// path for its [`PaymentReference`].
@@ -1838,10 +1848,27 @@ pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptA
         return Ok(Vec::new());
     }
 
-    let access = raw_messages
-        .iter()
-        .map(|raw| parse_receipt_access_json(&raw.plaintext))
-        .collect::<Result<Vec<_>>>()?;
+    let mut access = Vec::new();
+    let mut malformed = 0usize;
+    for raw in &raw_messages {
+        match parse_receipt_access_json(&raw.plaintext) {
+            Ok(parsed) => access.push(parsed),
+            Err(err) => {
+                malformed += 1;
+                warn!(
+                    error = ?err,
+                    "dropping malformed receipt access message while preserving later valid messages"
+                );
+            }
+        }
+    }
+    if malformed > 0 {
+        warn!(
+            malformed,
+            selected = raw_messages.len(),
+            "ignored malformed receipt access messages while preserving valid messages"
+        );
+    }
     debug!(
         count = access.len(),
         received,
@@ -4036,6 +4063,32 @@ mod tests {
         assert!(matches!(err, PaykitError::InvalidData { .. }));
     }
 
+    #[test]
+    fn test_decrypt_receipt_rejects_plaintext_reference_that_does_not_match_location() {
+        let location_reference =
+            PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let plaintext_reference =
+            PaymentReference::new("650e8400-e29b-41d4-a716-446655440000").unwrap();
+        let recipient_public_key = Keypair::random().public_key();
+        let receipt = Receipt {
+            reference: plaintext_reference,
+            recipient_public_key,
+            payment_method: Some(MethodId::new("lightning").unwrap()),
+            amount: Some("1000".to_string()),
+            currency: Some("sats".to_string()),
+            metadata: HashMap::new(),
+        };
+        let location = receipt_location(&location_reference);
+        let key = ReceiptDecryptionKey::generate();
+        let encrypted = encrypt_receipt(&receipt, &key, &location).unwrap();
+
+        let err = decrypt_receipt(&encrypted, &key, &location).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("receipt reference does not match receipt location")),
+            "expected receipt reference/location mismatch error, got: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn issue_receipt_stores_encrypted_receipt_and_sends_access_message() {
         let mut setup = PrivateTestSetup::new().await;
@@ -4106,6 +4159,56 @@ mod tests {
         let first_json = serialize_receipt_access_json(&first_access).unwrap();
         let second_json = serialize_receipt_access_json(&second_access).unwrap();
         send_raw_private_message(&mut setup.sender_link, &first_json).await;
+        send_raw_private_message(&mut setup.sender_link, &second_json).await;
+
+        let received = get_receipt_access(&mut setup.receiver_link).await.unwrap();
+        let empty = get_receipt_access(&mut setup.receiver_link).await.unwrap();
+
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0].reference, first_reference);
+        assert_eq!(received[1].reference, second_reference);
+        assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_receipt_access_preserves_valid_receipts_when_one_selected_message_is_malformed() {
+        let mut setup = PrivateTestSetup::new().await;
+        let first_reference =
+            PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let second_reference =
+            PaymentReference::new("650e8400-e29b-41d4-a716-446655440000").unwrap();
+        let malformed_reference =
+            PaymentReference::new("750e8400-e29b-41d4-a716-446655440000").unwrap();
+        let first_access = ReceiptAccess {
+            version: 1,
+            kind: PrivateMessageKind::ReceiptAccess,
+            location: receipt_location(&first_reference),
+            key: ReceiptDecryptionKey::generate(),
+            reference: first_reference.clone(),
+            algorithm: "XChaCha20Poly1305".to_string(),
+        };
+        let malformed_access = ReceiptAccess {
+            version: 1,
+            kind: PrivateMessageKind::ReceiptAccess,
+            location: receipt_location(&malformed_reference),
+            key: ReceiptDecryptionKey::generate(),
+            reference: malformed_reference,
+            algorithm: "bad-algorithm".to_string(),
+        };
+        let second_access = ReceiptAccess {
+            version: 1,
+            kind: PrivateMessageKind::ReceiptAccess,
+            location: receipt_location(&second_reference),
+            key: ReceiptDecryptionKey::generate(),
+            reference: second_reference.clone(),
+            algorithm: "XChaCha20Poly1305".to_string(),
+        };
+
+        let first_json = serialize_receipt_access_json(&first_access).unwrap();
+        let malformed_json = serialize_receipt_access_json(&malformed_access).unwrap();
+        let second_json = serialize_receipt_access_json(&second_access).unwrap();
+        send_raw_private_message(&mut setup.sender_link, &first_json).await;
+        send_raw_private_message(&mut setup.sender_link, &malformed_json).await;
         send_raw_private_message(&mut setup.sender_link, &second_json).await;
 
         let received = get_receipt_access(&mut setup.receiver_link).await.unwrap();
