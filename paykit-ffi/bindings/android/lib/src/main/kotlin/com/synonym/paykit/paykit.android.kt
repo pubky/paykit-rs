@@ -435,11 +435,11 @@ internal open class UniffiForeignFutureStruct(
     @JvmField public var `free`: UniffiForeignFutureFree?,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `handle` = 0.toLong(),
-
+        
         `free` = null,
-
+        
     )
 
     internal class UniffiByValue(
@@ -466,11 +466,11 @@ internal open class UniffiForeignFutureStructU8Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = 0.toByte(),
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -500,11 +500,11 @@ internal open class UniffiForeignFutureStructI8Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = 0.toByte(),
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -534,11 +534,11 @@ internal open class UniffiForeignFutureStructU16Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = 0.toShort(),
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -568,11 +568,11 @@ internal open class UniffiForeignFutureStructI16Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = 0.toShort(),
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -602,11 +602,11 @@ internal open class UniffiForeignFutureStructU32Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = 0,
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -636,11 +636,11 @@ internal open class UniffiForeignFutureStructI32Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = 0,
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -670,11 +670,11 @@ internal open class UniffiForeignFutureStructU64Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = 0.toLong(),
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -704,11 +704,11 @@ internal open class UniffiForeignFutureStructI64Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = 0.toLong(),
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -738,11 +738,11 @@ internal open class UniffiForeignFutureStructF32Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = 0.0f,
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -772,11 +772,11 @@ internal open class UniffiForeignFutureStructF64Struct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = 0.0,
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -806,11 +806,11 @@ internal open class UniffiForeignFutureStructPointerStruct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = NullPointer,
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -840,11 +840,11 @@ internal open class UniffiForeignFutureStructRustBufferStruct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `returnValue` = RustBufferHelper.allocValue(),
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -873,9 +873,9 @@ internal open class UniffiForeignFutureStructVoidStruct(
     @JvmField public var `callStatus`: UniffiRustCallStatusByValue,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
-
+        
         `callStatus` = UniffiRustCallStatusHelper.allocValue(),
-
+        
     )
 
     internal class UniffiByValue(
@@ -2066,7 +2066,7 @@ public suspend fun `paykitCloseEncryptedLink`(`linkId`: kotlin.String) {
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -2109,7 +2109,7 @@ public suspend fun `paykitDropEncryptedLinkHandshake`(`handshakeId`: kotlin.Stri
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -2179,7 +2179,7 @@ public suspend fun `paykitForceSignOut`() {
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
@@ -2318,7 +2318,7 @@ public suspend fun `paykitInitialize`() {
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -2378,7 +2378,7 @@ public suspend fun `paykitRemovePaymentEndpoint`(`methodId`: kotlin.String) {
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -2482,7 +2482,7 @@ public suspend fun `paykitSetEncryptedLinkHandshakeMaxRecoveryAttempts`(`handsha
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -2504,7 +2504,7 @@ public suspend fun `paykitSetEncryptedLinkMaxSendRetries`(`linkId`: kotlin.Strin
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -2526,7 +2526,7 @@ public suspend fun `paykitSetPaymentEndpoint`(`methodId`: kotlin.String, `endpoi
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -2548,7 +2548,7 @@ public suspend fun `paykitSetPrivatePayments`(`linkId`: kotlin.String, `payload`
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )
@@ -2593,7 +2593,7 @@ public suspend fun `paykitSignOut`() {
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )

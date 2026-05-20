@@ -524,7 +524,7 @@ public struct FfiConverterTypeFfiHandshakeProgress: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiHandshakeProgress {
         return
             try FfiHandshakeProgress(
-                status: FfiConverterString.read(from: &buf),
+                status: FfiConverterString.read(from: &buf), 
                 handleId: FfiConverterString.read(from: &buf)
         )
     }
@@ -596,7 +596,7 @@ public struct FfiConverterTypeFfiPaymentEntry: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentEntry {
         return
             try FfiPaymentEntry(
-                methodId: FfiConverterString.read(from: &buf),
+                methodId: FfiConverterString.read(from: &buf), 
                 endpointData: FfiConverterString.read(from: &buf)
         )
     }
@@ -668,7 +668,7 @@ public struct FfiConverterTypeFfiPrivatePaymentsPayload: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivatePaymentsPayload {
         return
             try FfiPrivatePaymentsPayload(
-                reference: FfiConverterString.read(from: &buf),
+                reference: FfiConverterString.read(from: &buf), 
                 entries: FfiConverterSequenceTypeFfiPaymentEntry.read(from: &buf)
         )
     }
@@ -697,8 +697,8 @@ public func FfiConverterTypeFfiPrivatePaymentsPayload_lower(_ value: FfiPrivateP
 
 public enum PaykitFfiError: Swift.Error {
 
-
-
+    
+    
     case Transport(reason: String
     )
     case NotFound(reason: String
@@ -722,9 +722,9 @@ public struct FfiConverterTypePaykitFfiError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
+        
 
-
-
+        
         case 1: return .Transport(
             reason: try FfiConverterString.read(from: &buf)
             )
@@ -748,34 +748,34 @@ public struct FfiConverterTypePaykitFfiError: FfiConverterRustBuffer {
     public static func write(_ value: PaykitFfiError, into buf: inout [UInt8]) {
         switch value {
 
+        
 
-
-
-
+        
+        
         case let .Transport(reason):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(reason, into: &buf)
-
-
+            
+        
         case let .NotFound(reason):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(reason, into: &buf)
-
-
+            
+        
         case let .InvalidData(reason):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(reason, into: &buf)
-
-
+            
+        
         case let .Validation(reason):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
-
-
+            
+        
         case let .Session(reason):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
-
+            
         }
     }
 }
@@ -1077,7 +1077,7 @@ public func paykitForceSignOut()async   {
             freeFunc: ffi_paykit_rust_future_free_void,
             liftFunc: { $0 },
             errorHandler: nil
-
+            
         )
 }
 /**
@@ -1104,7 +1104,7 @@ public func paykitGetCurrentPublicKey()async  -> String?  {
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionString.lift,
             errorHandler: nil
-
+            
         )
 }
 /**
@@ -1233,7 +1233,7 @@ public func paykitIsAuthenticated()async  -> Bool  {
             freeFunc: ffi_paykit_rust_future_free_i8,
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
-
+            
         )
 }
 /**
