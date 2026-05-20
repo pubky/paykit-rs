@@ -311,8 +311,12 @@ The receipt payload is encrypted with `XChaCha20Poly1305`; the storage location 
   Builds a canonical `Receipt` from the caller's `ReceiptDraft`, fills in the recipient public key from `link`, generates a fresh `ReceiptDecryptionKey`, stores the encrypted receipt on the issuer's homeserver, then sends a `ReceiptAccess` message over Noise. Reissuing the same `PaymentReference` overwrites the same receipt path with new ciphertext and a new key; older access descriptors for that reference may stop decrypting after a later successful reissue.
 - `get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptAccess>>`
   Receives all currently available queued receipt-access messages. This is FIFO/event-like: every receipt access message matters, and older receipt accesses are not collapsed when newer ones arrive. An empty vector means no receipt access messages are currently available. Calling `get_private_payments` will not discard receipt-access messages; they remain buffered for `get_receipt_access`.
+- `ReceiptAccess::location_for(reference) -> String`
+  Returns Paykit's canonical homeserver path for an encrypted receipt payload.
+- `Receipt::encrypt(&self, key, location) -> Result<String>` / `Receipt::decrypt(encrypted_json, key, location) -> Result<Receipt>`
+  Encrypts or decrypts receipt payloads using `XChaCha20Poly1305`. Pass the exact location from the access descriptor when decrypting; it is authenticated as AAD. Decryption also rejects plaintext whose internal reference does not match the authenticated location.
 - `decrypt_receipt(encrypted_json, key, location) -> Result<Receipt>`
-  Decrypts a receipt payload fetched from `ReceiptAccess::location` using `ReceiptAccess::key`. Pass the exact location from the access descriptor; it is authenticated as AAD. Incoming receipt access descriptors are accepted only when `location` equals Paykit's canonical receipt path for their `PaymentReference`.
+  Convenience wrapper around `Receipt::decrypt`. Incoming receipt access descriptors are accepted only when `location` equals Paykit's canonical receipt path for their `PaymentReference`.
 
 Receipt decryption keys are sensitive. `ReceiptDecryptionKey`, `ReceiptAccess`, and `IssuedReceipt` redact key material from formatted output through the key's custom `Debug`/`Display`, but callers must still avoid logging or persisting the raw `ReceiptDecryptionKey::as_str()` value outside secure storage.
 

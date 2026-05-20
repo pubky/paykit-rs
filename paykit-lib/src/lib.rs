@@ -1113,114 +1113,214 @@ struct ReceiptAccessWire {
 }
 
 #[cfg(feature = "pubky")]
-fn receipt_location(reference: &PaymentReference) -> String {
-    format!(
-        "{}private/receipts/{}",
-        transport::pubky::PAYKIT_PATH_PREFIX,
-        reference.as_str()
-    )
-}
+impl ReceiptAccess {
+    /// Return the canonical homeserver storage location for a receipt reference.
+    pub fn location_for(reference: &PaymentReference) -> String {
+        format!(
+            "{}private/receipts/{}",
+            transport::pubky::PAYKIT_PATH_PREFIX,
+            reference.as_str()
+        )
+    }
 
-#[cfg(feature = "pubky")]
-fn receipt_aad(location: &str) -> String {
-    format!("paykit.receipt.v1:{location}")
-}
-
-#[cfg(feature = "pubky")]
-fn receipt_to_wire(receipt: &Receipt) -> ReceiptWire {
-    ReceiptWire {
-        version: 1,
-        kind: "paykit.receipt".to_string(),
-        reference: receipt.reference.as_str().to_string(),
-        recipient_public_key: receipt.recipient_public_key.to_string(),
-        payment_method: receipt
-            .payment_method
-            .as_ref()
-            .map(|m| m.as_str().to_string()),
-        amount: receipt.amount.clone(),
-        currency: receipt.currency.clone(),
-        metadata: receipt.metadata.clone(),
+    /// Validate that this access descriptor points at the canonical location for
+    /// its payment reference.
+    pub fn validate_location(&self) -> Result<()> {
+        let expected_location = Self::location_for(&self.reference);
+        if self.location != expected_location {
+            return Err(PaykitError::InvalidData {
+                context: "receipt access location does not match payment reference".into(),
+                source: None,
+            });
+        }
+        Ok(())
     }
 }
 
 #[cfg(feature = "pubky")]
-fn receipt_from_wire(wire: ReceiptWire) -> Result<Receipt> {
-    if wire.version != 1 || wire.kind != "paykit.receipt" {
-        return Err(PaykitError::InvalidData {
-            context: format!(
-                "unsupported receipt payload version/kind: {}/{}",
-                wire.version, wire.kind
-            ),
-            source: None,
-        });
+impl From<&Receipt> for ReceiptWire {
+    fn from(receipt: &Receipt) -> Self {
+        Self {
+            version: 1,
+            kind: "paykit.receipt".to_string(),
+            reference: receipt.reference.as_str().to_string(),
+            recipient_public_key: receipt.recipient_public_key.to_string(),
+            payment_method: receipt
+                .payment_method
+                .as_ref()
+                .map(|m| m.as_str().to_string()),
+            amount: receipt.amount.clone(),
+            currency: receipt.currency.clone(),
+            metadata: receipt.metadata.clone(),
+        }
     }
-    let reference =
-        PaymentReference::new(wire.reference).map_err(|err| PaykitError::InvalidData {
-            context: "receipt contains invalid payment reference".into(),
-            source: Some(err.into()),
-        })?;
-    let recipient_public_key =
-        PublicKey::try_from(wire.recipient_public_key.as_str()).map_err(|err| {
-            PaykitError::InvalidData {
+}
+
+#[cfg(feature = "pubky")]
+impl TryFrom<ReceiptWire> for Receipt {
+    type Error = PaykitError;
+
+    fn try_from(wire: ReceiptWire) -> Result<Self> {
+        if wire.version != 1 || wire.kind != "paykit.receipt" {
+            return Err(PaykitError::InvalidData {
+                context: format!(
+                    "unsupported receipt payload version/kind: {}/{}",
+                    wire.version, wire.kind
+                ),
+                source: None,
+            });
+        }
+        let reference =
+            PaymentReference::new(wire.reference).map_err(|err| PaykitError::InvalidData {
+                context: "receipt contains invalid payment reference".into(),
+                source: Some(err.into()),
+            })?;
+        let recipient_public_key = PublicKey::try_from(wire.recipient_public_key.as_str())
+            .map_err(|err| PaykitError::InvalidData {
                 context: format!("receipt contains invalid recipient public key: {err:?}"),
                 source: anyhow::anyhow!("invalid recipient public key: {err:?}").into(),
-            }
-        })?;
-    let payment_method = wire
-        .payment_method
-        .map(MethodId::new)
-        .transpose()
-        .map_err(|err| PaykitError::InvalidData {
-            context: "receipt contains invalid payment method".into(),
-            source: Some(err.into()),
-        })?;
-    Ok(Receipt {
-        reference,
-        recipient_public_key,
-        payment_method,
-        amount: wire.amount,
-        currency: wire.currency,
-        metadata: wire.metadata,
-    })
+            })?;
+        let payment_method = wire
+            .payment_method
+            .map(MethodId::new)
+            .transpose()
+            .map_err(|err| PaykitError::InvalidData {
+                context: "receipt contains invalid payment method".into(),
+                source: Some(err.into()),
+            })?;
+        Ok(Self {
+            reference,
+            recipient_public_key,
+            payment_method,
+            amount: wire.amount,
+            currency: wire.currency,
+            metadata: wire.metadata,
+        })
+    }
 }
 
 #[cfg(feature = "pubky")]
-fn encrypt_receipt(
-    receipt: &Receipt,
-    key: &ReceiptDecryptionKey,
-    location: &str,
-) -> Result<String> {
-    let key_bytes = key.bytes()?;
-    let cipher = XChaCha20Poly1305::new((&key_bytes).into());
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let plaintext =
-        serde_json::to_vec(&receipt_to_wire(receipt)).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to serialize receipt JSON: {err}"),
+impl Receipt {
+    fn aad_for_location(location: &str) -> String {
+        format!("paykit.receipt.v1:{location}")
+    }
+
+    /// Encrypt this receipt for storage at `location` using `key`.
+    ///
+    /// The location is authenticated as AEAD associated data; callers must use
+    /// the same location when decrypting.
+    pub fn encrypt(&self, key: &ReceiptDecryptionKey, location: &str) -> Result<String> {
+        let key_bytes = key.bytes()?;
+        let cipher = XChaCha20Poly1305::new((&key_bytes).into());
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let plaintext = serde_json::to_vec(&ReceiptWire::from(self)).map_err(|err| {
+            PaykitError::InvalidData {
+                context: format!("failed to serialize receipt JSON: {err}"),
+                source: Some(err.into()),
+            }
+        })?;
+        let ciphertext = cipher
+            .encrypt(
+                &nonce,
+                chacha20poly1305::aead::Payload {
+                    msg: &plaintext,
+                    aad: Self::aad_for_location(location).as_bytes(),
+                },
+            )
+            .map_err(|err| PaykitError::InvalidData {
+                context: format!("failed to encrypt receipt: {err}"),
+                source: None,
+            })?;
+        let wire = EncryptedReceiptWire {
+            version: 1,
+            kind: "paykit.receipt.encrypted".to_string(),
+            algorithm: "XChaCha20Poly1305".to_string(),
+            nonce: URL_SAFE_NO_PAD.encode(nonce),
+            ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
+        };
+        serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
+            context: format!("failed to serialize encrypted receipt JSON: {err}"),
             source: Some(err.into()),
-        })?;
-    let ciphertext = cipher
-        .encrypt(
-            &nonce,
-            chacha20poly1305::aead::Payload {
-                msg: &plaintext,
-                aad: receipt_aad(location).as_bytes(),
-            },
-        )
-        .map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to encrypt receipt: {err}"),
-            source: None,
-        })?;
-    let wire = EncryptedReceiptWire {
-        version: 1,
-        kind: "paykit.receipt.encrypted".to_string(),
-        algorithm: "XChaCha20Poly1305".to_string(),
-        nonce: URL_SAFE_NO_PAD.encode(nonce),
-        ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
-    };
-    serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
-        context: format!("failed to serialize encrypted receipt JSON: {err}"),
-        source: Some(err.into()),
-    })
+        })
+    }
+
+    /// Decrypt an encrypted receipt payload fetched from a homeserver.
+    ///
+    /// `key` and `location` normally come from a [`ReceiptAccess`] message. The
+    /// location is authenticated as AEAD associated data and the decrypted
+    /// receipt reference must match the canonical location.
+    pub fn decrypt(
+        encrypted_json: &str,
+        key: &ReceiptDecryptionKey,
+        location: &str,
+    ) -> Result<Self> {
+        let wire: EncryptedReceiptWire =
+            serde_json::from_str(encrypted_json).map_err(|err| PaykitError::InvalidData {
+                context: format!("failed to parse encrypted receipt JSON: {err}"),
+                source: Some(err.into()),
+            })?;
+        if wire.version != 1
+            || wire.kind != "paykit.receipt.encrypted"
+            || wire.algorithm != "XChaCha20Poly1305"
+        {
+            return Err(PaykitError::InvalidData {
+                context: format!(
+                    "unsupported encrypted receipt envelope version/kind/algorithm: {}/{}/{}",
+                    wire.version, wire.kind, wire.algorithm
+                ),
+                source: None,
+            });
+        }
+        let nonce = URL_SAFE_NO_PAD
+            .decode(wire.nonce)
+            .map_err(|err| PaykitError::InvalidData {
+                context: format!("encrypted receipt nonce is not valid base64url: {err}"),
+                source: Some(err.into()),
+            })?;
+        let ciphertext =
+            URL_SAFE_NO_PAD
+                .decode(wire.ciphertext)
+                .map_err(|err| PaykitError::InvalidData {
+                    context: format!("encrypted receipt ciphertext is not valid base64url: {err}"),
+                    source: Some(err.into()),
+                })?;
+        if nonce.len() != 24 {
+            return Err(PaykitError::InvalidData {
+                context: format!(
+                    "encrypted receipt nonce must be 24 bytes, got {}",
+                    nonce.len()
+                ),
+                source: None,
+            });
+        }
+        let key_bytes = key.bytes()?;
+        let cipher = XChaCha20Poly1305::new((&key_bytes).into());
+        let plaintext = cipher
+            .decrypt(
+                nonce.as_slice().into(),
+                chacha20poly1305::aead::Payload {
+                    msg: &ciphertext,
+                    aad: Self::aad_for_location(location).as_bytes(),
+                },
+            )
+            .map_err(|err| PaykitError::InvalidData {
+                context: format!("failed to decrypt receipt: {err}"),
+                source: None,
+            })?;
+        let receipt_wire: ReceiptWire =
+            serde_json::from_slice(&plaintext).map_err(|err| PaykitError::InvalidData {
+                context: format!("failed to parse receipt plaintext JSON: {err}"),
+                source: Some(err.into()),
+            })?;
+        let receipt = Self::try_from(receipt_wire)?;
+        if ReceiptAccess::location_for(&receipt.reference) != location {
+            return Err(PaykitError::InvalidData {
+                context: "receipt reference does not match receipt location".into(),
+                source: None,
+            });
+        }
+        Ok(receipt)
+    }
 }
 
 #[cfg(feature = "pubky")]
@@ -1247,87 +1347,68 @@ pub fn decrypt_receipt(
     key: &ReceiptDecryptionKey,
     location: &str,
 ) -> Result<Receipt> {
-    let wire: EncryptedReceiptWire =
-        serde_json::from_str(encrypted_json).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to parse encrypted receipt JSON: {err}"),
-            source: Some(err.into()),
-        })?;
-    if wire.version != 1
-        || wire.kind != "paykit.receipt.encrypted"
-        || wire.algorithm != "XChaCha20Poly1305"
-    {
-        return Err(PaykitError::InvalidData {
-            context: format!(
-                "unsupported encrypted receipt envelope version/kind/algorithm: {}/{}/{}",
-                wire.version, wire.kind, wire.algorithm
-            ),
-            source: None,
-        });
+    Receipt::decrypt(encrypted_json, key, location)
+}
+
+#[cfg(feature = "pubky")]
+impl From<&ReceiptAccess> for ReceiptAccessWire {
+    fn from(access: &ReceiptAccess) -> Self {
+        Self {
+            version: 1,
+            kind: PrivateMessageKind::ReceiptAccess.as_str().to_string(),
+            reference: access.reference.as_str().to_string(),
+            location: access.location.clone(),
+            key: access.key.as_str().to_string(),
+            algorithm: access.algorithm.clone(),
+        }
     }
-    let nonce = URL_SAFE_NO_PAD
-        .decode(wire.nonce)
-        .map_err(|err| PaykitError::InvalidData {
-            context: format!("encrypted receipt nonce is not valid base64url: {err}"),
-            source: Some(err.into()),
-        })?;
-    let ciphertext =
-        URL_SAFE_NO_PAD
-            .decode(wire.ciphertext)
-            .map_err(|err| PaykitError::InvalidData {
-                context: format!("encrypted receipt ciphertext is not valid base64url: {err}"),
+}
+
+#[cfg(feature = "pubky")]
+impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
+    type Error = PaykitError;
+
+    fn try_from(wire: ReceiptAccessWire) -> Result<Self> {
+        if wire.version != 1
+            || wire.kind != PrivateMessageKind::ReceiptAccess.as_str()
+            || wire.algorithm != "XChaCha20Poly1305"
+        {
+            return Err(PaykitError::InvalidData {
+                context: format!(
+                    "unsupported receipt access version/kind/algorithm: {}/{}/{}",
+                    wire.version, wire.kind, wire.algorithm
+                ),
+                source: None,
+            });
+        }
+        let reference =
+            PaymentReference::new(wire.reference).map_err(|err| PaykitError::InvalidData {
+                context: "receipt access contains invalid payment reference".into(),
                 source: Some(err.into()),
             })?;
-    if nonce.len() != 24 {
-        return Err(PaykitError::InvalidData {
-            context: format!(
-                "encrypted receipt nonce must be 24 bytes, got {}",
-                nonce.len()
-            ),
-            source: None,
-        });
+        let access = Self {
+            version: 1,
+            kind: PrivateMessageKind::ReceiptAccess,
+            reference,
+            location: wire.location,
+            key: ReceiptDecryptionKey::new(wire.key).map_err(|err| PaykitError::InvalidData {
+                context: "receipt access contains invalid decryption key".into(),
+                source: Some(err.into()),
+            })?,
+            algorithm: "XChaCha20Poly1305".to_string(),
+        };
+        access.validate_location()?;
+        Ok(access)
     }
-    let key_bytes = key.bytes()?;
-    let cipher = XChaCha20Poly1305::new((&key_bytes).into());
-    let plaintext = cipher
-        .decrypt(
-            nonce.as_slice().into(),
-            chacha20poly1305::aead::Payload {
-                msg: &ciphertext,
-                aad: receipt_aad(location).as_bytes(),
-            },
-        )
-        .map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to decrypt receipt: {err}"),
-            source: None,
-        })?;
-    let receipt_wire: ReceiptWire =
-        serde_json::from_slice(&plaintext).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to parse receipt plaintext JSON: {err}"),
-            source: Some(err.into()),
-        })?;
-    let receipt = receipt_from_wire(receipt_wire)?;
-    if receipt_location(&receipt.reference) != location {
-        return Err(PaykitError::InvalidData {
-            context: "receipt reference does not match receipt location".into(),
-            source: None,
-        });
-    }
-    Ok(receipt)
 }
 
 #[cfg(feature = "pubky")]
 fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<String> {
-    let wire = ReceiptAccessWire {
-        version: 1,
-        kind: PrivateMessageKind::ReceiptAccess.as_str().to_string(),
-        reference: access.reference.as_str().to_string(),
-        location: access.location.clone(),
-        key: access.key.as_str().to_string(),
-        algorithm: access.algorithm.clone(),
-    };
-    serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
-        context: format!("failed to serialize receipt access JSON: {err}"),
-        source: Some(err.into()),
+    serde_json::to_string(&ReceiptAccessWire::from(access)).map_err(|err| {
+        PaykitError::InvalidData {
+            context: format!("failed to serialize receipt access JSON: {err}"),
+            source: Some(err.into()),
+        }
     })
 }
 
@@ -1338,42 +1419,7 @@ fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
             context: format!("failed to parse receipt access JSON: {err}"),
             source: Some(err.into()),
         })?;
-    if wire.version != 1
-        || wire.kind != PrivateMessageKind::ReceiptAccess.as_str()
-        || wire.algorithm != "XChaCha20Poly1305"
-    {
-        return Err(PaykitError::InvalidData {
-            context: format!(
-                "unsupported receipt access version/kind/algorithm: {}/{}/{}",
-                wire.version, wire.kind, wire.algorithm
-            ),
-            source: None,
-        });
-    }
-    let reference =
-        PaymentReference::new(wire.reference).map_err(|err| PaykitError::InvalidData {
-            context: "receipt access contains invalid payment reference".into(),
-            source: Some(err.into()),
-        })?;
-    let expected_location = receipt_location(&reference);
-    if wire.location != expected_location {
-        return Err(PaykitError::InvalidData {
-            context: "receipt access location does not match payment reference".into(),
-            source: None,
-        });
-    }
-
-    Ok(ReceiptAccess {
-        version: 1,
-        kind: PrivateMessageKind::ReceiptAccess,
-        reference,
-        location: wire.location,
-        key: ReceiptDecryptionKey::new(wire.key).map_err(|err| PaykitError::InvalidData {
-            context: "receipt access contains invalid decryption key".into(),
-            source: Some(err.into()),
-        })?,
-        algorithm: "XChaCha20Poly1305".to_string(),
-    })
+    ReceiptAccess::try_from(wire)
 }
 
 #[cfg(feature = "pubky")]
@@ -1687,7 +1733,7 @@ pub async fn issue_receipt(
 ) -> Result<IssuedReceipt> {
     debug!("issuing encrypted receipt");
     let reference = draft.reference;
-    let location = receipt_location(&reference);
+    let location = ReceiptAccess::location_for(&reference);
     let key = ReceiptDecryptionKey::generate();
     let receipt = Receipt {
         reference: reference.clone(),
@@ -1697,7 +1743,8 @@ pub async fn issue_receipt(
         currency: draft.currency,
         metadata: draft.metadata,
     };
-    let encrypted = encrypt_receipt(&receipt, &key, &location)
+    let encrypted = receipt
+        .encrypt(&key, &location)
         .map_err(|err| map_error("issue_receipt", err))?;
 
     session
@@ -4095,7 +4142,7 @@ mod tests {
     fn test_receipt_location_uses_payment_reference() {
         let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(
-            receipt_location(&reference),
+            ReceiptAccess::location_for(&reference),
             "/pub/paykit/v0/private/receipts/550e8400-e29b-41d4-a716-446655440000"
         );
     }
@@ -4112,10 +4159,10 @@ mod tests {
             currency: Some("sats".to_string()),
             metadata: HashMap::from([("preimage".to_string(), "abc".to_string())]),
         };
-        let location = receipt_location(&reference);
+        let location = ReceiptAccess::location_for(&reference);
         let key = ReceiptDecryptionKey::generate();
 
-        let encrypted = encrypt_receipt(&receipt, &key, &location).unwrap();
+        let encrypted = receipt.encrypt(&key, &location).unwrap();
         let decrypted = decrypt_receipt(&encrypted, &key, &location).unwrap();
         assert_eq!(decrypted, receipt);
 
@@ -4139,9 +4186,9 @@ mod tests {
             currency: Some("sats".to_string()),
             metadata: HashMap::new(),
         };
-        let location = receipt_location(&location_reference);
+        let location = ReceiptAccess::location_for(&location_reference);
         let key = ReceiptDecryptionKey::generate();
-        let encrypted = encrypt_receipt(&receipt, &key, &location).unwrap();
+        let encrypted = receipt.encrypt(&key, &location).unwrap();
 
         let err = decrypt_receipt(&encrypted, &key, &location).unwrap_err();
         assert!(
@@ -4167,7 +4214,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(issued.reference, reference);
-        assert_eq!(issued.location, receipt_location(&reference));
+        assert_eq!(issued.location, ReceiptAccess::location_for(&reference));
 
         let stored = setup
             .sender_session
@@ -4203,7 +4250,7 @@ mod tests {
         let first_access = ReceiptAccess {
             version: 1,
             kind: PrivateMessageKind::ReceiptAccess,
-            location: receipt_location(&first_reference),
+            location: ReceiptAccess::location_for(&first_reference),
             key: ReceiptDecryptionKey::generate(),
             reference: first_reference.clone(),
             algorithm: "XChaCha20Poly1305".to_string(),
@@ -4211,7 +4258,7 @@ mod tests {
         let second_access = ReceiptAccess {
             version: 1,
             kind: PrivateMessageKind::ReceiptAccess,
-            location: receipt_location(&second_reference),
+            location: ReceiptAccess::location_for(&second_reference),
             key: ReceiptDecryptionKey::generate(),
             reference: second_reference.clone(),
             algorithm: "XChaCha20Poly1305".to_string(),
@@ -4243,7 +4290,7 @@ mod tests {
         let first_access = ReceiptAccess {
             version: 1,
             kind: PrivateMessageKind::ReceiptAccess,
-            location: receipt_location(&first_reference),
+            location: ReceiptAccess::location_for(&first_reference),
             key: ReceiptDecryptionKey::generate(),
             reference: first_reference.clone(),
             algorithm: "XChaCha20Poly1305".to_string(),
@@ -4251,7 +4298,7 @@ mod tests {
         let malformed_access = ReceiptAccess {
             version: 1,
             kind: PrivateMessageKind::ReceiptAccess,
-            location: receipt_location(&malformed_reference),
+            location: ReceiptAccess::location_for(&malformed_reference),
             key: ReceiptDecryptionKey::generate(),
             reference: malformed_reference,
             algorithm: "bad-algorithm".to_string(),
@@ -4259,7 +4306,7 @@ mod tests {
         let second_access = ReceiptAccess {
             version: 1,
             kind: PrivateMessageKind::ReceiptAccess,
-            location: receipt_location(&second_reference),
+            location: ReceiptAccess::location_for(&second_reference),
             key: ReceiptDecryptionKey::generate(),
             reference: second_reference.clone(),
             algorithm: "XChaCha20Poly1305".to_string(),
@@ -4290,7 +4337,7 @@ mod tests {
             version: 1,
             kind: PrivateMessageKind::ReceiptAccess,
             reference: reference.clone(),
-            location: receipt_location(&other_reference),
+            location: ReceiptAccess::location_for(&other_reference),
             key: ReceiptDecryptionKey::generate(),
             algorithm: "XChaCha20Poly1305".to_string(),
         };
@@ -4312,7 +4359,7 @@ mod tests {
             version: 1,
             kind: PrivateMessageKind::ReceiptAccess,
             reference: reference.clone(),
-            location: receipt_location(&reference),
+            location: ReceiptAccess::location_for(&reference),
             key: key.clone(),
             algorithm: "XChaCha20Poly1305".to_string(),
         };
