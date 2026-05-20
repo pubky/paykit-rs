@@ -319,6 +319,10 @@ impl PrivateMessageKind {
             Self::ReceiptAccess => "paykit.receipt_access",
         }
     }
+
+    fn is_supported(kind: &str) -> bool {
+        kind == Self::PrivatePayments.as_str() || kind == Self::ReceiptAccess.as_str()
+    }
 }
 
 #[cfg(feature = "pubky")]
@@ -587,7 +591,7 @@ pub struct EncryptedLink {
     /// Noise stream but not yet consumed by a typed Paykit helper.
     ///
     /// This prevents a typed receiver such as [`get_private_payments`] from
-    /// discarding unrelated message kinds (for example future receipt-access
+    /// discarding unrelated supported message kinds (for example receipt-access
     /// messages) after the underlying Noise read counter has advanced.
     pending_private_messages: VecDeque<BufferedPrivateMessage>,
 }
@@ -1376,6 +1380,7 @@ fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
 async fn receive_private_messages(link: &mut EncryptedLink) -> Result<usize> {
     let mut received = 0usize;
     let mut malformed = 0usize;
+    let mut unknown = 0usize;
 
     loop {
         let messages =
@@ -1394,7 +1399,16 @@ async fn receive_private_messages(link: &mut EncryptedLink) -> Result<usize> {
         received += messages.len();
         for raw in messages {
             match decode_private_message(&raw) {
-                Ok(message) => link.pending_private_messages.push_back(message),
+                Ok(message) if PrivateMessageKind::is_supported(&message.kind) => {
+                    link.pending_private_messages.push_back(message)
+                }
+                Ok(message) => {
+                    unknown += 1;
+                    warn!(
+                        kind = %message.kind,
+                        "dropping unsupported private application message kind"
+                    );
+                }
                 Err(err) => {
                     malformed += 1;
                     warn!(
@@ -1411,6 +1425,12 @@ async fn receive_private_messages(link: &mut EncryptedLink) -> Result<usize> {
             received,
             malformed,
             "ignored malformed private application messages while preserving later valid messages"
+        );
+    }
+    if unknown > 0 {
+        warn!(
+            received,
+            unknown, "dropped unsupported private application message kinds"
         );
     }
 
@@ -1777,9 +1797,11 @@ where
 /// - Returns the latest queued [`PrivatePaymentsPayload`]. Intermediate queued
 ///   private payment updates are consumed because private payments are
 ///   latest-state data.
-/// - Messages with other `kind` values are left buffered on the [`EncryptedLink`]
-///   for their own typed receivers. They are not parsed as private payments and
-///   are not discarded just because this function was called.
+/// - Messages with other supported `kind` values are left buffered on the
+///   [`EncryptedLink`] for their own typed receivers. They are not parsed as
+///   private payments and are not discarded just because this function was called.
+/// - Syntactically valid messages with unsupported `kind` values are logged and
+///   dropped by the shared dispatcher; they are not buffered indefinitely.
 /// - The returned payload is the full versioned private payments envelope,
 ///   including its required [`PaymentReference`] and complete entries map.
 /// - Returns `Err(PaykitError::InvalidData)` when the selected private
@@ -1822,11 +1844,13 @@ pub async fn get_private_payments(
 /// older receipt access messages are not collapsed when newer ones arrive.
 /// Returns an empty vector when no receipt access messages are currently available.
 ///
-/// Messages for other private app kinds remain buffered on the [`EncryptedLink`]
-/// for their own typed receiver. Malformed unrelated app messages are ignored by
-/// the shared dispatcher. Malformed receipt-access messages are dropped with
-/// diagnostics while later valid receipt-access messages in the same batch are
-/// still returned.
+/// Messages for other supported private app kinds remain buffered on the
+/// [`EncryptedLink`] for their own typed receiver. Malformed unrelated app
+/// messages are ignored by the shared dispatcher. Syntactically valid messages
+/// with unsupported `kind` values are logged and dropped by the shared
+/// dispatcher rather than buffered indefinitely. Malformed receipt-access
+/// messages are dropped with diagnostics while later valid receipt-access
+/// messages in the same batch are still returned.
 ///
 /// Each selected receipt access location must match the canonical Paykit receipt
 /// path for its [`PaymentReference`].
@@ -3255,7 +3279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_private_payments_preserves_newer_unknown_messages() {
+    async fn get_private_payments_preserves_newer_receipt_access_messages() {
         let mut setup = PrivateTestSetup::new().await;
 
         let method = MethodId::new("bitcoin-bolt11").unwrap();
@@ -3286,7 +3310,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_private_payments_preserves_older_unknown_messages() {
+    async fn get_private_payments_preserves_older_receipt_access_messages() {
         let mut setup = PrivateTestSetup::new().await;
 
         send_raw_private_message(&mut setup.sender_link, TEST_RECEIPT_ACCESS_JSON).await;
@@ -3312,6 +3336,35 @@ mod tests {
                 .as_str(),
             "paykit.receipt_access"
         );
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_private_payments_drops_unknown_messages_without_buffering_them() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        send_raw_private_message(
+            &mut setup.sender_link,
+            r#"{"version":1,"kind":"paykit.future_kind","payload":"ignored"}"#,
+        )
+        .await;
+
+        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let data = EndpointData::new("lnbc1...");
+        let mut entries = HashMap::new();
+        entries.insert(method.clone(), data.clone());
+        set_private_payments(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+
+        let received = get_private_payments(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("valid private payments message should survive unknown earlier message");
+        assert_eq!(received.entries.get(&method), Some(&data));
+        assert!(setup.receiver_link.pending_private_messages.is_empty());
 
         setup.sender_session.signout().await.unwrap();
         setup.receiver_session.signout().await.unwrap();
