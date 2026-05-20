@@ -1651,6 +1651,14 @@ pub async fn set_private_payments(
 /// same location with a new key, so older access descriptors for that reference
 /// may no longer decrypt after a later successful reissue.
 ///
+/// # Identity binding
+///
+/// `session` is used for homeserver storage, while `link` is used to send the
+/// receipt-access message. Paykit does not currently verify that `session`
+/// belongs to the same local identity that established `link`; callers must pass
+/// the matching session or they may persist the receipt under the wrong identity
+/// while sending access over a different encrypted link.
+///
 /// # Durability and ordering
 ///
 /// This function stores the encrypted receipt first and sends access second. If
