@@ -296,7 +296,27 @@ Snapshot bytes include sensitive key material and must be treated as secrets (st
 - `get_private_payments(link: &mut EncryptedLink) -> Result<Option<PrivatePaymentsPayload>>`
   Receives and decrypts currently available private application messages from the remote peer and returns the latest private payments envelope, if one is available. `Ok(None)` means no private payments message is currently available; it is distinct from a payload with an empty `entries` map. Private payments are latest-state data: queued older private-payment envelopes are superseded by the newest one. Other recognized/unknown message kinds remain buffered for their own typed receivers. Malformed private application messages are ignored with diagnostics so they do not prevent later valid messages from being processed.
 
-All private application messages share one ordered encrypted stream. Event-like future kinds such as receipts must preserve all messages in send order. The in-memory buffer for messages dispatched but not yet consumed by a typed helper is not crash-durable; callers that add event-like kinds must define durable app-level handling around encrypted-link snapshots/read counters before performing irreversible side effects.
+All private application messages share one ordered encrypted stream. Private payments are latest-state data and intentionally collapse older queued private-payment envelopes. Receipts are event-like data and preserve each receipt-access message in FIFO/send order. The in-memory buffer for messages dispatched but not yet consumed by a typed helper is not crash-durable; callers that perform irreversible side effects after receiving event-like messages should persist their own app-level state alongside encrypted-link snapshots/read counters.
+
+#### Payment receipts
+
+Receipts are split into two persisted artifacts:
+
+1. The encrypted receipt payload is stored on the issuer's homeserver under `/pub/paykit/v0/private/receipts/{PaymentReference}`.
+2. A `ReceiptAccess` descriptor is sent to the counterparty over the existing Noise link. It contains the `PaymentReference`, the receipt `location`, the encryption `algorithm`, and the symmetric receipt decryption key.
+
+The receipt payload is encrypted with `XChaCha20Poly1305`; the storage location is used as authenticated associated data, so fetching the right ciphertext but decrypting it against a different location fails.
+
+- `issue_receipt(session, link, draft: ReceiptDraft) -> Result<IssuedReceipt>`
+  Builds a canonical `Receipt` from the caller's `ReceiptDraft`, fills in the recipient public key from `link`, generates a fresh `ReceiptDecryptionKey`, stores the encrypted receipt on the issuer's homeserver, then sends a `ReceiptAccess` message over Noise. Reissuing the same `PaymentReference` overwrites the same receipt path with new ciphertext and a new key; older access descriptors for that reference may stop decrypting after a later successful reissue.
+- `get_receipt_access(link: &mut EncryptedLink) -> Result<Option<ReceiptAccess>>`
+  Receives the next queued receipt-access message, if any. This is FIFO/event-like: every receipt access message matters, and older receipt accesses are not collapsed when newer ones arrive. Call repeatedly until `Ok(None)` to drain all currently available receipt accesses. Calling `get_private_payments` will not discard receipt-access messages; they remain buffered for `get_receipt_access`.
+- `decrypt_receipt(encrypted_json, key, location) -> Result<Receipt>`
+  Decrypts a receipt payload fetched from `ReceiptAccess::location` using `ReceiptAccess::key`. Pass the exact location from the access descriptor; it is authenticated as AAD.
+
+Receipt decryption keys are sensitive. `ReceiptDecryptionKey`, `ReceiptAccess`, and `IssuedReceipt` redact key material from formatted output through the key's custom `Debug`/`Display`, but callers must still avoid logging or persisting the raw `ReceiptDecryptionKey::as_str()` value outside secure storage.
+
+`issue_receipt` stores first and sends access second. If the process crashes or the Noise send ultimately fails after storage succeeds, an encrypted receipt can remain on the issuer's homeserver without the counterparty receiving access. Apps that need stronger delivery guarantees should track receipt issuance in durable app state and retry/reconcile at the application layer.
 
 #### Termination
 - `close_encrypted_link(link: EncryptedLink) -> Result<()>`  
@@ -416,6 +436,7 @@ When the `pubky` feature is enabled the crate exports:
 - `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the public payment traits above.
 - `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot`, `EncryptedLinkHandshakeSnapshot` for private encrypted payment types.
 - `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `set_private_payments`, `get_private_payments` for private encrypted payment operations.
+- `ReceiptDraft`, `Receipt`, `ReceiptAccess`, `IssuedReceipt`, `ReceiptDecryptionKey`, `issue_receipt`, `get_receipt_access`, and `decrypt_receipt` for encrypted receipt issuance, access delivery, and decryption.
 - `restore_encrypted_link`, `restore_encrypted_link_from_config`, `restore_encrypted_link_handshake`, `restore_encrypted_link_handshake_from_config` for session resumption after app restart or in-process recovery.
 - `DEFAULT_MAX_RECOVERY_ATTEMPTS`, `DEFAULT_MAX_SEND_RETRIES` for configurable retry/recovery limits.
 - `pubky_noise` re-export for advanced callers that need direct access to the encryption layer.

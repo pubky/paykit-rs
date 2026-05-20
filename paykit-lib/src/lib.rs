@@ -319,14 +319,6 @@ impl PrivateMessageKind {
             Self::ReceiptAccess => "paykit.receipt_access",
         }
     }
-
-    fn from_str(kind: &str) -> Option<Self> {
-        match kind {
-            "paykit.private_payments" => Some(Self::PrivatePayments),
-            "paykit.receipt_access" => Some(Self::ReceiptAccess),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(feature = "pubky")]
@@ -409,10 +401,15 @@ struct PrivateMessageHeader {
 /// public key from the established encrypted link before encrypting storage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceiptDraft {
+    /// Private payment reference being receipted.
     pub reference: PaymentReference,
+    /// Optional payment method used for the payment.
     pub payment_method: Option<MethodId>,
+    /// Optional amount string. Paykit does not interpret units or precision.
     pub amount: Option<String>,
+    /// Optional currency/unit label paired with `amount`.
     pub currency: Option<String>,
+    /// Caller-defined receipt metadata.
     pub metadata: HashMap<String, String>,
 }
 
@@ -420,17 +417,28 @@ pub struct ReceiptDraft {
 /// Canonical receipt plaintext encrypted before storage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Receipt {
+    /// Private payment reference this receipt corresponds to.
     pub reference: PaymentReference,
+    /// Public key of the intended receipt recipient.
     pub recipient_public_key: PublicKey,
+    /// Optional payment method used for the payment.
     pub payment_method: Option<MethodId>,
+    /// Optional amount string. Paykit does not interpret units or precision.
     pub amount: Option<String>,
+    /// Optional currency/unit label paired with `amount`.
     pub currency: Option<String>,
+    /// Caller-defined receipt metadata.
     pub metadata: HashMap<String, String>,
 }
 
 #[cfg(feature = "pubky")]
 /// Symmetric key used to decrypt an encrypted receipt payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// The key material is intentionally redacted from [`Debug`](std::fmt::Debug)
+/// and [`Display`](std::fmt::Display). Use [`as_str`](Self::as_str) only when
+/// serializing receipt access for the intended counterparty or storing the key
+/// in caller-managed secure storage.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReceiptDecryptionKey(String);
 
 #[cfg(feature = "pubky")]
@@ -456,6 +464,9 @@ impl ReceiptDecryptionKey {
         Ok(Self(key))
     }
 
+    /// Access the raw base64url key material.
+    ///
+    /// Treat this value as secret; do not log it or include it in telemetry.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -484,9 +495,16 @@ impl AsRef<str> for ReceiptDecryptionKey {
 }
 
 #[cfg(feature = "pubky")]
+impl std::fmt::Debug for ReceiptDecryptionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReceiptDecryptionKey([redacted])")
+    }
+}
+
+#[cfg(feature = "pubky")]
 impl std::fmt::Display for ReceiptDecryptionKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str("[redacted receipt decryption key]")
     }
 }
 
@@ -494,11 +512,17 @@ impl std::fmt::Display for ReceiptDecryptionKey {
 /// Receipt access descriptor sent over the existing Noise channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceiptAccess {
+    /// Receipt access envelope version. Currently always `1`.
     pub version: u8,
+    /// Private message kind. Currently always [`PrivateMessageKind::ReceiptAccess`].
     pub kind: PrivateMessageKind,
+    /// Private payment reference for the receipt.
     pub reference: PaymentReference,
+    /// Homeserver storage location of the encrypted receipt payload.
     pub location: String,
+    /// Symmetric key needed to decrypt the receipt payload.
     pub key: ReceiptDecryptionKey,
+    /// Encryption algorithm. Currently `XChaCha20Poly1305`.
     pub algorithm: String,
 }
 
@@ -506,8 +530,11 @@ pub struct ReceiptAccess {
 /// Result returned after issuing and storing an encrypted receipt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IssuedReceipt {
+    /// Private payment reference for the receipt.
     pub reference: PaymentReference,
+    /// Homeserver storage location of the encrypted receipt payload.
     pub location: String,
+    /// Symmetric key needed to decrypt the receipt payload.
     pub key: ReceiptDecryptionKey,
 }
 
@@ -1193,6 +1220,22 @@ fn encrypt_receipt(
 }
 
 #[cfg(feature = "pubky")]
+/// Decrypts an encrypted receipt payload fetched from a homeserver.
+///
+/// `encrypted_json` is the public receipt object stored by [`issue_receipt`].
+/// `key` and `location` normally come from a [`ReceiptAccess`] message received
+/// with [`get_receipt_access`]. The `location` is authenticated as additional
+/// data, so decrypting with a different location fails even when the key and
+/// ciphertext are otherwise correct.
+///
+/// Receipt keys are sensitive. [`ReceiptDecryptionKey`] redacts its `Debug` and
+/// `Display` output, but callers must still avoid logging values returned by
+/// [`ReceiptDecryptionKey::as_str`].
+///
+/// # Errors
+/// - Returns [`PaykitError::InvalidData`] if the encrypted envelope is malformed,
+///   uses an unsupported version/kind/algorithm, has invalid base64url fields,
+///   fails authenticated decryption, or decrypts to malformed receipt JSON.
 pub fn decrypt_receipt(
     encrypted_json: &str,
     key: &ReceiptDecryptionKey,
@@ -1378,6 +1421,26 @@ fn take_latest_pending_message(
 }
 
 #[cfg(feature = "pubky")]
+fn take_next_pending_message(
+    pending: &mut VecDeque<BufferedPrivateMessage>,
+    kind: PrivateMessageKind,
+) -> Option<BufferedPrivateMessage> {
+    let mut retained = VecDeque::with_capacity(pending.len());
+    let mut next = None;
+
+    while let Some(message) = pending.pop_front() {
+        if next.is_none() && message.is_kind(kind) {
+            next = Some(message);
+        } else {
+            retained.push_back(message);
+        }
+    }
+
+    *pending = retained;
+    next
+}
+
+#[cfg(feature = "pubky")]
 fn send_attempts_from_retries(max_send_retries: u32) -> u32 {
     max_send_retries.saturating_add(1)
 }
@@ -1538,6 +1601,39 @@ pub async fn set_private_payments(
 }
 
 #[cfg(feature = "pubky")]
+/// Issues, stores, and shares an encrypted payment receipt with the linked peer.
+///
+/// The encrypted receipt is written to the caller's homeserver at a deterministic
+/// Paykit receipt path derived from `draft.reference`. A fresh symmetric receipt
+/// key is generated for each call. The corresponding [`ReceiptAccess`] envelope
+/// is then sent over the existing Noise channel so the peer can fetch and decrypt
+/// the stored receipt with [`decrypt_receipt`].
+///
+/// Receipts are event-like private messages: every receipt access message matters.
+/// Reissuing the same [`PaymentReference`] stores a new encrypted receipt at the
+/// same location with a new key, so older access descriptors for that reference
+/// may no longer decrypt after a later successful reissue.
+///
+/// # Durability and ordering
+///
+/// This function stores the encrypted receipt first and sends access second. If
+/// the process crashes, or the Noise send fails after storage succeeds, the
+/// encrypted receipt may remain on the homeserver without the counterparty ever
+/// receiving access. Callers that need stronger delivery guarantees should keep
+/// their own durable issuance state and retry or reconcile at the application
+/// layer.
+///
+/// # Secrets
+///
+/// The returned [`IssuedReceipt::key`] is sensitive decryption material. Paykit
+/// redacts it from `Debug` and `Display`, but callers must not log or persist the
+/// raw [`ReceiptDecryptionKey::as_str`] value outside secure storage.
+///
+/// # Errors
+/// - Returns [`PaykitError::InvalidData`] if receipt serialization or encryption
+///   fails.
+/// - Returns [`PaykitError::Transport`] if storing the encrypted receipt fails or
+///   the receipt-access Noise message cannot be sent after configured retries.
 #[instrument(skip(session, link, draft))]
 pub async fn issue_receipt(
     session: &pubky::PubkySession,
@@ -1702,12 +1798,27 @@ pub async fn get_private_payments(
 }
 
 #[cfg(feature = "pubky")]
+/// Receives the next receipt access descriptor from the encrypted link.
+///
+/// Unlike [`get_private_payments`], this is FIFO/event-like. Each receipt access
+/// message is returned at most once and older receipt access messages are not
+/// collapsed when newer ones arrive. Call this repeatedly until it returns
+/// `Ok(None)` to drain all currently available receipts.
+///
+/// Messages for other private app kinds remain buffered on the [`EncryptedLink`]
+/// for their own typed receiver. Malformed unrelated app messages are ignored by
+/// the shared dispatcher; malformed selected receipt-access JSON returns
+/// [`PaykitError::InvalidData`].
+///
+/// The returned [`ReceiptAccess::key`] is sensitive. Its formatting is redacted,
+/// but callers must still avoid logging raw key material from
+/// [`ReceiptDecryptionKey::as_str`].
 #[instrument(skip(link))]
 pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Option<ReceiptAccess>> {
     debug!("receiving receipt access message");
 
     let received = receive_private_messages(link).await?;
-    let Some(raw) = take_latest_pending_message(
+    let Some(raw) = take_next_pending_message(
         &mut link.pending_private_messages,
         PrivateMessageKind::ReceiptAccess,
     ) else {
@@ -3952,6 +4063,75 @@ mod tests {
         assert_eq!(access.reference, reference);
         assert_eq!(access.location, issued.location);
         assert_eq!(access.key, issued.key);
+    }
+
+    #[tokio::test]
+    async fn get_receipt_access_preserves_fifo_order() {
+        let mut setup = PrivateTestSetup::new().await;
+        let first_reference =
+            PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let second_reference =
+            PaymentReference::new("650e8400-e29b-41d4-a716-446655440000").unwrap();
+        let first_access = ReceiptAccess {
+            version: 1,
+            kind: PrivateMessageKind::ReceiptAccess,
+            location: receipt_location(&first_reference),
+            key: ReceiptDecryptionKey::generate(),
+            reference: first_reference.clone(),
+            algorithm: "XChaCha20Poly1305".to_string(),
+        };
+        let second_access = ReceiptAccess {
+            version: 1,
+            kind: PrivateMessageKind::ReceiptAccess,
+            location: receipt_location(&second_reference),
+            key: ReceiptDecryptionKey::generate(),
+            reference: second_reference.clone(),
+            algorithm: "XChaCha20Poly1305".to_string(),
+        };
+
+        let first_json = serialize_receipt_access_json(&first_access).unwrap();
+        let second_json = serialize_receipt_access_json(&second_access).unwrap();
+        send_raw_private_message(&mut setup.sender_link, &first_json).await;
+        send_raw_private_message(&mut setup.sender_link, &second_json).await;
+
+        let first_received = get_receipt_access(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("first receipt access should be available");
+        let second_received = get_receipt_access(&mut setup.receiver_link)
+            .await
+            .unwrap()
+            .expect("second receipt access should be available");
+        let empty = get_receipt_access(&mut setup.receiver_link).await.unwrap();
+
+        assert_eq!(first_received.reference, first_reference);
+        assert_eq!(second_received.reference, second_reference);
+        assert!(empty.is_none());
+    }
+
+    #[test]
+    fn test_receipt_decryption_key_debug_and_display_are_redacted() {
+        let key = ReceiptDecryptionKey::generate();
+        let raw_key = key.as_str().to_string();
+        let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let access = ReceiptAccess {
+            version: 1,
+            kind: PrivateMessageKind::ReceiptAccess,
+            reference: reference.clone(),
+            location: receipt_location(&reference),
+            key: key.clone(),
+            algorithm: "XChaCha20Poly1305".to_string(),
+        };
+        let issued = IssuedReceipt {
+            reference,
+            location: access.location.clone(),
+            key,
+        };
+
+        assert!(!format!("{issued:?}").contains(&raw_key));
+        assert!(!format!("{access:?}").contains(&raw_key));
+        assert!(!format!("{:?}", access.key).contains(&raw_key));
+        assert!(!format!("{}", access.key).contains(&raw_key));
     }
 
     #[test]
