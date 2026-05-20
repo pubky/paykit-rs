@@ -269,13 +269,13 @@ uint64_t uniffi_paykit_fn_func_paykit_close_encrypted_link(RustBuffer link_id
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_DEFAULT_MAX_RECOVERY_ATTEMPTS
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_DEFAULT_MAX_RECOVERY_ATTEMPTS
 uint32_t uniffi_paykit_fn_func_paykit_default_max_recovery_attempts(RustCallStatus *_Nonnull out_status
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_DEFAULT_MAX_SEND_RETRIES
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_DEFAULT_MAX_SEND_RETRIES
 uint32_t uniffi_paykit_fn_func_paykit_default_max_send_retries(RustCallStatus *_Nonnull out_status
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_DROP_ENCRYPTED_LINK_HANDSHAKE
@@ -296,25 +296,25 @@ RustBuffer uniffi_paykit_fn_func_paykit_encrypted_link_snapshot_recipient(RustBu
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_EXPORT_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_EXPORT_SESSION
 uint64_t uniffi_paykit_fn_func_paykit_export_session(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_FORCE_SIGN_OUT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_FORCE_SIGN_OUT
 uint64_t uniffi_paykit_fn_func_paykit_force_sign_out(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GENERATE_PAYMENT_REFERENCE
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GENERATE_PAYMENT_REFERENCE
 RustBuffer uniffi_paykit_fn_func_paykit_generate_payment_reference(RustCallStatus *_Nonnull out_status
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_CURRENT_PUBLIC_KEY
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_CURRENT_PUBLIC_KEY
 uint64_t uniffi_paykit_fn_func_paykit_get_current_public_key(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_GET_PAYMENT_ENDPOINT
@@ -340,7 +340,7 @@ uint64_t uniffi_paykit_fn_func_paykit_import_session(RustBuffer session_secret
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_INITIALIZE
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_INITIALIZE
 uint64_t uniffi_paykit_fn_func_paykit_initialize(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_INITIATE_ENCRYPTED_LINK
@@ -351,7 +351,7 @@ uint64_t uniffi_paykit_fn_func_paykit_initiate_encrypted_link(RustBuffer secret_
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_IS_AUTHENTICATED
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_IS_AUTHENTICATED
 uint64_t uniffi_paykit_fn_func_paykit_is_authenticated(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_REMOVE_PAYMENT_ENDPOINT
@@ -407,7 +407,7 @@ uint64_t uniffi_paykit_fn_func_paykit_sign_in(RustBuffer secret_key_hex
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_SIGN_OUT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_SIGN_OUT
 uint64_t uniffi_paykit_fn_func_paykit_sign_out(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYKIT_SIGN_UP
@@ -698,193 +698,193 @@ void ffi_paykit_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonn
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_ACCEPT_ENCRYPTED_LINK
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_ACCEPT_ENCRYPTED_LINK
 uint16_t uniffi_paykit_checksum_func_paykit_accept_encrypted_link(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_ADVANCE_HANDSHAKE
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_ADVANCE_HANDSHAKE
 uint16_t uniffi_paykit_checksum_func_paykit_advance_handshake(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_CLOSE_ENCRYPTED_LINK
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_CLOSE_ENCRYPTED_LINK
 uint16_t uniffi_paykit_checksum_func_paykit_close_encrypted_link(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_DEFAULT_MAX_RECOVERY_ATTEMPTS
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_DEFAULT_MAX_RECOVERY_ATTEMPTS
 uint16_t uniffi_paykit_checksum_func_paykit_default_max_recovery_attempts(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_DEFAULT_MAX_SEND_RETRIES
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_DEFAULT_MAX_SEND_RETRIES
 uint16_t uniffi_paykit_checksum_func_paykit_default_max_send_retries(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_DROP_ENCRYPTED_LINK_HANDSHAKE
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_DROP_ENCRYPTED_LINK_HANDSHAKE
 uint16_t uniffi_paykit_checksum_func_paykit_drop_encrypted_link_handshake(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_ENCRYPTED_LINK_HANDSHAKE_SNAPSHOT_RECIPIENT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_ENCRYPTED_LINK_HANDSHAKE_SNAPSHOT_RECIPIENT
 uint16_t uniffi_paykit_checksum_func_paykit_encrypted_link_handshake_snapshot_recipient(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_ENCRYPTED_LINK_SNAPSHOT_RECIPIENT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_ENCRYPTED_LINK_SNAPSHOT_RECIPIENT
 uint16_t uniffi_paykit_checksum_func_paykit_encrypted_link_snapshot_recipient(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_EXPORT_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_EXPORT_SESSION
 uint16_t uniffi_paykit_checksum_func_paykit_export_session(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_FORCE_SIGN_OUT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_FORCE_SIGN_OUT
 uint16_t uniffi_paykit_checksum_func_paykit_force_sign_out(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GENERATE_PAYMENT_REFERENCE
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GENERATE_PAYMENT_REFERENCE
 uint16_t uniffi_paykit_checksum_func_paykit_generate_payment_reference(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_CURRENT_PUBLIC_KEY
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_CURRENT_PUBLIC_KEY
 uint16_t uniffi_paykit_checksum_func_paykit_get_current_public_key(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_PAYMENT_ENDPOINT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_PAYMENT_ENDPOINT
 uint16_t uniffi_paykit_checksum_func_paykit_get_payment_endpoint(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_PAYMENT_LIST
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_PAYMENT_LIST
 uint16_t uniffi_paykit_checksum_func_paykit_get_payment_list(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_PRIVATE_PAYMENTS
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_GET_PRIVATE_PAYMENTS
 uint16_t uniffi_paykit_checksum_func_paykit_get_private_payments(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_IMPORT_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_IMPORT_SESSION
 uint16_t uniffi_paykit_checksum_func_paykit_import_session(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_INITIALIZE
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_INITIALIZE
 uint16_t uniffi_paykit_checksum_func_paykit_initialize(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_INITIATE_ENCRYPTED_LINK
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_INITIATE_ENCRYPTED_LINK
 uint16_t uniffi_paykit_checksum_func_paykit_initiate_encrypted_link(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_IS_AUTHENTICATED
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_IS_AUTHENTICATED
 uint16_t uniffi_paykit_checksum_func_paykit_is_authenticated(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_REMOVE_PAYMENT_ENDPOINT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_REMOVE_PAYMENT_ENDPOINT
 uint16_t uniffi_paykit_checksum_func_paykit_remove_payment_endpoint(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_RESTORE_ENCRYPTED_LINK
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_RESTORE_ENCRYPTED_LINK
 uint16_t uniffi_paykit_checksum_func_paykit_restore_encrypted_link(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_RESTORE_ENCRYPTED_LINK_HANDSHAKE
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_RESTORE_ENCRYPTED_LINK_HANDSHAKE
 uint16_t uniffi_paykit_checksum_func_paykit_restore_encrypted_link_handshake(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SERIALIZE_ENCRYPTED_LINK
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SERIALIZE_ENCRYPTED_LINK
 uint16_t uniffi_paykit_checksum_func_paykit_serialize_encrypted_link(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SERIALIZE_ENCRYPTED_LINK_HANDSHAKE
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SERIALIZE_ENCRYPTED_LINK_HANDSHAKE
 uint16_t uniffi_paykit_checksum_func_paykit_serialize_encrypted_link_handshake(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SET_ENCRYPTED_LINK_HANDSHAKE_MAX_RECOVERY_ATTEMPTS
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SET_ENCRYPTED_LINK_HANDSHAKE_MAX_RECOVERY_ATTEMPTS
 uint16_t uniffi_paykit_checksum_func_paykit_set_encrypted_link_handshake_max_recovery_attempts(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SET_ENCRYPTED_LINK_MAX_SEND_RETRIES
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SET_ENCRYPTED_LINK_MAX_SEND_RETRIES
 uint16_t uniffi_paykit_checksum_func_paykit_set_encrypted_link_max_send_retries(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SET_PAYMENT_ENDPOINT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SET_PAYMENT_ENDPOINT
 uint16_t uniffi_paykit_checksum_func_paykit_set_payment_endpoint(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SET_PRIVATE_PAYMENTS
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SET_PRIVATE_PAYMENTS
 uint16_t uniffi_paykit_checksum_func_paykit_set_private_payments(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SIGN_IN
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SIGN_IN
 uint16_t uniffi_paykit_checksum_func_paykit_sign_in(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SIGN_OUT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SIGN_OUT
 uint16_t uniffi_paykit_checksum_func_paykit_sign_out(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SIGN_UP
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYKIT_SIGN_UP
 uint16_t uniffi_paykit_checksum_func_paykit_sign_up(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_PAYKIT_UNIFFI_CONTRACT_VERSION
 #define UNIFFI_FFIDEF_FFI_PAYKIT_UNIFFI_CONTRACT_VERSION
 uint32_t ffi_paykit_uniffi_contract_version(void
-
+    
 );
 #endif
 

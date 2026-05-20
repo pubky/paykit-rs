@@ -509,7 +509,7 @@ impl EncryptedLink {
 ///
 /// The serialized representation is the 197-byte
 /// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
-/// binary format produced by `pubky-noise` 0.1.0-rc4. The remote peer's public
+/// binary format produced by `pubky-noise` 0.1.0-rc5. The remote peer's public
 /// key is embedded in the snapshot (bytes 165-196) and reconstructed
 /// automatically during deserialization.
 pub struct EncryptedLinkSnapshot {
@@ -599,7 +599,7 @@ impl EncryptedLinkSnapshot {
 ///
 /// The serialized representation is the 197-byte
 /// [`PubkyNoiseSessionState`](pubky_noise::serializer::PubkyNoiseSessionState)
-/// binary format produced by `pubky-noise` 0.1.0-rc4. The remote peer's public
+/// binary format produced by `pubky-noise` 0.1.0-rc5. The remote peer's public
 /// key is embedded in the snapshot (bytes 165-196) and reconstructed
 /// automatically during deserialization.
 pub struct EncryptedLinkHandshakeSnapshot {
@@ -2071,7 +2071,37 @@ mod tests {
 
     use super::*;
     use pubky::PubkySession;
-    use pubky_testnet::{pubky::Keypair, EphemeralTestnet};
+    use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
+    use tokio::sync::{Mutex as TokioMutex, OnceCell};
+
+    static SHARED_POSTGRES: OnceCell<EmbeddedPostgres> = OnceCell::const_new();
+    static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
+
+    async fn shared_postgres() -> &'static EmbeddedPostgres {
+        SHARED_POSTGRES
+            .get_or_init(|| async {
+                EmbeddedPostgres::start()
+                    .await
+                    .expect("failed to start embedded postgres")
+            })
+            .await
+    }
+
+    async fn build_testnet() -> EphemeralTestnet {
+        let _guard = TESTNET_BUILD_LOCK.lock().await;
+
+        let builder = if std::env::var_os("TEST_PUBKY_CONNECTION_STRING").is_some() {
+            EphemeralTestnet::builder()
+        } else {
+            let postgres = shared_postgres()
+                .await
+                .connection_string()
+                .expect("embedded postgres connection string should be valid");
+            EphemeralTestnet::builder().postgres(postgres)
+        };
+
+        builder.build().await.unwrap()
+    }
 
     struct TestSetup {
         _testnet: EphemeralTestnet,
@@ -2083,11 +2113,7 @@ mod tests {
 
     impl TestSetup {
         async fn new() -> Self {
-            let testnet = EphemeralTestnet::builder()
-                .with_embedded_postgres()
-                .build()
-                .await
-                .unwrap();
+            let testnet = build_testnet().await;
 
             let homeserver = testnet.homeserver_app();
             let sdk = testnet.sdk().unwrap();
@@ -2276,11 +2302,7 @@ mod tests {
 
     impl InProgressHandshakeSetup {
         async fn new() -> Self {
-            let testnet = EphemeralTestnet::builder()
-                .with_embedded_postgres()
-                .build()
-                .await
-                .unwrap();
+            let testnet = build_testnet().await;
             let homeserver = testnet.homeserver_app();
 
             let initiator_sdk = testnet.sdk().unwrap();
@@ -2374,11 +2396,7 @@ mod tests {
 
     impl PrivateTestSetup {
         async fn new() -> Self {
-            let testnet = EphemeralTestnet::builder()
-                .with_embedded_postgres()
-                .build()
-                .await
-                .unwrap();
+            let testnet = build_testnet().await;
             let homeserver = testnet.homeserver_app();
 
             // Each user gets its own Pubky SDK instance.
@@ -2798,11 +2816,7 @@ mod tests {
     async fn test_parallel_writer_reader_happy_path() {
         // ── Shared infrastructure (main task) ───────────────────────────
 
-        let testnet = EphemeralTestnet::builder()
-            .with_embedded_postgres()
-            .build()
-            .await
-            .unwrap();
+        let testnet = build_testnet().await;
         let homeserver = testnet.homeserver_app();
 
         // Writer (Alice): authenticated session + SDK for outbox reads.

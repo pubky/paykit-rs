@@ -369,7 +369,7 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
 **Snapshot type:**
 
 - `EncryptedLinkSnapshot::serialize() -> Vec<u8>`  
-  Serializes to a compact 197-byte binary format (the `pubky-noise` 0.1.0-rc4 `PubkyNoiseSessionState` wire format). The remote peer's public key is embedded at bytes 165-196.
+  Serializes to a compact 197-byte binary format (the `pubky-noise` 0.1.0-rc5 `PubkyNoiseSessionState` wire format). The remote peer's public key is embedded at bytes 165-196.
 - `EncryptedLinkSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkSnapshot>`  
   Reconstructs a snapshot from bytes, including the embedded recipient public key.
 - `EncryptedLinkSnapshot::recipient() -> &PublicKey`  
