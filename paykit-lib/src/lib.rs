@@ -1337,15 +1337,23 @@ fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
             source: None,
         });
     }
+    let reference =
+        PaymentReference::new(wire.reference).map_err(|err| PaykitError::InvalidData {
+            context: "receipt access contains invalid payment reference".into(),
+            source: Some(err.into()),
+        })?;
+    let expected_location = receipt_location(&reference);
+    if wire.location != expected_location {
+        return Err(PaykitError::InvalidData {
+            context: "receipt access location does not match payment reference".into(),
+            source: None,
+        });
+    }
+
     Ok(ReceiptAccess {
         version: 1,
         kind: PrivateMessageKind::ReceiptAccess,
-        reference: PaymentReference::new(wire.reference).map_err(|err| {
-            PaykitError::InvalidData {
-                context: "receipt access contains invalid payment reference".into(),
-                source: Some(err.into()),
-            }
-        })?,
+        reference,
         location: wire.location,
         key: ReceiptDecryptionKey::new(wire.key).map_err(|err| PaykitError::InvalidData {
             context: "receipt access contains invalid decryption key".into(),
@@ -1421,23 +1429,23 @@ fn take_latest_pending_message(
 }
 
 #[cfg(feature = "pubky")]
-fn take_next_pending_message(
+fn take_all_pending_messages(
     pending: &mut VecDeque<BufferedPrivateMessage>,
     kind: PrivateMessageKind,
-) -> Option<BufferedPrivateMessage> {
+) -> Vec<BufferedPrivateMessage> {
     let mut retained = VecDeque::with_capacity(pending.len());
-    let mut next = None;
+    let mut selected = Vec::new();
 
     while let Some(message) = pending.pop_front() {
-        if next.is_none() && message.is_kind(kind) {
-            next = Some(message);
+        if message.is_kind(kind) {
+            selected.push(message);
         } else {
             retained.push_back(message);
         }
     }
 
     *pending = retained;
-    next
+    selected
 }
 
 #[cfg(feature = "pubky")]
@@ -1798,41 +1806,49 @@ pub async fn get_private_payments(
 }
 
 #[cfg(feature = "pubky")]
-/// Receives the next receipt access descriptor from the encrypted link.
+/// Receives all currently available receipt access descriptors from the encrypted link.
 ///
-/// Unlike [`get_private_payments`], this is FIFO/event-like. Each receipt access
-/// message is returned at most once and older receipt access messages are not
-/// collapsed when newer ones arrive. Call this repeatedly until it returns
-/// `Ok(None)` to drain all currently available receipts.
+/// Unlike [`get_private_payments`], this is FIFO/event-like. Every currently
+/// available receipt access message is returned in send order in a single vector;
+/// older receipt access messages are not collapsed when newer ones arrive.
+/// Returns an empty vector when no receipt access messages are currently available.
 ///
 /// Messages for other private app kinds remain buffered on the [`EncryptedLink`]
 /// for their own typed receiver. Malformed unrelated app messages are ignored by
 /// the shared dispatcher; malformed selected receipt-access JSON returns
 /// [`PaykitError::InvalidData`].
 ///
-/// The returned [`ReceiptAccess::key`] is sensitive. Its formatting is redacted,
-/// but callers must still avoid logging raw key material from
+/// Each selected receipt access location must match the canonical Paykit receipt
+/// path for its [`PaymentReference`].
+///
+/// The returned [`ReceiptAccess::key`] values are sensitive. Their formatting is
+/// redacted, but callers must still avoid logging raw key material from
 /// [`ReceiptDecryptionKey::as_str`].
 #[instrument(skip(link))]
-pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Option<ReceiptAccess>> {
-    debug!("receiving receipt access message");
+pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptAccess>> {
+    debug!("receiving receipt access messages");
 
     let received = receive_private_messages(link).await?;
-    let Some(raw) = take_next_pending_message(
+    let raw_messages = take_all_pending_messages(
         &mut link.pending_private_messages,
         PrivateMessageKind::ReceiptAccess,
-    ) else {
+    );
+    if raw_messages.is_empty() {
         debug!(received, "no receipt access messages available");
-        return Ok(None);
-    };
+        return Ok(Vec::new());
+    }
 
-    let access = parse_receipt_access_json(&raw.plaintext)?;
+    let access = raw_messages
+        .iter()
+        .map(|raw| parse_receipt_access_json(&raw.plaintext))
+        .collect::<Result<Vec<_>>>()?;
     debug!(
+        count = access.len(),
         received,
         pending = link.pending_private_messages.len(),
-        "receipt access message received"
+        "receipt access messages received"
     );
-    Ok(Some(access))
+    Ok(access)
 }
 
 /// Retrieves a specific payment endpoint for `payee` and `method`.
@@ -4056,17 +4072,15 @@ mod tests {
         );
         assert_eq!(receipt.amount.as_deref(), Some("1000"));
 
-        let access = get_receipt_access(&mut setup.receiver_link)
-            .await
-            .unwrap()
-            .expect("receipt access message should be available");
-        assert_eq!(access.reference, reference);
-        assert_eq!(access.location, issued.location);
-        assert_eq!(access.key, issued.key);
+        let access = get_receipt_access(&mut setup.receiver_link).await.unwrap();
+        assert_eq!(access.len(), 1);
+        assert_eq!(access[0].reference, reference);
+        assert_eq!(access[0].location, issued.location);
+        assert_eq!(access[0].key, issued.key);
     }
 
     #[tokio::test]
-    async fn get_receipt_access_preserves_fifo_order() {
+    async fn get_receipt_access_returns_all_available_receipts_in_fifo_order() {
         let mut setup = PrivateTestSetup::new().await;
         let first_reference =
             PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
@@ -4094,19 +4108,35 @@ mod tests {
         send_raw_private_message(&mut setup.sender_link, &first_json).await;
         send_raw_private_message(&mut setup.sender_link, &second_json).await;
 
-        let first_received = get_receipt_access(&mut setup.receiver_link)
-            .await
-            .unwrap()
-            .expect("first receipt access should be available");
-        let second_received = get_receipt_access(&mut setup.receiver_link)
-            .await
-            .unwrap()
-            .expect("second receipt access should be available");
+        let received = get_receipt_access(&mut setup.receiver_link).await.unwrap();
         let empty = get_receipt_access(&mut setup.receiver_link).await.unwrap();
 
-        assert_eq!(first_received.reference, first_reference);
-        assert_eq!(second_received.reference, second_reference);
-        assert!(empty.is_none());
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0].reference, first_reference);
+        assert_eq!(received[1].reference, second_reference);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_parse_receipt_access_json_rejects_location_that_does_not_match_reference() {
+        let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let other_reference =
+            PaymentReference::new("650e8400-e29b-41d4-a716-446655440000").unwrap();
+        let access = ReceiptAccess {
+            version: 1,
+            kind: PrivateMessageKind::ReceiptAccess,
+            reference: reference.clone(),
+            location: receipt_location(&other_reference),
+            key: ReceiptDecryptionKey::generate(),
+            algorithm: "XChaCha20Poly1305".to_string(),
+        };
+        let json = serialize_receipt_access_json(&access).unwrap();
+
+        let err = parse_receipt_access_json(&json).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("receipt access location does not match payment reference")),
+            "expected mismatched location error, got: {err}"
+        );
     }
 
     #[test]

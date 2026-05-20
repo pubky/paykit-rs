@@ -115,7 +115,7 @@ if let Some(payload) = get_private_payments(&mut link).await? {
 }
 ```
 
-Private payments are latest-state data: if several private payment envelopes are queued, `get_private_payments` returns the newest one and supersedes older private-payment envelopes. Future event-like message kinds (for example receipts) must use ordered/FIFO semantics instead of latest-wins.
+Private payments are latest-state data: if several private payment envelopes are queued, `get_private_payments` returns the newest one and supersedes older private-payment envelopes. Receipt access is event-like: `get_receipt_access` returns all currently available receipt access descriptors in FIFO order.
 
 The `entries` field is a `HashMap<MethodId, EndpointData>`.
 
@@ -296,7 +296,7 @@ Snapshot bytes include sensitive key material and must be treated as secrets (st
 - `get_private_payments(link: &mut EncryptedLink) -> Result<Option<PrivatePaymentsPayload>>`
   Receives and decrypts currently available private application messages from the remote peer and returns the latest private payments envelope, if one is available. `Ok(None)` means no private payments message is currently available; it is distinct from a payload with an empty `entries` map. Private payments are latest-state data: queued older private-payment envelopes are superseded by the newest one. Other recognized/unknown message kinds remain buffered for their own typed receivers. Malformed private application messages are ignored with diagnostics so they do not prevent later valid messages from being processed.
 
-All private application messages share one ordered encrypted stream. Private payments are latest-state data and intentionally collapse older queued private-payment envelopes. Receipts are event-like data and preserve each receipt-access message in FIFO/send order. The in-memory buffer for messages dispatched but not yet consumed by a typed helper is not crash-durable; callers that perform irreversible side effects after receiving event-like messages should persist their own app-level state alongside encrypted-link snapshots/read counters.
+All private application messages share one ordered encrypted stream. Private payments are latest-state data and intentionally collapse older queued private-payment envelopes. Receipts are event-like data; `get_receipt_access` drains and returns all currently available receipt-access messages in FIFO/send order. The in-memory buffer for messages dispatched but not yet consumed by a typed helper is not crash-durable; callers that perform irreversible side effects after receiving event-like messages should persist their own app-level state alongside encrypted-link snapshots/read counters.
 
 #### Payment receipts
 
@@ -309,10 +309,10 @@ The receipt payload is encrypted with `XChaCha20Poly1305`; the storage location 
 
 - `issue_receipt(session, link, draft: ReceiptDraft) -> Result<IssuedReceipt>`
   Builds a canonical `Receipt` from the caller's `ReceiptDraft`, fills in the recipient public key from `link`, generates a fresh `ReceiptDecryptionKey`, stores the encrypted receipt on the issuer's homeserver, then sends a `ReceiptAccess` message over Noise. Reissuing the same `PaymentReference` overwrites the same receipt path with new ciphertext and a new key; older access descriptors for that reference may stop decrypting after a later successful reissue.
-- `get_receipt_access(link: &mut EncryptedLink) -> Result<Option<ReceiptAccess>>`
-  Receives the next queued receipt-access message, if any. This is FIFO/event-like: every receipt access message matters, and older receipt accesses are not collapsed when newer ones arrive. Call repeatedly until `Ok(None)` to drain all currently available receipt accesses. Calling `get_private_payments` will not discard receipt-access messages; they remain buffered for `get_receipt_access`.
+- `get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptAccess>>`
+  Receives all currently available queued receipt-access messages. This is FIFO/event-like: every receipt access message matters, and older receipt accesses are not collapsed when newer ones arrive. An empty vector means no receipt access messages are currently available. Calling `get_private_payments` will not discard receipt-access messages; they remain buffered for `get_receipt_access`.
 - `decrypt_receipt(encrypted_json, key, location) -> Result<Receipt>`
-  Decrypts a receipt payload fetched from `ReceiptAccess::location` using `ReceiptAccess::key`. Pass the exact location from the access descriptor; it is authenticated as AAD.
+  Decrypts a receipt payload fetched from `ReceiptAccess::location` using `ReceiptAccess::key`. Pass the exact location from the access descriptor; it is authenticated as AAD. Incoming receipt access descriptors are accepted only when `location` equals Paykit's canonical receipt path for their `PaymentReference`.
 
 Receipt decryption keys are sensitive. `ReceiptDecryptionKey`, `ReceiptAccess`, and `IssuedReceipt` redact key material from formatted output through the key's custom `Debug`/`Display`, but callers must still avoid logging or persisting the raw `ReceiptDecryptionKey::as_str()` value outside secure storage.
 
