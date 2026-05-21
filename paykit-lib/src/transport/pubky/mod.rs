@@ -10,7 +10,7 @@ pub mod unauthenticated_transport;
 
 /// Conventional prefix for public Paykit data hosted on Pubky storage.
 /// `v0` means that the paykit conventions is to store data on pubky as following:
-///  - /pub/paykit/v0/{method_id} -> with payload being the payment endpoint
+///  - /pub/paykit/v0/{method_id} -> with payload being the Payment Endpoint Payload
 pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
 /// Conventional prefix for private (encrypted) Paykit data.
 /// This prefix is used as the base path for pubky-noise's encrypted messaging.

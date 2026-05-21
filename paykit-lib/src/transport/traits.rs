@@ -10,22 +10,23 @@
 //!
 //! [pubky-timeout]: https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout
 //!
-//! # Public vs. private payload types
+//! # Public vs. private payment data
 //!
-//! ## Public payment methods
+//! ## Public Payment Endpoints
 //!
-//! Public payment methods use [`EndpointData`] — a validated UTF-8 string wrapper
-//! representing human-readable payment endpoint payloads (addresses, invoices,
-//! JSON, etc.). Each public method is stored as a separate file at a well-known
-//! path (one file per [`MethodId`]).
+//! Public Payment Endpoints use [`EndpointData`] — the current implementation
+//! wrapper for a Payment Endpoint Payload (addresses, invoices, JSON, etc.).
+//! Each public Payment Endpoint is stored as a separate file at a well-known
+//! path, one file per [`MethodId`] (legacy implementation name for Payment
+//! Endpoint Identifier).
 //!
-//! The transport traits in this module handle **only public payment endpoints**.
-//! All public endpoint operations go through [`UnauthenticatedTransportRead`]
+//! The transport traits in this module handle **only public Payment Endpoints**.
+//! All public Payment Endpoint operations go through [`UnauthenticatedTransportRead`]
 //! and [`AuthenticatedTransport`].
 //!
-//! ## Private payment methods
+//! ## Private Payment Envelopes
 //!
-//! Private payment methods are handled entirely by [`pubky-noise`]'s encrypted
+//! Private Payment Envelopes are handled entirely by [`pubky-noise`]'s encrypted
 //! messaging layer via `PubkyNoiseEncryptor::send_message` and `receive_message`.
 //! This layer manages file naming, storage locations, and end-to-end encryption
 //! independently. **The transport traits have no involvement with private
@@ -54,16 +55,20 @@ use crate::{EndpointData, MethodId, PublicKey, Result};
 /// [pubky-timeout]: https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout
 #[async_trait]
 pub trait UnauthenticatedTransportRead {
-    /// Fetches the raw Supported Payments List for the provided `payee`.
+    /// Fetches the payee's public Payment List.
+    ///
+    /// The method name `fetch_supported_payments` is legacy public API naming.
+    /// It returns the payee-published Payment List snapshot, not the payer-side
+    /// Supported Payment List described in the domain language.
     ///
     /// # Consistency
     ///
-    /// This method first lists available payment method entries and then fetches
+    /// This method first lists available Payment Endpoint entries and then fetches
     /// each one individually. Because the underlying transport does not support
     /// atomic/transactional reads, a **race condition** exists: between the
-    /// directory listing and the individual fetches, endpoints may be added,
+    /// directory listing and the individual fetches, Payment Endpoints may be added,
     /// removed, or modified by the payee. The returned [`SupportedPayments`] is
-    /// therefore a **best-effort snapshot** and may be inconsistent.
+    /// therefore a **best-effort Payment List snapshot** and may be inconsistent.
     ///
     /// ## Recommended caller strategy
     ///
@@ -71,18 +76,18 @@ pub trait UnauthenticatedTransportRead {
     /// has already been consumed or is no longer valid (evidence of a race
     /// condition), callers should:
     ///
-    /// 1. Re-fetch the specific endpoint via
+    /// 1. Re-fetch the specific Payment Endpoint via
     ///    [`fetch_payment_endpoint`](Self::fetch_payment_endpoint).
-    /// 2. Compare the newly retrieved [`EndpointData`] with the value used in
-    ///    the failed attempt.
-    /// 3. If the endpoint data differs, it is safe to retry the payment with
-    ///    the updated value.
+    /// 2. Compare the newly retrieved [`EndpointData`] (Payment Endpoint Payload)
+    ///    with the value used in the failed attempt.
+    /// 3. If the Payment Endpoint Payload differs, it is safe to retry the payment
+    ///    with the updated value.
     ///
     /// [`SupportedPayments`]: crate::SupportedPayments
     async fn fetch_supported_payments(&self, payee: &PublicKey)
         -> Result<crate::SupportedPayments>;
 
-    /// Fetches an individual payment endpoint document if it exists.
+    /// Fetches an individual Payment Endpoint document if it exists.
     async fn fetch_payment_endpoint(
         &self,
         payee: &PublicKey,
@@ -103,9 +108,9 @@ pub trait UnauthenticatedTransportRead {
 /// [pubky-timeout]: https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout
 #[async_trait]
 pub trait AuthenticatedTransport {
-    /// Writes or updates a payment endpoint document.
+    /// Writes or updates a Payment Endpoint document.
     async fn upsert_payment_endpoint(&self, method: &MethodId, data: &EndpointData) -> Result<()>;
 
-    /// Removes an existing payment endpoint for the provided method.
+    /// Removes an existing Payment Endpoint for the provided Payment Endpoint Identifier.
     async fn remove_payment_endpoint(&self, method: &MethodId) -> Result<()>;
 }

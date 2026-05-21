@@ -94,13 +94,17 @@ impl From<paykit_lib::PaykitError> for PaykitFfiError {
 
 #[derive(uniffi::Record, Debug, Clone)]
 pub struct FfiPaymentEntry {
+    /// Current binding name for the Payment Endpoint Identifier.
     pub method_id: String,
+    /// Current binding name for the Payment Endpoint Payload.
     pub endpoint_data: String,
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
 pub struct FfiPrivatePaymentsPayload {
+    /// Payment Reference for this Private Payment Envelope.
     pub reference: String,
+    /// Private Payment Endpoints carried by this Private Payment Envelope.
     pub entries: Vec<FfiPaymentEntry>,
 }
 
@@ -112,7 +116,9 @@ pub struct FfiReceiptMetadataEntry {
 
 #[derive(uniffi::Record, Debug, Clone)]
 pub struct FfiReceiptDraft {
+    /// Payment Reference for the Receipt.
     pub reference: String,
+    /// Optional Payment Method used for the payment.
     pub payment_method: Option<String>,
     pub amount: Option<String>,
     pub currency: Option<String>,
@@ -121,8 +127,10 @@ pub struct FfiReceiptDraft {
 
 #[derive(uniffi::Record, Debug, Clone)]
 pub struct FfiReceipt {
+    /// Payment Reference for the Receipt.
     pub reference: String,
     pub recipient_public_key: String,
+    /// Optional Payment Method used for the payment.
     pub payment_method: Option<String>,
     pub amount: Option<String>,
     pub currency: Option<String>,
@@ -542,7 +550,7 @@ pub async fn paykit_export_session() -> Result<String, PaykitFfiError> {
 // Read operations
 // ---------------------------------------------------------------------------
 
-/// Fetch all published payment methods for a user.
+/// Fetch the payee-published Payment List for a user.
 #[uniffi::export]
 pub async fn paykit_get_payment_list(
     public_key: String,
@@ -559,7 +567,10 @@ pub async fn paykit_get_payment_list(
     .unwrap_or_else(|e| Err(runtime_err(e)))
 }
 
-/// Fetch a single payment endpoint for a user and method. Returns `None` if not set.
+/// Fetch a single Payment Endpoint for a user.
+///
+/// The `method_id` parameter is the current binding name for the Payment
+/// Endpoint Identifier. Returns `None` if the Payment Endpoint is not set.
 #[uniffi::export]
 pub async fn paykit_get_payment_endpoint(
     public_key: String,
@@ -684,7 +695,11 @@ pub async fn paykit_sign_in(secret_key_hex: String) -> Result<String, PaykitFfiE
 // Write operations
 // ---------------------------------------------------------------------------
 
-/// Publish or update a payment endpoint for the authenticated user.
+/// Publish or update a Payment Endpoint for the authenticated user.
+///
+/// The `method_id` parameter is the current binding name for the Payment
+/// Endpoint Identifier. The `endpoint_data` parameter is the current binding
+/// name for the Payment Endpoint Payload.
 #[uniffi::export]
 pub async fn paykit_set_payment_endpoint(
     method_id: String,
@@ -703,7 +718,10 @@ pub async fn paykit_set_payment_endpoint(
     .unwrap_or_else(|e| Err(runtime_err(e)))
 }
 
-/// Remove a payment endpoint for the authenticated user.
+/// Remove a Payment Endpoint for the authenticated user.
+///
+/// The `method_id` parameter is the current binding name for the Payment
+/// Endpoint Identifier.
 #[uniffi::export]
 pub async fn paykit_remove_payment_endpoint(method_id: String) -> Result<(), PaykitFfiError> {
     let rt = ensure_runtime();
@@ -940,7 +958,7 @@ pub fn paykit_generate_payment_reference() -> String {
     PaymentReference::new_v4().to_string()
 }
 
-/// Encrypt and send the complete private payments envelope over an established link.
+/// Encrypt and send the complete Private Payment Envelope over an established link.
 #[uniffi::export]
 pub async fn paykit_set_private_payments(
     link_id: String,
@@ -962,7 +980,7 @@ pub async fn paykit_set_private_payments(
     .unwrap_or_else(|e| Err(runtime_err(e)))
 }
 
-/// Receive and decrypt the latest private payments envelope from an established link.
+/// Receive and decrypt the latest Private Payment Envelope from an established link.
 #[uniffi::export]
 pub async fn paykit_get_private_payments(
     link_id: String,

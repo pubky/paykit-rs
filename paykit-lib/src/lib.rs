@@ -85,7 +85,7 @@ pub enum PaykitError {
 
     /// The requested resource does not exist.
     ///
-    /// Returned when a payment endpoint or other resource is not found (404/GONE).
+    /// Returned when a Payment Endpoint or other resource is not found (404/GONE).
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -113,10 +113,13 @@ pub enum PaykitError {
     Validation(String),
 }
 
-/// Identifier for a payment method specification.
+/// Legacy implementation name for a Payment Endpoint Identifier.
 ///
 /// A `MethodId` is a single, safe path segment stored under `/pub/paykit/v0/…`.
-/// It is validated at construction time to prevent path injection attacks.
+/// It identifies a Payment Endpoint type in the current public API. Domain
+/// language should prefer "Payment Endpoint Identifier"; the `MethodId` name is
+/// retained until a deliberate breaking-change release. It is validated at
+/// construction time to prevent path injection attacks.
 ///
 /// # Allowed characters
 /// ASCII alphanumeric (`a-z`, `A-Z`, `0-9`), hyphens (`-`), underscores (`_`),
@@ -131,8 +134,8 @@ pub enum PaykitError {
 /// # Examples
 /// ```
 /// # use paykit_lib::MethodId;
-/// let m = MethodId::new("lightning").unwrap();
-/// assert_eq!(m.as_str(), "lightning");
+/// let m = MethodId::new("btc-lightning-bolt11").unwrap();
+/// assert_eq!(m.as_str(), "btc-lightning-bolt11");
 ///
 /// // Path traversal is rejected:
 /// assert!(MethodId::new("../etc/passwd").is_err());
@@ -210,15 +213,17 @@ impl AsRef<str> for MethodId {
     }
 }
 
-/// Serialized payload served by a payment endpoint (UTF-8 text such as JSON, lnurl, etc.).
+/// Current implementation wrapper for a Payment Endpoint Payload.
 ///
-/// If you need to transmit binary payloads, encode them (e.g., base64) before wrapping
-/// in `EndpointData`.
+/// This is the payload part of a Payment Endpoint: UTF-8 text such as JSON,
+/// LNURL, an address, an invoice, an offer, or another payment-specific handle.
+/// If you need to transmit binary payloads, encode them (e.g., base64) before
+/// wrapping in `EndpointData`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EndpointData(String);
 
 impl EndpointData {
-    /// Wrap a payload string as endpoint data.
+    /// Wrap a payload string as a Payment Endpoint Payload.
     pub fn new(data: impl Into<String>) -> Self {
         Self(data.into())
     }
@@ -246,10 +251,14 @@ impl AsRef<str> for EndpointData {
     }
 }
 
-/// Collection of supported payment entries keyed by method identifiers.
+/// Legacy implementation name for a Payment List.
+///
+/// This type currently represents the payee-published Payment List returned by
+/// `get_payment_list`; it is not the payer-side Supported Payment List from the
+/// domain language.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SupportedPayments {
-    /// Map of `MethodId` to endpoint data.
+    /// Map of `MethodId` (Payment Endpoint Identifier) to `EndpointData` (Payment Endpoint Payload).
     pub entries: HashMap<MethodId, EndpointData>,
 }
 
@@ -305,7 +314,7 @@ impl AsRef<str> for PaymentReference {
 /// Private Noise message kinds understood by Paykit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivateMessageKind {
-    /// Latest-state private payment endpoint envelope (`paykit.private_payments`).
+    /// Latest-state Private Payment Envelope (`paykit.private_payments`).
     PrivatePayments,
     /// Receipt access descriptor envelope (`paykit.receipt_access`).
     ReceiptAccess,
@@ -326,24 +335,27 @@ impl PrivateMessageKind {
 }
 
 #[cfg(feature = "pubky")]
-/// Versioned private payments payload sent over an established Noise link.
+/// Versioned Private Payment Envelope sent over an established Noise link.
+///
+/// `PrivatePaymentsPayload` is the current public API name for this envelope and
+/// is retained until a deliberate breaking-change release.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrivatePaymentsPayload {
     version: u8,
     kind: PrivateMessageKind,
-    /// UUID-v4 correlation reference for this latest private-payment state.
+    /// UUID-v4 correlation reference for this Private Payment Envelope.
     pub reference: PaymentReference,
-    /// Complete latest-state map of private payment entries keyed by method ID.
+    /// Complete latest-state map of private Payment Endpoints keyed by Payment Endpoint Identifier.
     pub entries: HashMap<MethodId, EndpointData>,
 }
 
 #[cfg(feature = "pubky")]
 impl PrivatePaymentsPayload {
-    /// Construct a private payments payload using protocol version 1 and the
+    /// Construct a Private Payment Envelope using protocol version 1 and the
     /// `paykit.private_payments` message kind.
     ///
     /// `entries` must be the complete desired latest-state map; callers should
-    /// include all private payment methods they want the counterparty to see,
+    /// include all private Payment Endpoints they want the counterparty to see,
     /// not just an incremental patch.
     pub fn new(reference: PaymentReference, entries: HashMap<MethodId, EndpointData>) -> Self {
         Self {
@@ -374,7 +386,7 @@ impl PrivatePaymentsPayload {
         self.entries.is_empty()
     }
 
-    /// Look up an endpoint by method ID.
+    /// Look up a Payment Endpoint by Payment Endpoint Identifier.
     pub fn get(&self, method: &MethodId) -> Option<&EndpointData> {
         self.entries.get(method)
     }
@@ -407,7 +419,7 @@ struct PrivateMessageHeader {
 pub struct ReceiptDraft {
     /// Private payment reference being receipted.
     pub reference: PaymentReference,
-    /// Optional payment method used for the payment.
+    /// Optional Payment Method used for the payment.
     pub payment_method: Option<MethodId>,
     /// Optional amount string. Paykit does not interpret units or precision.
     pub amount: Option<String>,
@@ -425,7 +437,7 @@ pub struct Receipt {
     pub reference: PaymentReference,
     /// Public key of the intended receipt recipient.
     pub recipient_public_key: PublicKey,
-    /// Optional payment method used for the payment.
+    /// Optional Payment Method used for the payment.
     pub payment_method: Option<MethodId>,
     /// Optional amount string. Paykit does not interpret units or precision.
     pub amount: Option<String>,
@@ -1591,14 +1603,14 @@ async fn send_private_message(
     })
 }
 
-/// Stores or updates a payment endpoint via the injected authenticated client.
+/// Stores or updates a Payment Endpoint via the injected authenticated client.
 ///
 /// # Examples
 /// ```
 /// # use paykit_lib::{set_payment_endpoint, MethodId, EndpointData, PublicKey};
 /// # use paykit_lib::AuthenticatedTransport;
 /// # async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
-/// let method = MethodId::new("bitcoin-bolt11")?;
+/// let method = MethodId::new("btc-lightning-bolt11")?;
 /// let data = EndpointData::new("ln...");
 /// set_payment_endpoint(client, method, data).await?;
 /// # Ok(())
@@ -1617,7 +1629,7 @@ where
 }
 
 #[cfg(feature = "pubky")]
-/// Encrypts and sends a complete private payments envelope via the established
+/// Encrypts and sends a complete Private Payment Envelope via the established
 /// encrypted link.
 ///
 /// The caller must pass a [`PrivatePaymentsPayload`] containing a validated
@@ -1635,7 +1647,7 @@ where
 ///   "kind": "paykit.private_payments",
 ///   "reference": "550e8400-e29b-41d4-a716-446655440000",
 ///   "entries": {
-///     "lightning": "ln..."
+///     "btc-lightning-bolt11": "ln..."
 ///   }
 /// }
 /// ```
@@ -1663,7 +1675,7 @@ where
 ///
 /// # Parameters
 /// - `link` — an established [`EncryptedLink`] for encryption and I/O.
-/// - `payload` — the complete private payments envelope, including the
+/// - `payload` — the complete Private Payment Envelope, including the
 ///   required [`PaymentReference`] and complete entries map.
 ///
 /// # Errors
@@ -1779,7 +1791,7 @@ pub async fn issue_receipt(
     })
 }
 
-/// Removes a payment endpoint via the injected authenticated client.
+/// Removes a Payment Endpoint via the injected authenticated client.
 #[instrument(skip(client), fields(method = %method))]
 pub async fn remove_payment_endpoint<S>(client: &S, method: MethodId) -> Result<()>
 where
@@ -1792,7 +1804,7 @@ where
         .map_err(|err| map_error("remove_payment_endpoint", err))
 }
 
-/// Retrieves all supported payment methods for the given payee.
+/// Retrieves the payee-published Payment List for the given payee.
 ///
 /// # Semantics
 /// - Returns an empty map when the payee has not published any endpoints or their
@@ -1832,12 +1844,12 @@ where
 }
 
 #[cfg(feature = "pubky")]
-/// Receives and decrypts the latest private payments envelope from the remote
+/// Receives and decrypts the latest Private Payment Envelope from the remote
 /// peer via the established encrypted link.
 ///
 /// Returns `Ok(Some(payload))` when a private payments message is available.
 /// The caller can access the correlation reference at `payload.reference` and
-/// look up payment methods from `payload.entries` or via
+/// look up Payment Endpoints from `payload.entries` or via
 /// [`PrivatePaymentsPayload::get`].
 ///
 /// Returns `Ok(None)` when no private payments message is currently available.
@@ -1859,10 +1871,10 @@ where
 ///   private payments and are not discarded just because this function was called.
 /// - Syntactically valid messages with unsupported `kind` values are logged and
 ///   dropped by the shared dispatcher; they are not buffered indefinitely.
-/// - The returned payload is the full versioned private payments envelope,
+/// - The returned payload is the full versioned Private Payment Envelope,
 ///   including its required [`PaymentReference`] and complete entries map.
 /// - Returns `Err(PaykitError::InvalidData)` when the selected private
-///   payments payload cannot be parsed as a private payments envelope.
+///   payments payload cannot be parsed as a Private Payment Envelope.
 /// - Malformed unrelated private application messages are ignored with
 ///   diagnostics so one bad message does not prevent later valid messages from
 ///   being dispatched.
@@ -1959,7 +1971,7 @@ pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptA
     Ok(access)
 }
 
-/// Retrieves a specific payment endpoint for `payee` and `method`.
+/// Retrieves a specific Payment Endpoint for `payee` and `method`.
 ///
 /// # Semantics
 /// - Returns `Ok(None)` when the endpoint file is missing or empty.
@@ -1971,7 +1983,7 @@ pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptA
 /// # use paykit_lib::{get_payment_endpoint, MethodId, PublicKey};
 /// # use paykit_lib::UnauthenticatedTransportRead;
 /// # async fn inspect(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
-/// let lightning = MethodId::new("lightning")?;
+/// let lightning = MethodId::new("btc-lightning-bolt11")?;
 /// if let Some(endpoint) = get_payment_endpoint(reader, pk, &lightning).await? {
 ///     println!("lightning endpoint: {}", endpoint.as_str());
 /// } else {
@@ -2624,7 +2636,7 @@ mod validation_tests {
 
     #[test]
     fn test_method_id_valid_simple_names() {
-        for name in ["bitcoin-bolt11", "bitcoin-bolt12", "bitcoin-p2tr"] {
+        for name in ["btc-lightning-bolt11", "btc-lightning-bolt12", "btc-bitcoin-p2tr"] {
             assert!(MethodId::new(name).is_ok(), "expected '{name}' to be valid");
         }
     }
@@ -2660,15 +2672,15 @@ mod validation_tests {
 
     #[test]
     fn test_method_id_display() {
-        let m = MethodId::new("lightning").unwrap();
-        assert_eq!(format!("{m}"), "lightning");
+        let m = MethodId::new("btc-lightning-bolt11").unwrap();
+        assert_eq!(format!("{m}"), "btc-lightning-bolt11");
     }
 
     #[test]
     fn test_method_id_as_ref() {
-        let m = MethodId::new("onchain").unwrap();
+        let m = MethodId::new("btc-bitcoin-p2tr").unwrap();
         let s: &str = m.as_ref();
-        assert_eq!(s, "onchain");
+        assert_eq!(s, "btc-bitcoin-p2tr");
     }
 
     // ── MethodId: invalid inputs ────────────────────────────────────────
@@ -2874,7 +2886,7 @@ mod tests {
     async fn endpoint_round_trip_and_update() {
         let setup = TestSetup::new().await;
 
-        let method = MethodId::new("onchain").unwrap();
+        let method = MethodId::new("btc-bitcoin-p2tr").unwrap();
         let endpoint = EndpointData::new("{\"address\":\"bc1...\"}");
 
         set_payment_endpoint(&setup.session_transport, method.clone(), endpoint.clone())
@@ -2919,7 +2931,7 @@ mod tests {
     #[tokio::test]
     async fn missing_endpoint_returns_none() {
         let setup = TestSetup::new().await;
-        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let method = MethodId::new("btc-lightning-bolt11").unwrap();
 
         let missing = get_payment_endpoint(&setup.reader_transport, &setup.public_key, &method)
             .await
@@ -2933,8 +2945,8 @@ mod tests {
     async fn list_reflects_additions_and_removals() {
         let setup = TestSetup::new().await;
 
-        let onchain = MethodId::new("bitcoin-p2tr").unwrap();
-        let lightning = MethodId::new("bitcoin-bolt11").unwrap();
+        let onchain = MethodId::new("btc-bitcoin-p2tr").unwrap();
+        let lightning = MethodId::new("btc-lightning-bolt11").unwrap();
         let onchain_data = EndpointData::new("bc1p...");
         let lightning_data = EndpointData::new("ln...");
 
@@ -3203,7 +3215,7 @@ mod tests {
     async fn private_payments_round_trip() {
         let mut setup = PrivateTestSetup::new().await;
 
-        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let method = MethodId::new("btc-lightning-bolt11").unwrap();
         let data = EndpointData::new("lnbc1...");
         let mut entries = HashMap::new();
         entries.insert(method.clone(), data.clone());
@@ -3232,8 +3244,8 @@ mod tests {
     async fn private_payments_multiple_methods() {
         let mut setup = PrivateTestSetup::new().await;
 
-        let lightning = MethodId::new("bitcoin-bolt11").unwrap();
-        let onchain = MethodId::new("bitcoin-p2tr").unwrap();
+        let lightning = MethodId::new("btc-lightning-bolt11").unwrap();
+        let onchain = MethodId::new("btc-bitcoin-p2tr").unwrap();
         let cashu = MethodId::new("cashu-mint_id").unwrap();
 
         let mut entries = HashMap::new();
@@ -3277,7 +3289,7 @@ mod tests {
         // First write: lightning only.
         let mut entries_v1 = HashMap::new();
         entries_v1.insert(
-            MethodId::new("bitcoin-lightning").unwrap(),
+            MethodId::new("btc-lightning-bolt11").unwrap(),
             EndpointData::new("v1"),
         );
         set_private_payments(&mut setup.sender_link, &private_payload(&entries_v1))
@@ -3285,7 +3297,7 @@ mod tests {
             .unwrap();
 
         // Second write: completely different map (onchain only).
-        let onchain = MethodId::new("bitcoin-p2tr").unwrap();
+        let onchain = MethodId::new("btc-bitcoin-p2tr").unwrap();
         let mut entries_v2 = HashMap::new();
         entries_v2.insert(onchain.clone(), EndpointData::new("v2"));
         set_private_payments(&mut setup.sender_link, &private_payload(&entries_v2))
@@ -3318,7 +3330,7 @@ mod tests {
         let mut setup = PrivateTestSetup::new().await;
 
         // Build a map whose serialized JSON exceeds PUBKY_NOISE_MSG_LEN (1000 bytes).
-        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let method = MethodId::new("btc-lightning-bolt11").unwrap();
         let oversized_value = "x".repeat(1000);
         let mut entries = HashMap::new();
         entries.insert(method, EndpointData::new(oversized_value));
@@ -3339,7 +3351,7 @@ mod tests {
     async fn get_private_payments_preserves_newer_receipt_access_messages() {
         let mut setup = PrivateTestSetup::new().await;
 
-        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let method = MethodId::new("btc-lightning-bolt11").unwrap();
         let data = EndpointData::new("lnbc1...");
         let mut entries = HashMap::new();
         entries.insert(method.clone(), data.clone());
@@ -3372,7 +3384,7 @@ mod tests {
 
         send_raw_private_message(&mut setup.sender_link, TEST_RECEIPT_ACCESS_JSON).await;
 
-        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let method = MethodId::new("btc-lightning-bolt11").unwrap();
         let data = EndpointData::new("lnbc1...");
         let mut entries = HashMap::new();
         entries.insert(method.clone(), data.clone());
@@ -3408,7 +3420,7 @@ mod tests {
         )
         .await;
 
-        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let method = MethodId::new("btc-lightning-bolt11").unwrap();
         let data = EndpointData::new("lnbc1...");
         let mut entries = HashMap::new();
         entries.insert(method.clone(), data.clone());
@@ -3433,7 +3445,7 @@ mod tests {
 
         send_raw_private_message(&mut setup.sender_link, "not-json").await;
 
-        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let method = MethodId::new("btc-lightning-bolt11").unwrap();
         let data = EndpointData::new("lnbc1...");
         let mut entries = HashMap::new();
         entries.insert(method.clone(), data.clone());
@@ -3456,7 +3468,7 @@ mod tests {
     async fn get_private_payments_ignores_malformed_messages_after_valid_payment() {
         let mut setup = PrivateTestSetup::new().await;
 
-        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let method = MethodId::new("btc-lightning-bolt11").unwrap();
         let data = EndpointData::new("lnbc1...");
         let mut entries = HashMap::new();
         entries.insert(method.clone(), data.clone());
@@ -3480,7 +3492,7 @@ mod tests {
     async fn get_private_payments_keeps_latest_payment_without_dropping_other_kinds() {
         let mut setup = PrivateTestSetup::new().await;
 
-        let method = MethodId::new("bitcoin-bolt11").unwrap();
+        let method = MethodId::new("btc-lightning-bolt11").unwrap();
         let mut entries_v1 = HashMap::new();
         entries_v1.insert(method.clone(), EndpointData::new("v1"));
         set_private_payments(&mut setup.sender_link, &private_payload(&entries_v1))
@@ -3599,11 +3611,11 @@ mod tests {
             // 3. Send private payments.
             let mut entries = HashMap::new();
             entries.insert(
-                MethodId::new("bitcoin-bolt11").unwrap(),
+                MethodId::new("btc-lightning-bolt11").unwrap(),
                 EndpointData::new("lnbcpriv..."),
             );
             entries.insert(
-                MethodId::new("bitcoin-p2tr").unwrap(),
+                MethodId::new("btc-bitcoin-p2tr").unwrap(),
                 EndpointData::new("bc1priv..."),
             );
             set_private_payments(&mut link, &private_payload(&entries))
@@ -3644,11 +3656,11 @@ mod tests {
             assert_eq!(
                 private
                     .entries
-                    .get(&MethodId::new("bitcoin-bolt11").unwrap()),
+                    .get(&MethodId::new("btc-lightning-bolt11").unwrap()),
                 Some(&EndpointData::new("lnbcpriv...")),
             );
             assert_eq!(
-                private.entries.get(&MethodId::new("bitcoin-p2tr").unwrap()),
+                private.entries.get(&MethodId::new("btc-bitcoin-p2tr").unwrap()),
                 Some(&EndpointData::new("bc1priv...")),
             );
 
@@ -3768,7 +3780,7 @@ mod tests {
 
         let mut entries = HashMap::new();
         entries.insert(
-            MethodId::new("bitcoin-bolt11").unwrap(),
+            MethodId::new("btc-lightning-bolt11").unwrap(),
             EndpointData::new("lnrestored..."),
         );
         set_private_payments(&mut initiator_link, &private_payload(&entries))
@@ -3783,7 +3795,7 @@ mod tests {
         assert_eq!(
             received
                 .entries
-                .get(&MethodId::new("bitcoin-bolt11").unwrap()),
+                .get(&MethodId::new("btc-lightning-bolt11").unwrap()),
             Some(&EndpointData::new("lnrestored..."))
         );
 
@@ -3905,7 +3917,7 @@ mod tests {
         // Send a message to advance nonces beyond zero.
         let mut entries = HashMap::new();
         entries.insert(
-            MethodId::new("bitcoin-bolt11").unwrap(),
+            MethodId::new("btc-lightning-bolt11").unwrap(),
             EndpointData::new("ln..."),
         );
         set_private_payments(&mut setup.sender_link, &private_payload(&entries))
@@ -3943,7 +3955,7 @@ mod tests {
         // Send a message before snapshotting.
         let mut entries_v1 = HashMap::new();
         entries_v1.insert(
-            MethodId::new("bitcoin-bolt11").unwrap(),
+            MethodId::new("btc-lightning-bolt11").unwrap(),
             EndpointData::new("lnv1..."),
         );
         set_private_payments(&mut setup.sender_link, &private_payload(&entries_v1))
@@ -3988,7 +4000,7 @@ mod tests {
         // Send a new message from the restored sender.
         let mut entries_v2 = HashMap::new();
         entries_v2.insert(
-            MethodId::new("bitcoin-p2tr").unwrap(),
+            MethodId::new("btc-bitcoin-p2tr").unwrap(),
             EndpointData::new("bc1pv2..."),
         );
         set_private_payments(&mut restored_sender, &private_payload(&entries_v2))
@@ -4004,7 +4016,7 @@ mod tests {
         assert_eq!(
             received_v2
                 .entries
-                .get(&MethodId::new("bitcoin-p2tr").unwrap()),
+                .get(&MethodId::new("btc-bitcoin-p2tr").unwrap()),
             Some(&EndpointData::new("bc1pv2...")),
         );
 
@@ -4156,7 +4168,7 @@ mod tests {
         let receipt = Receipt {
             reference: reference.clone(),
             recipient_public_key,
-            payment_method: Some(MethodId::new("lightning").unwrap()),
+            payment_method: Some(MethodId::new("btc-lightning-bolt11").unwrap()),
             amount: Some("1000".to_string()),
             currency: Some("sats".to_string()),
             metadata: HashMap::from([("preimage".to_string(), "abc".to_string())]),
@@ -4211,7 +4223,7 @@ mod tests {
         let receipt = Receipt {
             reference: plaintext_reference,
             recipient_public_key,
-            payment_method: Some(MethodId::new("lightning").unwrap()),
+            payment_method: Some(MethodId::new("btc-lightning-bolt11").unwrap()),
             amount: Some("1000".to_string()),
             currency: Some("sats".to_string()),
             metadata: HashMap::new(),
@@ -4233,7 +4245,7 @@ mod tests {
         let reference = PaymentReference::new_v4();
         let draft = ReceiptDraft {
             reference: reference.clone(),
-            payment_method: Some(MethodId::new("lightning").unwrap()),
+            payment_method: Some(MethodId::new("btc-lightning-bolt11").unwrap()),
             amount: Some("1000".to_string()),
             currency: Some("sats".to_string()),
             metadata: HashMap::from([("note".to_string(), "paid".to_string())]),
@@ -4410,7 +4422,7 @@ mod tests {
         let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let mut entries = HashMap::new();
         entries.insert(
-            MethodId::new("lightning").unwrap(),
+            MethodId::new("btc-lightning-bolt11").unwrap(),
             EndpointData::new("ln..."),
         );
         let payload = PrivatePaymentsPayload::new(reference.clone(), entries);
@@ -4419,12 +4431,12 @@ mod tests {
         assert_eq!(value["version"], 1);
         assert_eq!(value["kind"], "paykit.private_payments");
         assert_eq!(value["reference"], reference.as_str());
-        assert_eq!(value["entries"]["lightning"], "ln...");
+        assert_eq!(value["entries"]["btc-lightning-bolt11"], "ln...");
     }
 
     #[test]
     fn test_parse_private_payments_json_requires_versioned_envelope() {
-        let err = parse_private_payments_json(r#"{"lightning": "ln..."}"#).unwrap_err();
+        let err = parse_private_payments_json(r#"{"btc-lightning-bolt11": "ln..."}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("private payments envelope"))
         );
@@ -4481,7 +4493,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payments_json_array_instead_of_object() {
-        let err = parse_private_payments_json(r#"["lightning","onchain"]"#).unwrap_err();
+        let err = parse_private_payments_json(r#"["btc-lightning-bolt11","btc-bitcoin-p2tr"]"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
             "expected InvalidData for JSON array, got: {err}"
@@ -4509,7 +4521,7 @@ mod tests {
     #[test]
     fn test_parse_private_payments_json_non_string_values() {
         let err =
-            parse_private_payments_json(r#"{"lightning": 123, "onchain": true}"#).unwrap_err();
+            parse_private_payments_json(r#"{"btc-lightning-bolt11": 123, "btc-bitcoin-p2tr": true}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
             "expected InvalidData for non-string values, got: {err}"
@@ -4518,7 +4530,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payments_json_trailing_comma() {
-        let err = parse_private_payments_json(r#"{"lightning": "ln...",}"#).unwrap_err();
+        let err = parse_private_payments_json(r#"{"btc-lightning-bolt11": "ln...",}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
             "expected InvalidData for trailing comma, got: {err}"
@@ -4589,7 +4601,7 @@ mod tests {
     fn test_parse_private_payments_json_one_valid_one_invalid_key() {
         // The valid key should not mask the invalid one.
         let err =
-            parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"lightning":"ln...","":"bc1..."}}"#).unwrap_err();
+            parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"btc-lightning-bolt11":"ln...","":"bc1..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid method identifier")),
             "expected InvalidData when one key is invalid, got: {err}"
@@ -4600,10 +4612,10 @@ mod tests {
 
     #[test]
     fn test_parse_private_payments_json_valid_single_entry() {
-        let result = parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"lightning":"ln..."}}"#).unwrap();
+        let result = parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"btc-lightning-bolt11":"ln..."}}"#).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(
-            result.get(&MethodId::new("lightning").unwrap()),
+            result.get(&MethodId::new("btc-lightning-bolt11").unwrap()),
             Some(&EndpointData::new("ln..."))
         );
     }
@@ -4611,14 +4623,14 @@ mod tests {
     #[test]
     fn test_parse_private_payments_json_valid_multiple_entries() {
         let result =
-            parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"lightning":"ln...","onchain":"bc1..."}}"#).unwrap();
+            parse_private_payments_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"btc-lightning-bolt11":"ln...","btc-bitcoin-p2tr":"bc1..."}}"#).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
-            result.get(&MethodId::new("lightning").unwrap()),
+            result.get(&MethodId::new("btc-lightning-bolt11").unwrap()),
             Some(&EndpointData::new("ln..."))
         );
         assert_eq!(
-            result.get(&MethodId::new("onchain").unwrap()),
+            result.get(&MethodId::new("btc-bitcoin-p2tr").unwrap()),
             Some(&EndpointData::new("bc1..."))
         );
     }

@@ -1,0 +1,3 @@
+# Defer public API terminology renames
+
+We aligned Paykit domain language around Payment Endpoint Identifier, Payment Endpoint Payload, Payment List, and Private Payment Envelope, but existing public Rust and FFI APIs still expose legacy names such as `MethodId`, `EndpointData`, `SupportedPayments`, and `PrivatePaymentsPayload`. We will not rename those public API types in the terminology-cleanup pass; instead, docs and comments will mark the legacy mapping clearly, and the actual type renames will happen only in a deliberate breaking-change release that updates Rust, FFI, generated bindings, tests, and downstream integration guidance together.

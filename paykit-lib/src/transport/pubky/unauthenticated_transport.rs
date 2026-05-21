@@ -145,7 +145,7 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
     #[instrument(skip(self), fields(payee = %payee))]
     async fn fetch_supported_payments(&self, payee: &PublicKey) -> Result<SupportedPayments> {
         let addr = format!("{payee}{PAYKIT_PATH_PREFIX}");
-        debug!(addr = %addr, "listing supported payment methods");
+        debug!(addr = %addr, "listing Payment Endpoint entries");
         let entries = self.list_entries(addr, "list supported payments").await?;
 
         let mut map = HashMap::new();
