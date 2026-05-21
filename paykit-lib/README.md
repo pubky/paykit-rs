@@ -22,12 +22,12 @@ Minimal example — store and retrieve a public payment endpoint:
 ```rust,ignore
 use paykit_lib::{
     set_payment_endpoint, get_payment_endpoint, get_payment_list,
-    MethodId, EndpointData,
+    PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
 
 // Create validated types.
-let method = MethodId::new("bitcoin-bolt11")?;
-let data = EndpointData::new("lnbc1...");
+let method = PaymentEndpointIdentifier::new("bitcoin-bolt11")?;
+let data = PaymentEndpointPayload::new("lnbc1...");
 
 // Store an endpoint (requires an AuthenticatedTransport).
 set_payment_endpoint(&client, method.clone(), data).await?;
@@ -44,49 +44,49 @@ for (method, data) in &payments.entries {
 
 ## Core Types
 
-### `MethodId`
+### `PaymentEndpointIdentifier`
 
-Legacy implementation name for **Payment Endpoint Identifier** (e.g. `"btc-lightning-bolt12"` or `"btc-bitcoin-p2tr"`). `MethodId` is validated at construction time to prevent path injection attacks. New domain-facing docs and APIs should use the Payment Endpoint Identifier name when possible; existing code still uses `MethodId` until a deliberate public API migration.
+Legacy implementation name for **Payment Endpoint Identifier** (e.g. `"btc-lightning-bolt12"` or `"btc-bitcoin-p2tr"`). `PaymentEndpointIdentifier` is validated at construction time to prevent path injection attacks. New domain-facing docs and APIs should use the Payment Endpoint Identifier name when possible; existing code still uses `PaymentEndpointIdentifier` until a deliberate public API migration.
 
 ```rust
-use paykit_lib::MethodId;
+use paykit_lib::PaymentEndpointIdentifier;
 
 // Construction is fallible:
-let method = MethodId::new("bitcoin-bolt11").unwrap();
+let method = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
 assert_eq!(method.as_str(), "bitcoin-bolt11");
 
 // Path traversal is rejected:
-assert!(MethodId::new("../etc/passwd").is_err());
+assert!(PaymentEndpointIdentifier::new("../etc/passwd").is_err());
 ```
 
 **Allowed values:** 1-64 ASCII characters from the set `[a-zA-Z0-9_-.]`. The value must not consist solely of dots (`.` and `..` are rejected as path traversal components), and must not be the reserved identifier `private` (used by private payment storage). Slashes, null bytes, spaces, and other special characters are rejected.
 
-`MethodId::new()` returns `Err(PaykitError::Validation(...))` for invalid input.
+`PaymentEndpointIdentifier::new()` returns `Err(PaykitError::Validation(...))` for invalid input.
 
 Read access is available via `as_str()`, `Display`, and `AsRef<str>`.
 
-**Naming convention:** `MethodId` values are opaque to the library, but peers need to agree on Payment Endpoint Identifiers to interoperate. A recommended (non-obligatory) convention for the shape of these identifiers is described in [../specs/payment-endpoint-identifier.md](../specs/payment-endpoint-identifier.md).
+**Naming convention:** `PaymentEndpointIdentifier` values are opaque to the library, but peers need to agree on Payment Endpoint Identifiers to interoperate. A recommended (non-obligatory) convention for the shape of these identifiers is described in [../specs/payment-endpoint-identifier.md](../specs/payment-endpoint-identifier.md).
 
-### `EndpointData`
+### `PaymentEndpointPayload`
 
 Current implementation wrapper for **Payment Endpoint Payload**: serialized payload served by a Payment Endpoint (UTF-8 text such as JSON, lnurl, etc.).
 
 ```rust
-use paykit_lib::EndpointData;
+use paykit_lib::PaymentEndpointPayload;
 
-let data = EndpointData::new("ln...");
+let data = PaymentEndpointPayload::new("ln...");
 let payload: &str = data.as_str();
 let owned: String = data.into_inner();
 ```
 
-### `SupportedPayments`
+### `PaymentList`
 
 Legacy implementation name for a **Payment List** returned by `get_payment_list`: a collection of public Payment Endpoints keyed by Payment Endpoint Identifier.
 
 ```rust,ignore
-use paykit_lib::SupportedPayments;
+use paykit_lib::PaymentList;
 
-let payments: SupportedPayments = get_payment_list(&reader, &payee).await?;
+let payments: PaymentList = get_payment_list(&reader, &payee).await?;
 
 // Access the underlying map:
 for (method, data) in &payments.entries {
@@ -99,12 +99,12 @@ if payments.entries.is_empty() {
 }
 ```
 
-Private payments use a versioned `PrivatePaymentsPayload` Private Payment Envelope. The Payment Endpoint entries still use the same `HashMap<MethodId, EndpointData>` implementation layout, but the envelope also carries a UUID-v4 `PaymentReference` for correlation with later protocol artifacts such as Receipts:
+Private payments use a versioned `PrivatePaymentEnvelope` Private Payment Envelope. The Payment Endpoint entries still use the same `HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>` implementation layout, but the envelope also carries a UUID-v4 `PaymentReference` for correlation with later protocol artifacts such as Receipts:
 
 ```rust,ignore
-use paykit_lib::{get_private_payments, PrivatePaymentsPayload};
+use paykit_lib::{get_private_payment_envelope, PrivatePaymentEnvelope};
 
-if let Some(payload) = get_private_payments(&mut link).await? {
+if let Some(payload) = get_private_payment_envelope(&mut link).await? {
     println!("reference={}", payload.reference.as_str());
     for (method, data) in &payload.entries {
         println!("method={} payload={}", method.as_str(), data.as_str());
@@ -114,9 +114,9 @@ if let Some(payload) = get_private_payments(&mut link).await? {
 }
 ```
 
-Private payments are latest-state data: if several Private Payment Envelopes are queued, `get_private_payments` returns the newest one and supersedes older Private Payment Envelopes. Receipt Access is event-like: `get_receipt_access` returns all currently available Receipt Access descriptors in FIFO order.
+Private payments are latest-state data: if several Private Payment Envelopes are queued, `get_private_payment_envelope` returns the newest one and supersedes older Private Payment Envelopes. Receipt Access is event-like: `get_receipt_access` returns all currently available Receipt Access descriptors in FIFO order.
 
-The `entries` field is currently a `HashMap<MethodId, EndpointData>`: Payment Endpoint Identifier to Payment Endpoint Payload.
+The `entries` field is currently a `HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>`: Payment Endpoint Identifier to Payment Endpoint Payload.
 
 ### `PaykitError`
 
@@ -127,7 +127,7 @@ Domain error enum with the following variants:
 | `Transport { context, source }` | Network or SDK failure |
 | `NotFound(String)` | Requested resource does not exist (404/GONE) |
 | `InvalidData { context, source }` | Fetched data is corrupt or structurally invalid |
-| `Validation(String)` | Caller-supplied input failed validation (e.g. invalid `MethodId`) |
+| `Validation(String)` | Caller-supplied input failed validation (e.g. invalid `PaymentEndpointIdentifier`) |
 
 The `source` field on `Transport` and `InvalidData` is backed by [`anyhow::Error`] so callers can downcast via `anyhow::Error::downcast_ref` when they need the original typed error.
 
@@ -168,21 +168,21 @@ These functions use the transport traits (`AuthenticatedTransport` / `Unauthenti
 Store or update a payee-owned endpoint using the caller's authenticated client.
 
 ```rust,ignore
-use paykit_lib::{set_payment_endpoint, MethodId, EndpointData, AuthenticatedTransport};
+use paykit_lib::{set_payment_endpoint, PaymentEndpointIdentifier, PaymentEndpointPayload, AuthenticatedTransport};
 
 async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
     // NOTE: parties need to agree on method ids in order to understand each other
 
-    let method = MethodId::new("bitcoin-bolt11")?;
-    let data = EndpointData::new("ln...");
+    let method = PaymentEndpointIdentifier::new("bitcoin-bolt11")?;
+    let data = PaymentEndpointPayload::new("ln...");
     set_payment_endpoint(client, method, data).await?;
 
-    let method = MethodId::new("bitcoin-p2wpkh")?;
-    let data = EndpointData::new("bc1...");
+    let method = PaymentEndpointIdentifier::new("bitcoin-p2wpkh")?;
+    let data = PaymentEndpointPayload::new("bc1...");
     set_payment_endpoint(client, method, data).await?;
     // or 
-    let method = MethodId::new("bitcoin-p2tr")?;
-    let data = EndpointData::new("bc1...");
+    let method = PaymentEndpointIdentifier::new("bitcoin-p2tr")?;
+    let data = PaymentEndpointPayload::new("bc1...");
     set_payment_endpoint(client, method, data).await?;
 
     Ok(())
@@ -194,10 +194,10 @@ async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
 Remove previously published endpoint data for a given method.
 
 ```rust,ignore
-use paykit_lib::{remove_payment_endpoint, MethodId, AuthenticatedTransport};
+use paykit_lib::{remove_payment_endpoint, PaymentEndpointIdentifier, AuthenticatedTransport};
 
 async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
-    let method = MethodId::new("bitcoin-bolt11")?;
+    let method = PaymentEndpointIdentifier::new("bitcoin-bolt11")?;
     remove_payment_endpoint(client, method).await?;
     Ok(())
 }
@@ -230,10 +230,10 @@ async fn demo(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> pay
 Convenience resolver for a single Payment Endpoint Identifier. Returns `Ok(None)` when the Payment Endpoint is missing or empty.
 
 ```rust,ignore
-use paykit_lib::{get_payment_endpoint, MethodId, PublicKey, UnauthenticatedTransportRead};
+use paykit_lib::{get_payment_endpoint, PaymentEndpointIdentifier, PublicKey, UnauthenticatedTransportRead};
 
 async fn inspect(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
-    let bolt11 = MethodId::new("bitcoin-bolt11")?;
+    let bolt11 = PaymentEndpointIdentifier::new("bitcoin-bolt11")?;
     if let Some(endpoint) = get_payment_endpoint(reader, pk, &bolt11).await? {
         println!("bolt11 endpoint: {}", endpoint.as_str());
     } else {
@@ -245,12 +245,12 @@ async fn inspect(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> 
 
 #### Consistency Note
 
-`get_payment_list` first lists available Payment Endpoint entries and then fetches each one individually. Because the underlying transport does not support atomic reads, a **race condition** exists: between the directory listing and the individual fetches, endpoints may be added, removed, or modified by the payee. The returned `SupportedPayments` is therefore a **best-effort Payment List snapshot**.
+`get_payment_list` first lists available Payment Endpoint entries and then fetches each one individually. Because the underlying transport does not support atomic reads, a **race condition** exists: between the directory listing and the individual fetches, endpoints may be added, removed, or modified by the payee. The returned `PaymentList` is therefore a **best-effort Payment List snapshot**.
 
 If a payment execution fails with an error suggesting the endpoint has been consumed or is no longer valid, callers should:
 
 1. Re-fetch the specific endpoint via `get_payment_endpoint`.
-2. Compare the newly retrieved `EndpointData` (Payment Endpoint Payload) with the value used in the failed attempt.
+2. Compare the newly retrieved `PaymentEndpointPayload` (Payment Endpoint Payload) with the value used in the failed attempt.
 3. If the Payment Endpoint Payload differs, retry the payment with the updated value.
 
 ### Private Payment Endpoints (`pubky` feature)
@@ -290,9 +290,9 @@ After handshake restore, recovery tuning resets to defaults: `recovery_attempts 
 Snapshot bytes include sensitive key material and must be treated as secrets (store encrypted at rest; never log or expose them).
 
 #### Payment endpoint exchange
-- `set_private_payments(link: &mut EncryptedLink, payload: &PrivatePaymentsPayload) -> Result<()>`
+- `set_private_payment_envelope(link: &mut EncryptedLink, payload: &PrivatePaymentEnvelope) -> Result<()>`
   Serializes the complete Private Payment Envelope to JSON, encrypts it, and sends it via the encrypted link. The caller is responsible for managing the map (adding/removing entries) and passing the full map each time in `payload.entries`. The envelope includes a UUID-v4 `PaymentReference`; `PaymentReference::new_v4()` generates a fresh canonical reference. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient homeserver write failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase homeserver write failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery. Deterministic state, counter, nonce, or encryption errors fail immediately.
-- `get_private_payments(link: &mut EncryptedLink) -> Result<Option<PrivatePaymentsPayload>>`
+- `get_private_payment_envelope(link: &mut EncryptedLink) -> Result<Option<PrivatePaymentEnvelope>>`
   Receives and decrypts currently available private application messages from the remote peer and returns the latest Private Payment Envelope, if one is available. `Ok(None)` means no private payments message is currently available; it is distinct from a payload with an empty `entries` map. Private payments are latest-state data: queued older Private Payment Envelopes are superseded by the newest one. Other supported message kinds remain buffered for their own typed receivers. Syntactically valid messages with unsupported `kind` values are logged and dropped rather than buffered indefinitely. Malformed private application messages are ignored with diagnostics so they do not prevent later valid messages from being processed.
 
 All private application messages share one ordered encrypted stream. Private payments are latest-state data and intentionally collapse older queued Private Payment Envelopes. Receipts are event-like data; `get_receipt_access` drains and returns all currently available Receipt Access messages in FIFO/send order. Unsupported syntactically valid private application message kinds are logged and dropped by the shared dispatcher. The in-memory buffer for supported messages dispatched but not yet consumed by a typed helper is not crash-durable; callers that perform irreversible side effects after receiving event-like messages should persist their own app-level state alongside encrypted-link snapshots/read counters.
@@ -309,7 +309,7 @@ The receipt payload is encrypted with `XChaCha20Poly1305`; the storage location 
 - `issue_receipt(session, link, draft: ReceiptDraft) -> Result<IssuedReceipt>`
   Builds a canonical `Receipt` from the caller's `ReceiptDraft`, fills in the recipient public key from `link`, generates a fresh `ReceiptDecryptionKey`, stores the encrypted receipt on the issuer's homeserver, then sends a `ReceiptAccess` message over Noise. Reissuing the same `PaymentReference` overwrites the same receipt path with new ciphertext and a new key; older access descriptors for that reference may stop decrypting after a later successful reissue.
 - `get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptAccess>>`
-  Receives all currently available queued receipt-access messages. This is FIFO/event-like: every receipt access message matters, and older receipt accesses are not collapsed when newer ones arrive. An empty vector means no receipt access messages are currently available. Calling `get_private_payments` will not discard receipt-access messages; they remain buffered for `get_receipt_access`.
+  Receives all currently available queued receipt-access messages. This is FIFO/event-like: every receipt access message matters, and older receipt accesses are not collapsed when newer ones arrive. An empty vector means no receipt access messages are currently available. Calling `get_private_payment_envelope` will not discard receipt-access messages; they remain buffered for `get_receipt_access`.
 - `ReceiptAccess::location_for(reference) -> String`
   Returns Paykit's canonical homeserver path for an encrypted receipt payload.
 - `Receipt::encrypt(&self, key) -> Result<String>` / `Receipt::decrypt(encrypted_json, key, location) -> Result<Receipt>`
@@ -428,7 +428,7 @@ let remote_pubkey = snapshot.recipient().clone();
 let mut link = restore_encrypted_link(
     fresh_session, secret_key, &remote_pubkey, outbox_client, snapshot,
 ).await?;
-// Continue using set_private_payments / get_private_payments
+// Continue using set_private_payment_envelope / get_private_payment_envelope
 ```
 
 ## Exports (`pubky` feature)
@@ -438,7 +438,7 @@ When the `pubky` feature is enabled the crate exports:
 - `transport::pubky::PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) to standardize path construction.
 - `PubkyAuthenticatedTransport` (wraps `PubkySession`) and `PubkyUnauthenticatedTransport` (wraps `pubky::PublicStorage`) as ready-to-use adapters that satisfy the public payment traits above.
 - `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot`, `EncryptedLinkHandshakeSnapshot` for private encrypted payment types.
-- `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `set_private_payments`, `get_private_payments` for private encrypted payment operations.
+- `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `set_private_payment_envelope`, `get_private_payment_envelope` for private encrypted payment operations.
 - `ReceiptDraft`, `Receipt`, `ReceiptAccess`, `IssuedReceipt`, `ReceiptDecryptionKey`, `issue_receipt`, `get_receipt_access`, and `decrypt_receipt` for encrypted receipt issuance, access delivery, and decryption.
 - `restore_encrypted_link`, `restore_encrypted_link_from_config`, `restore_encrypted_link_handshake`, `restore_encrypted_link_handshake_from_config` for session resumption after app restart or in-process recovery.
 - `DEFAULT_MAX_RECOVERY_ATTEMPTS`, `DEFAULT_MAX_SEND_RETRIES` for configurable retry/recovery limits.

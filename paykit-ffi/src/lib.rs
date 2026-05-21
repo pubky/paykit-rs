@@ -13,9 +13,9 @@ use tokio::sync::Mutex as TokioMutex;
 
 use paykit_lib::{
     EncryptedLink, EncryptedLinkHandshake, EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot,
-    EndpointData, HandshakeProgress, IssuedReceipt, MethodId, PaymentReference,
-    PrivatePaymentsPayload, PubkyAuthenticatedTransport, PubkyUnauthenticatedTransport, Receipt,
-    ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
+    HandshakeProgress, IssuedReceipt, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    PaymentReference, PrivatePaymentEnvelope, PubkyAuthenticatedTransport,
+    PubkyUnauthenticatedTransport, Receipt, ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,19 +93,19 @@ impl From<paykit_lib::PaykitError> for PaykitFfiError {
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
-pub struct FfiPaymentEntry {
+pub struct FfiPaymentEndpoint {
     /// Current binding name for the Payment Endpoint Identifier.
-    pub method_id: String,
+    pub payment_endpoint_identifier: String,
     /// Current binding name for the Payment Endpoint Payload.
-    pub endpoint_data: String,
+    pub payment_endpoint_payload: String,
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
-pub struct FfiPrivatePaymentsPayload {
+pub struct FfiPrivatePaymentEnvelope {
     /// Payment Reference for this Private Payment Envelope.
     pub reference: String,
     /// Private Payment Endpoints carried by this Private Payment Envelope.
-    pub entries: Vec<FfiPaymentEntry>,
+    pub endpoints: Vec<FfiPaymentEndpoint>,
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
@@ -118,8 +118,8 @@ pub struct FfiReceiptMetadataEntry {
 pub struct FfiReceiptDraft {
     /// Payment Reference for the Receipt.
     pub reference: String,
-    /// Optional Payment Method used for the payment.
-    pub payment_method: Option<String>,
+    /// Optional Payment Endpoint Identifier used for the payment.
+    pub payment_endpoint_identifier: Option<String>,
     pub amount: Option<String>,
     pub currency: Option<String>,
     pub metadata: Vec<FfiReceiptMetadataEntry>,
@@ -130,8 +130,8 @@ pub struct FfiReceipt {
     /// Payment Reference for the Receipt.
     pub reference: String,
     pub recipient_public_key: String,
-    /// Optional Payment Method used for the payment.
-    pub payment_method: Option<String>,
+    /// Optional Payment Endpoint Identifier used for the payment.
+    pub payment_endpoint_identifier: Option<String>,
     pub amount: Option<String>,
     pub currency: Option<String>,
     pub metadata: Vec<FfiReceiptMetadataEntry>,
@@ -311,46 +311,48 @@ fn decode_snapshot(encoded: &str, label: &'static str) -> Result<Vec<u8>, Paykit
 }
 
 fn entries_to_map(
-    entries: Vec<FfiPaymentEntry>,
-) -> Result<HashMap<MethodId, EndpointData>, PaykitFfiError> {
+    entries: Vec<FfiPaymentEndpoint>,
+) -> Result<HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>, PaykitFfiError> {
     entries
         .into_iter()
         .map(|entry| {
             Ok((
-                MethodId::new(entry.method_id)?,
-                EndpointData::new(entry.endpoint_data),
+                PaymentEndpointIdentifier::new(entry.payment_endpoint_identifier)?,
+                PaymentEndpointPayload::new(entry.payment_endpoint_payload),
             ))
         })
         .collect()
 }
 
-fn map_to_entries(payments: paykit_lib::SupportedPayments) -> Vec<FfiPaymentEntry> {
-    entries_map_to_entries(payments.entries)
+fn map_to_entries(payments: paykit_lib::PaymentList) -> Vec<FfiPaymentEndpoint> {
+    entries_map_to_entries(payments.endpoints)
 }
 
-fn entries_map_to_entries(entries: HashMap<MethodId, EndpointData>) -> Vec<FfiPaymentEntry> {
-    entries
+fn entries_map_to_entries(
+    endpoints: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
+) -> Vec<FfiPaymentEndpoint> {
+    endpoints
         .into_iter()
-        .map(|(method, data)| FfiPaymentEntry {
-            method_id: method.as_str().to_string(),
-            endpoint_data: data.into_inner(),
+        .map(|(method, data)| FfiPaymentEndpoint {
+            payment_endpoint_identifier: method.as_str().to_string(),
+            payment_endpoint_payload: data.into_inner(),
         })
         .collect()
 }
 
 fn private_payload_to_lib(
-    payload: FfiPrivatePaymentsPayload,
-) -> Result<PrivatePaymentsPayload, PaykitFfiError> {
-    Ok(PrivatePaymentsPayload::new(
+    payload: FfiPrivatePaymentEnvelope,
+) -> Result<PrivatePaymentEnvelope, PaykitFfiError> {
+    Ok(PrivatePaymentEnvelope::new(
         PaymentReference::new(payload.reference)?,
-        entries_to_map(payload.entries)?,
-    ))
+        entries_to_map(payload.endpoints)?,
+    )?)
 }
 
-fn private_payload_to_ffi(payload: PrivatePaymentsPayload) -> FfiPrivatePaymentsPayload {
-    FfiPrivatePaymentsPayload {
+fn private_payload_to_ffi(payload: PrivatePaymentEnvelope) -> FfiPrivatePaymentEnvelope {
+    FfiPrivatePaymentEnvelope {
         reference: payload.reference.as_str().to_string(),
-        entries: entries_map_to_entries(payload.entries),
+        endpoints: entries_map_to_entries(payload.into_endpoints()),
     }
 }
 
@@ -368,14 +370,19 @@ fn receipt_metadata_to_entries(metadata: HashMap<String, String>) -> Vec<FfiRece
         .collect()
 }
 
-fn optional_method_to_lib(method: Option<String>) -> Result<Option<MethodId>, PaykitFfiError> {
-    method.map(MethodId::new).transpose().map_err(Into::into)
+fn optional_method_to_lib(
+    method: Option<String>,
+) -> Result<Option<PaymentEndpointIdentifier>, PaykitFfiError> {
+    method
+        .map(PaymentEndpointIdentifier::new)
+        .transpose()
+        .map_err(Into::into)
 }
 
 fn receipt_draft_to_lib(draft: FfiReceiptDraft) -> Result<ReceiptDraft, PaykitFfiError> {
     Ok(ReceiptDraft {
         reference: PaymentReference::new(draft.reference)?,
-        payment_method: optional_method_to_lib(draft.payment_method)?,
+        payment_endpoint_identifier: optional_method_to_lib(draft.payment_endpoint_identifier)?,
         amount: draft.amount,
         currency: draft.currency,
         metadata: receipt_metadata_to_map(draft.metadata),
@@ -386,8 +393,8 @@ fn receipt_to_ffi(receipt: Receipt) -> FfiReceipt {
     FfiReceipt {
         reference: receipt.reference.as_str().to_string(),
         recipient_public_key: receipt.recipient_public_key.to_string(),
-        payment_method: receipt
-            .payment_method
+        payment_endpoint_identifier: receipt
+            .payment_endpoint_identifier
             .map(|method| method.as_str().to_string()),
         amount: receipt.amount,
         currency: receipt.currency,
@@ -554,7 +561,7 @@ pub async fn paykit_export_session() -> Result<String, PaykitFfiError> {
 #[uniffi::export]
 pub async fn paykit_get_payment_list(
     public_key: String,
-) -> Result<Vec<FfiPaymentEntry>, PaykitFfiError> {
+) -> Result<Vec<FfiPaymentEndpoint>, PaykitFfiError> {
     let rt = ensure_runtime();
     rt.spawn(async move {
         let pubky = get_pubky_client()?;
@@ -569,18 +576,18 @@ pub async fn paykit_get_payment_list(
 
 /// Fetch a single Payment Endpoint for a user.
 ///
-/// The `method_id` parameter is the current binding name for the Payment
+/// The `payment_endpoint_identifier` parameter is the current binding name for the Payment
 /// Endpoint Identifier. Returns `None` if the Payment Endpoint is not set.
 #[uniffi::export]
 pub async fn paykit_get_payment_endpoint(
     public_key: String,
-    method_id: String,
+    payment_endpoint_identifier: String,
 ) -> Result<Option<String>, PaykitFfiError> {
     let rt = ensure_runtime();
     rt.spawn(async move {
         let pubky = get_pubky_client()?;
         let pk = parse_public_key(&public_key)?;
-        let method = MethodId::new(method_id)?;
+        let method = PaymentEndpointIdentifier::new(payment_endpoint_identifier)?;
         let reader = make_reader(pubky);
         let endpoint = paykit_lib::get_payment_endpoint(&reader, &pk, &method).await?;
         Ok(endpoint.map(|d| d.into_inner()))
@@ -697,18 +704,18 @@ pub async fn paykit_sign_in(secret_key_hex: String) -> Result<String, PaykitFfiE
 
 /// Publish or update a Payment Endpoint for the authenticated user.
 ///
-/// The `method_id` parameter is the current binding name for the Payment
-/// Endpoint Identifier. The `endpoint_data` parameter is the current binding
+/// The `payment_endpoint_identifier` parameter is the current binding name for the Payment
+/// Endpoint Identifier. The `payment_endpoint_payload` parameter is the current binding
 /// name for the Payment Endpoint Payload.
 #[uniffi::export]
 pub async fn paykit_set_payment_endpoint(
-    method_id: String,
-    endpoint_data: String,
+    payment_endpoint_identifier: String,
+    payment_endpoint_payload: String,
 ) -> Result<(), PaykitFfiError> {
     let rt = ensure_runtime();
     rt.spawn(async move {
-        let method = MethodId::new(method_id)?;
-        let data = EndpointData::new(endpoint_data);
+        let method = PaymentEndpointIdentifier::new(payment_endpoint_identifier)?;
+        let data = PaymentEndpointPayload::new(payment_endpoint_payload);
         let transport = get_authenticated_transport().await?;
 
         paykit_lib::set_payment_endpoint(&transport, method, data).await?;
@@ -720,13 +727,15 @@ pub async fn paykit_set_payment_endpoint(
 
 /// Remove a Payment Endpoint for the authenticated user.
 ///
-/// The `method_id` parameter is the current binding name for the Payment
+/// The `payment_endpoint_identifier` parameter is the current binding name for the Payment
 /// Endpoint Identifier.
 #[uniffi::export]
-pub async fn paykit_remove_payment_endpoint(method_id: String) -> Result<(), PaykitFfiError> {
+pub async fn paykit_remove_payment_endpoint(
+    payment_endpoint_identifier: String,
+) -> Result<(), PaykitFfiError> {
     let rt = ensure_runtime();
     rt.spawn(async move {
-        let method = MethodId::new(method_id)?;
+        let method = PaymentEndpointIdentifier::new(payment_endpoint_identifier)?;
         let transport = get_authenticated_transport().await?;
 
         paykit_lib::remove_payment_endpoint(&transport, method).await?;
@@ -960,9 +969,9 @@ pub fn paykit_generate_payment_reference() -> String {
 
 /// Encrypt and send the complete Private Payment Envelope over an established link.
 #[uniffi::export]
-pub async fn paykit_set_private_payments(
+pub async fn paykit_set_private_payment_envelope(
     link_id: String,
-    payload: FfiPrivatePaymentsPayload,
+    payload: FfiPrivatePaymentEnvelope,
 ) -> Result<(), PaykitFfiError> {
     let rt = ensure_runtime();
     rt.spawn(async move {
@@ -973,7 +982,7 @@ pub async fn paykit_set_private_payments(
         let link = guard.as_mut().ok_or_else(|| PaykitFfiError::Validation {
             reason: format!("Encrypted-link handle is closed: {link_id}"),
         })?;
-        paykit_lib::set_private_payments(link, &payload).await?;
+        paykit_lib::set_private_payment_envelope(link, &payload).await?;
         Ok(())
     })
     .await
@@ -982,9 +991,9 @@ pub async fn paykit_set_private_payments(
 
 /// Receive and decrypt the latest Private Payment Envelope from an established link.
 #[uniffi::export]
-pub async fn paykit_get_private_payments(
+pub async fn paykit_get_private_payment_envelope(
     link_id: String,
-) -> Result<Option<FfiPrivatePaymentsPayload>, PaykitFfiError> {
+) -> Result<Option<FfiPrivatePaymentEnvelope>, PaykitFfiError> {
     let rt = ensure_runtime();
     rt.spawn(async move {
         let link_id = parse_handle_id(&link_id, "link")?;
@@ -993,7 +1002,7 @@ pub async fn paykit_get_private_payments(
         let link = guard.as_mut().ok_or_else(|| PaykitFfiError::Validation {
             reason: format!("Encrypted-link handle is closed: {link_id}"),
         })?;
-        let payments = paykit_lib::get_private_payments(link).await?;
+        let payments = paykit_lib::get_private_payment_envelope(link).await?;
         Ok(payments.map(private_payload_to_ffi))
     })
     .await

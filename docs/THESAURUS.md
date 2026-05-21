@@ -45,16 +45,10 @@
 - **Related terms**: Paykit Protocol, Payment List
 
 ### Payment List
-- **Definition**: The list of Payment Endpoints published or shared by a payee.
+- **Definition**: The payee-published or payee-shared list of Payment Endpoints.
 - **NOT**: The payer-side intersection of compatible endpoints.
 - **Synonyms to AVOID**: Payment Method List, Supported Payments List, Supported Payment List when referring to the payee-published list
 - **Related terms**: Payment Endpoint, Supported Payment List, Payee
-
-### Public Payment List
-- **Definition**: A Payment List published by a payee in a public Pubky location for unknown or unauthenticated payers to discover.
-- **NOT**: A private known-peer envelope or payer-side compatibility result.
-- **Synonyms to AVOID**: Public Payment Method List, Public Supported Payments List
-- **Related terms**: Payment List, Pubky Routing, Unknown Payer
 
 ### Supported Payment List
 - **Definition**: The payer-side derived intersection between the payer's supported payment capabilities/preferences and the payee's Payment List.
@@ -71,7 +65,7 @@
 ### Payment Endpoint Identifier
 - **Definition**: The canonical machine-readable identifier for a payment endpoint type, such as `btc-lightning-bolt12` or `eur-sepa-iban`.
 - **NOT**: The full Payment Endpoint or the payload/credential itself.
-- **Synonyms to AVOID**: MethodId, method id, payment method id
+- **Synonyms to AVOID**: PaymentEndpointIdentifier, method id, payment method id
 - **Related terms**: Payment Endpoint, Payment Method, Asset, Rail, Endpoint Format
 
 ### Payment Endpoint Payload
@@ -109,7 +103,7 @@
 ### Private Payment Envelope
 - **Definition**: The latest-state private payment disclosure sent to a Known Peer for a specific Payment Reference. It contains the private Payment Endpoints the payee is willing to share for that payment/request. Latest-wins semantics apply per Known Peer; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
 - **NOT**: A public Payment List, and not merely a private version of the list if the object includes more than endpoints.
-- **Synonyms to AVOID**: Private Payment List, Private Payment Method List, private payments payload when naming the domain concept
+- **Synonyms to AVOID**: Private Payment List, Private Payment Method List, private payments payload
 - **Related terms**: Known Peer, Payment Endpoint, Payment Reference
 
 ### Payment Reference
@@ -163,10 +157,28 @@
 ## Legacy Terms
 
 ### MethodId
-- **Definition**: Legacy implementation name currently used in code for Payment Endpoint Identifier.
+- **Definition**: Former legacy implementation name for Payment Endpoint Identifier.
 - **NOT**: Canonical domain language.
 - **Synonyms to AVOID**: MethodId in new domain-facing code/docs
 - **Related terms**: Payment Endpoint Identifier
+
+### EndpointData
+- **Definition**: Former legacy implementation name for Payment Endpoint Payload.
+- **NOT**: Canonical domain language.
+- **Synonyms to AVOID**: EndpointData in new domain-facing code/docs
+- **Related terms**: Payment Endpoint Payload
+
+### SupportedPayments
+- **Definition**: Former legacy implementation name for the payee-published Payment List.
+- **NOT**: The payer-side Supported Payment List.
+- **Synonyms to AVOID**: SupportedPayments in new domain-facing code/docs
+- **Related terms**: Payment List, Supported Payment List
+
+### PrivatePaymentsPayload
+- **Definition**: Former legacy implementation name for Private Payment Envelope.
+- **NOT**: Canonical domain language.
+- **Synonyms to AVOID**: PrivatePaymentsPayload, private payments payload
+- **Related terms**: Private Payment Envelope
 
 ### Paykit PDK
 - **Definition**: Legacy artifact/name for earlier Paykit library work.
@@ -195,7 +207,10 @@ These terms must not be used for new Paykit domain/protocol/component names:
 - **Supported Payments List** → use **Supported Payment List** only for the payer-side intersection; use **Payment List** for the payee-published list.
 - **Payment Option** → use **Payment Endpoint** or **Payment Method**, depending on meaning.
 - **Routing Network** / **Paykit Routing Network** → use **Pubky Routing** in concrete Paykit docs.
-- **MethodId** → use **Payment Endpoint Identifier** in domain-facing names; existing code should be migrated deliberately.
+- **MethodId** → use **Payment Endpoint Identifier**.
+- **EndpointData** → use **Payment Endpoint Payload**.
+- **SupportedPayments** → use **Payment List** for the payee-published list.
+- **PrivatePaymentsPayload** → use **Private Payment Envelope**.
 - **Private Payment Method List** / **Private Payment List** → use **Private Payment Envelope** when referring to known-peer private payment data.
 - **Payment Endpoint** for only address/invoice/IBAN/etc. data → use **Payment Endpoint Payload**.
 
@@ -209,7 +224,6 @@ Current/core:
 
 Protocol concepts:
 - Payment List
-- Public Payment List
 - Supported Payment List
 - Payment Endpoint
 - Payment Endpoint Identifier
@@ -228,3 +242,6 @@ Implementation/legacy details:
 - Paykit React Native
 - Paykit PDK
 - MethodId
+- EndpointData
+- SupportedPayments
+- PrivatePaymentsPayload

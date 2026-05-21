@@ -24,23 +24,23 @@
 
 | Legacy | Canonical |
 |---|---|
-| `MethodId` | `PaymentEndpointIdentifier` |
-| `METHOD_ID_MAX_LEN` | `PAYMENT_ENDPOINT_IDENTIFIER_MAX_LEN` |
-| `METHOD_ID_RESERVED_PRIVATE` | `PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE` |
-| `EndpointData` | `PaymentEndpointPayload` |
-| `SupportedPayments` | `PaymentList` |
-| `SupportedPayments.entries` | `PaymentList.endpoints` |
-| `PrivatePaymentsPayload` | `PrivatePaymentEnvelope` |
-| `PrivatePaymentsPayload.entries` | private `PrivatePaymentEnvelope.endpoints` |
-| `fetch_supported_payments` | `fetch_payment_list` |
-| `set_private_payments` | `set_private_payment_envelope` |
-| `get_private_payments` | `get_private_payment_envelope` |
-| `paykit.private_payments` | `paykit.private_payment_envelope` |
-| `payment_method` receipt field | `payment_endpoint_identifier` |
-| `method_id` FFI/platform field | `payment_endpoint_identifier` |
-| `endpoint_data` FFI/platform field | `payment_endpoint_payload` |
-| `FfiPaymentEntry` | `FfiPaymentEndpoint` |
-| `FfiPrivatePaymentsPayload` | `FfiPrivatePaymentEnvelope` |
+| `PaymentEndpointIdentifier` | `PaymentEndpointIdentifier` |
+| `PAYMENT_ENDPOINT_IDENTIFIER_MAX_LEN` | `PAYMENT_ENDPOINT_IDENTIFIER_MAX_LEN` |
+| `PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE` | `PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE` |
+| `PaymentEndpointPayload` | `PaymentEndpointPayload` |
+| `PaymentList` | `PaymentList` |
+| `PaymentList.entries` | `PaymentList.endpoints` |
+| `PrivatePaymentEnvelope` | `PrivatePaymentEnvelope` |
+| `PrivatePaymentEnvelope.entries` | private `PrivatePaymentEnvelope.endpoints` |
+| `fetch_payment_list` | `fetch_payment_list` |
+| `set_private_payment_envelope` | `set_private_payment_envelope` |
+| `get_private_payment_envelope` | `get_private_payment_envelope` |
+| `paykit.private_payment_envelope` | `paykit.private_payment_envelope` |
+| `payment_endpoint_identifier` receipt field | `payment_endpoint_identifier` |
+| `payment_endpoint_identifier` FFI/platform field | `payment_endpoint_identifier` |
+| `payment_endpoint_payload` FFI/platform field | `payment_endpoint_payload` |
+| `FfiPaymentEndpoint` | `FfiPaymentEndpoint` |
+| `FfiPrivatePaymentEnvelope` | `FfiPrivatePaymentEnvelope` |
 
 ## Desired Core Shapes
 
@@ -81,7 +81,7 @@ impl PrivatePaymentEnvelope {
 }
 ```
 
-`PaymentEndpointIdentifier::new()` must keep current `MethodId::new()` semantics:
+`PaymentEndpointIdentifier::new()` must keep current `PaymentEndpointIdentifier::new()` semantics:
 - preserve input exactly;
 - allow ASCII alphanumeric, `-`, `_`, and `.`;
 - reject empty;
@@ -90,7 +90,7 @@ impl PrivatePaymentEnvelope {
 - reject `.`, `..`, slashes, backslashes, null bytes, spaces, unicode, and other currently forbidden characters;
 - do not enforce `asset-rail-endpoint-format`.
 
-`PaymentEndpointPayload::new()` must keep current `EndpointData::new()` semantics:
+`PaymentEndpointPayload::new()` must keep current `PaymentEndpointPayload::new()` semantics:
 - generic UTF-8 wrapper;
 - no identifier-aware validation;
 - no generic max size.
@@ -108,7 +108,7 @@ impl PrivatePaymentEnvelope {
 
 Run:
 ```bash
-rg -n "\b(MethodId|EndpointData|SupportedPayments|PrivatePaymentsPayload)\b|fetch_supported_payments|get_private_payments|set_private_payments|payment_method|method_id|endpoint_data|paykit\.private_payments" . --glob '!target/**' --glob '!docs/adr/0001-defer-public-api-terminology-renames.md' --glob '!docs/THESAURUS.md' --glob '!CONTEXT.md'
+rg -n "\b(PaymentEndpointIdentifier|PaymentEndpointPayload|PaymentList|PrivatePaymentEnvelope)\b|fetch_payment_list|get_private_payment_envelope|set_private_payment_envelope|payment_endpoint_identifier|payment_endpoint_identifier|payment_endpoint_payload|paykit\.private_payment_envelope" . --glob '!target/**' --glob '!docs/adr/0001-defer-public-api-terminology-renames.md' --glob '!docs/THESAURUS.md' --glob '!CONTEXT.md'
 ```
 
 Expected: existing matches in `paykit-lib`, `paykit-ffi`, README files, and tests.
@@ -125,7 +125,7 @@ This is reconnaissance only.
 
 ## Task 2: Rename Core Identifier Type
 
-**Objective:** Rename `MethodId` to `PaymentEndpointIdentifier` while preserving validation semantics exactly.
+**Objective:** Rename `PaymentEndpointIdentifier` to `PaymentEndpointIdentifier` while preserving validation semantics exactly.
 
 **Files:**
 - Modify: `paykit-lib/src/lib.rs`
@@ -138,7 +138,7 @@ This is reconnaissance only.
 
 Replace:
 ```rust
-pub struct MethodId(String);
+pub struct PaymentEndpointIdentifier(String);
 ```
 with:
 ```rust
@@ -147,8 +147,8 @@ pub struct PaymentEndpointIdentifier(String);
 
 Rename constants:
 ```rust
-METHOD_ID_MAX_LEN -> PAYMENT_ENDPOINT_IDENTIFIER_MAX_LEN
-METHOD_ID_RESERVED_PRIVATE -> PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE
+PAYMENT_ENDPOINT_IDENTIFIER_MAX_LEN -> PAYMENT_ENDPOINT_IDENTIFIER_MAX_LEN
+PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE -> PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE
 ```
 
 Update `impl`, `Display`, `AsRef<str>`, examples, rustdoc, and test names.
@@ -187,14 +187,14 @@ Expected: tests compile and pass after test names are updated.
 ```bash
 git add paykit-lib/src
 
-git commit -m "refactor: rename MethodId to PaymentEndpointIdentifier"
+git commit -m "refactor: rename PaymentEndpointIdentifier to PaymentEndpointIdentifier"
 ```
 
 ---
 
 ## Task 3: Rename Core Payload Type
 
-**Objective:** Rename `EndpointData` to `PaymentEndpointPayload` while preserving generic wrapper behavior.
+**Objective:** Rename `PaymentEndpointPayload` to `PaymentEndpointPayload` while preserving generic wrapper behavior.
 
 **Files:**
 - Modify: `paykit-lib/src/lib.rs`
@@ -206,7 +206,7 @@ git commit -m "refactor: rename MethodId to PaymentEndpointIdentifier"
 
 Replace:
 ```rust
-pub struct EndpointData(String);
+pub struct PaymentEndpointPayload(String);
 ```
 with:
 ```rust
@@ -238,12 +238,12 @@ Expected: payload accessor tests pass.
 ```bash
 git add paykit-lib/src
 
-git commit -m "refactor: rename EndpointData to PaymentEndpointPayload"
+git commit -m "refactor: rename PaymentEndpointPayload to PaymentEndpointPayload"
 ```
 
 ---
 
-## Task 4: Introduce `PaymentEndpoint` and Rename `SupportedPayments` to `PaymentList`
+## Task 4: Introduce `PaymentEndpoint` and Rename `PaymentList` to `PaymentList`
 
 **Objective:** Make the public Payment List model match the thesaurus.
 
@@ -265,12 +265,12 @@ pub struct PaymentEndpoint {
 }
 ```
 
-**Step 2: Rename `SupportedPayments`**
+**Step 2: Rename `PaymentList`**
 
 Replace:
 ```rust
-pub struct SupportedPayments {
-    pub entries: HashMap<MethodId, EndpointData>,
+pub struct PaymentList {
+    pub entries: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
 }
 ```
 with:
@@ -300,7 +300,7 @@ If no focused tests exist yet, add one that constructs an empty `PaymentList` an
 ```bash
 git add paykit-lib/src
 
-git commit -m "refactor: rename SupportedPayments to PaymentList"
+git commit -m "refactor: rename PaymentList to PaymentList"
 ```
 
 ---
@@ -318,7 +318,7 @@ git commit -m "refactor: rename SupportedPayments to PaymentList"
 
 Replace:
 ```rust
-async fn fetch_supported_payments(...) -> Result<SupportedPayments>;
+async fn fetch_payment_list(...) -> Result<PaymentList>;
 ```
 with:
 ```rust
@@ -355,7 +355,7 @@ git commit -m "refactor: rename transport payment-list fetch"
 
 ## Task 6: Rename Private Envelope Core Type and Wire Kind
 
-**Objective:** Rename `PrivatePaymentsPayload` to `PrivatePaymentEnvelope` and hard-break the message kind.
+**Objective:** Rename `PrivatePaymentEnvelope` to `PrivatePaymentEnvelope` and hard-break the message kind.
 
 **Files:**
 - Modify: `paykit-lib/src/lib.rs`
@@ -364,7 +364,7 @@ git commit -m "refactor: rename transport payment-list fetch"
 
 Replace:
 ```rust
-"paykit.private_payments"
+"paykit.private_payment_envelope"
 ```
 with:
 ```rust
@@ -378,9 +378,9 @@ Do not bump envelope version solely because of this rename.
 
 Replace:
 ```rust
-pub struct PrivatePaymentsPayload {
+pub struct PrivatePaymentEnvelope {
     pub reference: PaymentReference,
-    pub entries: HashMap<MethodId, EndpointData>,
+    pub entries: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
 }
 ```
 with:
@@ -422,8 +422,8 @@ pub fn get(&self, identifier: &PaymentEndpointIdentifier) -> Option<&PaymentEndp
 
 Rename functions:
 ```rust
-parse_private_payments_json -> parse_private_payment_envelope_json
-serialize_private_payments_json -> serialize_private_payment_envelope_json
+parse_private_payment_envelope_json -> parse_private_payment_envelope_json
+serialize_private_payment_envelope_json -> serialize_private_payment_envelope_json
 ```
 
 Serialized field should become `endpoints`, not `entries`.
@@ -463,7 +463,7 @@ git commit -m "refactor: rename private payments to PrivatePaymentEnvelope"
 
 Replace:
 ```rust
-set_private_payments(link, payload)
+set_private_payment_envelope(link, payload)
 ```
 with:
 ```rust
@@ -474,7 +474,7 @@ set_private_payment_envelope(link, envelope)
 
 Replace:
 ```rust
-get_private_payments(link) -> Result<Option<PrivatePaymentsPayload>>
+get_private_payment_envelope(link) -> Result<Option<PrivatePaymentEnvelope>>
 ```
 with:
 ```rust
@@ -506,7 +506,7 @@ git commit -m "refactor: rename private envelope APIs"
 
 ## Task 8: Rename Receipt Field and Serialized JSON
 
-**Objective:** Replace receipt `payment_method` with `payment_endpoint_identifier` across structs and wire JSON.
+**Objective:** Replace receipt `payment_endpoint_identifier` with `payment_endpoint_identifier` across structs and wire JSON.
 
 **Files:**
 - Modify: `paykit-lib/src/lib.rs`
@@ -517,7 +517,7 @@ git commit -m "refactor: rename private envelope APIs"
 
 Replace fields such as:
 ```rust
-pub payment_method: Option<MethodId>
+pub payment_endpoint_identifier: Option<PaymentEndpointIdentifier>
 ```
 with:
 ```rust
@@ -530,7 +530,7 @@ Apply to `ReceiptDraft`, `IssuedReceipt`, `Receipt`, and any wire structs.
 
 Replace JSON key:
 ```json
-"payment_method"
+"payment_endpoint_identifier"
 ```
 with:
 ```json
@@ -541,7 +541,7 @@ Do not support old key.
 
 **Step 3: Update tests**
 
-Add/modify tests asserting serialized JSON contains `payment_endpoint_identifier` and does not contain `payment_method`.
+Add/modify tests asserting serialized JSON contains `payment_endpoint_identifier` and does not contain `payment_endpoint_identifier`.
 
 **Step 4: Run focused tests**
 
@@ -567,13 +567,13 @@ git commit -m "refactor: rename receipt endpoint identifier field"
 **Files:**
 - Modify: `paykit-ffi/src/lib.rs`
 
-**Step 1: Rename `FfiPaymentEntry`**
+**Step 1: Rename `FfiPaymentEndpoint`**
 
 Replace:
 ```rust
-pub struct FfiPaymentEntry {
-    pub method_id: String,
-    pub endpoint_data: String,
+pub struct FfiPaymentEndpoint {
+    pub payment_endpoint_identifier: String,
+    pub payment_endpoint_payload: String,
 }
 ```
 with:
@@ -586,7 +586,7 @@ pub struct FfiPaymentEndpoint {
 
 **Step 2: Rename private envelope DTO**
 
-Replace `FfiPrivatePaymentsPayload` with:
+Replace `FfiPrivatePaymentEnvelope` with:
 ```rust
 pub struct FfiPrivatePaymentEnvelope {
     pub reference: String,
@@ -646,16 +646,16 @@ paykit_remove_payment_endpoint
 
 Update parameters:
 ```rust
-method_id -> payment_endpoint_identifier
-endpoint_data -> payment_endpoint_payload
+payment_endpoint_identifier -> payment_endpoint_identifier
+payment_endpoint_payload -> payment_endpoint_payload
 ```
 
 **Step 2: Rename private functions**
 
 Replace:
 ```rust
-paykit_set_private_payments
-paykit_get_private_payments
+paykit_set_private_payment_envelope
+paykit_get_private_payment_envelope
 ```
 with:
 ```rust
@@ -735,7 +735,7 @@ Do not rewrite old release history in a misleading way.
 
 Run:
 ```bash
-rg -n "Supported Payments List|Payment Method List|Payment Option|Routing Network|Paykit SDK|Paykit PDK|\bMethodId\b|\bEndpointData\b|\bSupportedPayments\b|\bPrivatePaymentsPayload\b|method_id|endpoint_data|payment_method|private_payments|paykit\.private_payments" . --glob '*.md' --glob '!docs/THESAURUS.md' --glob '!CONTEXT.md' --glob '!docs/adr/0001-defer-public-api-terminology-renames.md'
+rg -n "Supported Payments List|Payment Method List|Payment Option|Routing Network|Paykit SDK|Paykit PDK|\bPaymentEndpointIdentifier\b|\bPaymentEndpointPayload\b|\bPaymentList\b|\bPrivatePaymentEnvelope\b|payment_endpoint_identifier|payment_endpoint_payload|payment_endpoint_identifier|private_payment_envelope|paykit\.private_payment_envelope" . --glob '*.md' --glob '!docs/THESAURUS.md' --glob '!CONTEXT.md' --glob '!docs/adr/0001-defer-public-api-terminology-renames.md'
 ```
 
 Expected: only explicitly historical changelog entries, if any.
@@ -763,8 +763,8 @@ git commit -m "docs: align Paykit terminology after breaking rename"
 
 Examples:
 ```rust
-test_method_id_valid_simple_names -> test_payment_endpoint_identifier_valid_simple_names
-test_endpoint_data_accessors -> test_payment_endpoint_payload_accessors
+test_payment_endpoint_identifier_valid_simple_names -> test_payment_endpoint_identifier_valid_simple_names
+test_payment_endpoint_payload_accessors -> test_payment_endpoint_payload_accessors
 ```
 
 **Step 2: Update JSON fixtures**
@@ -874,7 +874,7 @@ Only commit if verification required follow-up changes.
 
 Run:
 ```bash
-rg -n "\bMethodId\b|\bEndpointData\b|\bSupportedPayments\b|\bPrivatePaymentsPayload\b|fetch_supported_payments|get_private_payments|set_private_payments|method_id|endpoint_data|payment_method|private_payments|paykit\.private_payments|Supported Payments List|Payment Method List|Payment Option|Routing Network|Paykit SDK|Paykit PDK" . --glob '!target/**' --glob '!.git/**'
+rg -n "\bPaymentEndpointIdentifier\b|\bPaymentEndpointPayload\b|\bPaymentList\b|\bPrivatePaymentEnvelope\b|fetch_payment_list|get_private_payment_envelope|set_private_payment_envelope|payment_endpoint_identifier|payment_endpoint_payload|payment_endpoint_identifier|private_payment_envelope|paykit\.private_payment_envelope|Supported Payments List|Payment Method List|Payment Option|Routing Network|Paykit SDK|Paykit PDK" . --glob '!target/**' --glob '!.git/**'
 ```
 
 Expected: no matches except:
@@ -918,12 +918,12 @@ Only commit if changes were needed.
 **Step 1: Add breaking-change changelog entry**
 
 Include:
-- `MethodId` -> `PaymentEndpointIdentifier`
-- `EndpointData` -> `PaymentEndpointPayload`
-- `SupportedPayments` -> `PaymentList`
-- `PrivatePaymentsPayload` -> `PrivatePaymentEnvelope`
-- `paykit.private_payments` -> `paykit.private_payment_envelope`
-- receipt JSON `payment_method` -> `payment_endpoint_identifier`
+- `PaymentEndpointIdentifier` -> `PaymentEndpointIdentifier`
+- `PaymentEndpointPayload` -> `PaymentEndpointPayload`
+- `PaymentList` -> `PaymentList`
+- `PrivatePaymentEnvelope` -> `PrivatePaymentEnvelope`
+- `paykit.private_payment_envelope` -> `paykit.private_payment_envelope`
+- receipt JSON `payment_endpoint_identifier` -> `payment_endpoint_identifier`
 - no backward read compatibility for old wire names
 - no envelope version bump solely for rename
 
@@ -956,9 +956,9 @@ git commit -m "docs: add migration notes for Paykit terminology rename"
 - `cargo clippy --all-targets --all-features` passes.
 - `cargo doc --no-deps` passes.
 - `cd paykit-ffi && ./build.sh all` succeeds.
-- No source code uses `MethodId`, `EndpointData`, `SupportedPayments`, `PrivatePaymentsPayload`, `fetch_supported_payments`, `get_private_payments`, or `set_private_payments`.
-- No active wire/runtime code emits or accepts `paykit.private_payments`.
-- Receipt JSON uses `payment_endpoint_identifier`, not `payment_method`.
+- No source code uses `PaymentEndpointIdentifier`, `PaymentEndpointPayload`, `PaymentList`, `PrivatePaymentEnvelope`, `fetch_payment_list`, `get_private_payment_envelope`, or `set_private_payment_envelope`.
+- No active wire/runtime code emits or accepts `paykit.private_payment_envelope`.
+- Receipt JSON uses `payment_endpoint_identifier`, not `payment_endpoint_identifier`.
 - Rust core uses `PaymentList.endpoints` as a public map.
 - Rust core uses `PrivatePaymentEnvelope` with public `reference` and private non-empty `endpoints`.
 - FFI uses vector DTOs for Payment Endpoints.

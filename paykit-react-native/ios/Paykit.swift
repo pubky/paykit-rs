@@ -26,7 +26,7 @@ class Paykit: RCTEventEmitter {
         return ["error", message]
     }
 
-    private func paymentEntries(from jsonString: String) throws -> [FfiPaymentEntry] {
+    private func paymentEndpoints(from jsonString: String) throws -> [FfiPaymentEndpoint] {
         let data = Data(jsonString.utf8)
         guard let raw = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             throw NSError(domain: "Paykit", code: 1, userInfo: [
@@ -34,22 +34,22 @@ class Paykit: RCTEventEmitter {
             ])
         }
         return try raw.map { item in
-            guard let methodId = item["method_id"] as? String,
-                  let endpointData = item["endpoint_data"] as? String else {
+            guard let paymentEndpointIdentifier = item["payment_endpoint_identifier"] as? String,
+                  let paymentEndpointPayload = item["payment_endpoint_payload"] as? String else {
                 throw NSError(domain: "Paykit", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "payment entries must include string method_id and endpoint_data fields"
+                    NSLocalizedDescriptionKey: "payment entries must include string payment_endpoint_identifier and payment_endpoint_payload fields"
                 ])
             }
-            return FfiPaymentEntry(
-                methodId: methodId,
-                endpointData: endpointData
+            return FfiPaymentEndpoint(
+                paymentEndpointIdentifier: paymentEndpointIdentifier,
+                paymentEndpointPayload: paymentEndpointPayload
             )
         }
     }
 
-    private func paymentEntriesJson(_ entries: [FfiPaymentEntry]) throws -> String {
-        let jsonArray = entries.map { entry in
-            ["method_id": entry.methodId, "endpoint_data": entry.endpointData]
+    private func paymentEndpointsJson(_ endpoints: [FfiPaymentEndpoint]) throws -> String {
+        let jsonArray = endpoints.map { entry in
+            ["payment_endpoint_identifier": entry.paymentEndpointIdentifier, "payment_endpoint_payload": entry.paymentEndpointPayload]
         }
         let data = try JSONSerialization.data(withJSONObject: jsonArray)
         return String(data: data, encoding: .utf8) ?? "[]"
@@ -182,7 +182,7 @@ class Paykit: RCTEventEmitter {
         Task {
             do {
                 let entries = try await paykitGetPaymentList(publicKey: publicKey)
-                resolve(self.resultArray(try self.paymentEntriesJson(entries)))
+                resolve(self.resultArray(try self.paymentEndpointsJson(endpoints)))
             } catch {
                 resolve(self.errorArray(error.localizedDescription))
             }
@@ -299,12 +299,12 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    @objc(setPrivatePayments:entriesJson:withResolver:withRejecter:)
-    func setPrivatePayments(_ linkId: String, entriesJson: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+    @objc(setPrivatePaymentEnvelope:endpointsJson:withResolver:withRejecter:)
+    func setPrivatePaymentEnvelope(_ linkId: String, endpointsJson: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
         Task {
             do {
-                let entries = try self.paymentEntries(from: entriesJson)
-                try await paykitSetPrivatePayments(linkId: linkId, entries: entries)
+                let entries = try self.paymentEndpoints(from: endpointsJson)
+                try await paykitSetPrivatePaymentEnvelope(linkId: linkId, entries: endpoints)
                 resolve(self.resultArray(""))
             } catch {
                 resolve(self.errorArray(error.localizedDescription))
@@ -312,12 +312,12 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    @objc(getPrivatePayments:withResolver:withRejecter:)
-    func getPrivatePayments(_ linkId: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+    @objc(getPrivatePaymentEnvelope:withResolver:withRejecter:)
+    func getPrivatePaymentEnvelope(_ linkId: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
         Task {
             do {
-                let entries = try await paykitGetPrivatePayments(linkId: linkId)
-                resolve(self.resultArray(try self.paymentEntriesJson(entries)))
+                let entries = try await paykitGetPrivatePaymentEnvelope(linkId: linkId)
+                resolve(self.resultArray(try self.paymentEndpointsJson(endpoints)))
             } catch {
                 resolve(self.errorArray(error.localizedDescription))
             }

@@ -11,7 +11,9 @@ use tracing::{debug, error, instrument, trace};
 
 use super::PAYKIT_PATH_PREFIX;
 use crate::transport::traits::UnauthenticatedTransportRead;
-use crate::{EndpointData, MethodId, PaykitError, PublicKey, Result, SupportedPayments};
+use crate::{
+    PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList, PublicKey, Result,
+};
 
 /// Adapter around `pubky::PublicStorage` implementing `UnauthenticatedTransportRead`.
 #[derive(Clone)]
@@ -133,17 +135,17 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
     // NOTE: Race condition — the directory listing and subsequent per-entry
     // fetches are **not** atomic. Between the `list_entries` call and the
     // individual `fetch_text` calls the payee may add, remove, or update
-    // endpoints. The returned `SupportedPayments` is therefore a best-effort
+    // endpoints. The returned `PaymentList` is therefore a best-effort
     // snapshot. The underlying Pubky storage layer does not expose
     // locks or transactional reads, so this cannot be resolved at the
     // transport level.
     //
     // If a payment execution error suggests the endpoint has already been
     // consumed (evidence of a race), callers should re-fetch the specific
-    // endpoint via `fetch_payment_endpoint`, compare the `EndpointData`, and
+    // endpoint via `fetch_payment_endpoint`, compare the `PaymentEndpointPayload`, and
     // retry with the updated value if it differs.
     #[instrument(skip(self), fields(payee = %payee))]
-    async fn fetch_supported_payments(&self, payee: &PublicKey) -> Result<SupportedPayments> {
+    async fn fetch_payment_list(&self, payee: &PublicKey) -> Result<PaymentList> {
         let addr = format!("{payee}{PAYKIT_PATH_PREFIX}");
         debug!(addr = %addr, "listing Payment Endpoint entries");
         let entries = self.list_entries(addr, "list supported payments").await?;
@@ -176,30 +178,39 @@ impl UnauthenticatedTransportRead for PubkyUnauthenticatedTransport {
             let label = format!("fetch endpoint {}", method);
             if let Some(payload) = self.fetch_text(resource.to_string(), &label).await? {
                 debug!(method = %method, "fetched payment endpoint payload");
-                let method_id = MethodId::new(&method).map_err(|err| PaykitError::InvalidData {
-                    context: format!("storage returned invalid method identifier '{}'", method),
-                    source: Some(err.into()),
-                })?;
-                map.insert(method_id, EndpointData::new(payload));
+                let payment_endpoint_identifier =
+                    PaymentEndpointIdentifier::new(&method).map_err(|err| {
+                        PaykitError::InvalidData {
+                            context: format!(
+                                "storage returned invalid Payment Endpoint Identifier '{}'",
+                                method
+                            ),
+                            source: Some(err.into()),
+                        }
+                    })?;
+                map.insert(
+                    payment_endpoint_identifier,
+                    PaymentEndpointPayload::new(payload),
+                );
             }
         }
 
         debug!(count = map.len(), "supported payments collected");
-        Ok(SupportedPayments { entries: map })
+        Ok(PaymentList { endpoints: map })
     }
 
     #[instrument(skip(self), fields(payee = %payee, method = %method))]
     async fn fetch_payment_endpoint(
         &self,
         payee: &PublicKey,
-        method: &MethodId,
-    ) -> Result<Option<EndpointData>> {
+        method: &PaymentEndpointIdentifier,
+    ) -> Result<Option<PaymentEndpointPayload>> {
         let addr = format!("{payee}{PAYKIT_PATH_PREFIX}{}", method.as_str());
         debug!(addr = %addr, "fetching individual payment endpoint");
         match self.fetch_text(addr, "fetch endpoint").await? {
             Some(payload) => {
                 debug!("payment endpoint found");
-                Ok(Some(EndpointData::new(payload)))
+                Ok(Some(PaymentEndpointPayload::new(payload)))
             }
             None => {
                 debug!("payment endpoint not found");

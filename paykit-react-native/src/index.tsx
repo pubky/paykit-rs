@@ -32,8 +32,8 @@ function validateUint32(value: number, label: string): string | null {
 // ---------------------------------------------------------------------------
 
 export interface PaymentEntry {
-  method_id: string;
-  endpoint_data: string;
+  payment_endpoint_identifier: string;
+  payment_endpoint_payload: string;
 }
 
 declare const encryptedLinkHandleBrand: unique symbol;
@@ -460,12 +460,12 @@ export async function setEncryptedLinkMaxSendRetries(
 /**
  * Encrypt and send the complete private payments map.
  */
-export async function setPrivatePayments(
+export async function setPrivatePaymentEnvelope(
   linkId: EncryptedLinkHandle,
   entries: PaymentEntry[]
 ): Promise<Result<string>> {
   try {
-    const res: string[] = await Paykit.setPrivatePayments(
+    const res: string[] = await Paykit.setPrivatePaymentEnvelope(
       linkId,
       JSON.stringify(entries)
     );
@@ -481,11 +481,11 @@ export async function setPrivatePayments(
 /**
  * Receive and decrypt the latest private payments map.
  */
-export async function getPrivatePayments(
+export async function getPrivatePaymentEnvelope(
   linkId: EncryptedLinkHandle
 ): Promise<Result<PaymentEntry[]>> {
   try {
-    const res: string[] = await Paykit.getPrivatePayments(linkId);
+    const res: string[] = await Paykit.getPrivatePaymentEnvelope(linkId);
     if (res[0] === 'error') {
       return err(res[1]!);
     }

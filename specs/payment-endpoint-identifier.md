@@ -23,7 +23,7 @@ each other without side-channel coordination.
 
 This is a *recommended* convention, not a mandatory one. Paykit's routing
 layer does not enforce identifier shape beyond the structural checks currently
-performed by [`MethodId`](../paykit-lib/src/lib.rs), the legacy implementation
+performed by [`PaymentEndpointIdentifier`](../paykit-lib/src/lib.rs), the legacy implementation
 name for Payment Endpoint Identifier (ASCII alphanumeric, `-`, `_`, `.`;
 max 64 characters; no path traversal; the value `private` is reserved).
 
@@ -47,7 +47,7 @@ only when, they appear in all capitals.
 - **Payment Endpoint Identifier** (or *identifier*): the three-segment string
   that names a payment endpoint type, e.g. `btc-bitcoin-p2tr`. In the
   current Paykit Library implementation this is represented by the legacy
-  `MethodId` type.
+  `PaymentEndpointIdentifier` type.
 - **Payment Endpoint Payload**: the JSON object stored alongside the identifier,
   describing the specific payee handle for an endpoint of that type.
 - **Asset**, **rail**, **endpoint format**: the three positional segments of an
@@ -227,15 +227,15 @@ of a format emerges on the same rail, prefer a new endpoint segment
 ## 9. Relation to `paykit-lib`
 
 In the current reference implementation, a Payment Endpoint Identifier is stored
-as a [`MethodId`](../paykit-lib/src/lib.rs), which is now treated as a legacy
-implementation name. The `MethodId` constructor performs structural validation
+as a [`PaymentEndpointIdentifier`](../paykit-lib/src/lib.rs), which is now treated as a legacy
+implementation name. The `PaymentEndpointIdentifier` constructor performs structural validation
 (character set, length, reserved values, path-traversal rejection) but does not
 enforce the three-segment shape defined here. Callers that want to verify
 conformance to this specification SHOULD apply an additional check on top of
-`MethodId::new`.
+`PaymentEndpointIdentifier::new`.
 
 The reserved identifier `private` is used internally by Paykit for
-private-payment storage paths; it is rejected at `MethodId` construction
+private-payment storage paths; it is rejected at `PaymentEndpointIdentifier` construction
 and therefore cannot appear as a conforming identifier under this
 specification either.
 
@@ -244,7 +244,7 @@ specification either.
 - Identifiers are untrusted input when received from a peer. Implementations
   MUST treat them as opaque tokens and MUST NOT interpret any segment as a
   filesystem path, URL component, or shell argument without prior
-  validation. `MethodId::new` already rejects path-traversal sequences;
+  validation. `PaymentEndpointIdentifier::new` already rejects path-traversal sequences;
   callers interpolating identifiers into storage paths MUST continue to
   route them through that validated constructor rather than using raw
   strings.

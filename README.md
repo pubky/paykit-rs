@@ -59,7 +59,7 @@ An initial draft convention is available in [specs/payment-endpoint-identifier.m
 
 Paykit can support virtually any Payment Method as long as payer and payee can mutually describe and identify it. Paykit users create **Payment Lists**: payee-published or payee-shared lists of Payment Endpoints.
 
-### Public Payment Lists
+### Payment Lists
 
 Paykit allows you to receive payments from anyone who is aware of the payee's public key.
 
@@ -85,8 +85,8 @@ Paykit can exchange personalized, dedicated payment data with known peers over a
 
 1. The peers establish an encrypted link with `initiate_encrypted_link` / `accept_encrypted_link` and drive it with `advance_handshake`.
 2. The payee creates a complete Private Payment Envelope containing a UUID-v4 `PaymentReference` and the currently supported private Payment Endpoints.
-3. The payee sends the envelope with `set_private_payments`. Pubky Noise handles encryption, derived private storage paths, file slots, and counterparty retrieval.
-4. The payer calls `get_private_payments` on the same encrypted link and receives the newest valid envelope, if one is available.
+3. The payee sends the envelope with `set_private_payment_envelope`. Pubky Noise handles encryption, derived private storage paths, file slots, and counterparty retrieval.
+4. The payer calls `get_private_payment_envelope` on the same encrypted link and receives the newest valid envelope, if one is available.
 
 ## Payment Method Selection
 
@@ -108,7 +108,7 @@ The “known peer” relationship means that there was previous out-of-band comm
 
 #### Payee is not a known peer
 
-1. The payer resolves the payee’s **Public Payment List** using their public key
+1. The payer resolves the payee’s **Payment List** using their public key
 2. The payer derives a Supported Payment List
 3. The payer selects the first Payment Endpoint according to payer's own personal preference
 4. The payer retrieves the corresponding Payment Endpoint Payload
@@ -117,7 +117,7 @@ The “known peer” relationship means that there was previous out-of-band comm
 
 ## Payment Method Interactivity
 
-Public Payment Lists and Private Payment Envelopes can contain virtually any payment data, regardless of the interactivity requirements to either payer or payee on any level. In other words, paykit peers implement hooks for uni- and bi-directional communication.
+Payment Lists and Private Payment Envelopes can contain virtually any payment data, regardless of the interactivity requirements to either payer or payee on any level. In other words, paykit peers implement hooks for uni- and bi-directional communication.
 
 ### Interactive Payments
 
@@ -202,7 +202,7 @@ Allow users to store a Payment Endpoint for a specific Payment Endpoint Identifi
 
 ### Private Payment Data
 
-These APIs facilitate secure interaction with private payment data between known peers over an established encrypted link. Private payment data is encrypted by `pubky-noise` and exchanged as complete latest-state Private Payment Envelopes: callers manage the full map of private Payment Endpoints and pass the complete map each time they call `set_private_payments`.
+These APIs facilitate secure interaction with private payment data between known peers over an established encrypted link. Private payment data is encrypted by `pubky-noise` and exchanged as complete latest-state Private Payment Envelopes: callers manage the full map of private Payment Endpoints and pass the complete map each time they call `set_private_payment_envelope`.
 
 #### Establish an encrypted link with a counterparty
 

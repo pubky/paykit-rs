@@ -29,12 +29,8 @@ Paykit's concrete routing, discovery, and storage substrate using Pubky public-k
 _Avoid_: Routing Network, Paykit Routing Network
 
 **Payment List**:
-The list of Payment Endpoints published or shared by a payee.
+The payee-published or payee-shared list of Payment Endpoints.
 _Avoid_: Payment Method List, Supported Payments List, Supported Payment List when referring to the payee-published list
-
-**Public Payment List**:
-A Payment List published by a payee in a public Pubky location for unknown or unauthenticated payers to discover.
-_Avoid_: Public Payment Method List, Public Supported Payments List
 
 **Supported Payment List**:
 The payer-side intersection between the payer's supported payment capabilities/preferences and the payee's Payment List.
@@ -46,7 +42,7 @@ _Avoid_: Payment Option, Payment Endpoint when referring only to payload data
 
 **Payment Endpoint Identifier**:
 The canonical machine-readable identifier for a payment endpoint type, such as btc-lightning-bolt12 or eur-sepa-iban.
-_Avoid_: MethodId, method id, payment method id
+_Avoid_: PaymentEndpointIdentifier, method id, payment method id
 
 **Payment Endpoint Payload**:
 The data part of a Payment Endpoint containing the actual receiving handle/details, such as an address, invoice, offer, IBAN, tag, or related fields.
@@ -72,7 +68,7 @@ _Avoid_: endpoint when it is ambiguous with Payment Endpoint
 
 **Private Payment Envelope**:
 The latest-state private payment disclosure sent to a Known Peer for a specific Payment Reference. It contains the private Payment Endpoints the payee is willing to share for that payment/request. Latest-wins semantics apply per Known Peer; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
-_Avoid_: Private Payment List, Private Payment Method List, private payments payload when naming the domain concept
+_Avoid_: Private Payment List, Private Payment Method List, private payments payload
 
 **Payment Reference**:
 A per-payment or per-request correlation identifier. In private payment flows, the Private Payment Envelope carries the Payment Reference because the envelope represents the latest private payment disclosure for that payment/request.
@@ -109,16 +105,16 @@ _Avoid_: receiver when it obscures payment role
 ## Flagged ambiguities
 
 **MethodId**:
-Legacy implementation name for Payment Endpoint Identifier. Existing code may still contain MethodId, but new domain-facing names should use Payment Endpoint Identifier.
+Former legacy implementation name for Payment Endpoint Identifier.
 
 **EndpointData**:
-Current implementation wrapper for Payment Endpoint Payload. New domain-facing names should prefer Payment Endpoint Payload.
+Former legacy implementation name for Payment Endpoint Payload.
 
 **SupportedPayments**:
-Legacy implementation name that currently represents a payee's Payment List, not a Supported Payment List. This is misleading because Supported Payment List means the payer-side intersection.
+Former legacy implementation name that represented a payee's Payment List, not a Supported Payment List. This was misleading because Supported Payment List means the payer-side intersection.
 
 **PrivatePaymentsPayload**:
-Current implementation name for Private Payment Envelope. New domain-facing names should prefer Private Payment Envelope.
+Former legacy implementation name for Private Payment Envelope.
 
 ## Example dialogue
 

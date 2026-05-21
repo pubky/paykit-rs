@@ -112,7 +112,7 @@ public data class FfiHandshakeProgress (
 
 
 @kotlinx.serialization.Serializable
-public data class FfiPaymentEntry (
+public data class FfiPaymentEndpoint (
     val `methodId`: kotlin.String, 
     val `endpointData`: kotlin.String
 ) {
@@ -122,9 +122,9 @@ public data class FfiPaymentEntry (
 
 
 @kotlinx.serialization.Serializable
-public data class FfiPrivatePaymentsPayload (
+public data class FfiPrivatePaymentEnvelope (
     val `reference`: kotlin.String, 
-    val `entries`: List<FfiPaymentEntry>
+    val `endpoints`: List<FfiPaymentEndpoint>
 ) {
     public companion object
 }

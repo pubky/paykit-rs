@@ -14,11 +14,10 @@
 //!
 //! ## Public Payment Endpoints
 //!
-//! Public Payment Endpoints use [`EndpointData`] — the current implementation
-//! wrapper for a Payment Endpoint Payload (addresses, invoices, JSON, etc.).
+//! Public Payment Endpoints use [`PaymentEndpointPayload`] for addresses,
+//! invoices, JSON, or other payee-owned receiving payloads.
 //! Each public Payment Endpoint is stored as a separate file at a well-known
-//! path, one file per [`MethodId`] (legacy implementation name for Payment
-//! Endpoint Identifier).
+//! path, one file per [`PaymentEndpointIdentifier`].
 //!
 //! The transport traits in this module handle **only public Payment Endpoints**.
 //! All public Payment Endpoint operations go through [`UnauthenticatedTransportRead`]
@@ -33,14 +32,14 @@
 //! payments.**
 //!
 //! Higher-level helper functions in [`crate`] (e.g.
-//! [`crate::set_private_payments`]) compose `pubky-noise` encryption
+//! [`crate::set_private_payment_envelope`]) compose `pubky-noise` encryption
 //! directly with storage operations, bypassing the transport traits entirely.
 //! This keeps the transport traits focused on public, unencrypted storage
 //! operations.
 
 use async_trait::async_trait;
 
-use crate::{EndpointData, MethodId, PublicKey, Result};
+use crate::{PaymentEndpointIdentifier, PaymentEndpointPayload, PublicKey, Result};
 
 /// Trait describing read-only access to public Paykit transport.
 ///
@@ -57,7 +56,6 @@ use crate::{EndpointData, MethodId, PublicKey, Result};
 pub trait UnauthenticatedTransportRead {
     /// Fetches the payee's public Payment List.
     ///
-    /// The method name `fetch_supported_payments` is legacy public API naming.
     /// It returns the payee-published Payment List snapshot, not the payer-side
     /// Supported Payment List described in the domain language.
     ///
@@ -67,7 +65,7 @@ pub trait UnauthenticatedTransportRead {
     /// each one individually. Because the underlying transport does not support
     /// atomic/transactional reads, a **race condition** exists: between the
     /// directory listing and the individual fetches, Payment Endpoints may be added,
-    /// removed, or modified by the payee. The returned [`SupportedPayments`] is
+    /// removed, or modified by the payee. The returned [`PaymentList`] is
     /// therefore a **best-effort Payment List snapshot** and may be inconsistent.
     ///
     /// ## Recommended caller strategy
@@ -78,21 +76,20 @@ pub trait UnauthenticatedTransportRead {
     ///
     /// 1. Re-fetch the specific Payment Endpoint via
     ///    [`fetch_payment_endpoint`](Self::fetch_payment_endpoint).
-    /// 2. Compare the newly retrieved [`EndpointData`] (Payment Endpoint Payload)
+    /// 2. Compare the newly retrieved [`PaymentEndpointPayload`] (Payment Endpoint Payload)
     ///    with the value used in the failed attempt.
     /// 3. If the Payment Endpoint Payload differs, it is safe to retry the payment
     ///    with the updated value.
     ///
-    /// [`SupportedPayments`]: crate::SupportedPayments
-    async fn fetch_supported_payments(&self, payee: &PublicKey)
-        -> Result<crate::SupportedPayments>;
+    /// [`PaymentList`]: crate::PaymentList
+    async fn fetch_payment_list(&self, payee: &PublicKey) -> Result<crate::PaymentList>;
 
     /// Fetches an individual Payment Endpoint document if it exists.
     async fn fetch_payment_endpoint(
         &self,
         payee: &PublicKey,
-        method: &MethodId,
-    ) -> Result<Option<EndpointData>>;
+        identifier: &PaymentEndpointIdentifier,
+    ) -> Result<Option<PaymentEndpointPayload>>;
 }
 
 /// Trait describing authenticated write (and optional read) access.
@@ -109,8 +106,12 @@ pub trait UnauthenticatedTransportRead {
 #[async_trait]
 pub trait AuthenticatedTransport {
     /// Writes or updates a Payment Endpoint document.
-    async fn upsert_payment_endpoint(&self, method: &MethodId, data: &EndpointData) -> Result<()>;
+    async fn upsert_payment_endpoint(
+        &self,
+        identifier: &PaymentEndpointIdentifier,
+        payload: &PaymentEndpointPayload,
+    ) -> Result<()>;
 
     /// Removes an existing Payment Endpoint for the provided Payment Endpoint Identifier.
-    async fn remove_payment_endpoint(&self, method: &MethodId) -> Result<()>;
+    async fn remove_payment_endpoint(&self, identifier: &PaymentEndpointIdentifier) -> Result<()>;
 }

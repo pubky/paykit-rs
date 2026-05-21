@@ -32,8 +32,8 @@ import {
   removePaymentEndpoint,
   initiateEncryptedLink,
   advanceHandshake,
-  setPrivatePayments,
-  getPrivatePayments,
+  setPrivatePaymentEnvelope,
+  getPrivatePaymentEnvelope,
 } from '@synonymdev/react-native-paykit';
 
 // Initialize the SDK (call once at app startup)
@@ -52,7 +52,7 @@ if (sessionResult.isOk()) {
 const listResult = await getPaymentList('user_public_key');
 if (listResult.isOk()) {
   for (const entry of listResult.value) {
-    console.log(`${entry.method_id}: ${entry.endpoint_data}`);
+    console.log(`${entry.payment_endpoint_identifier}: ${entry.payment_endpoint_payload}`);
   }
 }
 
@@ -70,10 +70,10 @@ const handshake = await initiateEncryptedLink(secretKeyHex, receiverPublicKey);
 if (handshake.isOk()) {
   const progress = await advanceHandshake(handshake.value);
   if (progress.isOk() && progress.value.status === 'complete') {
-    await setPrivatePayments(progress.value.linkHandle, [
-      { method_id: 'btc-lightning-bolt11', endpoint_data: '{"value":"lnbc1..."}' },
+    await setPrivatePaymentEnvelope(progress.value.linkHandle, [
+      { payment_endpoint_identifier: 'btc-lightning-bolt11', payment_endpoint_payload: '{"value":"lnbc1..."}' },
     ]);
-    const privatePayments = await getPrivatePayments(progress.value.linkHandle);
+    const privatePayments = await getPrivatePaymentEnvelope(progress.value.linkHandle);
   }
 }
 ```
@@ -111,8 +111,8 @@ if (handshake.isOk()) {
 - **`advanceHandshake(handshakeId)`** — Advance a handshake; returns pending handshake handle or complete link handle.
 - **`setEncryptedLinkHandshakeMaxRecoveryAttempts(handshakeId, max)`** — Override recovery attempts for a pending handshake.
 - **`setEncryptedLinkMaxSendRetries(linkId, max)`** — Override send retries for an established encrypted link.
-- **`setPrivatePayments(linkId, entries)`** — Send the complete latest-state private payment entries over the link.
-- **`getPrivatePayments(linkId)`** — Receive the newest private payment entries from the link.
+- **`setPrivatePaymentEnvelope(linkId, entries)`** — Send the complete latest-state private payment entries over the link.
+- **`getPrivatePaymentEnvelope(linkId)`** — Receive the newest private payment entries from the link.
 - **`serializeEncryptedLinkHandshake(handshakeId)`** / **`restoreEncryptedLinkHandshake(secretKeyHex, snapshotHex)`** — Persist and restore pending handshakes.
 - **`serializeEncryptedLink(linkId)`** / **`restoreEncryptedLink(secretKeyHex, snapshotHex)`** — Persist and restore established encrypted links.
 - **`encryptedLinkSnapshotRecipient(snapshotHex)`** / **`encryptedLinkHandshakeSnapshotRecipient(snapshotHex)`** — Inspect the counterparty embedded in a snapshot.
