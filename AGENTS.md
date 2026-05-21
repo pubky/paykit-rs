@@ -51,6 +51,6 @@
 
 ## Security & Configuration Tips
 - Never commit real routing keys or secrets; stub them via env vars or fixture files ignored by git.
-- Treat private URL handling code as sensitive: add comments describing assumptions about encryption and access control to aid auditing.
+- Treat private encrypted payment, receipt, and storage-path handling code as sensitive: add comments describing assumptions about encryption, access control, and durability to aid auditing.
 - `MethodId` is validated at construction time (`MethodId::new()`). The inner field is private. Do not add escape hatches that bypass validation — all values interpolated into storage paths must go through the validated constructor. Allowed characters: ASCII alphanumeric, hyphens, underscores, and dots; max 64 chars; no path traversal (`.`, `..`). The value `"private"` is reserved for private payment storage and is rejected.
 - `EndpointData` has a private inner field accessed via `.as_str()` / `.into_inner()`. Construct via `EndpointData::new()`.

@@ -7,9 +7,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+- Private encrypted receipt APIs in `paykit-lib`: `ReceiptDraft`, `Receipt`,
+  `ReceiptAccess`, `IssuedReceipt`, `ReceiptDecryptionKey`, `issue_receipt`,
+  `get_receipt_access`, and `decrypt_receipt`.
+- FFI receipt records and exports in `paykit-ffi`: `FfiReceiptDraft`,
+  `FfiReceipt`, `FfiReceiptAccess`, `FfiIssuedReceipt`,
+  `paykit_issue_receipt`, `paykit_get_receipt_access`,
+  `paykit_receipt_location`, and `paykit_decrypt_receipt`.
+
 ### Changed
+- Private encrypted messages now distinguish latest-state private-payment
+  envelopes from event-like receipt-access messages. `get_private_payments`
+  returns the newest valid private-payment envelope, while `get_receipt_access`
+  returns all currently available receipt access descriptors as a FIFO vector.
+- Unsupported syntactically valid private application message kinds are logged
+  and dropped rather than buffered indefinitely.
 - `MethodId::new("private")` is now rejected with `PaykitError::Validation` because
   `private` is reserved for private-payment storage paths.
+
+### Security
+- Receipt decryption keys are redacted from Rust `Debug`/`Display` formatting
+  in the library and from FFI wrapper debug output. Callers must still treat raw
+  key fields returned through FFI as secrets.
+- Receipt access locations are validated against their `PaymentReference`, and
+  decrypted receipt plaintext is rejected if its reference does not match the
+  authenticated receipt location.
 
 ## [0.1.0-rc2] - 2026-03-10
 

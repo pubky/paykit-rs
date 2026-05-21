@@ -247,9 +247,10 @@ specification either.
 - Payload values may contain sensitive data (bank account numbers, real
   names, recovery-style invoices). Public payment lists are visible to any
   party that knows the payee's public key; authors MUST consider this when
-  deciding which endpoints to publish publicly versus privately. See the
-  "Private Payment Method Lists" section of the [README](../README.md) for
-  the private-list flow.
+  deciding which endpoints to publish publicly versus exchange privately. See
+  the private payment sections of the [README](../README.md) and
+  [paykit-lib README](../paykit-lib/README.md) for the current encrypted-link
+  flow.
 - Byte-for-byte comparison (Section 4, rule 4) is a security property as
   well as a correctness one: case-insensitive or normalising matchers can
   cause a payer to treat two distinct identifiers as equivalent and select
