@@ -1,10 +1,10 @@
 # Paykit Library
 
-Stateless Rust crate that implements the Paykit transport layer. It provides helpers for both **public** payment endpoints (stored as plaintext files on the homeserver) and **private** payment endpoints (end-to-end encrypted via `pubky-noise`'s Noise protocol), while delegating authentication and session management to callers.
+Stateless Rust crate that implements the Paykit Library. It provides helpers for both **public** Payment Endpoints (stored as plaintext files on the homeserver) and **private** Payment Endpoints (end-to-end encrypted via `pubky-noise`'s Noise protocol), while delegating authentication and session management to callers.
 
-Paykit relies on a **transport** protocol for network *communication* between peers.
+Paykit uses Pubky Routing for network communication between peers.
 
-The default transport protocol in this implementation is [pubky](https://pubky.org/), enabled via the default feature flag `pubky`.
+The default Pubky Routing implementation is [pubky](https://pubky.org/), enabled via the default feature flag `pubky`.
 
 ## Quick Start
 
@@ -46,8 +46,7 @@ for (method, data) in &payments.entries {
 
 ### `MethodId`
 
-Identifier for a payment method specification (e.g. `"bitcoin-p2sh"`, `"bitcoin-bolt11"` basically anything parties agree on).
-`MethodId` is validated at construction time to prevent path injection attacks.
+Legacy implementation name for **Payment Endpoint Identifier** (e.g. `"btc-lightning-bolt12"` or `"btc-bitcoin-p2tr"`). `MethodId` is validated at construction time to prevent path injection attacks. New domain-facing docs and APIs should use the Payment Endpoint Identifier name when possible; existing code still uses `MethodId` until a deliberate public API migration.
 
 ```rust
 use paykit_lib::MethodId;
@@ -66,11 +65,11 @@ assert!(MethodId::new("../etc/passwd").is_err());
 
 Read access is available via `as_str()`, `Display`, and `AsRef<str>`.
 
-**Naming convention:** `MethodId` values are opaque to the library, but peers need to agree on them to interoperate. A recommended (non-obligatory) convention for the shape of these identifiers is described in [../specs/payment-endpoint-identifier.md](../specs/payment-endpoint-identifier.md).
+**Naming convention:** `MethodId` values are opaque to the library, but peers need to agree on Payment Endpoint Identifiers to interoperate. A recommended (non-obligatory) convention for the shape of these identifiers is described in [../specs/payment-endpoint-identifier.md](../specs/payment-endpoint-identifier.md).
 
 ### `EndpointData`
 
-Serialized payload served by a payment endpoint (UTF-8 text such as JSON, lnurl, etc.).
+Current implementation wrapper for **Payment Endpoint Payload**: serialized payload served by a Payment Endpoint (UTF-8 text such as JSON, lnurl, etc.).
 
 ```rust
 use paykit_lib::EndpointData;
@@ -82,7 +81,7 @@ let owned: String = data.into_inner();
 
 ### `SupportedPayments`
 
-Collection of public payment entries keyed by method identifiers. Returned by `get_payment_list`.
+Legacy implementation name for a **Payment List** returned by `get_payment_list`: a collection of public Payment Endpoints keyed by Payment Endpoint Identifier.
 
 ```rust,ignore
 use paykit_lib::SupportedPayments;
@@ -100,7 +99,7 @@ if payments.entries.is_empty() {
 }
 ```
 
-Private payments use a versioned `PrivatePaymentsPayload` envelope. The payment entries still use the same `HashMap<MethodId, EndpointData>` layout, but the envelope also carries a UUID-v4 `PaymentReference` for correlation with later protocol artifacts such as receipts:
+Private payments use a versioned `PrivatePaymentsPayload` Private Payment Envelope. The Payment Endpoint entries still use the same `HashMap<MethodId, EndpointData>` implementation layout, but the envelope also carries a UUID-v4 `PaymentReference` for correlation with later protocol artifacts such as Receipts:
 
 ```rust,ignore
 use paykit_lib::{get_private_payments, PrivatePaymentsPayload};
@@ -115,9 +114,9 @@ if let Some(payload) = get_private_payments(&mut link).await? {
 }
 ```
 
-Private payments are latest-state data: if several private payment envelopes are queued, `get_private_payments` returns the newest one and supersedes older private-payment envelopes. Receipt access is event-like: `get_receipt_access` returns all currently available receipt access descriptors in FIFO order.
+Private payments are latest-state data: if several Private Payment Envelopes are queued, `get_private_payments` returns the newest one and supersedes older Private Payment Envelopes. Receipt Access is event-like: `get_receipt_access` returns all currently available Receipt Access descriptors in FIFO order.
 
-The `entries` field is a `HashMap<MethodId, EndpointData>`.
+The `entries` field is currently a `HashMap<MethodId, EndpointData>`: Payment Endpoint Identifier to Payment Endpoint Payload.
 
 ### `PaykitError`
 
@@ -138,8 +137,8 @@ All public APIs return `paykit_lib::Result<T>`, which is an alias for `std::resu
 
 ## Auth & Dependency Injection
 
-- **Public endpoints** use the generic transport traits (`AuthenticatedTransport` / `UnauthenticatedTransportRead`). Instead of hard-coding `PubkySession`, public APIs accept any type implementing these traits. The crate provides adapters so callers can wrap [`pubky::PubkySession`](https://docs.rs/pubky/latest/pubky/struct.PubkySession.html) or provide mocks for tests.
-- **Private endpoints** bypass the transport traits entirely. They use `pubky-noise`'s `PubkyNoiseEncryptor` for Noise-encrypted messaging, which handles both encryption and homeserver I/O. Private payment functions accept an `EncryptedLink` (established via a Noise handshake) and are gated behind the `pubky` feature.
+- **Public Payment Endpoints** use the generic transport traits (`AuthenticatedTransport` / `UnauthenticatedTransportRead`). Instead of hard-coding `PubkySession`, public APIs accept any type implementing these traits. The crate provides adapters so callers can wrap [`pubky::PubkySession`](https://docs.rs/pubky/latest/pubky/struct.PubkySession.html) or provide mocks for tests.
+- **Private Payment Endpoints** bypass the transport traits entirely. They use `pubky-noise`'s `PubkyNoiseEncryptor` for Noise-encrypted messaging, which handles both encryption and homeserver I/O. Private payment functions accept an `EncryptedLink` (established via a Noise handshake) and are gated behind the `pubky` feature.
 - Public reads only require the `UnauthenticatedTransportRead` trait, keeping unauthenticated flows lightweight. Session lifecycle, capability scoping, and key rotation stay outside this crate.
 - The `pubky` feature flag (enabled by default) wires in Pubky adapters under `transport::pubky` and enables the private payment helpers. Disable it if you want to use custom transports for public endpoints only.
 
@@ -208,7 +207,7 @@ async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
 
 #### `get_payment_list`
 
-Resolve the supported methods document for a public key. The result is empty when no endpoints are published.
+Resolve the payee's public Payment List. The result is empty when no Payment Endpoints are published.
 
 ```rust,ignore
 use paykit_lib::{get_payment_list, UnauthenticatedTransportRead, PublicKey};
@@ -228,7 +227,7 @@ async fn demo(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> pay
 
 #### `get_payment_endpoint`
 
-Convenience resolver for a single method. Returns `Ok(None)` when the endpoint is missing or empty.
+Convenience resolver for a single Payment Endpoint Identifier. Returns `Ok(None)` when the Payment Endpoint is missing or empty.
 
 ```rust,ignore
 use paykit_lib::{get_payment_endpoint, MethodId, PublicKey, UnauthenticatedTransportRead};
@@ -246,13 +245,13 @@ async fn inspect(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> 
 
 #### Consistency Note
 
-`get_payment_list` first lists available payment method entries and then fetches each one individually. Because the underlying transport does not support atomic reads, a **race condition** exists: between the directory listing and the individual fetches, endpoints may be added, removed, or modified by the payee. The returned `SupportedPayments` is therefore a **best-effort snapshot**.
+`get_payment_list` first lists available Payment Endpoint entries and then fetches each one individually. Because the underlying transport does not support atomic reads, a **race condition** exists: between the directory listing and the individual fetches, endpoints may be added, removed, or modified by the payee. The returned `SupportedPayments` is therefore a **best-effort Payment List snapshot**.
 
 If a payment execution fails with an error suggesting the endpoint has been consumed or is no longer valid, callers should:
 
 1. Re-fetch the specific endpoint via `get_payment_endpoint`.
-2. Compare the newly retrieved `EndpointData` with the value used in the failed attempt.
-3. If the endpoint data differs, retry the payment with the updated value.
+2. Compare the newly retrieved `EndpointData` (Payment Endpoint Payload) with the value used in the failed attempt.
+3. If the Payment Endpoint Payload differs, retry the payment with the updated value.
 
 ### Private Payment Endpoints (`pubky` feature)
 
@@ -292,11 +291,11 @@ Snapshot bytes include sensitive key material and must be treated as secrets (st
 
 #### Payment endpoint exchange
 - `set_private_payments(link: &mut EncryptedLink, payload: &PrivatePaymentsPayload) -> Result<()>`
-  Serializes the complete private payments envelope to JSON, encrypts it, and sends it via the encrypted link. The caller is responsible for managing the map (adding/removing entries) and passing the full map each time in `payload.entries`. The envelope includes a UUID-v4 `PaymentReference`; `PaymentReference::new_v4()` generates a fresh canonical reference. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient homeserver write failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase homeserver write failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery. Deterministic state, counter, nonce, or encryption errors fail immediately.
+  Serializes the complete Private Payment Envelope to JSON, encrypts it, and sends it via the encrypted link. The caller is responsible for managing the map (adding/removing entries) and passing the full map each time in `payload.entries`. The envelope includes a UUID-v4 `PaymentReference`; `PaymentReference::new_v4()` generates a fresh canonical reference. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient homeserver write failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase homeserver write failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery. Deterministic state, counter, nonce, or encryption errors fail immediately.
 - `get_private_payments(link: &mut EncryptedLink) -> Result<Option<PrivatePaymentsPayload>>`
-  Receives and decrypts currently available private application messages from the remote peer and returns the latest private payments envelope, if one is available. `Ok(None)` means no private payments message is currently available; it is distinct from a payload with an empty `entries` map. Private payments are latest-state data: queued older private-payment envelopes are superseded by the newest one. Other supported message kinds remain buffered for their own typed receivers. Syntactically valid messages with unsupported `kind` values are logged and dropped rather than buffered indefinitely. Malformed private application messages are ignored with diagnostics so they do not prevent later valid messages from being processed.
+  Receives and decrypts currently available private application messages from the remote peer and returns the latest Private Payment Envelope, if one is available. `Ok(None)` means no private payments message is currently available; it is distinct from a payload with an empty `entries` map. Private payments are latest-state data: queued older Private Payment Envelopes are superseded by the newest one. Other supported message kinds remain buffered for their own typed receivers. Syntactically valid messages with unsupported `kind` values are logged and dropped rather than buffered indefinitely. Malformed private application messages are ignored with diagnostics so they do not prevent later valid messages from being processed.
 
-All private application messages share one ordered encrypted stream. Private payments are latest-state data and intentionally collapse older queued private-payment envelopes. Receipts are event-like data; `get_receipt_access` drains and returns all currently available receipt-access messages in FIFO/send order. Unsupported syntactically valid private application message kinds are logged and dropped by the shared dispatcher. The in-memory buffer for supported messages dispatched but not yet consumed by a typed helper is not crash-durable; callers that perform irreversible side effects after receiving event-like messages should persist their own app-level state alongside encrypted-link snapshots/read counters.
+All private application messages share one ordered encrypted stream. Private payments are latest-state data and intentionally collapse older queued Private Payment Envelopes. Receipts are event-like data; `get_receipt_access` drains and returns all currently available Receipt Access messages in FIFO/send order. Unsupported syntactically valid private application message kinds are logged and dropped by the shared dispatcher. The in-memory buffer for supported messages dispatched but not yet consumed by a typed helper is not crash-durable; callers that perform irreversible side effects after receiving event-like messages should persist their own app-level state alongside encrypted-link snapshots/read counters.
 
 #### Payment receipts
 

@@ -22,13 +22,14 @@ each other without side-channel coordination.
 ## 1. Status of this document
 
 This is a *recommended* convention, not a mandatory one. Paykit's routing
-layer does not enforce identifier shape beyond the structural checks performed
-by [`MethodId`](../paykit-lib/src/lib.rs) (ASCII alphanumeric, `-`, `_`, `.`;
+layer does not enforce identifier shape beyond the structural checks currently
+performed by [`MethodId`](../paykit-lib/src/lib.rs), the legacy implementation
+name for Payment Endpoint Identifier (ASCII alphanumeric, `-`, `_`, `.`;
 max 64 characters; no path traversal; the value `private` is reserved).
 
 Identifiers that follow this specification are interoperable with Paykit
 clients that follow the same conventions. Identifiers that do not follow it
-may still be valid `MethodId` values, but carry no cross-implementation
+may still be valid implementation values, but carry no cross-implementation
 guarantees.
 
 A future revision may introduce a formal registry, additional conformance
@@ -43,18 +44,20 @@ only when, they appear in all capitals.
 
 ## 3. Terminology
 
-- **Payment endpoint identifier** (or *identifier*): the three-segment string
+- **Payment Endpoint Identifier** (or *identifier*): the three-segment string
   that names a payment endpoint type, e.g. `btc-bitcoin-p2tr`. In the
-  Paykit library this is represented by the `MethodId` type.
-- **Payload**: the JSON object stored alongside the identifier, describing
-  the specific payee handle for an endpoint of that type.
-- **Asset**, **rail**, **endpoint**: the three positional segments of an
+  current Paykit Library implementation this is represented by the legacy
+  `MethodId` type.
+- **Payment Endpoint Payload**: the JSON object stored alongside the identifier,
+  describing the specific payee handle for an endpoint of that type.
+- **Asset**, **rail**, **endpoint format**: the three positional segments of an
   identifier, defined in Section 5.
 - **Segment**: one positional component of an identifier, delimited by `-`.
 
 Paykit's higher-level terms (*Payment Method*, *Payment Endpoint*,
-*Supported Payments List*) are defined in the top-level [README](../README.md);
-this specification does not redefine them.
+*Payment List*, *Supported Payment List*) are defined in the top-level
+[README](../README.md) and [THESAURUS](../docs/THESAURUS.md); this
+specification does not redefine them.
 
 ## 4. Grammar
 
@@ -223,12 +226,13 @@ of a format emerges on the same rail, prefer a new endpoint segment
 
 ## 9. Relation to `paykit-lib`
 
-In the reference implementation, a payment endpoint identifier is stored
-as a [`MethodId`](../paykit-lib/src/lib.rs). The `MethodId` constructor
-performs structural validation (character set, length, reserved values,
-path-traversal rejection) but does not enforce the three-segment shape
-defined here. Callers that want to verify conformance to this
-specification SHOULD apply an additional check on top of `MethodId::new`.
+In the current reference implementation, a Payment Endpoint Identifier is stored
+as a [`MethodId`](../paykit-lib/src/lib.rs), which is now treated as a legacy
+implementation name. The `MethodId` constructor performs structural validation
+(character set, length, reserved values, path-traversal rejection) but does not
+enforce the three-segment shape defined here. Callers that want to verify
+conformance to this specification SHOULD apply an additional check on top of
+`MethodId::new`.
 
 The reserved identifier `private` is used internally by Paykit for
 private-payment storage paths; it is rejected at `MethodId` construction

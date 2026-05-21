@@ -10,11 +10,11 @@ As a meta payment protocol, Paykit also serves as an ideal layer for handling me
 
 # Paykit protocol
 
-Peers and applications that support Paykit may share or retrieve necessary payment information by accessing a compatible **routing network**. This network facilitates the storage and retrieval of data associated with public keys. The intended solution is to utilize Pubky’s PKARR method with Mainline DHT for discovery and routing, and data storage in Pubky homeservers.
+Peers and applications that support Paykit share or retrieve payment information through **Pubky Routing**. Pubky Routing uses Pubky public-key addressing, Pkarr discovery, and homeserver storage.
 
-## Routing network
+## Pubky Routing
 
-Paykit requires a network to lookup **Supported Payments List** in order to retrieve and share data. Therefore the minimum requirements to the network are:
+Paykit uses Pubky Routing to look up a payee's **Payment List** and retrieve or share payment data. Pubky Routing provides:
 
 * Ability to look up a node on a network based on its public key
 * Data stored on the node under certain path is guaranteed to be available by URL
@@ -26,23 +26,27 @@ Paykit requires a network to lookup **Supported Payments List** in order to retr
 
 ### Pubky Core protocol
 
-DHT’s are optimal routing mechanisms for key based methods like Paykit. Paykit currently utilizes the Mainline DHT via use of [**Pubky Core**](https://github.com/pubky/pubky-core) protocol but theoretically any network could be used that satisfies the requirements above.
+DHT’s are optimal routing mechanisms for key based methods like Paykit. Paykit currently utilizes the Mainline DHT via use of [**Pubky Core**](https://github.com/pubky/pubky-core) protocol.
 
-## Supported Payments List, Payment Method and Payment Endpoint
+## Payment List, Supported Payment List, Payment Method, and Payment Endpoint
 
 The examples of following concepts are provided in the Appendix at the end of this document. For the reasons explained below they are for illustrative purposes only.
 
-### Supported Payments List
+### Payment List
 
-Read request to **Paykit Routing Network** with public key returns a **Supported Payments List** stored at **default public path**. This is an array of objects with one key being “**method**” whose value is URL to **Payment Method** and another key is **“endpoint”** with value being **Payment Endpoint** URL.
+A **Payment List** is the list of **Payment Endpoints** published or shared by a payee. A public read through Pubky Routing with a payee public key returns the payee's public Payment List from the default public path.
+
+### Supported Payment List
+
+A **Supported Payment List** is the payer-side intersection between the payer's supported payment capabilities/preferences and the payee's Payment List. It is derived by the payer; it is not the raw list published by the payee.
 
 ### Payment Method
 
-The term "**Payment Method**" refers to the general concept of the medium through which a payment can be executed.
+The term "**Payment Method**" refers to a higher-level human/domain concept for how value can be transferred. A Payment Method can map to one or more **Payment Endpoint Identifiers**.
 
 ### Payment Endpoint
 
-**Payment Endpoint** corresponds to the specific payee owned credentials/reference on which they can receive corresponding payments.
+A **Payment Endpoint** is a whole payee-owned entry in a Payment List. It consists of a **Payment Endpoint Identifier** and a **Payment Endpoint Payload**. The payload contains the actual receiving data such as an address, invoice, offer, IBAN, or tag.
 
 ### Paykit Method Implementation Proposals
 
@@ -51,69 +55,69 @@ Given that both the payer and payee may have preferences regarding payment media
 
 An initial draft convention is available in [specs/payment-endpoint-identifier.md](specs/payment-endpoint-identifier.md). It is recommended but not obligatory, and is intended as the first such proposal rather than a final format.
 
-## Payment Method Lists
+## Payment Lists
 
-Paykit can support virtually any payment method as long as payer and payee can mutually describe and identify it. Paykit users create the **Supported Payments Lists** \- minimum necessary data related to their supported payment methods and publish them as records on **Paykit routing** network.
+Paykit can support virtually any Payment Method as long as payer and payee can mutually describe and identify it. Paykit users create **Payment Lists**: payee-published or payee-shared lists of Payment Endpoints.
 
-### Public Payment Method Lists
+### Public Payment Lists
 
 Paykit allows you to receive payments from anyone who is aware of the payee's public key.
 
 #### Flow
 
-1. The payee creates **Supported Payments List, Methods and Endpoints**
-2. The payee stores created data under public location on Paykit Routing Network associated with their key pair
+1. The payee creates a **Payment List** containing Payment Endpoints
+2. The payee stores the Payment List under a public location on Pubky Routing associated with their key pair
 3. The payee publicly shares public key
 
 #### NOTE:
 
 It is important to understand that this data could be logged and monitored by all peers that know of this pubkey, and thus some methods, like bitcoin addresses, could expose correlations and payment information of peers in a suboptimal or undesirable way.
 
-### Private Payment Method Lists
+### Private Payment Envelopes
 
-Paykit can exchange personalized, dedicated payment methods with known peers over an end-to-end encrypted Pubky Noise link. Private payments are:
+Paykit can exchange personalized, dedicated payment data with known peers over an end-to-end encrypted Pubky Noise link. A **Private Payment Envelope** is the canonical known-peer private payment data object. Private Payment Envelopes are:
 
 * Encrypted before they are written to homeserver storage
 * Exchanged only with the counterparty that completed the encrypted-link handshake
-* Stored as latest-state envelopes: the newest private-payment envelope supersedes older queued private-payment envelopes
+* Stored as latest-state envelopes: the newest Private Payment Envelope supersedes older queued Private Payment Envelopes
 
 #### Flow
 
 1. The peers establish an encrypted link with `initiate_encrypted_link` / `accept_encrypted_link` and drive it with `advance_handshake`.
-2. The payee creates a complete private-payments envelope containing a UUID-v4 `PaymentReference` and the currently supported private payment endpoints.
+2. The payee creates a complete Private Payment Envelope containing a UUID-v4 `PaymentReference` and the currently supported private Payment Endpoints.
 3. The payee sends the envelope with `set_private_payments`. Pubky Noise handles encryption, derived private storage paths, file slots, and counterparty retrieval.
 4. The payer calls `get_private_payments` on the same encrypted link and receives the newest valid envelope, if one is available.
 
 ## Payment Method Selection
 
-Paykit attempts to match the supported payment methods of two peers by comparing payers supported payments against payees **Payment Method Lists** to find a match. If multiple matches are detected, paykit uses the payer’s **Payment Selection Logic** settings to prioritize the order of execution. If a user has not customized their **Payment Selection Logic**, paykit will use the **Default Payment Selection Logic**
+Paykit attempts to match the supported Payment Methods of two peers by comparing the payer's capabilities/preferences against the payee's Payment List to produce a **Supported Payment List**. If multiple matches are detected, paykit uses the payer’s **Payment Selection Logic** settings to prioritize the order of execution. If a user has not customized their **Payment Selection Logic**, paykit will use the **Default Payment Selection Logic**
 
 ### Default Payment Selection Logic
 
-The “known peer” relationship means that there was previous out-of-band communication between payer and payee, during which public keys were exchanged. The payee can establish a private encrypted link with that peer and send a personalized private-payments envelope over the link. If no encrypted link or private update is available, payment should be treated as a public-list flow with the payee's threat model adjusted accordingly.
+The “known peer” relationship means that there was previous out-of-band communication between payer and payee, during which public keys were exchanged and an encrypted link was established. The payee can send a Private Payment Envelope over the link. If no encrypted link or private update is available, payment should be treated as a public-list flow with the payee's threat model adjusted accordingly.
 
 #### Payee is a known peer
 
 1. The payer establishes or restores the encrypted link with the payee
-2. The payer receives the payee’s latest private-payments envelope
-3. The payer filters out supported payment methods
-4. The payer selects the first payment method according to the payer’s own personal preferences
+2. The payer receives the payee’s latest Private Payment Envelope
+3. The payer derives a Supported Payment List
+4. The payer selects the first Payment Endpoint according to the payer’s own personal preferences
 5. The payer attempts to execute a payment
 6. In case of failure \- repeats from step 4 until the list from step 3 is empty.
 7. In case all payments failed, the payer can notify the payee over an available secure communication channel
 
 #### Payee is not a known peer
 
-1. The payer resolves payee’s **Public Payment Method List** using their public key
-2. The filters out supported payment methods
-3. The payer selects the first payment method according to payers own personal preference
-4. The payer retrieves data from the corresponding payment endpoint
+1. The payer resolves the payee’s **Public Payment List** using their public key
+2. The payer derives a Supported Payment List
+3. The payer selects the first Payment Endpoint according to payer's own personal preference
+4. The payer retrieves the corresponding Payment Endpoint Payload
 5. The payer attempts to execute a payment
 6. In case of failure \- repeats from step 3 until the list from step 2 is empty.
 
 ## Payment Method Interactivity
 
-Both Private & Public **Payment Method Lists** can contain virtually any payment data, regardless of the interactivity requirements to either payer or payee on any level. In other words, paykit peers implement hooks for uni- and bi- directional communication.
+Public Payment Lists and Private Payment Envelopes can contain virtually any payment data, regardless of the interactivity requirements to either payer or payee on any level. In other words, paykit peers implement hooks for uni- and bi-directional communication.
 
 ### Interactive Payments
 
@@ -123,9 +127,9 @@ For example, peers may include URLs that direct the payer to an appropriate serv
 
 For example, any static blockchain address, lightning network invoice, address or offer, email address, cashtag etc.
 
-# Paykit library
+# Paykit Library
 
-A stateless toolkit featuring developer-friendly APIs and language bindings to engage with Paykit’s Payment Method Lists. This kit is intended to serve as a new dependency in the existing logic of applications and services responsible for processing of payments.
+A stateless toolkit featuring developer-friendly APIs and language bindings to engage with Paykit’s Payment Lists, Payment Endpoints, Private Payment Envelopes, Receipts, and Receipt Access. This library is intended to serve as a new dependency in the existing logic of applications and services responsible for processing of payments.
 
 For release history and upgrade notes see [CHANGELOG.md](CHANGELOG.md).
 
@@ -182,39 +186,39 @@ Mobile bindings are generated via [UniFFI](https://mozilla.github.io/uniffi-rs/)
 
 ### Public Payment Data
 
-The APIs facilitate seamless interaction with public payment data using Paykit’s Routing Network which ensures efficient communication between payees and payers.
+The APIs facilitate seamless interaction with public payment data using Pubky Routing, which ensures efficient communication between payees and payers.
 
-#### Retrieve public Supported Payments List for a given payee's public key
+#### Retrieve public Payment List for a given payee's public key
 
-Allow users to fetch the list of payment methods that are publicly available for a specific payee, identified by their public key.
+Allow users to fetch the list of Payment Endpoints that are publicly available for a specific payee, identified by their public key.
 
-#### Retrieve Payment Endpoint for a payee's public key and payment method
+#### Retrieve Payment Endpoint for a payee's public key and Payment Endpoint Identifier
 
-Enable users to access detailed payment information associated with a particular payment method for a given payee's public key.
+Enable users to access the Payment Endpoint associated with a particular Payment Endpoint Identifier for a given payee's public key.
 
-#### Store Payment Endpoint for a specific Payment Method and make it publicly accessible
+#### Store Payment Endpoint for a specific Payment Endpoint Identifier and make it publicly accessible
 
-Allow users to store payment data for a specific payment method, making it publicly accessible.
+Allow users to store a Payment Endpoint for a specific Payment Endpoint Identifier, making it publicly accessible.
 
 ### Private Payment Data
 
-These APIs facilitate secure interaction with private payment data between known peers over an established encrypted link. Private payment data is encrypted by `pubky-noise` and exchanged as complete latest-state envelopes: callers manage the full map of private payment entries and pass the complete map each time they call `set_private_payments`.
+These APIs facilitate secure interaction with private payment data between known peers over an established encrypted link. Private payment data is encrypted by `pubky-noise` and exchanged as complete latest-state Private Payment Envelopes: callers manage the full map of private Payment Endpoints and pass the complete map each time they call `set_private_payments`.
 
 #### Establish an encrypted link with a counterparty
 
 Allows users to initiate or accept a Pubky Noise handshake, advance it until complete, serialize handshake/link state for durable storage, and restore it after an app restart.
 
-#### Send a private payment envelope
+#### Send a Private Payment Envelope
 
-Allows users to send a complete private-payments envelope containing a UUID-v4 `PaymentReference` and a map of `MethodId` to UTF-8 endpoint data. The encrypted plaintext must fit within one pubky-noise message.
+Allows users to send a complete Private Payment Envelope containing a UUID-v4 `PaymentReference` and a map of Payment Endpoint Identifiers to Payment Endpoint Payloads. The encrypted plaintext must fit within one pubky-noise message.
 
 #### Receive private payment updates
 
-Allows users to receive the newest valid private-payments envelope from the encrypted link. Private payments are latest-state data: older queued private-payment envelopes are superseded by the newest valid envelope.
+Allows users to receive the newest valid Private Payment Envelope from the encrypted link. Private payments are latest-state data: older queued Private Payment Envelopes are superseded by the newest valid envelope.
 
-#### Issue and receive encrypted receipts
+#### Issue and receive Receipts
 
-Allows the receiver of a private payment to store an encrypted receipt on their homeserver and send a `ReceiptAccess` descriptor to the counterparty over the encrypted link. Receipt access is event-like/FIFO: every currently available access descriptor is returned in send order by `get_receipt_access` and is not collapsed like private-payment state.
+Allows the receiver of a private payment to store a Receipt on their homeserver and send a `ReceiptAccess` descriptor to the counterparty over the encrypted link. Receipt Access is event-like/FIFO: every currently available access descriptor is returned in send order by `get_receipt_access` and is not collapsed like private-payment state.
 
 Receipt decryption keys are sensitive. Callers must not log raw receipt keys and should store them only in platform secure storage. Receipt payloads are stored at deterministic homeserver locations derived from `PaymentReference`; reissuing the same reference overwrites the same receipt payload and older access descriptors may stop decrypting.
 
@@ -238,7 +242,7 @@ The **Paykit Daemon** offers the following features:
 
 #### To public key
 
-Allows sending payments to a public key with automatic fallback to alternative payment methods based on the default payment selection logic assuming the location of Supported Payment List under conventional path.
+Allows sending payments to a public key with automatic fallback to alternative Payment Endpoints based on the default payment selection logic, assuming the Payment List is stored under the conventional path.
 
 #### To URL
 
@@ -254,11 +258,11 @@ Both public and private receiving have an option of automatically recycling paym
 
 #### Receive on public key
 
-Enables publicly receiving payments using multiple selected payment endpoints via one public key. From anyone, with or without specifying amount and / or ID shared with a payer. Using conventional path for Supported Payments List.
+Enables publicly receiving payments using multiple selected Payment Endpoints via one public key: from anyone, with or without specifying amount and/or ID shared with a payer. Uses the conventional path for the Payment List.
 
 #### Receive on URL
 
-Enables receiving payments for optionally specified amount using given multiple selected payment endpoints via one URL using private path and encryption key for the stored content returned as a part of the URL pointing to the Supported Payment List.
+Enables receiving payments for optionally specified amount using a URL that points to a Payment List stored at a private path with the encryption key for the stored content returned as part of the URL.
 
 ### Accounting
 
@@ -343,7 +347,7 @@ The daemon is expected to be run as a standalone background process with CLI for
 
 Examples of **Payment Methods** can be “bitcoin” \- referring to bitcoin onchain payments, “lighting” \- referring to bitcoin lightning network payment, “SEPA” referring to SEPA network bank transfer. Correspondingly **Payment Endpoints** will be bitcoin onchain address, bolt11 invoice or bolt12 offer, IBAN with optional BIC code.
 
-#### Supported Payments List
+#### Payment List
 
 ```
 [
