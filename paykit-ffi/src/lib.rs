@@ -13,8 +13,9 @@ use tokio::sync::Mutex as TokioMutex;
 
 use paykit_lib::{
     EncryptedLink, EncryptedLinkHandshake, EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot,
-    EndpointData, HandshakeProgress, MethodId, PaymentReference, PrivatePaymentsPayload,
-    PubkyAuthenticatedTransport, PubkyUnauthenticatedTransport,
+    EndpointData, HandshakeProgress, IssuedReceipt, MethodId, PaymentReference,
+    PrivatePaymentsPayload, PubkyAuthenticatedTransport, PubkyUnauthenticatedTransport, Receipt,
+    ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
 };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +102,71 @@ pub struct FfiPaymentEntry {
 pub struct FfiPrivatePaymentsPayload {
     pub reference: String,
     pub entries: Vec<FfiPaymentEntry>,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct FfiReceiptMetadataEntry {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct FfiReceiptDraft {
+    pub reference: String,
+    pub payment_method: Option<String>,
+    pub amount: Option<String>,
+    pub currency: Option<String>,
+    pub metadata: Vec<FfiReceiptMetadataEntry>,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct FfiReceipt {
+    pub reference: String,
+    pub recipient_public_key: String,
+    pub payment_method: Option<String>,
+    pub amount: Option<String>,
+    pub currency: Option<String>,
+    pub metadata: Vec<FfiReceiptMetadataEntry>,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct FfiReceiptAccess {
+    pub version: u32,
+    pub reference: String,
+    pub location: String,
+    /// Sensitive raw receipt decryption key material. Do not log.
+    pub key: String,
+    pub algorithm: String,
+}
+
+impl std::fmt::Debug for FfiReceiptAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FfiReceiptAccess")
+            .field("version", &self.version)
+            .field("reference", &self.reference)
+            .field("location", &self.location)
+            .field("key", &"[redacted]")
+            .field("algorithm", &self.algorithm)
+            .finish()
+    }
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct FfiIssuedReceipt {
+    pub reference: String,
+    pub location: String,
+    /// Sensitive raw receipt decryption key material. Do not log.
+    pub key: String,
+}
+
+impl std::fmt::Debug for FfiIssuedReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FfiIssuedReceipt")
+            .field("reference", &self.reference)
+            .field("location", &self.location)
+            .field("key", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
@@ -277,6 +343,65 @@ fn private_payload_to_ffi(payload: PrivatePaymentsPayload) -> FfiPrivatePayments
     FfiPrivatePaymentsPayload {
         reference: payload.reference.as_str().to_string(),
         entries: entries_map_to_entries(payload.entries),
+    }
+}
+
+fn receipt_metadata_to_map(metadata: Vec<FfiReceiptMetadataEntry>) -> HashMap<String, String> {
+    metadata
+        .into_iter()
+        .map(|entry| (entry.key, entry.value))
+        .collect()
+}
+
+fn receipt_metadata_to_entries(metadata: HashMap<String, String>) -> Vec<FfiReceiptMetadataEntry> {
+    metadata
+        .into_iter()
+        .map(|(key, value)| FfiReceiptMetadataEntry { key, value })
+        .collect()
+}
+
+fn optional_method_to_lib(method: Option<String>) -> Result<Option<MethodId>, PaykitFfiError> {
+    method.map(MethodId::new).transpose().map_err(Into::into)
+}
+
+fn receipt_draft_to_lib(draft: FfiReceiptDraft) -> Result<ReceiptDraft, PaykitFfiError> {
+    Ok(ReceiptDraft {
+        reference: PaymentReference::new(draft.reference)?,
+        payment_method: optional_method_to_lib(draft.payment_method)?,
+        amount: draft.amount,
+        currency: draft.currency,
+        metadata: receipt_metadata_to_map(draft.metadata),
+    })
+}
+
+fn receipt_to_ffi(receipt: Receipt) -> FfiReceipt {
+    FfiReceipt {
+        reference: receipt.reference.as_str().to_string(),
+        recipient_public_key: receipt.recipient_public_key.to_string(),
+        payment_method: receipt
+            .payment_method
+            .map(|method| method.as_str().to_string()),
+        amount: receipt.amount,
+        currency: receipt.currency,
+        metadata: receipt_metadata_to_entries(receipt.metadata),
+    }
+}
+
+fn receipt_access_to_ffi(access: ReceiptAccess) -> FfiReceiptAccess {
+    FfiReceiptAccess {
+        version: u32::from(access.version),
+        reference: access.reference.as_str().to_string(),
+        location: access.location,
+        key: access.key.as_str().to_string(),
+        algorithm: access.algorithm,
+    }
+}
+
+fn issued_receipt_to_ffi(receipt: IssuedReceipt) -> FfiIssuedReceipt {
+    FfiIssuedReceipt {
+        reference: receipt.reference.as_str().to_string(),
+        location: receipt.location,
+        key: receipt.key.as_str().to_string(),
     }
 }
 
@@ -857,6 +982,78 @@ pub async fn paykit_get_private_payments(
     .unwrap_or_else(|e| Err(runtime_err(e)))
 }
 
+/// Store an encrypted receipt and send receipt access over an established link.
+///
+/// The returned `key` is sensitive decryption material. Do not log it or store it
+/// outside platform secure storage.
+#[uniffi::export]
+pub async fn paykit_issue_receipt(
+    link_id: String,
+    draft: FfiReceiptDraft,
+) -> Result<FfiIssuedReceipt, PaykitFfiError> {
+    let rt = ensure_runtime();
+    rt.spawn(async move {
+        let link_id = parse_handle_id(&link_id, "link")?;
+        let draft = receipt_draft_to_lib(draft)?;
+        let session = get_session().await?;
+        let handle = get_link_handle(link_id).await?;
+        let mut guard = handle.lock().await;
+        let link = guard.as_mut().ok_or_else(|| PaykitFfiError::Validation {
+            reason: format!("Encrypted-link handle is closed: {link_id}"),
+        })?;
+        let receipt = paykit_lib::issue_receipt(&session, link, draft).await?;
+        Ok(issued_receipt_to_ffi(receipt))
+    })
+    .await
+    .unwrap_or_else(|e| Err(runtime_err(e)))
+}
+
+/// Receive all currently available receipt access descriptors in FIFO order.
+///
+/// Returns an empty vector when no receipt access messages are available. Each
+/// returned `key` is sensitive decryption material. Do not log it.
+#[uniffi::export]
+pub async fn paykit_get_receipt_access(
+    link_id: String,
+) -> Result<Vec<FfiReceiptAccess>, PaykitFfiError> {
+    let rt = ensure_runtime();
+    rt.spawn(async move {
+        let link_id = parse_handle_id(&link_id, "link")?;
+        let handle = get_link_handle(link_id).await?;
+        let mut guard = handle.lock().await;
+        let link = guard.as_mut().ok_or_else(|| PaykitFfiError::Validation {
+            reason: format!("Encrypted-link handle is closed: {link_id}"),
+        })?;
+        let access = paykit_lib::get_receipt_access(link).await?;
+        Ok(access.into_iter().map(receipt_access_to_ffi).collect())
+    })
+    .await
+    .unwrap_or_else(|e| Err(runtime_err(e)))
+}
+
+/// Return the canonical homeserver receipt location for a payment reference.
+#[uniffi::export]
+pub fn paykit_receipt_location(reference: String) -> Result<String, PaykitFfiError> {
+    let reference = PaymentReference::new(reference)?;
+    Ok(ReceiptAccess::location_for(&reference))
+}
+
+/// Decrypt an encrypted receipt payload fetched from the homeserver.
+///
+/// `key` and `location` should come from a `FfiReceiptAccess` message. The key is
+/// sensitive; do not log it. Decryption authenticates `location` as associated
+/// data and rejects plaintext whose reference does not match that location.
+#[uniffi::export]
+pub fn paykit_decrypt_receipt(
+    encrypted_json: String,
+    key: String,
+    location: String,
+) -> Result<FfiReceipt, PaykitFfiError> {
+    let key = ReceiptDecryptionKey::new(key)?;
+    let receipt = paykit_lib::decrypt_receipt(&encrypted_json, &key, &location)?;
+    Ok(receipt_to_ffi(receipt))
+}
+
 /// Serialize an in-progress handshake snapshot for durable storage.
 #[uniffi::export]
 pub async fn paykit_serialize_encrypted_link_handshake(
@@ -1097,4 +1294,30 @@ pub async fn paykit_force_sign_out() {
 fn keypair_from_hex(hex_str: &str) -> Result<Keypair, PaykitFfiError> {
     let secret = parse_secret_key(hex_str)?;
     Ok(Keypair::from_secret(&secret))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_receipt_key_debug_is_redacted() {
+        let key = "test-secret-key-material".to_string();
+        let access = FfiReceiptAccess {
+            version: 1,
+            reference: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            location: "/pub/paykit/v0/private/receipts/550e8400-e29b-41d4-a716-446655440000"
+                .to_string(),
+            key: key.clone(),
+            algorithm: "XChaCha20Poly1305".to_string(),
+        };
+        let issued = FfiIssuedReceipt {
+            reference: access.reference.clone(),
+            location: access.location.clone(),
+            key: key.clone(),
+        };
+
+        assert!(!format!("{access:?}").contains(&key));
+        assert!(!format!("{issued:?}").contains(&key));
+    }
 }
