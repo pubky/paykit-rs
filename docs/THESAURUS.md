@@ -107,13 +107,13 @@
 ## Private Payments and Receipts
 
 ### Private Payment Envelope
-- **Definition**: The canonical known-peer private payment data object exchanged over an encrypted link; it can contain Payment Endpoints plus protocol fields such as Payment Reference and freshness/versioning data.
+- **Definition**: The latest-state private payment disclosure sent to a Known Peer for a specific Payment Reference. It contains the private Payment Endpoints the payee is willing to share for that payment/request. Latest-wins semantics apply per Known Peer; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
 - **NOT**: A public Payment List, and not merely a private version of the list if the object includes more than endpoints.
 - **Synonyms to AVOID**: Private Payment List, Private Payment Method List, private payments payload when naming the domain concept
 - **Related terms**: Known Peer, Payment Endpoint, Payment Reference
 
 ### Payment Reference
-- **Definition**: A per-payment or per-request correlation identifier.
+- **Definition**: A per-payment or per-request correlation identifier. In private payment flows, the Private Payment Envelope carries the Payment Reference because the envelope represents the latest private payment disclosure for that payment/request.
 - **NOT**: A stable relationship identifier for a known peer.
 - **Synonyms to AVOID**: peer reference, relationship reference
 - **Related terms**: Private Payment Envelope, Receipt
