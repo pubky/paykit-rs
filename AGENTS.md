@@ -4,8 +4,8 @@
 - Workspace root hosts `Cargo.toml` that pins resolver `2` and registers members.
 - Core library lives in `paykit-lib/` with its own `Cargo.toml` and `src/lib.rs`; treat this crate as the Paykit Library implementation over Pubky Routing.
 - `docs/THESAURUS.md` is the authority for Paykit domain language. Use it before naming public APIs, docs sections, files, types, fields, endpoints, events, or components.
-- Pubky storage helpers live in `paykit-lib/src/transport/pubky/mod.rs`; Paykit Library supports Pubky as the only transport.
-- `transport/pubky/mod.rs` exports `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) and `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) to keep all Pubky paths consistent—reuse them instead of hard-coding strings.
+- Pubky Routing helpers live in `paykit-lib/src/pubky_routing/`; Paykit Library supports Pubky as the only transport.
+- `pubky_routing/paths.rs` defines `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) and `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) to keep all Pubky paths consistent—reuse typed path helpers instead of hard-coding strings.
 
 ## Build, Test, and Development Commands
 - `cargo fmt` — run rustfmt on every crate; required before submitting changes.

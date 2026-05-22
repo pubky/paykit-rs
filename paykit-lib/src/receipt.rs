@@ -8,8 +8,7 @@ use chacha20poly1305::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    transport, PaykitError, PaymentEndpointIdentifier, PaymentReference, PrivateMessageKind,
-    PublicKey, Result,
+    PaykitError, PaymentEndpointIdentifier, PaymentReference, PrivateMessageKind, PublicKey, Result,
 };
 
 /// Caller-provided receipt fields. [`crate::issue_receipt`] fills in the recipient
@@ -179,11 +178,10 @@ struct ReceiptAccessWire {
 impl ReceiptAccess {
     /// Return the canonical homeserver storage location for a receipt reference.
     pub fn location_for(reference: &PaymentReference) -> String {
-        format!(
-            "{}private/receipts/{}",
-            transport::pubky::PAYKIT_PATH_PREFIX,
-            reference.as_str()
-        )
+        crate::pubky_routing::paths::ReceiptPayloadPath::local(reference)
+            .as_path()
+            .as_str()
+            .to_string()
     }
 
     /// Validate that this access descriptor points at the canonical location for

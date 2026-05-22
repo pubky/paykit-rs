@@ -11,14 +11,14 @@ pub use pubky_noise;
 use serde::{Deserialize, Serialize};
 
 mod private_message_dispatch;
+mod pubky_routing;
 mod receipt;
-mod transport;
 
+pub use pubky_routing::paths::{PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX};
 pub use receipt::{
     decrypt_receipt, IssuedReceipt, Receipt, ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
 };
 use receipt::{parse_receipt_access_json, serialize_receipt_access_json};
-pub use transport::pubky::{PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX};
 
 /// Common result alias for Paykit operations.
 pub type Result<T> = std::result::Result<T, PaykitError>;
@@ -791,7 +791,7 @@ fn compute_private_payment_paths(
         local_secret_key,
         remote_pubkey,
         PAYKIT_PATH_DOMAIN,
-        transport::pubky::PAYKIT_PRIVATE_PATH_PREFIX,
+        pubky_routing::paths::PAYKIT_PRIVATE_PATH_PREFIX,
     )
 }
 
@@ -959,7 +959,8 @@ pub async fn set_payment_endpoint(
     data: PaymentEndpointPayload,
 ) -> Result<()> {
     debug!("storing payment endpoint");
-    transport::pubky::upsert_payment_endpoint(client, &method, &data)
+    pubky_routing::public_storage::for_session(client)
+        .set_payment_endpoint(&method, &data)
         .await
         .map_err(|err| map_error("set_payment_endpoint", err))
 }
@@ -1081,7 +1082,6 @@ pub async fn issue_receipt(
 ) -> Result<IssuedReceipt> {
     debug!("issuing encrypted receipt");
     let reference = draft.reference;
-    let location = ReceiptAccess::location_for(&reference);
     let key = ReceiptDecryptionKey::generate();
     let receipt = Receipt {
         reference: reference.clone(),
@@ -1095,14 +1095,9 @@ pub async fn issue_receipt(
         .encrypt(&key)
         .map_err(|err| map_error("issue_receipt", err))?;
 
-    session
-        .storage()
-        .put(location.clone(), encrypted)
-        .await
-        .map_err(|err| PaykitError::Transport {
-            context: format!("failed to store encrypted receipt at {location}"),
-            source: err.into(),
-        })?;
+    let location = pubky_routing::public_storage::for_session(session)
+        .store_encrypted_receipt(&reference, encrypted)
+        .await?;
 
     let access = ReceiptAccess {
         version: 1,
@@ -1132,7 +1127,8 @@ pub async fn remove_payment_endpoint(
     method: PaymentEndpointIdentifier,
 ) -> Result<()> {
     debug!("removing payment endpoint");
-    transport::pubky::remove_payment_endpoint(client, &method)
+    pubky_routing::public_storage::for_session(client)
+        .remove_payment_endpoint(&method)
         .await
         .map_err(|err| map_error("remove_payment_endpoint", err))
 }
@@ -1164,7 +1160,8 @@ pub async fn remove_payment_endpoint(
 #[instrument(skip(reader))]
 pub async fn get_payment_list(reader: &PublicStorage, payee: &PublicKey) -> Result<PaymentList> {
     debug!("fetching payment list");
-    let result = transport::pubky::fetch_payment_list(reader, payee)
+    let result = pubky_routing::public_storage::for_reader(reader)
+        .get_payment_list(payee)
         .await
         .map_err(|err| map_error("get_payment_list", err))?;
     debug!(count = result.endpoints.len(), "payment list retrieved");
@@ -1335,7 +1332,8 @@ pub async fn get_payment_endpoint(
     method: &PaymentEndpointIdentifier,
 ) -> Result<Option<PaymentEndpointPayload>> {
     debug!("fetching payment endpoint");
-    let result = transport::pubky::fetch_payment_endpoint(reader, payee, method)
+    let result = pubky_routing::public_storage::for_reader(reader)
+        .get_payment_endpoint(payee, method)
         .await
         .map_err(|err| map_error("get_payment_endpoint", err))?;
     debug!(found = result.is_some(), "payment endpoint lookup complete");
