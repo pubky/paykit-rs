@@ -21,8 +21,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   envelopes from event-like receipt-access messages. `get_private_payments`
   collapses pending private-payment messages to the latest message by kind,
   then parses that selected message. If that latest envelope is malformed,
-  it returns InvalidData rather than falling back to an older valid envelope.
-  While `get_receipt_access` returns all currently available receipt access
+  it returns InvalidData rather than falling back to an older valid envelope,
+  while `get_receipt_access` returns all currently available receipt access
   descriptors as a FIFO vector.
 - Unsupported syntactically valid private application message kinds are logged
   and dropped rather than buffered indefinitely.
