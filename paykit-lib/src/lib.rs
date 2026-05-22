@@ -1,8 +1,6 @@
 #![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
-#[cfg(feature = "pubky")]
-use std::collections::VecDeque;
 #[cfg(not(feature = "pubky"))]
 use std::fmt;
 
@@ -49,6 +47,8 @@ impl std::str::FromStr for PublicKey {
     }
 }
 
+#[cfg(feature = "pubky")]
+mod private_message_dispatch;
 mod transport;
 
 pub use transport::{AuthenticatedTransport, UnauthenticatedTransportRead};
@@ -334,8 +334,12 @@ impl PrivateMessageKind {
         }
     }
 
-    fn is_supported(kind: &str) -> bool {
-        kind == Self::PrivatePaymentEnvelope.as_str() || kind == Self::ReceiptAccess.as_str()
+    fn from_wire_name(kind: &str) -> Option<Self> {
+        match kind {
+            "paykit.private_payment_envelope" => Some(Self::PrivatePaymentEnvelope),
+            "paykit.receipt_access" => Some(Self::ReceiptAccess),
+            _ => None,
+        }
     }
 }
 
@@ -415,20 +419,6 @@ impl PrivatePaymentEnvelope {
     /// Look up a Payment Endpoint by Payment Endpoint Identifier.
     pub fn get(&self, identifier: &PaymentEndpointIdentifier) -> Option<&PaymentEndpointPayload> {
         self.endpoints.get(identifier)
-    }
-}
-
-#[cfg(feature = "pubky")]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BufferedPrivateMessage {
-    kind: String,
-    plaintext: String,
-}
-
-#[cfg(feature = "pubky")]
-impl BufferedPrivateMessage {
-    fn is_kind(&self, kind: PrivateMessageKind) -> bool {
-        self.kind == kind.as_str()
     }
 }
 
@@ -631,7 +621,7 @@ pub struct EncryptedLink {
     /// This prevents a typed receiver such as [`get_private_payment_envelope`] from
     /// discarding unrelated supported message kinds (for example receipt-access
     /// messages) after the underlying Noise read counter has advanced.
-    pending_private_messages: VecDeque<BufferedPrivateMessage>,
+    private_messages: private_message_dispatch::PrivateMessageInbox,
 }
 
 #[cfg(feature = "pubky")]
@@ -1096,31 +1086,6 @@ fn serialize_private_payment_envelope_json(payload: &PrivatePaymentEnvelope) -> 
 }
 
 #[cfg(feature = "pubky")]
-fn decode_private_message(
-    raw: &[u8; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN],
-) -> Result<BufferedPrivateMessage> {
-    // Trim trailing zero-padding added by pubky-noise's fixed-size buffers.
-    // Paykit application messages are JSON, so trailing NUL bytes are not valid
-    // payload content.
-    let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let plaintext = std::str::from_utf8(&raw[..end]).map_err(|err| PaykitError::InvalidData {
-        context: format!("private message plaintext is not valid UTF-8: {err}"),
-        source: Some(err.into()),
-    })?;
-
-    let header: PrivateMessageHeader =
-        serde_json::from_str(plaintext).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to parse private message header JSON: {err}"),
-            source: Some(err.into()),
-        })?;
-
-    Ok(BufferedPrivateMessage {
-        kind: header.kind,
-        plaintext: plaintext.to_owned(),
-    })
-}
-
-#[cfg(feature = "pubky")]
 #[derive(Serialize, Deserialize)]
 struct ReceiptWire {
     version: u8,
@@ -1464,107 +1429,6 @@ fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
             source: Some(err.into()),
         })?;
     ReceiptAccess::try_from(wire)
-}
-
-#[cfg(feature = "pubky")]
-async fn receive_private_messages(link: &mut EncryptedLink) -> Result<usize> {
-    let mut received = 0usize;
-    let mut malformed = 0usize;
-    let mut unknown = 0usize;
-
-    loop {
-        let messages =
-            link.encryptor
-                .receive_message()
-                .await
-                .map_err(|err| PaykitError::Transport {
-                    context: format!("failed to receive private messages: {err:?}"),
-                    source: anyhow::anyhow!("pubky-noise receive_message failed: {err:?}"),
-                })?;
-
-        if messages.is_empty() {
-            break;
-        }
-
-        received += messages.len();
-        for raw in messages {
-            match decode_private_message(&raw) {
-                Ok(message) if PrivateMessageKind::is_supported(&message.kind) => {
-                    link.pending_private_messages.push_back(message)
-                }
-                Ok(message) => {
-                    unknown += 1;
-                    warn!(
-                        kind = %message.kind,
-                        "dropping unsupported private application message kind"
-                    );
-                }
-                Err(err) => {
-                    malformed += 1;
-                    warn!(
-                        error = ?err,
-                        "dropping malformed private application message"
-                    );
-                }
-            }
-        }
-    }
-
-    if malformed > 0 {
-        warn!(
-            received,
-            malformed,
-            "ignored malformed private application messages while preserving later valid messages"
-        );
-    }
-    if unknown > 0 {
-        warn!(
-            received,
-            unknown, "dropped unsupported private application message kinds"
-        );
-    }
-
-    Ok(received)
-}
-
-#[cfg(feature = "pubky")]
-fn take_latest_pending_message(
-    pending: &mut VecDeque<BufferedPrivateMessage>,
-    kind: PrivateMessageKind,
-) -> Option<BufferedPrivateMessage> {
-    let mut retained = VecDeque::with_capacity(pending.len());
-    let mut latest = None;
-
-    while let Some(message) = pending.pop_front() {
-        if message.is_kind(kind) {
-            latest = Some(message);
-        } else {
-            retained.push_back(message);
-        }
-    }
-
-    *pending = retained;
-    latest
-}
-
-#[cfg(feature = "pubky")]
-fn take_all_pending_messages(
-    pending: &mut VecDeque<BufferedPrivateMessage>,
-    kind: PrivateMessageKind,
-) -> Vec<BufferedPrivateMessage> {
-    let mut retained = VecDeque::with_capacity(pending.len());
-    let mut selected = Vec::new();
-
-    while let Some(message) = pending.pop_front() {
-        if message.is_kind(kind) {
-            selected.push(message);
-        } else {
-            retained.push_back(message);
-        }
-    }
-
-    *pending = retained;
-    selected
 }
 
 #[cfg(feature = "pubky")]
@@ -1920,20 +1784,26 @@ pub async fn get_private_payment_envelope(
 ) -> Result<Option<PrivatePaymentEnvelope>> {
     debug!("receiving Private Payment Envelope");
 
-    let received = receive_private_messages(link).await?;
-    let Some(raw) = take_latest_pending_message(
-        &mut link.pending_private_messages,
-        PrivateMessageKind::PrivatePaymentEnvelope,
-    ) else {
-        debug!(received, "no private payments messages available");
+    let stats = link
+        .private_messages
+        .receive_available(&mut link.encryptor)
+        .await?;
+    let Some(raw) = link
+        .private_messages
+        .take_latest(PrivateMessageKind::PrivatePaymentEnvelope)
+    else {
+        debug!(
+            received = stats.received,
+            "no private payments messages available"
+        );
         return Ok(None);
     };
 
-    let payload = parse_private_payment_envelope_json(&raw.plaintext)?;
+    let payload = parse_private_payment_envelope_json(raw.plaintext())?;
     debug!(
         count = payload.endpoints.len(),
-        received,
-        pending = link.pending_private_messages.len(),
+        received = stats.received,
+        pending = link.private_messages.len(),
         "Private Payment Envelope received"
     );
     Ok(Some(payload))
@@ -1965,20 +1835,25 @@ pub async fn get_private_payment_envelope(
 pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptAccess>> {
     debug!("receiving receipt access messages");
 
-    let received = receive_private_messages(link).await?;
-    let raw_messages = take_all_pending_messages(
-        &mut link.pending_private_messages,
-        PrivateMessageKind::ReceiptAccess,
-    );
+    let stats = link
+        .private_messages
+        .receive_available(&mut link.encryptor)
+        .await?;
+    let raw_messages = link
+        .private_messages
+        .take_all_fifo(PrivateMessageKind::ReceiptAccess);
     if raw_messages.is_empty() {
-        debug!(received, "no receipt access messages available");
+        debug!(
+            received = stats.received,
+            "no receipt access messages available"
+        );
         return Ok(Vec::new());
     }
 
     let mut access = Vec::new();
     let mut malformed = 0usize;
     for raw in &raw_messages {
-        match parse_receipt_access_json(&raw.plaintext) {
+        match parse_receipt_access_json(raw.plaintext()) {
             Ok(parsed) => access.push(parsed),
             Err(err) => {
                 malformed += 1;
@@ -1998,8 +1873,8 @@ pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptA
     }
     debug!(
         count = access.len(),
-        received,
-        pending = link.pending_private_messages.len(),
+        received = stats.received,
+        pending = link.private_messages.len(),
         "receipt access messages received"
     );
     Ok(access)
@@ -2336,7 +2211,7 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
         recipient: handshake.remote_pubkey,
         config: handshake.config,
         max_send_retries: DEFAULT_MAX_SEND_RETRIES,
-        pending_private_messages: VecDeque::new(),
+        private_messages: private_message_dispatch::PrivateMessageInbox::new(),
     }))
 }
 
@@ -2642,7 +2517,7 @@ async fn restore_encrypted_link_inner(
         recipient: remote_pubkey.clone(),
         config,
         max_send_retries: DEFAULT_MAX_SEND_RETRIES,
-        pending_private_messages: VecDeque::new(),
+        private_messages: private_message_dispatch::PrivateMessageInbox::new(),
     })
 }
 
@@ -3238,6 +3113,32 @@ mod tests {
             .expect("raw private message should send");
     }
 
+    #[test]
+    fn private_message_inbox_latest_state_retains_fifo_events() {
+        let mut inbox = crate::private_message_dispatch::PrivateMessageInbox::new();
+        inbox.push_for_test(
+            PrivateMessageKind::PrivatePaymentEnvelope,
+            "first".to_string(),
+        );
+        inbox.push_for_test(PrivateMessageKind::ReceiptAccess, "receipt-a".to_string());
+        inbox.push_for_test(
+            PrivateMessageKind::PrivatePaymentEnvelope,
+            "second".to_string(),
+        );
+        inbox.push_for_test(PrivateMessageKind::ReceiptAccess, "receipt-b".to_string());
+
+        let latest = inbox
+            .take_latest(PrivateMessageKind::PrivatePaymentEnvelope)
+            .expect("latest Private Payment Envelope should be selected");
+        assert_eq!(latest.plaintext(), "second");
+
+        let receipts = inbox.take_all_fifo(PrivateMessageKind::ReceiptAccess);
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].plaintext(), "receipt-a");
+        assert_eq!(receipts[1].plaintext(), "receipt-b");
+        assert_eq!(inbox.len(), 0);
+    }
+
     #[tokio::test]
     async fn private_payment_envelope_empty_returns_empty() {
         let mut setup = PrivateTestSetup::new().await;
@@ -3410,10 +3311,13 @@ mod tests {
             .unwrap()
             .expect("private payments message should not be lost behind receipt message");
         assert_eq!(received.endpoints.get(&method), Some(&data));
-        assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
+        assert_eq!(setup.receiver_link.private_messages.len(), 1);
         assert_eq!(
-            setup.receiver_link.pending_private_messages[0]
-                .kind
+            setup
+                .receiver_link
+                .private_messages
+                .kind_at(0)
+                .unwrap()
                 .as_str(),
             "paykit.receipt_access"
         );
@@ -3442,10 +3346,13 @@ mod tests {
             .unwrap()
             .expect("private payments message should be found without dropping receipt message");
         assert_eq!(received.endpoints.get(&method), Some(&data));
-        assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
+        assert_eq!(setup.receiver_link.private_messages.len(), 1);
         assert_eq!(
-            setup.receiver_link.pending_private_messages[0]
-                .kind
+            setup
+                .receiver_link
+                .private_messages
+                .kind_at(0)
+                .unwrap()
                 .as_str(),
             "paykit.receipt_access"
         );
@@ -3477,7 +3384,7 @@ mod tests {
             .unwrap()
             .expect("valid private payments message should survive unknown earlier message");
         assert_eq!(received.endpoints.get(&method), Some(&data));
-        assert!(setup.receiver_link.pending_private_messages.is_empty());
+        assert!(setup.receiver_link.private_messages.len() == 0);
 
         setup.sender_session.signout().await.unwrap();
         setup.receiver_session.signout().await.unwrap();
@@ -3502,7 +3409,7 @@ mod tests {
             .unwrap()
             .expect("valid private payments message should survive malformed earlier message");
         assert_eq!(received.endpoints.get(&method), Some(&data));
-        assert!(setup.receiver_link.pending_private_messages.is_empty());
+        assert!(setup.receiver_link.private_messages.len() == 0);
 
         setup.sender_session.signout().await.unwrap();
         setup.receiver_session.signout().await.unwrap();
@@ -3526,7 +3433,7 @@ mod tests {
             .unwrap()
             .expect("valid private payments message should survive malformed later message");
         assert_eq!(received.endpoints.get(&method), Some(&data));
-        assert!(setup.receiver_link.pending_private_messages.is_empty());
+        assert!(setup.receiver_link.private_messages.len() == 0);
 
         setup.sender_session.signout().await.unwrap();
         setup.receiver_session.signout().await.unwrap();
@@ -3559,10 +3466,13 @@ mod tests {
             received.endpoints.get(&method),
             Some(&PaymentEndpointPayload::new("v2"))
         );
-        assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
+        assert_eq!(setup.receiver_link.private_messages.len(), 1);
         assert_eq!(
-            setup.receiver_link.pending_private_messages[0]
-                .kind
+            setup
+                .receiver_link
+                .private_messages
+                .kind_at(0)
+                .unwrap()
                 .as_str(),
             "paykit.receipt_access"
         );
