@@ -32,7 +32,7 @@ pub use pubky_routing::paths::{PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX};
 pub use receipt::{
     decrypt_receipt, IssuedReceipt, Receipt, ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
 };
-use receipt::{parse_receipt_access_json, serialize_receipt_access_json};
+use receipt::{parse_receipt_access_json, prepare_receipt_issue, serialize_receipt_access_json};
 
 /// Common result alias for Paykit operations.
 pub type Result<T> = std::result::Result<T, PaykitError>;
@@ -361,43 +361,22 @@ pub async fn issue_receipt(
     draft: ReceiptDraft,
 ) -> Result<IssuedReceipt> {
     debug!("issuing encrypted receipt");
-    let reference = draft.reference;
-    let key = ReceiptDecryptionKey::generate();
-    let receipt = Receipt {
-        reference: reference.clone(),
-        recipient_public_key: link.recipient.clone(),
-        payment_endpoint_identifier: draft.payment_endpoint_identifier,
-        amount: draft.amount,
-        currency: draft.currency,
-        metadata: draft.metadata,
-    };
-    let encrypted = receipt
-        .encrypt(&key)
+    let prepared = prepare_receipt_issue(draft, link.recipient.clone())
+        .map_err(|err| map_error("issue_receipt", err))?;
+    debug!(reference = %prepared.reference, "prepared encrypted receipt issue");
+
+    pubky_routing::public_storage::for_session(session)
+        .store_encrypted_receipt_at(&prepared.issued.location, prepared.encrypted_receipt)
+        .await
         .map_err(|err| map_error("issue_receipt", err))?;
 
-    let location = pubky_routing::public_storage::for_session(session)
-        .store_encrypted_receipt(&reference, encrypted)
-        .await?;
-
-    let access = ReceiptAccess {
-        version: 1,
-        kind: PrivateMessageKind::ReceiptAccess,
-        reference: reference.clone(),
-        location: location.clone(),
-        key: key.clone(),
-        algorithm: "XChaCha20Poly1305".to_string(),
-    };
-    let json =
-        serialize_receipt_access_json(&access).map_err(|err| map_error("issue_receipt", err))?;
+    let json = serialize_receipt_access_json(&prepared.access)
+        .map_err(|err| map_error("issue_receipt", err))?;
     send_private_message(link, json.as_bytes(), "receipt access")
         .await
         .map_err(|err| map_error("issue_receipt", err))?;
 
-    Ok(IssuedReceipt {
-        reference,
-        location,
-        key,
-    })
+    Ok(prepared.issued)
 }
 
 /// Removes a Payment Endpoint via the authenticated Pubky session.

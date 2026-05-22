@@ -8,10 +8,9 @@ use pubky::{
 };
 use tracing::{debug, error, instrument, trace};
 
-use super::paths::{PublicPaymentEndpointPath, PublicPaymentListPath, ReceiptPayloadPath};
+use super::paths::{PublicPaymentEndpointPath, PublicPaymentListPath};
 use crate::{
-    PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList, PaymentReference,
-    PublicKey, Result,
+    PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList, PublicKey, Result,
 };
 
 /// Build a write-side Pubky Routing Adapter over an authenticated Pubky session.
@@ -81,25 +80,23 @@ impl PublicPaymentStorage<'_> {
         Ok(())
     }
 
-    /// Stores an encrypted Receipt payload at its canonical Pubky Routing path.
-    #[instrument(skip(self, encrypted), fields(reference = %reference))]
-    pub(crate) async fn store_encrypted_receipt(
+    /// Stores an encrypted Receipt payload at its prepared canonical Pubky Routing path.
+    #[instrument(skip(self, encrypted), fields(location = %location))]
+    pub(crate) async fn store_encrypted_receipt_at(
         &self,
-        reference: &PaymentReference,
+        location: &str,
         encrypted: String,
-    ) -> Result<String> {
-        let path = ReceiptPayloadPath::local(reference);
-        let location = path.as_path().as_str().to_string();
+    ) -> Result<()> {
         debug!(path = %location, "writing encrypted receipt to Pubky storage");
         self.session
             .storage()
-            .put(location.clone(), encrypted)
+            .put(location.to_string(), encrypted)
             .await
             .map_err(|err| PaykitError::Transport {
                 context: format!("failed to store encrypted receipt at {location}"),
                 source: err.into(),
             })?;
-        Ok(location)
+        Ok(())
     }
 }
 

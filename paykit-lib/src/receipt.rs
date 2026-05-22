@@ -144,6 +144,13 @@ pub struct IssuedReceipt {
     pub key: ReceiptDecryptionKey,
 }
 
+pub(crate) struct PreparedReceiptIssue {
+    pub(crate) reference: PaymentReference,
+    pub(crate) encrypted_receipt: String,
+    pub(crate) access: ReceiptAccess,
+    pub(crate) issued: IssuedReceipt,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ReceiptWire {
     version: u8,
@@ -409,6 +416,44 @@ pub fn decrypt_receipt(
     Receipt::decrypt(encrypted_json, key, location)
 }
 
+pub(crate) fn prepare_receipt_issue(
+    draft: ReceiptDraft,
+    recipient_public_key: PublicKey,
+) -> Result<PreparedReceiptIssue> {
+    let reference = draft.reference;
+    let key = ReceiptDecryptionKey::generate();
+    let location = ReceiptAccess::location_for(&reference);
+    let receipt = Receipt {
+        reference: reference.clone(),
+        recipient_public_key,
+        payment_endpoint_identifier: draft.payment_endpoint_identifier,
+        amount: draft.amount,
+        currency: draft.currency,
+        metadata: draft.metadata,
+    };
+    let encrypted_receipt = receipt.encrypt(&key)?;
+    let access = ReceiptAccess {
+        version: 1,
+        kind: PrivateMessageKind::ReceiptAccess,
+        reference: reference.clone(),
+        location: location.clone(),
+        key: key.clone(),
+        algorithm: "XChaCha20Poly1305".to_string(),
+    };
+    let issued = IssuedReceipt {
+        reference: reference.clone(),
+        location,
+        key,
+    };
+
+    Ok(PreparedReceiptIssue {
+        reference,
+        encrypted_receipt,
+        access,
+        issued,
+    })
+}
+
 impl From<&ReceiptAccess> for ReceiptAccessWire {
     fn from(access: &ReceiptAccess) -> Self {
         Self {
@@ -488,6 +533,63 @@ mod tests {
             ReceiptAccess::location_for(&reference),
             "/pub/paykit/v0/private/receipts/550e8400-e29b-41d4-a716-446655440000"
         );
+    }
+
+    #[test]
+    fn test_prepare_receipt_issue_builds_consistent_artifacts() {
+        let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let recipient_public_key = pubky::Keypair::random().public_key();
+        let draft = ReceiptDraft {
+            reference: reference.clone(),
+            payment_endpoint_identifier: Some(
+                PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            ),
+            amount: Some("21".to_string()),
+            currency: Some("BTC".to_string()),
+            metadata: HashMap::from([("invoice".to_string(), "ln...".to_string())]),
+        };
+
+        let prepared = prepare_receipt_issue(draft, recipient_public_key.clone()).unwrap();
+        assert_eq!(prepared.reference, reference);
+        assert_eq!(prepared.issued.reference, reference);
+        assert_eq!(prepared.access.reference, reference);
+        assert_eq!(prepared.access.location, prepared.issued.location);
+        assert_eq!(
+            prepared.access.location,
+            ReceiptAccess::location_for(&reference)
+        );
+        assert_eq!(prepared.access.key, prepared.issued.key);
+        assert_eq!(prepared.access.kind, PrivateMessageKind::ReceiptAccess);
+        assert_eq!(prepared.access.algorithm, "XChaCha20Poly1305");
+
+        let decrypted = Receipt::decrypt(
+            &prepared.encrypted_receipt,
+            &prepared.issued.key,
+            &prepared.issued.location,
+        )
+        .unwrap();
+        assert_eq!(decrypted.reference, reference);
+        assert_eq!(decrypted.recipient_public_key, recipient_public_key);
+        assert_eq!(
+            decrypted
+                .payment_endpoint_identifier
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "btc-lightning-bolt11"
+        );
+        assert_eq!(decrypted.amount.as_deref(), Some("21"));
+        assert_eq!(decrypted.currency.as_deref(), Some("BTC"));
+        assert_eq!(
+            decrypted.metadata.get("invoice").map(String::as_str),
+            Some("ln...")
+        );
+        assert!(!format!("{:?}", prepared.issued).contains(prepared.issued.key.as_str()));
+        assert!(!prepared
+            .issued
+            .key
+            .to_string()
+            .contains(prepared.issued.key.as_str()));
     }
 
     #[test]
