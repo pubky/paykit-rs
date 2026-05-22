@@ -46,7 +46,7 @@ for (method, data) in &payments.entries {
 
 ### `PaymentEndpointIdentifier`
 
-Legacy implementation name for **Payment Endpoint Identifier** (e.g. `"btc-lightning-bolt12"` or `"btc-bitcoin-p2tr"`). `PaymentEndpointIdentifier` is validated at construction time to prevent path injection attacks. New domain-facing docs and APIs should use the Payment Endpoint Identifier name when possible; existing code still uses `PaymentEndpointIdentifier` until a deliberate public API migration.
+**Payment Endpoint Identifier** identifier for paymetn endpoint specification (e.g. `"btc-lightning-bolt12"` or `"btc-bitcoin-p2tr"`). `PaymentEndpointIdentifier` is validated at construction time to prevent path injection attacks. New domain-facing docs and APIs should use the Payment Endpoint Identifier name when possible; existing code still uses `PaymentEndpointIdentifier` until a deliberate public API migration.
 
 ```rust
 use paykit_lib::PaymentEndpointIdentifier;
