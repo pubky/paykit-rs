@@ -1,8 +1,40 @@
 use std::collections::VecDeque;
 
+use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::{PaykitError, PrivateMessageHeader, PrivateMessageKind, Result};
+use crate::{PaykitError, Result};
+
+/// Private Noise message kinds understood by Paykit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivateMessageKind {
+    /// Latest-state Private Payment Envelope (`paykit.private_payment_envelope`).
+    PrivatePaymentEnvelope,
+    /// Receipt access descriptor envelope (`paykit.receipt_access`).
+    ReceiptAccess,
+}
+
+impl PrivateMessageKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::PrivatePaymentEnvelope => "paykit.private_payment_envelope",
+            Self::ReceiptAccess => "paykit.receipt_access",
+        }
+    }
+
+    fn from_wire_name(kind: &str) -> Option<Self> {
+        match kind {
+            "paykit.private_payment_envelope" => Some(Self::PrivatePaymentEnvelope),
+            "paykit.receipt_access" => Some(Self::ReceiptAccess),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PrivateMessageHeader {
+    kind: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BufferedPrivateMessage {
@@ -190,4 +222,35 @@ fn decode_private_message(
         kind,
         plaintext: plaintext.to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_message_inbox_latest_state_retains_fifo_events() {
+        let mut inbox = PrivateMessageInbox::new();
+        inbox.push_for_test(
+            PrivateMessageKind::PrivatePaymentEnvelope,
+            "first".to_string(),
+        );
+        inbox.push_for_test(PrivateMessageKind::ReceiptAccess, "receipt-a".to_string());
+        inbox.push_for_test(
+            PrivateMessageKind::PrivatePaymentEnvelope,
+            "second".to_string(),
+        );
+        inbox.push_for_test(PrivateMessageKind::ReceiptAccess, "receipt-b".to_string());
+
+        let latest = inbox
+            .take_latest(PrivateMessageKind::PrivatePaymentEnvelope)
+            .expect("latest Private Payment Envelope should be selected");
+        assert_eq!(latest.plaintext(), "second");
+
+        let receipts = inbox.take_all_fifo(PrivateMessageKind::ReceiptAccess);
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].plaintext(), "receipt-a");
+        assert_eq!(receipts[1].plaintext(), "receipt-b");
+        assert_eq!(inbox.len(), 0);
+    }
 }
