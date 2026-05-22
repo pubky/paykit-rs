@@ -119,7 +119,7 @@ if (handshake.isOk()) {
 - **`closeEncryptedLink(linkId)`** — Close an established encrypted-link native handle.
 - **`dropEncryptedLinkHandshake(handshakeId)`** — Drop a pending handshake native handle.
 
-Private payments are latest-state data: older queued private payment updates are superseded by the newest valid update. Serialized snapshots contain sensitive key material and should be stored encrypted at rest.
+Private payments are latest-state data: older queued private payment updates are superseded by the latest/newest queued envelope update. Serialized snapshots contain sensitive key material and should be stored encrypted at rest.
 
 All functions return `Promise<Result<T>>` using [`@synonymdev/result`](https://www.npmjs.com/package/@synonymdev/result).
 

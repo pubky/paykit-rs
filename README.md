@@ -82,7 +82,7 @@ Paykit can exchange personalized, dedicated payment methods with known peers ove
 1. The peers establish an encrypted link with `initiate_encrypted_link` / `accept_encrypted_link` and drive it with `advance_handshake`.
 2. The payee creates a complete private-payments envelope containing a UUID-v4 `PaymentReference` and the currently supported private payment endpoints.
 3. The payee sends the envelope with `set_private_payments`. Pubky Noise handles encryption, derived private storage paths, file slots, and counterparty retrieval.
-4. The payer calls `get_private_payments` on the same encrypted link and receives the newest valid envelope, if one is available.
+4. The payer calls `get_private_payments` on the same encrypted link and receives the latest/newest queued envelope, if one is available.
 
 ## Payment Method Selection
 
@@ -210,7 +210,7 @@ Allows users to send a complete private-payments envelope containing a UUID-v4 `
 
 #### Receive private payment updates
 
-Allows users to receive the newest valid private-payments envelope from the encrypted link. Private payments are latest-state data: older queued private-payment envelopes are superseded by the newest valid envelope.
+Allows users to receive the latest/newest queued private-payments envelope from the encrypted link. Private payments are latest-state data: older queued private-payment envelopes are superseded by the latest/newest queued envelope.
 
 #### Issue and receive encrypted receipts
 
