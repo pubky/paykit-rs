@@ -3440,6 +3440,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_private_payment_envelope_returns_error_when_latest_payment_is_malformed() {
+        let mut setup = PrivateTestSetup::new().await;
+
+        let method = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+        let mut entries = HashMap::new();
+        entries.insert(method, PaymentEndpointPayload::new("v1"));
+        set_private_payment_envelope(&mut setup.sender_link, &private_payload(&entries))
+            .await
+            .unwrap();
+
+        send_raw_private_message(
+            &mut setup.sender_link,
+            r#"{"version":0,"kind":"paykit.private_payment_envelope","reference":"not-a-uuid","entries":{}}"#,
+        )
+        .await;
+
+        let err = get_private_payment_envelope(&mut setup.receiver_link)
+            .await
+            .expect_err(
+                "malformed latest Private Payment Envelope must supersede older valid state",
+            );
+        assert!(matches!(err, PaykitError::InvalidData { .. }));
+        assert_eq!(setup.receiver_link.private_messages.len(), 0);
+
+        setup.sender_session.signout().await.unwrap();
+        setup.receiver_session.signout().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn get_private_payment_envelope_keeps_latest_payment_without_dropping_other_kinds() {
         let mut setup = PrivateTestSetup::new().await;
 
