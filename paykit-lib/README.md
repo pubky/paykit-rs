@@ -81,7 +81,7 @@ let owned: String = data.into_inner();
 
 ### `PaymentList`
 
-Legacy implementation name for a **Payment List** returned by `get_payment_list`: a collection of public Payment Endpoints keyed by Payment Endpoint Identifier.
+**Payment List** returned by `get_payment_list`: a collection of public Payment Endpoints keyed by Payment Endpoint Identifier.
 
 ```rust,ignore
 use paykit_lib::PaymentList;
