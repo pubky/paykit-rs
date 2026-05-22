@@ -1,62 +1,24 @@
 #![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
-#[cfg(not(feature = "pubky"))]
-use std::fmt;
 
 use thiserror::Error;
 use tracing::{debug, instrument, warn};
 
-#[cfg(feature = "pubky")]
-pub use pubky::PublicKey;
-
-#[cfg(feature = "pubky")]
+pub use pubky::{PubkySession, PublicKey, PublicStorage};
 pub use pubky_noise;
 
-#[cfg(feature = "pubky")]
 use serde::{Deserialize, Serialize};
 
-#[cfg(not(feature = "pubky"))]
-/// Public key placeholder used when the `pubky` feature is disabled.
-///
-/// Applications providing their own transport layer should define a richer type
-/// and convert into this wrapper where necessary.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PublicKey(pub String);
-
-#[cfg(not(feature = "pubky"))]
-impl fmt::Display for PublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-#[cfg(not(feature = "pubky"))]
-impl std::str::FromStr for PublicKey {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(PublicKey(s.to_string()))
-    }
-}
-
-#[cfg(feature = "pubky")]
 mod private_message_dispatch;
-#[cfg(feature = "pubky")]
 mod receipt;
 mod transport;
 
-#[cfg(feature = "pubky")]
 pub use receipt::{
     decrypt_receipt, IssuedReceipt, Receipt, ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
 };
-#[cfg(feature = "pubky")]
 use receipt::{parse_receipt_access_json, serialize_receipt_access_json};
-pub use transport::{AuthenticatedTransport, UnauthenticatedTransportRead};
-
-/// Pubky adapters are only exposed when the default `pubky` feature is enabled.
-#[cfg(feature = "pubky")]
-pub use transport::{PubkyAuthenticatedTransport, PubkyUnauthenticatedTransport};
+pub use transport::pubky::{PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX};
 
 /// Common result alias for Paykit operations.
 pub type Result<T> = std::result::Result<T, PaykitError>;
@@ -268,12 +230,10 @@ pub struct PaymentList {
     pub endpoints: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
 }
 
-#[cfg(feature = "pubky")]
 /// UUID-v4 correlation reference used to connect private payment offers and receipts.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PaymentReference(String);
 
-#[cfg(feature = "pubky")]
 impl PaymentReference {
     /// Create a payment reference after validating that the input is a UUID v4 string.
     ///
@@ -302,21 +262,18 @@ impl PaymentReference {
     }
 }
 
-#[cfg(feature = "pubky")]
 impl std::fmt::Display for PaymentReference {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-#[cfg(feature = "pubky")]
 impl AsRef<str> for PaymentReference {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-#[cfg(feature = "pubky")]
 /// Private Noise message kinds understood by Paykit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivateMessageKind {
@@ -326,7 +283,6 @@ pub enum PrivateMessageKind {
     ReceiptAccess,
 }
 
-#[cfg(feature = "pubky")]
 impl PrivateMessageKind {
     fn as_str(self) -> &'static str {
         match self {
@@ -344,7 +300,6 @@ impl PrivateMessageKind {
     }
 }
 
-#[cfg(feature = "pubky")]
 /// Versioned Private Payment Envelope sent over an established Noise link.
 ///
 /// Carries private Payment Endpoints for one payment/request disclosure.
@@ -358,7 +313,6 @@ pub struct PrivatePaymentEnvelope {
     endpoints: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
 }
 
-#[cfg(feature = "pubky")]
 impl PrivatePaymentEnvelope {
     /// Construct a Private Payment Envelope using protocol version 1 and the
     /// `paykit.private_payment_envelope` message kind.
@@ -423,13 +377,11 @@ impl PrivatePaymentEnvelope {
     }
 }
 
-#[cfg(feature = "pubky")]
 #[derive(Deserialize)]
 struct PrivateMessageHeader {
     kind: String,
 }
 
-#[cfg(feature = "pubky")]
 /// Handle to an established encrypted Noise link with a peer.
 ///
 /// Created by [`advance_handshake`] (via [`HandshakeProgress::Complete`]) after
@@ -483,7 +435,6 @@ pub struct EncryptedLink {
     private_messages: private_message_dispatch::PrivateMessageInbox,
 }
 
-#[cfg(feature = "pubky")]
 impl EncryptedLink {
     /// Set the maximum number of automatic `send_message` retries before
     /// [`set_private_payment_envelope`] gives up and returns [`PaykitError::Transport`].
@@ -538,7 +489,6 @@ impl EncryptedLink {
     }
 }
 
-#[cfg(feature = "pubky")]
 /// Serializable snapshot of an established [`EncryptedLink`].
 ///
 /// Created by [`EncryptedLink::snapshot`]. Can be serialized to a compact
@@ -566,7 +516,6 @@ pub struct EncryptedLinkSnapshot {
     recipient: PublicKey,
 }
 
-#[cfg(feature = "pubky")]
 fn recipient_from_snapshot_state(
     state: &pubky_noise::serializer::PubkyNoiseSessionState,
     snapshot_kind: &'static str,
@@ -583,7 +532,6 @@ fn recipient_from_snapshot_state(
     Ok(PublicKey::from(pkarr_pk))
 }
 
-#[cfg(feature = "pubky")]
 impl std::fmt::Debug for EncryptedLinkSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptedLinkSnapshot")
@@ -592,7 +540,6 @@ impl std::fmt::Debug for EncryptedLinkSnapshot {
     }
 }
 
-#[cfg(feature = "pubky")]
 impl EncryptedLinkSnapshot {
     /// Serialize to a compact binary format for durable storage.
     ///
@@ -628,7 +575,6 @@ impl EncryptedLinkSnapshot {
     }
 }
 
-#[cfg(feature = "pubky")]
 /// Serializable snapshot of an in-progress [`EncryptedLinkHandshake`].
 ///
 /// Created by [`EncryptedLinkHandshake::snapshot`]. Can be serialized to a
@@ -656,7 +602,6 @@ pub struct EncryptedLinkHandshakeSnapshot {
     recipient: PublicKey,
 }
 
-#[cfg(feature = "pubky")]
 impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptedLinkHandshakeSnapshot")
@@ -665,7 +610,6 @@ impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
     }
 }
 
-#[cfg(feature = "pubky")]
 impl EncryptedLinkHandshakeSnapshot {
     /// Serialize to a compact binary format for durable storage.
     ///
@@ -703,21 +647,18 @@ impl EncryptedLinkHandshakeSnapshot {
     }
 }
 
-#[cfg(feature = "pubky")]
 /// Default maximum number of automatic `send_message` retries before
 /// [`set_private_payment_envelope`] gives up and returns an error.
 ///
 /// Override per-link via [`EncryptedLink::set_max_send_retries`].
 pub const DEFAULT_MAX_SEND_RETRIES: u32 = 3;
 
-#[cfg(feature = "pubky")]
 /// Default maximum number of consecutive automatic recovery attempts before
 /// [`advance_handshake`] gives up and returns an error.
 ///
 /// Override per-handshake via [`EncryptedLinkHandshake::set_max_recovery_attempts`].
 pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 
-#[cfg(feature = "pubky")]
 /// Handle to an in-progress Noise handshake.
 ///
 /// Created by [`initiate_encrypted_link`] (initiator) or
@@ -761,7 +702,6 @@ pub struct EncryptedLinkHandshake {
     max_recovery_attempts: u32,
 }
 
-#[cfg(feature = "pubky")]
 impl EncryptedLinkHandshake {
     /// Set the maximum number of consecutive automatic recovery attempts
     /// before [`advance_handshake`] gives up and returns
@@ -803,7 +743,6 @@ impl EncryptedLinkHandshake {
     }
 }
 
-#[cfg(feature = "pubky")]
 /// Result of a single [`advance_handshake`] step.
 pub enum HandshakeProgress {
     /// Handshake is still in progress. The peer may not have written their next
@@ -820,10 +759,8 @@ pub enum HandshakeProgress {
 ///
 /// Ensures that different applications using the same key pairs derive
 /// different storage paths, preventing cross-protocol path collisions.
-#[cfg(feature = "pubky")]
 const PAYKIT_PATH_DOMAIN: &[u8] = b"paykit-path-v0";
 
-#[cfg(feature = "pubky")]
 /// Computes the write and read path components for private payment storage.
 ///
 /// Uses [`pubky_noise::path_derivation::derive_asymmetric_paths`] to derive
@@ -858,7 +795,6 @@ fn compute_private_payment_paths(
     )
 }
 
-#[cfg(feature = "pubky")]
 #[derive(Deserialize)]
 struct PrivatePaymentEnvelopeWire {
     version: u8,
@@ -867,7 +803,6 @@ struct PrivatePaymentEnvelopeWire {
     endpoints: HashMap<String, String>,
 }
 
-#[cfg(feature = "pubky")]
 #[derive(Serialize)]
 struct PrivatePaymentEnvelopeWireRef<'a> {
     version: u8,
@@ -876,7 +811,6 @@ struct PrivatePaymentEnvelopeWireRef<'a> {
     endpoints: HashMap<&'a str, &'a str>,
 }
 
-#[cfg(feature = "pubky")]
 /// Deserializes a versioned private payments JSON envelope.
 fn parse_private_payment_envelope_json(json: &str) -> Result<PrivatePaymentEnvelope> {
     let wire: PrivatePaymentEnvelopeWire =
@@ -925,7 +859,6 @@ fn parse_private_payment_envelope_json(json: &str) -> Result<PrivatePaymentEnvel
 }
 
 /// Serializes private payments into a versioned JSON envelope.
-#[cfg(feature = "pubky")]
 fn serialize_private_payment_envelope_json(payload: &PrivatePaymentEnvelope) -> Result<String> {
     let endpoints = payload
         .endpoints
@@ -944,17 +877,14 @@ fn serialize_private_payment_envelope_json(payload: &PrivatePaymentEnvelope) -> 
     })
 }
 
-#[cfg(feature = "pubky")]
 fn send_attempts_from_retries(max_send_retries: u32) -> u32 {
     max_send_retries.saturating_add(1)
 }
 
-#[cfg(feature = "pubky")]
 fn is_retryable_private_send_error(err: &pubky_noise::PubkyNoiseError) -> bool {
     matches!(err, pubky_noise::PubkyNoiseError::HomeserverWriteError)
 }
 
-#[cfg(feature = "pubky")]
 async fn send_private_message(
     link: &mut EncryptedLink,
     plaintext: &[u8],
@@ -1010,13 +940,12 @@ async fn send_private_message(
     })
 }
 
-/// Stores or updates a Payment Endpoint via the injected authenticated client.
+/// Stores or updates a Payment Endpoint via the authenticated Pubky session.
 ///
 /// # Examples
 /// ```
-/// # use paykit_lib::{set_payment_endpoint, PaymentEndpointIdentifier, PaymentEndpointPayload, PublicKey};
-/// # use paykit_lib::AuthenticatedTransport;
-/// # async fn demo(client: &impl AuthenticatedTransport) -> paykit_lib::Result<()> {
+/// # use paykit_lib::{set_payment_endpoint, PaymentEndpointIdentifier, PaymentEndpointPayload, PubkySession};
+/// # async fn demo(client: &PubkySession) -> paykit_lib::Result<()> {
 /// let method = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
 /// let data = PaymentEndpointPayload::new("ln...");
 /// set_payment_endpoint(client, method, data).await?;
@@ -1024,22 +953,17 @@ async fn send_private_message(
 /// # }
 /// ```
 #[instrument(skip(client, data), fields(method = %method))]
-pub async fn set_payment_endpoint<S>(
-    client: &S,
+pub async fn set_payment_endpoint(
+    client: &PubkySession,
     method: PaymentEndpointIdentifier,
     data: PaymentEndpointPayload,
-) -> Result<()>
-where
-    S: AuthenticatedTransport,
-{
+) -> Result<()> {
     debug!("storing payment endpoint");
-    client
-        .upsert_payment_endpoint(&method, &data)
+    transport::pubky::upsert_payment_endpoint(client, &method, &data)
         .await
         .map_err(|err| map_error("set_payment_endpoint", err))
 }
 
-#[cfg(feature = "pubky")]
 /// Encrypts and sends a complete Private Payment Envelope via the established
 /// encrypted link.
 ///
@@ -1108,7 +1032,6 @@ pub async fn set_private_payment_envelope(
         .map_err(|err| map_error("set_private_payment_envelope", err))
 }
 
-#[cfg(feature = "pubky")]
 /// Issues, stores, and shares an encrypted payment receipt with the linked peer.
 ///
 /// The encrypted receipt is written to the caller's homeserver at a deterministic
@@ -1202,15 +1125,14 @@ pub async fn issue_receipt(
     })
 }
 
-/// Removes a Payment Endpoint via the injected authenticated client.
+/// Removes a Payment Endpoint via the authenticated Pubky session.
 #[instrument(skip(client), fields(method = %method))]
-pub async fn remove_payment_endpoint<S>(client: &S, method: PaymentEndpointIdentifier) -> Result<()>
-where
-    S: AuthenticatedTransport,
-{
+pub async fn remove_payment_endpoint(
+    client: &PubkySession,
+    method: PaymentEndpointIdentifier,
+) -> Result<()> {
     debug!("removing payment endpoint");
-    client
-        .remove_payment_endpoint(&method)
+    transport::pubky::remove_payment_endpoint(client, &method)
         .await
         .map_err(|err| map_error("remove_payment_endpoint", err))
 }
@@ -1226,9 +1148,8 @@ where
 ///
 /// # Examples
 /// ```
-/// # use paykit_lib::{get_payment_list, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList};
-/// # use paykit_lib::{AuthenticatedTransport, UnauthenticatedTransportRead};
-/// # async fn demo(reader: &impl UnauthenticatedTransportRead, pk: &paykit_lib::PublicKey) -> paykit_lib::Result<()> {
+/// # use paykit_lib::{get_payment_list, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList, PublicStorage};
+/// # async fn demo(reader: &PublicStorage, pk: &paykit_lib::PublicKey) -> paykit_lib::Result<()> {
 /// let payments = get_payment_list(reader, pk).await?;
 /// if payments.endpoints.is_empty() {
 ///     println!("payee published no endpoints yet");
@@ -1241,20 +1162,15 @@ where
 /// # }
 /// ```
 #[instrument(skip(reader))]
-pub async fn get_payment_list<R>(reader: &R, payee: &PublicKey) -> Result<PaymentList>
-where
-    R: UnauthenticatedTransportRead,
-{
+pub async fn get_payment_list(reader: &PublicStorage, payee: &PublicKey) -> Result<PaymentList> {
     debug!("fetching payment list");
-    let result = reader
-        .fetch_payment_list(payee)
+    let result = transport::pubky::fetch_payment_list(reader, payee)
         .await
         .map_err(|err| map_error("get_payment_list", err))?;
     debug!(count = result.endpoints.len(), "payment list retrieved");
     Ok(result)
 }
 
-#[cfg(feature = "pubky")]
 /// Receives and decrypts the latest Private Payment Envelope from the remote
 /// peer via the established encrypted link.
 ///
@@ -1322,7 +1238,6 @@ pub async fn get_private_payment_envelope(
     Ok(Some(payload))
 }
 
-#[cfg(feature = "pubky")]
 /// Receives all currently available receipt access descriptors from the encrypted link.
 ///
 /// Unlike [`get_private_payment_envelope`], this is FIFO/event-like. Every currently
@@ -1402,9 +1317,8 @@ pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptA
 ///
 /// # Examples
 /// ```
-/// # use paykit_lib::{get_payment_endpoint, PaymentEndpointIdentifier, PublicKey};
-/// # use paykit_lib::UnauthenticatedTransportRead;
-/// # async fn inspect(reader: &impl UnauthenticatedTransportRead, pk: &PublicKey) -> paykit_lib::Result<()> {
+/// # use paykit_lib::{get_payment_endpoint, PaymentEndpointIdentifier, PublicKey, PublicStorage};
+/// # async fn inspect(reader: &PublicStorage, pk: &PublicKey) -> paykit_lib::Result<()> {
 /// let lightning = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
 /// if let Some(endpoint) = get_payment_endpoint(reader, pk, &lightning).await? {
 ///     println!("lightning endpoint: {}", endpoint.as_str());
@@ -1415,24 +1329,19 @@ pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptA
 /// # }
 /// ```
 #[instrument(skip(reader), fields(method = %method))]
-pub async fn get_payment_endpoint<R>(
-    reader: &R,
+pub async fn get_payment_endpoint(
+    reader: &PublicStorage,
     payee: &PublicKey,
     method: &PaymentEndpointIdentifier,
-) -> Result<Option<PaymentEndpointPayload>>
-where
-    R: UnauthenticatedTransportRead,
-{
+) -> Result<Option<PaymentEndpointPayload>> {
     debug!("fetching payment endpoint");
-    let result = reader
-        .fetch_payment_endpoint(payee, method)
+    let result = transport::pubky::fetch_payment_endpoint(reader, payee, method)
         .await
         .map_err(|err| map_error("get_payment_endpoint", err))?;
     debug!(found = result.is_some(), "payment endpoint lookup complete");
     Ok(result)
 }
 
-#[cfg(feature = "pubky")]
 /// Initiates a Noise XX handshake with a remote peer (initiator role).
 ///
 /// Initializes the encryption stack and creates a handshake context. The actual
@@ -1500,7 +1409,6 @@ pub fn initiate_encrypted_link(
     })
 }
 
-#[cfg(feature = "pubky")]
 /// Accepts a Noise XX handshake from a remote peer (responder role).
 ///
 /// Initializes the encryption stack and creates a handshake context for the
@@ -1565,7 +1473,6 @@ pub fn accept_encrypted_link(
     })
 }
 
-#[cfg(feature = "pubky")]
 /// Advances the handshake by one step.
 ///
 /// This function is **polling-safe**: calling it when the remote peer has not
@@ -1707,7 +1614,6 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
 }
 
 /// Transitions a completed handshake into an [`EncryptedLink`].
-#[cfg(feature = "pubky")]
 fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
     let _link_id =
         handshake
@@ -1728,7 +1634,6 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
     }))
 }
 
-#[cfg(feature = "pubky")]
 /// Restores an [`EncryptedLinkHandshake`] from a previously saved snapshot.
 ///
 /// Use this to resume an in-progress handshake after an app restart. A fresh
@@ -1792,7 +1697,6 @@ pub async fn restore_encrypted_link_handshake(
     restore_encrypted_link_handshake_inner(config, remote_pubkey, snapshot).await
 }
 
-#[cfg(feature = "pubky")]
 /// Restores an [`EncryptedLinkHandshake`] from a previously saved snapshot
 /// using an existing Noise configuration.
 ///
@@ -1827,7 +1731,6 @@ pub async fn restore_encrypted_link_handshake_from_config(
 }
 
 /// Shared implementation for both handshake restore variants.
-#[cfg(feature = "pubky")]
 async fn restore_encrypted_link_handshake_inner(
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
     remote_pubkey: &PublicKey,
@@ -1873,7 +1776,6 @@ async fn restore_encrypted_link_handshake_inner(
     })
 }
 
-#[cfg(feature = "pubky")]
 /// Closes an encrypted link and cleans up the Noise session state.
 ///
 /// After calling this function, the [`EncryptedLink`] is consumed and can no
@@ -1886,7 +1788,6 @@ pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "pubky")]
 /// Restores an [`EncryptedLink`] from a previously saved snapshot.
 ///
 /// Use this to resume an encrypted session after an app restart without
@@ -1950,7 +1851,6 @@ pub async fn restore_encrypted_link(
     restore_encrypted_link_inner(config, remote_pubkey, snapshot).await
 }
 
-#[cfg(feature = "pubky")]
 /// Restores an [`EncryptedLink`] from a previously saved snapshot using an
 /// existing Noise configuration.
 ///
@@ -1989,7 +1889,6 @@ pub async fn restore_encrypted_link_from_config(
 }
 
 /// Shared implementation for both restore variants.
-#[cfg(feature = "pubky")]
 async fn restore_encrypted_link_inner(
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
     remote_pubkey: &PublicKey,
@@ -2215,7 +2114,7 @@ mod validation_tests {
 }
 
 /// Integration tests (require `pubky` feature and ephemeral testnet).
-#[cfg(all(test, feature = "pubky"))]
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
@@ -2255,8 +2154,8 @@ mod tests {
 
     struct TestSetup {
         _testnet: EphemeralTestnet,
-        session_transport: PubkyAuthenticatedTransport,
-        reader_transport: PubkyUnauthenticatedTransport,
+        session: PubkySession,
+        reader: PublicStorage,
         raw_session: PubkySession,
         public_key: PublicKey,
     }
@@ -2272,13 +2171,12 @@ mod tests {
             let signer = sdk.signer(pair.clone());
             let session = signer.signup(&homeserver.public_key(), None).await.unwrap();
 
-            let session_transport = PubkyAuthenticatedTransport::new(session.clone());
-            let reader_transport = PubkyUnauthenticatedTransport::new(sdk.public_storage());
+            let reader = sdk.public_storage();
 
             Self {
                 _testnet: testnet,
-                session_transport,
-                reader_transport,
+                session: session.clone(),
+                reader,
                 raw_session: session,
                 public_key: pair.public_key(),
             }
@@ -2318,16 +2216,16 @@ mod tests {
         let method = PaymentEndpointIdentifier::new("btc-bitcoin-p2tr").unwrap();
         let endpoint = PaymentEndpointPayload::new("{\"address\":\"bc1...\"}");
 
-        set_payment_endpoint(&setup.session_transport, method.clone(), endpoint.clone())
+        set_payment_endpoint(&setup.session, method.clone(), endpoint.clone())
             .await
             .unwrap();
 
-        let fetched = get_payment_endpoint(&setup.reader_transport, &setup.public_key, &method)
+        let fetched = get_payment_endpoint(&setup.reader, &setup.public_key, &method)
             .await
             .unwrap();
         assert_eq!(fetched, Some(endpoint.clone()));
 
-        let list = get_payment_list(&setup.reader_transport, &setup.public_key)
+        let list = get_payment_list(&setup.reader, &setup.public_key)
             .await
             .unwrap();
         assert_eq!(
@@ -2341,15 +2239,11 @@ mod tests {
 
         let new_endpoint = PaymentEndpointPayload::new("{\"address\":\"1c1...\"}");
 
-        set_payment_endpoint(
-            &setup.session_transport,
-            method.clone(),
-            new_endpoint.clone(),
-        )
-        .await
-        .unwrap();
+        set_payment_endpoint(&setup.session, method.clone(), new_endpoint.clone())
+            .await
+            .unwrap();
 
-        let updated = get_payment_endpoint(&setup.reader_transport, &setup.public_key, &method)
+        let updated = get_payment_endpoint(&setup.reader, &setup.public_key, &method)
             .await
             .unwrap();
         assert_eq!(updated, Some(new_endpoint.clone()));
@@ -2362,7 +2256,7 @@ mod tests {
         let setup = TestSetup::new().await;
         let method = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
 
-        let missing = get_payment_endpoint(&setup.reader_transport, &setup.public_key, &method)
+        let missing = get_payment_endpoint(&setup.reader, &setup.public_key, &method)
             .await
             .unwrap();
         assert!(missing.is_none());
@@ -2379,22 +2273,14 @@ mod tests {
         let onchain_data = PaymentEndpointPayload::new("bc1p...");
         let lightning_data = PaymentEndpointPayload::new("ln...");
 
-        set_payment_endpoint(
-            &setup.session_transport,
-            onchain.clone(),
-            onchain_data.clone(),
-        )
-        .await
-        .unwrap();
-        set_payment_endpoint(
-            &setup.session_transport,
-            lightning.clone(),
-            lightning_data.clone(),
-        )
-        .await
-        .unwrap();
+        set_payment_endpoint(&setup.session, onchain.clone(), onchain_data.clone())
+            .await
+            .unwrap();
+        set_payment_endpoint(&setup.session, lightning.clone(), lightning_data.clone())
+            .await
+            .unwrap();
 
-        let list = get_payment_list(&setup.reader_transport, &setup.public_key)
+        let list = get_payment_list(&setup.reader, &setup.public_key)
             .await
             .unwrap();
         let mut expected = HashMap::new();
@@ -2402,10 +2288,10 @@ mod tests {
         expected.insert(lightning.clone(), lightning_data.clone());
         assert_eq!(list.endpoints, expected);
 
-        remove_payment_endpoint(&setup.session_transport, onchain.clone())
+        remove_payment_endpoint(&setup.session, onchain.clone())
             .await
             .unwrap();
-        let list = get_payment_list(&setup.reader_transport, &setup.public_key)
+        let list = get_payment_list(&setup.reader, &setup.public_key)
             .await
             .unwrap();
         assert_eq!(
@@ -2415,10 +2301,10 @@ mod tests {
                 .collect()
         );
 
-        remove_payment_endpoint(&setup.session_transport, lightning.clone())
+        remove_payment_endpoint(&setup.session, lightning.clone())
             .await
             .unwrap();
-        let empty = get_payment_list(&setup.reader_transport, &setup.public_key)
+        let empty = get_payment_list(&setup.reader, &setup.public_key)
             .await
             .unwrap();
         assert!(empty.endpoints.is_empty());
@@ -2431,7 +2317,7 @@ mod tests {
         let setup = TestSetup::new().await;
         let method = PaymentEndpointIdentifier::new("unused").unwrap();
 
-        remove_payment_endpoint(&setup.session_transport, method)
+        remove_payment_endpoint(&setup.session, method)
             .await
             .expect_err("removing non-existent endpoint should fail");
 

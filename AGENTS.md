@@ -4,8 +4,8 @@
 - Workspace root hosts `Cargo.toml` that pins resolver `2` and registers members.
 - Core library lives in `paykit-lib/` with its own `Cargo.toml` and `src/lib.rs`; treat this crate as the Paykit Library implementation over Pubky Routing.
 - `docs/THESAURUS.md` is the authority for Paykit domain language. Use it before naming public APIs, docs sections, files, types, fields, endpoints, events, or components.
-- Transport abstractions live in `paykit-lib/src/transport/`: `traits.rs` defines the public interfaces, while feature-gated adapters (e.g., `transport/pubky/*`) provide concrete implementations.
-- `transport/pubky/mod.rs` exports `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) to keep all Pubky paths consistent—reuse them instead of hard-coding strings.
+- Pubky storage helpers live in `paykit-lib/src/transport/pubky/mod.rs`; Paykit Library supports Pubky as the only transport.
+- `transport/pubky/mod.rs` exports `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) and `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) to keep all Pubky paths consistent—reuse them instead of hard-coding strings.
 
 ## Build, Test, and Development Commands
 - `cargo fmt` — run rustfmt on every crate; required before submitting changes.
@@ -20,19 +20,18 @@
 - Keep files ASCII; when referencing Paykit vocabulary copy spellings from `README.md`.
 - Prefer descriptive module names such as `routing`, `payments`, `endpoints` to mirror protocol sections.
 
-## Transport Abstraction & Dependency Injection
-- Keep the library stateless. Functions that touch remote state must accept `AuthenticatedTransport` or `UnauthenticatedTransportRead` implementors instead of concrete SDK types.
-- Pubky support lives behind the default `pubky` feature; adapters such as `PubkyAuthenticatedTransport` and `PubkyUnauthenticatedTransport` simply wrap `PubkySession` and `pubky::PublicStorage`. Disable the feature if you need to compile without the SDK.
-- When adding or updating adapters, follow the convention: `fetch_payment_endpoint` returns `Option`, list operations treat 404s as empty, and contact discovery relies on directory listings rather than file contents.
-- Document in each API that session creation, capability scope, and key rotation remain the caller's responsibility; Paykit only consumes the trait methods it needs.
-- Timeout handling is the transport layer's responsibility, not Paykit's. The traits do not enforce any deadline — implementations must configure their own timeouts. The Pubky SDK exposes [`PubkyHttpClientBuilder::request_timeout`](https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout) for this purpose.
+## Pubky Transport & Dependency Injection
+- Keep the library stateless. Functions that touch remote state accept concrete Pubky handles (`PubkySession` for authenticated writes, `PublicStorage` for public reads) instead of owning sessions.
+- Pubky is the only supported transport; do not add feature flags, generic transport traits, or adapter wrappers unless this product decision changes.
+- When adding or updating public storage helpers, follow the convention: `fetch_payment_endpoint` returns `Option`, list operations treat 404s as empty, and contact discovery relies on directory listings rather than file contents.
+- Document in each API that session creation, capability scope, and key rotation remain the caller's responsibility; Paykit only consumes the provided Pubky handles.
+- Timeout handling is the Pubky SDK/client layer's responsibility, not Paykit's. Paykit does not enforce any deadline. The Pubky SDK exposes [`PubkyHttpClientBuilder::request_timeout`](https://docs.rs/pubky/latest/pubky/struct.PubkyHttpClientBuilder.html#method.request_timeout) for this purpose.
 
 ### Public vs. Private Payload Types
-- **Public** Payment Endpoints use `PaymentEndpointPayload` (legacy implementation name for Payment Endpoint Payload; UTF-8 `String` wrapper) at the transport trait level. Each Payment Endpoint is stored as a separate file at a well-known path. The transport traits (`AuthenticatedTransport`, `UnauthenticatedTransportRead`) handle public payment storage.
-- **Private** Payment Endpoints bypass the transport traits entirely. They are handled by `pubky-noise`'s `PubkyNoiseEncryptor`, which manages encryption, file naming, and storage via `send_message`/`receive_message`. Private payment plaintext is a versioned Private Payment Envelope (`version`, `kind`, UUID-v4 `reference`, and `entries`). The `write_path` and `read_path` (asymmetric folder prefixes derived per-peer-pair via `pubky_noise::path_derivation::derive_asymmetric_paths`) are set during `initiate_encrypted_link` / `accept_encrypted_link`; pubky-noise manages individual file slots within those folders using a counter-based scheme.
+- **Public** Payment Endpoints use `PaymentEndpointPayload` (legacy implementation name for Payment Endpoint Payload; UTF-8 `String` wrapper). Each Payment Endpoint is stored as a separate Pubky file at a well-known path. Public payment storage uses concrete Pubky handles.
+- **Private** Payment Endpoints are handled by `pubky-noise`'s `PubkyNoiseEncryptor`, which manages encryption, file naming, and storage via `send_message`/`receive_message`. Private payment plaintext is a versioned Private Payment Envelope (`version`, `kind`, UUID-v4 `reference`, and `entries`). The `write_path` and `read_path` (asymmetric folder prefixes derived per-peer-pair via `pubky_noise::path_derivation::derive_asymmetric_paths`) are set during `initiate_encrypted_link` / `accept_encrypted_link`; pubky-noise manages individual file slots within those folders using a counter-based scheme.
 - The helper functions `set_private_payment_envelope` and `get_private_payment_envelope` in `lib.rs` compose JSON serialization with `PubkyNoiseEncryptor::send_message`/`receive_message`. The caller is responsible for managing the payments map (adding/removing entries) and passing the complete map inside `PrivatePaymentEnvelope` to `set_private_payment_envelope`.
 - Private payments are latest-state data: when multiple Private Payment Envelopes are queued, `get_private_payment_envelope` returns the latest and supersedes older Private Payment Envelopes. Receipt Access is event-like: `get_receipt_access` must return every currently available `paykit.receipt_access` message as a FIFO vector instead of using latest-wins or one-at-a-time semantics. Unsupported syntactically valid private application message kinds must be logged and dropped rather than buffered indefinitely. Future event-like kinds must preserve all messages in send order once they are explicitly recognized by Paykit.
-- Private payment helper functions are `#[cfg(feature = "pubky")]` and accept concrete Pubky types (not generic over the transport traits) because they depend on `pubky-noise` for Noise encryption.
 - The serialized private payments JSON must fit within a single pubky-noise message (`PUBKY_NOISE_MSG_LEN`, currently 1000 bytes).
 
 ## Testing Guidelines
