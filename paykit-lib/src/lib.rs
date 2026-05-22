@@ -1205,11 +1205,13 @@ impl Receipt {
         format!("paykit.receipt.v1:{location}")
     }
 
-    /// Encrypt this receipt for storage at `location` using `key`.
+    /// Encrypt this receipt for storage at its canonical location using `key`.
     ///
-    /// The location is authenticated as AEAD associated data; callers must use
-    /// the same location when decrypting.
-    pub fn encrypt(&self, key: &ReceiptDecryptionKey, location: &str) -> Result<String> {
+    /// The location is derived from the receipt reference and authenticated as
+    /// AEAD associated data; callers must use that same canonical location when
+    /// decrypting.
+    pub fn encrypt(&self, key: &ReceiptDecryptionKey) -> Result<String> {
+        let location = ReceiptAccess::location_for(&self.reference);
         let key_bytes = key.bytes()?;
         let cipher = XChaCha20Poly1305::new((&key_bytes).into());
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
@@ -1224,7 +1226,7 @@ impl Receipt {
                 &nonce,
                 chacha20poly1305::aead::Payload {
                     msg: &plaintext,
-                    aad: Self::aad_for_location(location).as_bytes(),
+                    aad: Self::aad_for_location(&location).as_bytes(),
                 },
             )
             .map_err(|err| PaykitError::InvalidData {
@@ -1744,7 +1746,7 @@ pub async fn issue_receipt(
         metadata: draft.metadata,
     };
     let encrypted = receipt
-        .encrypt(&key, &location)
+        .encrypt(&key)
         .map_err(|err| map_error("issue_receipt", err))?;
 
     session
@@ -4162,13 +4164,41 @@ mod tests {
         let location = ReceiptAccess::location_for(&reference);
         let key = ReceiptDecryptionKey::generate();
 
-        let encrypted = receipt.encrypt(&key, &location).unwrap();
+        let encrypted = receipt.encrypt(&key).unwrap();
         let decrypted = decrypt_receipt(&encrypted, &key, &location).unwrap();
         assert_eq!(decrypted, receipt);
 
         let wrong_location = "/pub/paykit/v0/private/receipts/650e8400-e29b-41d4-a716-446655440000";
         let err = decrypt_receipt(&encrypted, &key, wrong_location).unwrap_err();
         assert!(matches!(err, PaykitError::InvalidData { .. }));
+    }
+
+    fn encrypt_receipt_for_test_location(
+        receipt: &Receipt,
+        key: &ReceiptDecryptionKey,
+        location: &str,
+    ) -> String {
+        let key_bytes = key.bytes().unwrap();
+        let cipher = XChaCha20Poly1305::new((&key_bytes).into());
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let plaintext = serde_json::to_vec(&ReceiptWire::from(receipt)).unwrap();
+        let ciphertext = cipher
+            .encrypt(
+                &nonce,
+                chacha20poly1305::aead::Payload {
+                    msg: &plaintext,
+                    aad: Receipt::aad_for_location(location).as_bytes(),
+                },
+            )
+            .unwrap();
+        serde_json::to_string(&EncryptedReceiptWire {
+            version: 1,
+            kind: "paykit.receipt.encrypted".to_string(),
+            algorithm: "XChaCha20Poly1305".to_string(),
+            nonce: URL_SAFE_NO_PAD.encode(nonce),
+            ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
+        })
+        .unwrap()
     }
 
     #[test]
@@ -4188,7 +4218,7 @@ mod tests {
         };
         let location = ReceiptAccess::location_for(&location_reference);
         let key = ReceiptDecryptionKey::generate();
-        let encrypted = receipt.encrypt(&key, &location).unwrap();
+        let encrypted = encrypt_receipt_for_test_location(&receipt, &key, &location);
 
         let err = decrypt_receipt(&encrypted, &key, &location).unwrap_err();
         assert!(

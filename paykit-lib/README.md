@@ -313,8 +313,8 @@ The receipt payload is encrypted with `XChaCha20Poly1305`; the storage location 
   Receives all currently available queued receipt-access messages. This is FIFO/event-like: every receipt access message matters, and older receipt accesses are not collapsed when newer ones arrive. An empty vector means no receipt access messages are currently available. Calling `get_private_payments` will not discard receipt-access messages; they remain buffered for `get_receipt_access`.
 - `ReceiptAccess::location_for(reference) -> String`
   Returns Paykit's canonical homeserver path for an encrypted receipt payload.
-- `Receipt::encrypt(&self, key, location) -> Result<String>` / `Receipt::decrypt(encrypted_json, key, location) -> Result<Receipt>`
-  Encrypts or decrypts receipt payloads using `XChaCha20Poly1305`. Pass the exact location from the access descriptor when decrypting; it is authenticated as AAD. Decryption also rejects plaintext whose internal reference does not match the authenticated location.
+- `Receipt::encrypt(&self, key) -> Result<String>` / `Receipt::decrypt(encrypted_json, key, location) -> Result<Receipt>`
+  Encrypts or decrypts receipt payloads using `XChaCha20Poly1305`. Encryption derives the canonical receipt location from the receipt's `PaymentReference` and authenticates that location as AAD. Pass the exact location from the access descriptor when decrypting; it is authenticated as AAD. Decryption also rejects plaintext whose internal reference does not match the authenticated location.
 - `decrypt_receipt(encrypted_json, key, location) -> Result<Receipt>`
   Convenience wrapper around `Receipt::decrypt`. Incoming receipt access descriptors are accepted only when `location` equals Paykit's canonical receipt path for their `PaymentReference`.
 
