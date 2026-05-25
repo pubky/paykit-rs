@@ -13,22 +13,17 @@ readme = "README.md"
 keywords = ["paykit", "payments", "routing", "pubky"]
 categories = ["network-programming", "finance"]
 
-[features]
-default = ["pubky"]
-pubky = ["dep:pubky", "dep:pubky-noise", "dep:base64", "dep:chacha20poly1305", "dep:serde", "dep:serde_json", "dep:uuid"]
-
 [dependencies]
 anyhow = "1.0.102"
-async-trait = "0.1.89"
-pubky = { version = "0.8.0", optional = true }
-pubky-noise = { optional = true, version = "0.1.0-rc5" }
-base64 = { version = "0.22", optional = true }
-chacha20poly1305 = { version = "0.10", features = ["std"], optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+base64 = "0.22"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+pubky = "0.8.0"
+pubky-noise = "0.1.0-rc5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2.0.18"
 tracing = "0.1.44"
-uuid = { version = "1", features = ["v4"], optional = true }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 pubky-testnet = { version = "0.8.0", features = ["embedded-postgres"] }

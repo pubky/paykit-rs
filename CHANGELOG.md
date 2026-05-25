@@ -17,6 +17,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `paykit_receipt_location`, and `paykit_decrypt_receipt`.
 
 ### Changed
+- **BREAKING:** `paykit-lib` now treats Pubky as the only supported transport.
+  Public endpoint APIs accept concrete Pubky SDK handles (`PubkySession` for
+  writes and `PublicStorage` for reads) instead of generic transport traits.
 - Private encrypted messages now distinguish latest-state private-payment
   envelopes from event-like receipt-access messages. `get_private_payments`
   collapses pending private-payment messages to the latest message by kind,
@@ -28,6 +31,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   and dropped rather than buffered indefinitely.
 - `MethodId::new("private")` is now rejected with `PaykitError::Validation` because
   `private` is reserved for private-payment storage paths.
+
+### Removed
+- **BREAKING:** Removed the `pubky` feature flag, `AuthenticatedTransport` /
+  `UnauthenticatedTransportRead` traits, and Pubky transport adapter wrappers.
+  Pubky dependencies are now unconditional.
 
 ### Security
 - Receipt decryption keys are redacted from Rust `Debug`/`Display` formatting
