@@ -30,6 +30,15 @@ import {
   getPaymentEndpoint,
   setPaymentEndpoint,
   removePaymentEndpoint,
+  initiateEncryptedLink,
+  advanceHandshake,
+  generatePaymentReference,
+  setPrivatePayments,
+  getPrivatePayments,
+  issueReceipt,
+  getReceiptAccess,
+  receiptLocation,
+  decryptReceipt,
 } from '@synonymdev/react-native-paykit';
 
 // Initialize the SDK (call once at app startup)
@@ -60,6 +69,35 @@ await setPaymentEndpoint('bitcoin', 'bc1q...');
 
 // Remove a payment endpoint
 await removePaymentEndpoint('bitcoin');
+
+// Private encrypted payments use encrypted-link handles
+const handshake = await initiateEncryptedLink(secretKeyHex, receiverPublicKey);
+if (handshake.isOk()) {
+  const progress = await advanceHandshake(handshake.value);
+  if (progress.isOk() && progress.value.status === 'complete') {
+    const reference = await generatePaymentReference();
+    if (reference.isErr()) {
+      throw new Error(reference.error);
+    }
+
+    await setPrivatePayments(progress.value.linkHandle, {
+      reference: reference.value,
+      entries: [
+        { method_id: 'btc-lightning-bolt11', endpoint_data: '{"value":"lnbc1..."}' },
+      ],
+    });
+    const privatePayments = await getPrivatePayments(progress.value.linkHandle);
+
+    await issueReceipt(progress.value.linkHandle, {
+      reference: reference.value,
+      payment_method: 'btc-lightning-bolt11',
+      amount: '1000',
+      currency: 'sats',
+      metadata: [{ key: 'note', value: 'Paid' }],
+    });
+    const access = await getReceiptAccess(progress.value.linkHandle);
+  }
+}
 ```
 
 ## API
@@ -81,10 +119,34 @@ await removePaymentEndpoint('bitcoin');
 
 ### Payment List
 
-- **`getPaymentList(publicKey)`** — Fetch all payment methods for a user.
-- **`getPaymentEndpoint(publicKey, methodId)`** — Fetch a specific endpoint.
-- **`setPaymentEndpoint(methodId, endpointData)`** — Publish/update an endpoint.
-- **`removePaymentEndpoint(methodId)`** — Remove an endpoint.
+- **`getPaymentList(publicKey)`** — Fetch all public payment methods for a user.
+- **`getPaymentEndpoint(publicKey, methodId)`** — Fetch a specific public endpoint.
+- **`setPaymentEndpoint(methodId, endpointData)`** — Publish/update a public endpoint.
+- **`removePaymentEndpoint(methodId)`** — Remove a public endpoint.
+
+### Private encrypted payments
+
+- **`defaultMaxSendRetries()`** — Get the default private-message send retry count.
+- **`defaultMaxRecoveryAttempts()`** — Get the default handshake recovery-attempt count.
+- **`generatePaymentReference()`** — Generate a UUID-v4 payment reference for private payment and receipt correlation.
+- **`initiateEncryptedLink(secretKeyHex, receiverPublicKey)`** — Start a private encrypted-link handshake as initiator.
+- **`acceptEncryptedLink(secretKeyHex, senderPublicKey)`** — Start a private encrypted-link handshake as responder.
+- **`advanceHandshake(handshakeId)`** — Advance a handshake; returns pending handshake handle or complete link handle.
+- **`setEncryptedLinkHandshakeMaxRecoveryAttempts(handshakeId, max)`** — Override recovery attempts for a pending handshake.
+- **`setEncryptedLinkMaxSendRetries(linkId, max)`** — Override send retries for an established encrypted link.
+- **`setPrivatePayments(linkId, payload)`** — Send the complete latest-state private payment payload over the link. The payload contains `reference` and `entries`.
+- **`getPrivatePayments(linkId)`** — Receive the newest private payment payload from the link, or `null` when none is available.
+- **`issueReceipt(linkId, draft)`** — Store an encrypted receipt and send receipt access over the link.
+- **`getReceiptAccess(linkId)`** — Receive all currently available receipt access descriptors in FIFO order.
+- **`receiptLocation(reference)`** — Return the canonical homeserver receipt location for a payment reference.
+- **`decryptReceipt(encryptedJson, key, location)`** — Decrypt an encrypted receipt fetched from the homeserver.
+- **`serializeEncryptedLinkHandshake(handshakeId)`** / **`restoreEncryptedLinkHandshake(secretKeyHex, snapshotHex)`** — Persist and restore pending handshakes.
+- **`serializeEncryptedLink(linkId)`** / **`restoreEncryptedLink(secretKeyHex, snapshotHex)`** — Persist and restore established encrypted links.
+- **`encryptedLinkSnapshotRecipient(snapshotHex)`** / **`encryptedLinkHandshakeSnapshotRecipient(snapshotHex)`** — Inspect the counterparty embedded in a snapshot.
+- **`closeEncryptedLink(linkId)`** — Close an established encrypted-link native handle.
+- **`dropEncryptedLinkHandshake(handshakeId)`** — Drop a pending handshake native handle.
+
+Private payments are latest-state data: older queued private payment updates are superseded by the latest/newest queued envelope update. Receipt access is event-like and should be processed in order. Serialized snapshots and receipt keys contain sensitive key material and should be stored encrypted at rest.
 
 All functions return `Promise<Result<T>>` using [`@synonymdev/result`](https://www.npmjs.com/package/@synonymdev/result).
 

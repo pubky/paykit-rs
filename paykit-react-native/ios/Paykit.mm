@@ -58,6 +58,9 @@ RCT_EXTERN_METHOD(defaultMaxSendRetries:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(defaultMaxRecoveryAttempts:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(generatePaymentReference:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(initiateEncryptedLink:(NSString *)secretKeyHex
                   receiverPublicKey:(NSString *)receiverPublicKey
                   withResolver:(RCTPromiseResolveBlock)resolve
@@ -83,11 +86,30 @@ RCT_EXTERN_METHOD(setEncryptedLinkMaxSendRetries:(NSString *)linkId
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(setPrivatePayments:(NSString *)linkId
-                  entriesJson:(NSString *)entriesJson
+                  payloadJson:(NSString *)payloadJson
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(getPrivatePayments:(NSString *)linkId
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(issueReceipt:(NSString *)linkId
+                  draftJson:(NSString *)draftJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(getReceiptAccess:(NSString *)linkId
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(receiptLocation:(NSString *)reference
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(decryptReceipt:(NSString *)encryptedJson
+                  key:(NSString *)key
+                  location:(NSString *)location
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 

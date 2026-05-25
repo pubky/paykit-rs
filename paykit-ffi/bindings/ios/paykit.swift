@@ -524,7 +524,7 @@ public struct FfiConverterTypeFfiHandshakeProgress: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiHandshakeProgress {
         return
             try FfiHandshakeProgress(
-                status: FfiConverterString.read(from: &buf), 
+                status: FfiConverterString.read(from: &buf),
                 handleId: FfiConverterString.read(from: &buf)
         )
     }
@@ -548,6 +548,92 @@ public func FfiConverterTypeFfiHandshakeProgress_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeFfiHandshakeProgress_lower(_ value: FfiHandshakeProgress) -> RustBuffer {
     return FfiConverterTypeFfiHandshakeProgress.lower(value)
+}
+
+
+public struct FfiIssuedReceipt {
+    public var reference: String
+    public var location: String
+    /**
+     * Sensitive raw receipt decryption key material. Do not log.
+     */
+    public var key: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(reference: String, location: String,
+        /**
+         * Sensitive raw receipt decryption key material. Do not log.
+         */key: String) {
+        self.reference = reference
+        self.location = location
+        self.key = key
+    }
+}
+
+#if compiler(>=6)
+extension FfiIssuedReceipt: Sendable {}
+#endif
+
+
+extension FfiIssuedReceipt: Equatable, Hashable {
+    public static func ==(lhs: FfiIssuedReceipt, rhs: FfiIssuedReceipt) -> Bool {
+        if lhs.reference != rhs.reference {
+            return false
+        }
+        if lhs.location != rhs.location {
+            return false
+        }
+        if lhs.key != rhs.key {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(reference)
+        hasher.combine(location)
+        hasher.combine(key)
+    }
+}
+
+extension FfiIssuedReceipt: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiIssuedReceipt: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiIssuedReceipt {
+        return
+            try FfiIssuedReceipt(
+                reference: FfiConverterString.read(from: &buf),
+                location: FfiConverterString.read(from: &buf),
+                key: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiIssuedReceipt, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.reference, into: &buf)
+        FfiConverterString.write(value.location, into: &buf)
+        FfiConverterString.write(value.key, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiIssuedReceipt_lift(_ buf: RustBuffer) throws -> FfiIssuedReceipt {
+    return try FfiConverterTypeFfiIssuedReceipt.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiIssuedReceipt_lower(_ value: FfiIssuedReceipt) -> RustBuffer {
+    return FfiConverterTypeFfiIssuedReceipt.lower(value)
 }
 
 
@@ -596,7 +682,7 @@ public struct FfiConverterTypeFfiPaymentEntry: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentEntry {
         return
             try FfiPaymentEntry(
-                methodId: FfiConverterString.read(from: &buf), 
+                methodId: FfiConverterString.read(from: &buf),
                 endpointData: FfiConverterString.read(from: &buf)
         )
     }
@@ -668,7 +754,7 @@ public struct FfiConverterTypeFfiPrivatePaymentsPayload: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivatePaymentsPayload {
         return
             try FfiPrivatePaymentsPayload(
-                reference: FfiConverterString.read(from: &buf), 
+                reference: FfiConverterString.read(from: &buf),
                 entries: FfiConverterSequenceTypeFfiPaymentEntry.read(from: &buf)
         )
     }
@@ -695,10 +781,384 @@ public func FfiConverterTypeFfiPrivatePaymentsPayload_lower(_ value: FfiPrivateP
 }
 
 
+public struct FfiReceipt {
+    public var reference: String
+    public var recipientPublicKey: String
+    public var paymentMethod: String?
+    public var amount: String?
+    public var currency: String?
+    public var metadata: [FfiReceiptMetadataEntry]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(reference: String, recipientPublicKey: String, paymentMethod: String?, amount: String?, currency: String?, metadata: [FfiReceiptMetadataEntry]) {
+        self.reference = reference
+        self.recipientPublicKey = recipientPublicKey
+        self.paymentMethod = paymentMethod
+        self.amount = amount
+        self.currency = currency
+        self.metadata = metadata
+    }
+}
+
+#if compiler(>=6)
+extension FfiReceipt: Sendable {}
+#endif
+
+
+extension FfiReceipt: Equatable, Hashable {
+    public static func ==(lhs: FfiReceipt, rhs: FfiReceipt) -> Bool {
+        if lhs.reference != rhs.reference {
+            return false
+        }
+        if lhs.recipientPublicKey != rhs.recipientPublicKey {
+            return false
+        }
+        if lhs.paymentMethod != rhs.paymentMethod {
+            return false
+        }
+        if lhs.amount != rhs.amount {
+            return false
+        }
+        if lhs.currency != rhs.currency {
+            return false
+        }
+        if lhs.metadata != rhs.metadata {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(reference)
+        hasher.combine(recipientPublicKey)
+        hasher.combine(paymentMethod)
+        hasher.combine(amount)
+        hasher.combine(currency)
+        hasher.combine(metadata)
+    }
+}
+
+extension FfiReceipt: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceipt: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceipt {
+        return
+            try FfiReceipt(
+                reference: FfiConverterString.read(from: &buf),
+                recipientPublicKey: FfiConverterString.read(from: &buf),
+                paymentMethod: FfiConverterOptionString.read(from: &buf),
+                amount: FfiConverterOptionString.read(from: &buf),
+                currency: FfiConverterOptionString.read(from: &buf),
+                metadata: FfiConverterSequenceTypeFfiReceiptMetadataEntry.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReceipt, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.reference, into: &buf)
+        FfiConverterString.write(value.recipientPublicKey, into: &buf)
+        FfiConverterOptionString.write(value.paymentMethod, into: &buf)
+        FfiConverterOptionString.write(value.amount, into: &buf)
+        FfiConverterOptionString.write(value.currency, into: &buf)
+        FfiConverterSequenceTypeFfiReceiptMetadataEntry.write(value.metadata, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceipt_lift(_ buf: RustBuffer) throws -> FfiReceipt {
+    return try FfiConverterTypeFfiReceipt.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceipt_lower(_ value: FfiReceipt) -> RustBuffer {
+    return FfiConverterTypeFfiReceipt.lower(value)
+}
+
+
+public struct FfiReceiptAccess {
+    public var version: UInt32
+    public var reference: String
+    public var location: String
+    /**
+     * Sensitive raw receipt decryption key material. Do not log.
+     */
+    public var key: String
+    public var algorithm: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(version: UInt32, reference: String, location: String,
+        /**
+         * Sensitive raw receipt decryption key material. Do not log.
+         */key: String, algorithm: String) {
+        self.version = version
+        self.reference = reference
+        self.location = location
+        self.key = key
+        self.algorithm = algorithm
+    }
+}
+
+#if compiler(>=6)
+extension FfiReceiptAccess: Sendable {}
+#endif
+
+
+extension FfiReceiptAccess: Equatable, Hashable {
+    public static func ==(lhs: FfiReceiptAccess, rhs: FfiReceiptAccess) -> Bool {
+        if lhs.version != rhs.version {
+            return false
+        }
+        if lhs.reference != rhs.reference {
+            return false
+        }
+        if lhs.location != rhs.location {
+            return false
+        }
+        if lhs.key != rhs.key {
+            return false
+        }
+        if lhs.algorithm != rhs.algorithm {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(version)
+        hasher.combine(reference)
+        hasher.combine(location)
+        hasher.combine(key)
+        hasher.combine(algorithm)
+    }
+}
+
+extension FfiReceiptAccess: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceiptAccess: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptAccess {
+        return
+            try FfiReceiptAccess(
+                version: FfiConverterUInt32.read(from: &buf),
+                reference: FfiConverterString.read(from: &buf),
+                location: FfiConverterString.read(from: &buf),
+                key: FfiConverterString.read(from: &buf),
+                algorithm: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReceiptAccess, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.version, into: &buf)
+        FfiConverterString.write(value.reference, into: &buf)
+        FfiConverterString.write(value.location, into: &buf)
+        FfiConverterString.write(value.key, into: &buf)
+        FfiConverterString.write(value.algorithm, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptAccess_lift(_ buf: RustBuffer) throws -> FfiReceiptAccess {
+    return try FfiConverterTypeFfiReceiptAccess.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptAccess_lower(_ value: FfiReceiptAccess) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptAccess.lower(value)
+}
+
+
+public struct FfiReceiptDraft {
+    public var reference: String
+    public var paymentMethod: String?
+    public var amount: String?
+    public var currency: String?
+    public var metadata: [FfiReceiptMetadataEntry]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(reference: String, paymentMethod: String?, amount: String?, currency: String?, metadata: [FfiReceiptMetadataEntry]) {
+        self.reference = reference
+        self.paymentMethod = paymentMethod
+        self.amount = amount
+        self.currency = currency
+        self.metadata = metadata
+    }
+}
+
+#if compiler(>=6)
+extension FfiReceiptDraft: Sendable {}
+#endif
+
+
+extension FfiReceiptDraft: Equatable, Hashable {
+    public static func ==(lhs: FfiReceiptDraft, rhs: FfiReceiptDraft) -> Bool {
+        if lhs.reference != rhs.reference {
+            return false
+        }
+        if lhs.paymentMethod != rhs.paymentMethod {
+            return false
+        }
+        if lhs.amount != rhs.amount {
+            return false
+        }
+        if lhs.currency != rhs.currency {
+            return false
+        }
+        if lhs.metadata != rhs.metadata {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(reference)
+        hasher.combine(paymentMethod)
+        hasher.combine(amount)
+        hasher.combine(currency)
+        hasher.combine(metadata)
+    }
+}
+
+extension FfiReceiptDraft: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptDraft {
+        return
+            try FfiReceiptDraft(
+                reference: FfiConverterString.read(from: &buf),
+                paymentMethod: FfiConverterOptionString.read(from: &buf),
+                amount: FfiConverterOptionString.read(from: &buf),
+                currency: FfiConverterOptionString.read(from: &buf),
+                metadata: FfiConverterSequenceTypeFfiReceiptMetadataEntry.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReceiptDraft, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.reference, into: &buf)
+        FfiConverterOptionString.write(value.paymentMethod, into: &buf)
+        FfiConverterOptionString.write(value.amount, into: &buf)
+        FfiConverterOptionString.write(value.currency, into: &buf)
+        FfiConverterSequenceTypeFfiReceiptMetadataEntry.write(value.metadata, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptDraft_lift(_ buf: RustBuffer) throws -> FfiReceiptDraft {
+    return try FfiConverterTypeFfiReceiptDraft.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptDraft_lower(_ value: FfiReceiptDraft) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptDraft.lower(value)
+}
+
+
+public struct FfiReceiptMetadataEntry {
+    public var key: String
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(key: String, value: String) {
+        self.key = key
+        self.value = value
+    }
+}
+
+#if compiler(>=6)
+extension FfiReceiptMetadataEntry: Sendable {}
+#endif
+
+
+extension FfiReceiptMetadataEntry: Equatable, Hashable {
+    public static func ==(lhs: FfiReceiptMetadataEntry, rhs: FfiReceiptMetadataEntry) -> Bool {
+        if lhs.key != rhs.key {
+            return false
+        }
+        if lhs.value != rhs.value {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(key)
+        hasher.combine(value)
+    }
+}
+
+extension FfiReceiptMetadataEntry: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceiptMetadataEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptMetadataEntry {
+        return
+            try FfiReceiptMetadataEntry(
+                key: FfiConverterString.read(from: &buf),
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReceiptMetadataEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.key, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptMetadataEntry_lift(_ buf: RustBuffer) throws -> FfiReceiptMetadataEntry {
+    return try FfiConverterTypeFfiReceiptMetadataEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptMetadataEntry_lower(_ value: FfiReceiptMetadataEntry) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptMetadataEntry.lower(value)
+}
+
+
 public enum PaykitFfiError: Swift.Error {
 
-    
-    
+
+
     case Transport(reason: String
     )
     case NotFound(reason: String
@@ -722,9 +1182,9 @@ public struct FfiConverterTypePaykitFfiError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Transport(
             reason: try FfiConverterString.read(from: &buf)
             )
@@ -748,34 +1208,34 @@ public struct FfiConverterTypePaykitFfiError: FfiConverterRustBuffer {
     public static func write(_ value: PaykitFfiError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
-        
+
+
+
         case let .Transport(reason):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(reason, into: &buf)
-            
-        
+
+
         case let .NotFound(reason):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(reason, into: &buf)
-            
-        
+
+
         case let .InvalidData(reason):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(reason, into: &buf)
-            
-        
+
+
         case let .Validation(reason):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
-            
-        
+
+
         case let .Session(reason):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
-            
+
         }
     }
 }
@@ -884,6 +1344,56 @@ fileprivate struct FfiConverterSequenceTypeFfiPaymentEntry: FfiConverterRustBuff
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiReceiptAccess: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiReceiptAccess]
+
+    public static func write(_ value: [FfiReceiptAccess], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiReceiptAccess.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiReceiptAccess] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiReceiptAccess]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiReceiptAccess.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiReceiptMetadataEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiReceiptMetadataEntry]
+
+    public static func write(_ value: [FfiReceiptMetadataEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiReceiptMetadataEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiReceiptMetadataEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiReceiptMetadataEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiReceiptMetadataEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
 private let UNIFFI_RUST_FUTURE_POLL_MAYBE_READY: Int8 = 1
 
@@ -985,6 +1495,22 @@ public func paykitCloseEncryptedLink(linkId: String)async throws   {
         )
 }
 /**
+ * Decrypt an encrypted receipt payload fetched from the homeserver.
+ *
+ * `key` and `location` should come from a `FfiReceiptAccess` message. The key is
+ * sensitive; do not log it. Decryption authenticates `location` as associated
+ * data and rejects plaintext whose reference does not match that location.
+ */
+public func paykitDecryptReceipt(encryptedJson: String, key: String, location: String)throws  -> FfiReceipt  {
+    return try  FfiConverterTypeFfiReceipt_lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_func_paykit_decrypt_receipt(
+        FfiConverterString.lower(encryptedJson),
+        FfiConverterString.lower(key),
+        FfiConverterString.lower(location),$0
+    )
+})
+}
+/**
  * Default maximum number of consecutive handshake recovery attempts.
  */
 public func paykitDefaultMaxRecoveryAttempts() -> UInt32  {
@@ -1077,7 +1603,7 @@ public func paykitForceSignOut()async   {
             freeFunc: ffi_paykit_rust_future_free_void,
             liftFunc: { $0 },
             errorHandler: nil
-            
+
         )
 }
 /**
@@ -1104,7 +1630,7 @@ public func paykitGetCurrentPublicKey()async  -> String?  {
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionString.lift,
             errorHandler: nil
-            
+
         )
 }
 /**
@@ -1155,6 +1681,26 @@ public func paykitGetPrivatePayments(linkId: String)async throws  -> FfiPrivateP
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeFfiPrivatePaymentsPayload.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Receive all currently available receipt access descriptors in FIFO order.
+ *
+ * Returns an empty vector when no receipt access messages are available. Each
+ * returned `key` is sensitive decryption material. Do not log it.
+ */
+public func paykitGetReceiptAccess(linkId: String)async throws  -> [FfiReceiptAccess]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_get_receipt_access(FfiConverterString.lower(linkId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiReceiptAccess.lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1233,8 +1779,38 @@ public func paykitIsAuthenticated()async  -> Bool  {
             freeFunc: ffi_paykit_rust_future_free_i8,
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
-            
+
         )
+}
+/**
+ * Store an encrypted receipt and send receipt access over an established link.
+ *
+ * The returned `key` is sensitive decryption material. Do not log it or store it
+ * outside platform secure storage.
+ */
+public func paykitIssueReceipt(linkId: String, draft: FfiReceiptDraft)async throws  -> FfiIssuedReceipt  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_func_paykit_issue_receipt(FfiConverterString.lower(linkId),FfiConverterTypeFfiReceiptDraft_lower(draft)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiIssuedReceipt_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+/**
+ * Return the canonical homeserver receipt location for a payment reference.
+ */
+public func paykitReceiptLocation(reference: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_func_paykit_receipt_location(
+        FfiConverterString.lower(reference),$0
+    )
+})
 }
 /**
  * Remove a payment endpoint for the authenticated user.
@@ -1471,6 +2047,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_close_encrypted_link() != 14508) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_func_paykit_decrypt_receipt() != 38169) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_paykit_default_max_recovery_attempts() != 23339) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1507,6 +2086,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_get_private_payments() != 50390) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_func_paykit_get_receipt_access() != 29689) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_paykit_import_session() != 29532) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1517,6 +2099,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_is_authenticated() != 34745) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_issue_receipt() != 32321) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_receipt_location() != 36124) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_remove_payment_endpoint() != 52853) {

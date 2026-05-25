@@ -36,6 +36,47 @@ export interface PaymentEntry {
   endpoint_data: string;
 }
 
+export interface PrivatePaymentsPayload {
+  reference: string;
+  entries: PaymentEntry[];
+}
+
+export interface ReceiptMetadataEntry {
+  key: string;
+  value: string;
+}
+
+export interface ReceiptDraft {
+  reference: string;
+  payment_method?: string | null;
+  amount?: string | null;
+  currency?: string | null;
+  metadata?: ReceiptMetadataEntry[];
+}
+
+export interface Receipt {
+  reference: string;
+  recipient_public_key: string;
+  payment_method: string | null;
+  amount: string | null;
+  currency: string | null;
+  metadata: ReceiptMetadataEntry[];
+}
+
+export interface ReceiptAccess {
+  version: number;
+  reference: string;
+  location: string;
+  key: string;
+  algorithm: string;
+}
+
+export interface IssuedReceipt {
+  reference: string;
+  location: string;
+  key: string;
+}
+
 declare const encryptedLinkHandleBrand: unique symbol;
 declare const encryptedLinkHandshakeHandleBrand: unique symbol;
 
@@ -336,6 +377,21 @@ export async function defaultMaxRecoveryAttempts(): Promise<Result<number>> {
 }
 
 /**
+ * Generate a fresh UUID-v4 payment reference.
+ */
+export async function generatePaymentReference(): Promise<Result<string>> {
+  try {
+    const res: string[] = await Paykit.generatePaymentReference();
+    if (res[0] === 'error') {
+      return err(res[1]!);
+    }
+    return ok(res[1] ?? '');
+  } catch (e) {
+    return err(JSON.stringify(e));
+  }
+}
+
+/**
  * Start a private encrypted-link handshake as the initiator.
  */
 export async function initiateEncryptedLink(
@@ -458,16 +514,16 @@ export async function setEncryptedLinkMaxSendRetries(
 }
 
 /**
- * Encrypt and send the complete private payments map.
+ * Encrypt and send the complete private payments payload.
  */
 export async function setPrivatePayments(
   linkId: EncryptedLinkHandle,
-  entries: PaymentEntry[]
+  payload: PrivatePaymentsPayload
 ): Promise<Result<string>> {
   try {
     const res: string[] = await Paykit.setPrivatePayments(
       linkId,
-      JSON.stringify(entries)
+      JSON.stringify(payload)
     );
     if (res[0] === 'error') {
       return err(res[1]!);
@@ -479,17 +535,95 @@ export async function setPrivatePayments(
 }
 
 /**
- * Receive and decrypt the latest private payments map.
+ * Receive and decrypt the latest private payments payload.
  */
 export async function getPrivatePayments(
   linkId: EncryptedLinkHandle
-): Promise<Result<PaymentEntry[]>> {
+): Promise<Result<PrivatePaymentsPayload | null>> {
   try {
     const res: string[] = await Paykit.getPrivatePayments(linkId);
     if (res[0] === 'error') {
       return err(res[1]!);
     }
-    return ok(JSON.parse(res[1]!));
+    return ok(JSON.parse(res[1] ?? 'null'));
+  } catch (e) {
+    return err(JSON.stringify(e));
+  }
+}
+
+/**
+ * Store an encrypted receipt and send access to the counterparty.
+ */
+export async function issueReceipt(
+  linkId: EncryptedLinkHandle,
+  draft: ReceiptDraft
+): Promise<Result<IssuedReceipt>> {
+  try {
+    const res: string[] = await Paykit.issueReceipt(
+      linkId,
+      JSON.stringify(draft)
+    );
+    if (res[0] === 'error') {
+      return err(res[1]!);
+    }
+    return ok(JSON.parse(res[1]!) as IssuedReceipt);
+  } catch (e) {
+    return err(JSON.stringify(e));
+  }
+}
+
+/**
+ * Receive all currently available receipt access descriptors.
+ */
+export async function getReceiptAccess(
+  linkId: EncryptedLinkHandle
+): Promise<Result<ReceiptAccess[]>> {
+  try {
+    const res: string[] = await Paykit.getReceiptAccess(linkId);
+    if (res[0] === 'error') {
+      return err(res[1]!);
+    }
+    return ok(JSON.parse(res[1]!) as ReceiptAccess[]);
+  } catch (e) {
+    return err(JSON.stringify(e));
+  }
+}
+
+/**
+ * Return the canonical homeserver receipt location for a payment reference.
+ */
+export async function receiptLocation(
+  reference: string
+): Promise<Result<string>> {
+  try {
+    const res: string[] = await Paykit.receiptLocation(reference);
+    if (res[0] === 'error') {
+      return err(res[1]!);
+    }
+    return ok(res[1] ?? '');
+  } catch (e) {
+    return err(JSON.stringify(e));
+  }
+}
+
+/**
+ * Decrypt an encrypted receipt payload fetched from the homeserver.
+ */
+export async function decryptReceipt(
+  encryptedJson: string,
+  key: string,
+  location: string
+): Promise<Result<Receipt>> {
+  try {
+    const res: string[] = await Paykit.decryptReceipt(
+      encryptedJson,
+      key,
+      location
+    );
+    if (res[0] === 'error') {
+      return err(res[1]!);
+    }
+    return ok(JSON.parse(res[1]!) as Receipt);
   } catch (e) {
     return err(JSON.stringify(e));
   }

@@ -30,8 +30,7 @@ class PaykitModule(reactContext: ReactApplicationContext) :
         pushString(message)
     }
 
-    private fun entriesFromJson(json: String): List<FfiPaymentEntry> {
-        val array = JSONArray(json)
+    private fun entriesFromJsonArray(array: JSONArray): List<FfiPaymentEntry> {
         return List(array.length()) { index ->
             val item = array.getJSONObject(index)
             FfiPaymentEntry(
@@ -41,7 +40,7 @@ class PaykitModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun entriesJson(entries: List<FfiPaymentEntry>): String {
+    private fun entriesJsonArray(entries: List<FfiPaymentEntry>): JSONArray {
         return JSONArray().apply {
             entries.forEach { entry ->
                 put(JSONObject().apply {
@@ -49,6 +48,112 @@ class PaykitModule(reactContext: ReactApplicationContext) :
                     put("endpoint_data", entry.endpointData)
                 })
             }
+        }
+    }
+
+    private fun entriesJson(entries: List<FfiPaymentEntry>): String {
+        return entriesJsonArray(entries).toString()
+    }
+
+    private fun privatePaymentsPayloadFromJson(json: String): FfiPrivatePaymentsPayload {
+        val payload = JSONObject(json)
+        return FfiPrivatePaymentsPayload(
+            reference = payload.getString("reference"),
+            entries = entriesFromJsonArray(payload.getJSONArray("entries"))
+        )
+    }
+
+    private fun privatePaymentsPayloadJson(payload: FfiPrivatePaymentsPayload?): String {
+        if (payload == null) {
+            return "null"
+        }
+        return JSONObject().apply {
+            put("reference", payload.reference)
+            put("entries", entriesJsonArray(payload.entries))
+        }.toString()
+    }
+
+    private fun optionalString(item: JSONObject, key: String): String? {
+        return if (!item.has(key) || item.isNull(key)) null else item.getString(key)
+    }
+
+    private fun optionalJsonArray(item: JSONObject, key: String): JSONArray? {
+        if (!item.has(key) || item.isNull(key)) {
+            return null
+        }
+        return item.optJSONArray(key)
+            ?: throw IllegalArgumentException("$key must be a JSON array")
+    }
+
+    private fun metadataFromJsonArray(array: JSONArray?): List<FfiReceiptMetadataEntry> {
+        if (array == null) {
+            return emptyList()
+        }
+        return List(array.length()) { index ->
+            val item = array.getJSONObject(index)
+            FfiReceiptMetadataEntry(
+                key = item.getString("key"),
+                value = item.getString("value")
+            )
+        }
+    }
+
+    private fun metadataJsonArray(metadata: List<FfiReceiptMetadataEntry>): JSONArray {
+        return JSONArray().apply {
+            metadata.forEach { entry ->
+                put(JSONObject().apply {
+                    put("key", entry.key)
+                    put("value", entry.value)
+                })
+            }
+        }
+    }
+
+    private fun receiptDraftFromJson(json: String): FfiReceiptDraft {
+        val draft = JSONObject(json)
+        return FfiReceiptDraft(
+            reference = draft.getString("reference"),
+            paymentMethod = optionalString(draft, "payment_method"),
+            amount = optionalString(draft, "amount"),
+            currency = optionalString(draft, "currency"),
+            metadata = metadataFromJsonArray(optionalJsonArray(draft, "metadata"))
+        )
+    }
+
+    private fun issuedReceiptJson(receipt: FfiIssuedReceipt): String {
+        return JSONObject().apply {
+            put("reference", receipt.reference)
+            put("location", receipt.location)
+            put("key", receipt.key)
+        }.toString()
+    }
+
+    private fun receiptAccessJsonObject(access: FfiReceiptAccess): JSONObject {
+        return JSONObject().apply {
+            put("version", access.version.toLong())
+            put("reference", access.reference)
+            put("location", access.location)
+            put("key", access.key)
+            put("algorithm", access.algorithm)
+        }
+    }
+
+    private fun receiptAccessJson(access: List<FfiReceiptAccess>): String {
+        return JSONArray().apply {
+            access.forEach { item ->
+                put(receiptAccessJsonObject(item))
+            }
+        }.toString()
+    }
+
+    private fun receiptJson(receipt: FfiReceipt): String {
+        return JSONObject().apply {
+            put("reference", receipt.reference)
+            put("recipient_public_key", receipt.recipientPublicKey)
+            put("payment_method", receipt.paymentMethod ?: JSONObject.NULL)
+            put("amount", receipt.amount ?: JSONObject.NULL)
+            put("currency", receipt.currency ?: JSONObject.NULL)
+            put("metadata", metadataJsonArray(receipt.metadata))
         }.toString()
     }
 
@@ -321,6 +426,15 @@ class PaykitModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun generatePaymentReference(promise: Promise) {
+        try {
+            promise.resolve(resultArray(paykitGeneratePaymentReference()))
+        } catch (e: Exception) {
+            promise.resolve(errorArray(e.message ?: "Unknown error"))
+        }
+    }
+
+    @ReactMethod
     fun initiateEncryptedLink(secretKeyHex: String, receiverPublicKey: String, promise: Promise) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -407,10 +521,10 @@ class PaykitModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun setPrivatePayments(linkId: String, entriesJson: String, promise: Promise) {
+    fun setPrivatePayments(linkId: String, payloadJson: String, promise: Promise) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                paykitSetPrivatePayments(linkId, entriesFromJson(entriesJson))
+                paykitSetPrivatePayments(linkId, privatePaymentsPayloadFromJson(payloadJson))
                 withContext(Dispatchers.Main) {
                     promise.resolve(resultArray(""))
                 }
@@ -426,15 +540,65 @@ class PaykitModule(reactContext: ReactApplicationContext) :
     fun getPrivatePayments(linkId: String, promise: Promise) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val entries = paykitGetPrivatePayments(linkId)
+                val payload = paykitGetPrivatePayments(linkId)
                 withContext(Dispatchers.Main) {
-                    promise.resolve(resultArray(entriesJson(entries)))
+                    promise.resolve(resultArray(privatePaymentsPayloadJson(payload)))
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     promise.resolve(errorArray(e.message ?: "Unknown error"))
                 }
             }
+        }
+    }
+
+    @ReactMethod
+    fun issueReceipt(linkId: String, draftJson: String, promise: Promise) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val receipt = paykitIssueReceipt(linkId, receiptDraftFromJson(draftJson))
+                withContext(Dispatchers.Main) {
+                    promise.resolve(resultArray(issuedReceiptJson(receipt)))
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    promise.resolve(errorArray(e.message ?: "Unknown error"))
+                }
+            }
+        }
+    }
+
+    @ReactMethod
+    fun getReceiptAccess(linkId: String, promise: Promise) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val access = paykitGetReceiptAccess(linkId)
+                withContext(Dispatchers.Main) {
+                    promise.resolve(resultArray(receiptAccessJson(access)))
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    promise.resolve(errorArray(e.message ?: "Unknown error"))
+                }
+            }
+        }
+    }
+
+    @ReactMethod
+    fun receiptLocation(reference: String, promise: Promise) {
+        try {
+            promise.resolve(resultArray(paykitReceiptLocation(reference)))
+        } catch (e: Exception) {
+            promise.resolve(errorArray(e.message ?: "Unknown error"))
+        }
+    }
+
+    @ReactMethod
+    fun decryptReceipt(encryptedJson: String, key: String, location: String, promise: Promise) {
+        try {
+            promise.resolve(resultArray(receiptJson(paykitDecryptReceipt(encryptedJson, key, location))))
+        } catch (e: Exception) {
+            promise.resolve(errorArray(e.message ?: "Unknown error"))
         }
     }
 
