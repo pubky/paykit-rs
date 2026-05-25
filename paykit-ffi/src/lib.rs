@@ -14,8 +14,7 @@ use tokio::sync::Mutex as TokioMutex;
 use paykit_lib::{
     EncryptedLink, EncryptedLinkHandshake, EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot,
     EndpointData, HandshakeProgress, IssuedReceipt, MethodId, PaymentReference,
-    PrivatePaymentsPayload, PubkyAuthenticatedTransport, PubkyUnauthenticatedTransport, Receipt,
-    ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
+    PrivatePaymentsPayload, Receipt, ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
 };
 
 // ---------------------------------------------------------------------------
@@ -183,7 +182,6 @@ static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static PUBKY: OnceCell<Pubky> = OnceCell::new();
 
 struct SessionState {
-    transport: PubkyAuthenticatedTransport,
     session: PubkySession,
 }
 
@@ -234,8 +232,8 @@ fn parse_public_key(pk_str: &str) -> Result<PublicKey, PaykitFfiError> {
         })
 }
 
-fn make_reader(pubky: &Pubky) -> PubkyUnauthenticatedTransport {
-    PubkyUnauthenticatedTransport::new(pubky.public_storage())
+fn make_reader(pubky: &Pubky) -> pubky::PublicStorage {
+    pubky.public_storage()
 }
 
 fn runtime_err(e: tokio::task::JoinError) -> PaykitFfiError {
@@ -258,15 +256,6 @@ fn parse_handle_id(value: &str, label: &'static str) -> Result<u64, PaykitFfiErr
         .map_err(|e| PaykitFfiError::Validation {
             reason: format!("Invalid {label} handle '{value}': {e}"),
         })
-}
-
-/// Clone the transport out of the session lock so network I/O doesn't hold it.
-async fn get_authenticated_transport() -> Result<PubkyAuthenticatedTransport, PaykitFfiError> {
-    let guard = get_session_lock().lock().await;
-    let state = guard.as_ref().ok_or_else(|| PaykitFfiError::Session {
-        reason: "No active session. Call paykit_import_session or paykit_sign_in first.".into(),
-    })?;
-    Ok(state.transport.clone())
 }
 
 /// Clone the session out of the lock so private-payment I/O doesn't hold it.
@@ -600,12 +589,10 @@ pub async fn paykit_import_session(session_secret: String) -> Result<String, Pay
             })?;
 
         let public_key = session.info().public_key().to_string();
-        let transport = PubkyAuthenticatedTransport::new(session.clone());
-
         clear_private_handles().await;
 
         let mut guard = get_session_lock().lock().await;
-        *guard = Some(SessionState { transport, session });
+        *guard = Some(SessionState { session });
 
         Ok(public_key)
     })
@@ -636,12 +623,10 @@ pub async fn paykit_sign_up(
             })?;
 
         let public_key = session.info().public_key().to_string();
-        let transport = PubkyAuthenticatedTransport::new(session.clone());
-
         clear_private_handles().await;
 
         let mut guard = get_session_lock().lock().await;
-        *guard = Some(SessionState { transport, session });
+        *guard = Some(SessionState { session });
 
         Ok(public_key)
     })
@@ -667,12 +652,10 @@ pub async fn paykit_sign_in(secret_key_hex: String) -> Result<String, PaykitFfiE
         })?;
 
         let public_key = session.info().public_key().to_string();
-        let transport = PubkyAuthenticatedTransport::new(session.clone());
-
         clear_private_handles().await;
 
         let mut guard = get_session_lock().lock().await;
-        *guard = Some(SessionState { transport, session });
+        *guard = Some(SessionState { session });
 
         Ok(public_key)
     })
@@ -694,9 +677,9 @@ pub async fn paykit_set_payment_endpoint(
     rt.spawn(async move {
         let method = MethodId::new(method_id)?;
         let data = EndpointData::new(endpoint_data);
-        let transport = get_authenticated_transport().await?;
+        let session = get_session().await?;
 
-        paykit_lib::set_payment_endpoint(&transport, method, data).await?;
+        paykit_lib::set_payment_endpoint(&session, method, data).await?;
         Ok(())
     })
     .await
@@ -709,9 +692,9 @@ pub async fn paykit_remove_payment_endpoint(method_id: String) -> Result<(), Pay
     let rt = ensure_runtime();
     rt.spawn(async move {
         let method = MethodId::new(method_id)?;
-        let transport = get_authenticated_transport().await?;
+        let session = get_session().await?;
 
-        paykit_lib::remove_payment_endpoint(&transport, method).await?;
+        paykit_lib::remove_payment_endpoint(&session, method).await?;
         Ok(())
     })
     .await
@@ -1256,7 +1239,6 @@ pub async fn paykit_sign_out() -> Result<(), PaykitFfiError> {
             }
             Err((e, returned_session)) => {
                 *guard = Some(SessionState {
-                    transport: PubkyAuthenticatedTransport::new(returned_session.clone()),
                     session: returned_session,
                 });
                 Err(PaykitFfiError::Session {
