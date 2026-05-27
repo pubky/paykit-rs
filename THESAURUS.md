@@ -13,7 +13,7 @@
 - **Related terms**: Paykit Protocol, Paykit Library, Paykit Daemon
 
 ### Paykit Protocol
-- **Definition**: The domain rules, data model, and flows for payment discovery and exchange through Pubky Routing, including public Payment Lists, private payments, Payment Endpoint Identifiers, Payment References, Receipts, and Receipt Access.
+- **Definition**: The domain rules, data model, and flows for payment discovery and exchange through Pubky Routing, including Payment Lists, Private Payment Envelopes, Payment Endpoint Identifiers, Payment References, Receipts, and Receipt Access.
 - **NOT**: A specific Rust implementation or daemon runtime.
 - **Synonyms to AVOID**: routing network protocol, Paykit SDK protocol
 - **Related terms**: Payment List, Private Payment Envelope, Payment Endpoint Identifier, Pubky Routing
