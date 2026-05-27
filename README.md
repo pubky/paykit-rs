@@ -154,7 +154,6 @@ The Paykit Library is an abstraction for payment specific CRUD methods of Paykit
 ### Dependencies
 
 * **The Pubky SDK** [https://github.com/pubky/pubky-core/tree/main/pubky](https://github.com/pubky/pubky-core/tree/main/pubky)
-* **async-trait** — async fn in trait definitions
 * **tracing** — structured, context-aware logging
 
 ### Language bindings
