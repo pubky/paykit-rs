@@ -65,7 +65,7 @@
 ### Payment Endpoint Identifier
 - **Definition**: The canonical machine-readable identifier for a payment endpoint type, such as `btc-lightning-bolt12` or `eur-sepa-iban`.
 - **NOT**: The full Payment Endpoint or the payload/credential itself.
-- **Synonyms to AVOID**: PaymentEndpointIdentifier, method id, payment method id
+- **Synonyms to AVOID**: method id, payment method id
 - **Related terms**: Payment Endpoint, Payment Method, Asset, Rail, Endpoint Format
 
 ### Payment Endpoint Payload
