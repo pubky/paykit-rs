@@ -95,7 +95,7 @@
 ## Private Payments and Receipts
 
 ### Private Payment Envelope
-- **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete private Payment List of a Know Peer. Latest-wins semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
+- **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete Payment List of a Know Peer. Latest-wins semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
 - **NOT**: A public Payment List, and not merely a private version of the list if the object includes more than endpoints.
 - **Synonyms to AVOID**: Private Payment List, Private Payment Method List, private payments payload
 - **Related terms**: Known Peer, Payment Endpoint, Payment Reference
