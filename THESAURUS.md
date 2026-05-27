@@ -112,11 +112,17 @@
 - **Synonyms to AVOID**: private message type when naming the protocol concept
 - **Related terms**: Private Application Message, Private Payment Envelope, Receipt Access
 
+### Latest-State Message
+- **Definition**: A private message semantic where only the newest valid message of that kind matters.
+- **NOT**: An event-like message stream where every message must be preserved and processed in order.
+- **Synonyms to AVOID**: latest-wins message when naming the protocol concept
+- **Related terms**: Private Application Message, Private Message Kind, Private Payment Envelope
+
 ### Private Payment Envelope
-- **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete Payment List of a Know Peer. Latest-wins semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
+- **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete Payment List of a Know Peer. Latest-State Message semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
 - **NOT**: A Payment List with addition fields.
 - **Synonyms to AVOID**: Private Payment List, Private Payment Method List, private payments payload
-- **Related terms**: Linked Peer, Private Application Message, Payment Endpoint, Payment Reference
+- **Related terms**: Linked Peer, Private Application Message, Latest-State Message, Payment Endpoint, Payment Reference
 
 ### Payment Reference
 - **Definition**: A per-payment or per-request correlation identifier. In private payment flows, the Private Payment Envelope carries the Payment Reference because the envelope represents the latest private payment disclosure for that payment/request.
@@ -203,6 +209,7 @@ Protocol concepts:
 - Payment Method
 - Private Application Message
 - Private Message Kind
+- Latest-State Message
 - Private Payment Envelope
 - Payment Reference
 - Receipt
