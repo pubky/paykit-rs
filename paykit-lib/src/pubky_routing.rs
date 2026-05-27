@@ -12,12 +12,13 @@ use pubky::{
 };
 use tracing::{debug, error, instrument, trace};
 
-use crate::{EndpointData, MethodId, PaykitError, Result, SupportedPayments};
+use crate::{PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList, Result};
 
 /// Conventional prefix for public Paykit data hosted on Pubky storage.
 ///
 /// `v0` stores public payment endpoints as:
-/// `/pub/paykit/v0/{method_id}` with the file payload being the payment endpoint.
+/// `/pub/paykit/v0/{payment_endpoint_identifier}` with the file contents being
+/// the Payment Endpoint Payload.
 pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
 
 /// Conventional prefix for private (encrypted) Paykit data.
@@ -29,17 +30,17 @@ pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
 pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit/v0/private";
 
 /// Writes or updates a payment endpoint document in the authenticated Pubky session.
-#[instrument(skip(session, data), fields(method = %method))]
+#[instrument(skip(session, payload), fields(identifier = %identifier))]
 pub async fn upsert_payment_endpoint(
     session: &PubkySession,
-    method: &MethodId,
-    data: &EndpointData,
+    identifier: &PaymentEndpointIdentifier,
+    payload: &PaymentEndpointPayload,
 ) -> Result<()> {
-    let path = payment_endpoint_path(method);
+    let path = payment_endpoint_path(identifier);
     debug!(path = %path, "writing payment endpoint to Pubky storage");
     session
         .storage()
-        .put(path, data.as_str().to_string())
+        .put(path, payload.as_str().to_string())
         .await
         .map_err(|err| {
             error!(error = %err, "failed to put payment endpoint");
@@ -53,9 +54,12 @@ pub async fn upsert_payment_endpoint(
 }
 
 /// Removes an existing payment endpoint from the authenticated Pubky session.
-#[instrument(skip(session), fields(method = %method))]
-pub async fn delete_payment_endpoint(session: &PubkySession, method: &MethodId) -> Result<()> {
-    let path = payment_endpoint_path(method);
+#[instrument(skip(session), fields(identifier = %identifier))]
+pub async fn delete_payment_endpoint(
+    session: &PubkySession,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<()> {
+    let path = payment_endpoint_path(identifier);
     debug!(path = %path, "deleting payment endpoint from Pubky storage");
     session.storage().delete(path).await.map_err(|err| {
         error!(error = %err, "failed to delete payment endpoint");
@@ -73,13 +77,10 @@ pub async fn delete_payment_endpoint(session: &PubkySession, method: &MethodId) 
 /// Directory listing and per-entry fetches are not atomic; the returned list is a
 /// best-effort snapshot of the payee's homeserver state.
 #[instrument(skip(storage), fields(payee = %payee))]
-pub async fn fetch_supported_payments(
-    storage: &PublicStorage,
-    payee: &PublicKey,
-) -> Result<SupportedPayments> {
+pub async fn fetch_payment_list(storage: &PublicStorage, payee: &PublicKey) -> Result<PaymentList> {
     let addr = format!("{payee}{PAYKIT_PATH_PREFIX}");
-    debug!(addr = %addr, "listing supported payment methods");
-    let entries = list_entries(storage, addr, "list supported payments").await?;
+    debug!(addr = %addr, "listing payment endpoints");
+    let entries = list_entries(storage, addr, "list payment endpoints").await?;
 
     let mut map = HashMap::new();
     for resource in entries {
@@ -88,17 +89,17 @@ pub async fn fetch_supported_payments(
             continue;
         }
 
-        let method = resource
+        let identifier_text = resource
             .path
             .as_str()
             .rsplit('/')
             .next()
             .filter(|segment| !segment.is_empty())
             .ok_or_else(|| {
-                error!(path = %resource.path, "invalid resource path for payment entry");
+                error!(path = %resource.path, "invalid resource path for Payment Endpoint");
                 PaykitError::InvalidData {
                     context: format!(
-                        "cannot extract method from resource path '{}'",
+                        "cannot extract Payment Endpoint Identifier from resource path '{}'",
                         resource.path
                     ),
                     source: None,
@@ -106,34 +107,40 @@ pub async fn fetch_supported_payments(
             })?
             .to_string();
 
-        let label = format!("fetch endpoint {method}");
+        let label = format!("fetch payment endpoint {identifier_text}");
         if let Some(payload) = fetch_text(storage, resource.to_string(), &label).await? {
-            debug!(method = %method, "fetched payment endpoint payload");
-            let method_id = MethodId::new(&method).map_err(|err| PaykitError::InvalidData {
-                context: format!("storage returned invalid method identifier '{method}'"),
-                source: Some(err.into()),
-            })?;
-            map.insert(method_id, EndpointData::new(payload));
+            debug!(identifier = %identifier_text, "fetched Payment Endpoint Payload");
+            let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&identifier_text)
+                .map_err(|err| PaykitError::InvalidData {
+                    context: format!(
+                        "storage returned invalid Payment Endpoint Identifier '{identifier_text}'"
+                    ),
+                    source: Some(err.into()),
+                })?;
+            map.insert(
+                payment_endpoint_identifier,
+                PaymentEndpointPayload::new(payload),
+            );
         }
     }
 
-    debug!(count = map.len(), "supported payments collected");
-    Ok(SupportedPayments { entries: map })
+    debug!(count = map.len(), "Payment List collected");
+    Ok(PaymentList { entries: map })
 }
 
 /// Fetches an individual public payment endpoint from Pubky storage.
-#[instrument(skip(storage), fields(payee = %payee, method = %method))]
+#[instrument(skip(storage), fields(payee = %payee, identifier = %identifier))]
 pub async fn fetch_payment_endpoint(
     storage: &PublicStorage,
     payee: &PublicKey,
-    method: &MethodId,
-) -> Result<Option<EndpointData>> {
-    let addr = format!("{payee}{}", payment_endpoint_path(method));
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<Option<PaymentEndpointPayload>> {
+    let addr = format!("{payee}{}", payment_endpoint_path(identifier));
     debug!(addr = %addr, "fetching individual payment endpoint");
     match fetch_text(storage, addr, "fetch endpoint").await? {
         Some(payload) => {
             debug!("payment endpoint found");
-            Ok(Some(EndpointData::new(payload)))
+            Ok(Some(PaymentEndpointPayload::new(payload)))
         }
         None => {
             debug!("payment endpoint not found");
@@ -142,8 +149,8 @@ pub async fn fetch_payment_endpoint(
     }
 }
 
-fn payment_endpoint_path(method: &MethodId) -> String {
-    format!("{PAYKIT_PATH_PREFIX}{}", method.as_str())
+fn payment_endpoint_path(identifier: &PaymentEndpointIdentifier) -> String {
+    format!("{PAYKIT_PATH_PREFIX}{}", identifier.as_str())
 }
 
 #[instrument(skip(storage), fields(addr = %addr, label = %label))]

@@ -32,11 +32,11 @@ function validateUint32(value: number, label: string): string | null {
 // ---------------------------------------------------------------------------
 
 export interface PaymentEntry {
-  method_id: string;
-  endpoint_data: string;
+  payment_endpoint_identifier: string;
+  payment_endpoint_payload: string;
 }
 
-export interface PrivatePaymentsPayload {
+export interface PrivatePaymentEnvelope {
   reference: string;
   entries: PaymentEntry[];
 }
@@ -48,7 +48,7 @@ export interface ReceiptMetadataEntry {
 
 export interface ReceiptDraft {
   reference: string;
-  payment_method?: string | null;
+  payment_endpoint_identifier?: string | null;
   amount?: string | null;
   currency?: string | null;
   metadata?: ReceiptMetadataEntry[];
@@ -57,7 +57,7 @@ export interface ReceiptDraft {
 export interface Receipt {
   reference: string;
   recipient_public_key: string;
-  payment_method: string | null;
+  payment_endpoint_identifier: string | null;
   amount: string | null;
   currency: string | null;
   metadata: ReceiptMetadataEntry[];
@@ -107,7 +107,7 @@ export type HandshakeProgress =
 // ---------------------------------------------------------------------------
 
 /**
- * Initialize the PayKit SDK. Call once at app startup.
+ * Initialize the React Native binding. Call once at app startup.
  */
 export async function initialize(): Promise<Result<string>> {
   try {
@@ -261,11 +261,11 @@ export async function forceSignOut(): Promise<Result<string>> {
 }
 
 // ---------------------------------------------------------------------------
-// Payment list (read)
+// Payment List (read)
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch all published payment methods for a user.
+ * Fetch all published Payment Endpoints for a user.
  */
 export async function getPaymentList(
   publicKey: string
@@ -282,15 +282,15 @@ export async function getPaymentList(
 }
 
 /**
- * Fetch a single payment endpoint for a user and method.
+ * Fetch a single Payment Endpoint Payload for a payee.
  * Returns empty string if not set.
  */
 export async function getPaymentEndpoint(
   publicKey: string,
-  methodId: string
+  paymentEndpointIdentifier: string
 ): Promise<Result<string>> {
   try {
-    const res: string[] = await Paykit.getPaymentEndpoint(publicKey, methodId);
+    const res: string[] = await Paykit.getPaymentEndpoint(publicKey, paymentEndpointIdentifier);
     if (res[0] === 'error') {
       return err(res[1]!);
     }
@@ -308,13 +308,13 @@ export async function getPaymentEndpoint(
  * Publish or update a payment endpoint for the authenticated user.
  */
 export async function setPaymentEndpoint(
-  methodId: string,
-  endpointData: string
+  paymentEndpointIdentifier: string,
+  paymentEndpointPayload: string
 ): Promise<Result<string>> {
   try {
     const res: string[] = await Paykit.setPaymentEndpoint(
-      methodId,
-      endpointData
+      paymentEndpointIdentifier,
+      paymentEndpointPayload
     );
     if (res[0] === 'error') {
       return err(res[1]!);
@@ -329,10 +329,10 @@ export async function setPaymentEndpoint(
  * Remove a payment endpoint for the authenticated user.
  */
 export async function removePaymentEndpoint(
-  methodId: string
+  paymentEndpointIdentifier: string
 ): Promise<Result<string>> {
   try {
-    const res: string[] = await Paykit.removePaymentEndpoint(methodId);
+    const res: string[] = await Paykit.removePaymentEndpoint(paymentEndpointIdentifier);
     if (res[0] === 'error') {
       return err(res[1]!);
     }
@@ -343,11 +343,11 @@ export async function removePaymentEndpoint(
 }
 
 // ---------------------------------------------------------------------------
-// Private encrypted payments
+// Private Payment Envelopes and Encrypted Links
 // ---------------------------------------------------------------------------
 
 /**
- * Default number of automatic send retries for private payment updates.
+ * Default number of automatic send retries for Private Payment Envelope updates.
  */
 export async function defaultMaxSendRetries(): Promise<Result<number>> {
   try {
@@ -377,7 +377,7 @@ export async function defaultMaxRecoveryAttempts(): Promise<Result<number>> {
 }
 
 /**
- * Generate a fresh UUID-v4 payment reference.
+ * Generate a fresh UUID-v4 Payment Reference.
  */
 export async function generatePaymentReference(): Promise<Result<string>> {
   try {
@@ -392,7 +392,7 @@ export async function generatePaymentReference(): Promise<Result<string>> {
 }
 
 /**
- * Start a private encrypted-link handshake as the initiator.
+ * Start a private Encrypted Link handshake as the initiator.
  */
 export async function initiateEncryptedLink(
   secretKeyHex: string,
@@ -413,7 +413,7 @@ export async function initiateEncryptedLink(
 }
 
 /**
- * Start a private encrypted-link handshake as the responder.
+ * Start a private Encrypted Link handshake as the responder.
  */
 export async function acceptEncryptedLink(
   secretKeyHex: string,
@@ -434,7 +434,7 @@ export async function acceptEncryptedLink(
 }
 
 /**
- * Advance a private encrypted-link handshake by one polling-safe step.
+ * Advance a private Encrypted Link handshake by one polling-safe step.
  */
 export async function advanceHandshake(
   handshakeId: EncryptedLinkHandshakeHandle
@@ -488,7 +488,7 @@ export async function setEncryptedLinkHandshakeMaxRecoveryAttempts(
 }
 
 /**
- * Configure automatic send retries for an established encrypted link.
+ * Configure automatic send retries for an established Encrypted Link.
  */
 export async function setEncryptedLinkMaxSendRetries(
   linkId: EncryptedLinkHandle,
@@ -514,16 +514,16 @@ export async function setEncryptedLinkMaxSendRetries(
 }
 
 /**
- * Encrypt and send the complete private payments payload.
+ * Encrypt and send the complete Private Payment Envelope.
  */
-export async function setPrivatePayments(
+export async function setPrivatePaymentEnvelope(
   linkId: EncryptedLinkHandle,
-  payload: PrivatePaymentsPayload
+  envelope: PrivatePaymentEnvelope
 ): Promise<Result<string>> {
   try {
-    const res: string[] = await Paykit.setPrivatePayments(
+    const res: string[] = await Paykit.setPrivatePaymentEnvelope(
       linkId,
-      JSON.stringify(payload)
+      JSON.stringify(envelope)
     );
     if (res[0] === 'error') {
       return err(res[1]!);
@@ -535,13 +535,13 @@ export async function setPrivatePayments(
 }
 
 /**
- * Receive and decrypt the latest private payments payload.
+ * Receive and decrypt the latest Private Payment Envelope.
  */
-export async function getPrivatePayments(
+export async function getPrivatePaymentEnvelope(
   linkId: EncryptedLinkHandle
-): Promise<Result<PrivatePaymentsPayload | null>> {
+): Promise<Result<PrivatePaymentEnvelope | null>> {
   try {
-    const res: string[] = await Paykit.getPrivatePayments(linkId);
+    const res: string[] = await Paykit.getPrivatePaymentEnvelope(linkId);
     if (res[0] === 'error') {
       return err(res[1]!);
     }
@@ -552,7 +552,7 @@ export async function getPrivatePayments(
 }
 
 /**
- * Store an encrypted receipt and send access to the counterparty.
+ * Store an encrypted Receipt and send Receipt Access to the counterparty.
  */
 export async function issueReceipt(
   linkId: EncryptedLinkHandle,
@@ -573,7 +573,7 @@ export async function issueReceipt(
 }
 
 /**
- * Receive all currently available receipt access descriptors.
+ * Receive all currently available Receipt Access descriptors.
  */
 export async function getReceiptAccess(
   linkId: EncryptedLinkHandle
@@ -590,7 +590,7 @@ export async function getReceiptAccess(
 }
 
 /**
- * Return the canonical homeserver receipt location for a payment reference.
+ * Return the canonical homeserver Receipt Location for a Payment Reference.
  */
 export async function receiptLocation(
   reference: string
@@ -607,7 +607,7 @@ export async function receiptLocation(
 }
 
 /**
- * Decrypt an encrypted receipt payload fetched from the homeserver.
+ * Decrypt an encrypted Receipt fetched from the homeserver.
  */
 export async function decryptReceipt(
   encryptedJson: string,
@@ -630,7 +630,7 @@ export async function decryptReceipt(
 }
 
 /**
- * Serialize a pending handshake snapshot as hex.
+ * Serialize a pending Encrypted Link Handshake snapshot as hex.
  */
 export async function serializeEncryptedLinkHandshake(
   handshakeId: EncryptedLinkHandshakeHandle
@@ -649,7 +649,7 @@ export async function serializeEncryptedLinkHandshake(
 }
 
 /**
- * Serialize an established encrypted-link snapshot as hex.
+ * Serialize an established Encrypted Link snapshot as hex.
  */
 export async function serializeEncryptedLink(
   linkId: EncryptedLinkHandle
@@ -666,7 +666,7 @@ export async function serializeEncryptedLink(
 }
 
 /**
- * Return the remote peer embedded in an encrypted-link snapshot.
+ * Return the counterparty embedded in an Encrypted Link snapshot.
  */
 export async function encryptedLinkSnapshotRecipient(
   snapshotHex: string
@@ -685,7 +685,7 @@ export async function encryptedLinkSnapshotRecipient(
 }
 
 /**
- * Return the remote peer embedded in a handshake snapshot.
+ * Return the counterparty embedded in an Encrypted Link Handshake snapshot.
  */
 export async function encryptedLinkHandshakeSnapshotRecipient(
   snapshotHex: string
@@ -704,7 +704,7 @@ export async function encryptedLinkHandshakeSnapshotRecipient(
 }
 
 /**
- * Restore an established encrypted link from a hex snapshot.
+ * Restore an established Encrypted Link from a hex snapshot.
  */
 export async function restoreEncryptedLink(
   secretKeyHex: string,
@@ -725,7 +725,7 @@ export async function restoreEncryptedLink(
 }
 
 /**
- * Restore a pending encrypted-link handshake from a hex snapshot.
+ * Restore a pending Encrypted Link handshake from a hex snapshot.
  */
 export async function restoreEncryptedLinkHandshake(
   secretKeyHex: string,
@@ -746,7 +746,7 @@ export async function restoreEncryptedLinkHandshake(
 }
 
 /**
- * Close an established encrypted link and release its native handle.
+ * Close an established Encrypted Link and release its native handle.
  */
 export async function closeEncryptedLink(
   linkId: EncryptedLinkHandle

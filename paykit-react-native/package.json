@@ -1,7 +1,7 @@
 {
   "name": "@synonymdev/react-native-paykit",
   "version": "0.1.0",
-  "description": "React Native wrapper for PayKit FFI bindings",
+  "description": "React Native wrapper for Paykit FFI bindings",
   "source": "./src/index.tsx",
   "main": "./lib/commonjs/index.js",
   "module": "./lib/module/index.js",

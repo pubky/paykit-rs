@@ -73,22 +73,22 @@ class Paykit: RCTEventEmitter {
             ])
         }
         return try entries.map { item in
-            guard let methodId = item["method_id"] as? String,
-                  let endpointData = item["endpoint_data"] as? String else {
+            guard let paymentEndpointIdentifier = item["payment_endpoint_identifier"] as? String,
+                  let paymentEndpointPayload = item["payment_endpoint_payload"] as? String else {
                 throw NSError(domain: "Paykit", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "payment entries must include string method_id and endpoint_data fields"
+                    NSLocalizedDescriptionKey: "payment entries must include string payment_endpoint_identifier and payment_endpoint_payload fields"
                 ])
             }
             return FfiPaymentEntry(
-                methodId: methodId,
-                endpointData: endpointData
+                paymentEndpointIdentifier: paymentEndpointIdentifier,
+                paymentEndpointPayload: paymentEndpointPayload
             )
         }
     }
 
     private func paymentEntriesJsonObject(_ entries: [FfiPaymentEntry]) -> [[String: String]] {
         return entries.map { entry in
-            ["method_id": entry.methodId, "endpoint_data": entry.endpointData]
+            ["payment_endpoint_identifier": entry.paymentEndpointIdentifier, "payment_endpoint_payload": entry.paymentEndpointPayload]
         }
     }
 
@@ -96,21 +96,21 @@ class Paykit: RCTEventEmitter {
         return try jsonString(paymentEntriesJsonObject(entries), fallback: "[]")
     }
 
-    private func privatePaymentsPayload(from jsonString: String) throws -> FfiPrivatePaymentsPayload {
-        let object = try jsonObject(from: jsonString, label: "private payments payload")
-        return FfiPrivatePaymentsPayload(
+    private func privatePaymentEnvelope(from jsonString: String) throws -> FfiPrivatePaymentEnvelope {
+        let object = try jsonObject(from: jsonString, label: "Private Payment Envelope")
+        return FfiPrivatePaymentEnvelope(
             reference: try requiredString(object, key: "reference"),
             entries: try paymentEntries(from: object["entries"])
         )
     }
 
-    private func privatePaymentsPayloadJson(_ payload: FfiPrivatePaymentsPayload?) throws -> String {
-        guard let payload = payload else {
+    private func privatePaymentEnvelopeJson(_ envelope: FfiPrivatePaymentEnvelope?) throws -> String {
+        guard let envelope = envelope else {
             return "null"
         }
         return try jsonString([
-            "reference": payload.reference,
-            "entries": paymentEntriesJsonObject(payload.entries),
+            "reference": envelope.reference,
+            "entries": paymentEntriesJsonObject(envelope.entries),
         ], fallback: "{}")
     }
 
@@ -120,14 +120,14 @@ class Paykit: RCTEventEmitter {
         }
         guard let metadata = raw as? [[String: Any]] else {
             throw NSError(domain: "Paykit", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "receipt metadata must be a JSON array"
+                NSLocalizedDescriptionKey: "Receipt Metadata must be a JSON array"
             ])
         }
         return try metadata.map { item in
             guard let key = item["key"] as? String,
                   let value = item["value"] as? String else {
                 throw NSError(domain: "Paykit", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "receipt metadata entries must include string key and value fields"
+                    NSLocalizedDescriptionKey: "Receipt Metadata entries must include string key and value fields"
                 ])
             }
             return FfiReceiptMetadataEntry(key: key, value: value)
@@ -144,7 +144,7 @@ class Paykit: RCTEventEmitter {
         let object = try jsonObject(from: jsonString, label: "receipt draft")
         return FfiReceiptDraft(
             reference: try requiredString(object, key: "reference"),
-            paymentMethod: try optionalString(object, key: "payment_method"),
+            paymentEndpointIdentifier: try optionalString(object, key: "payment_endpoint_identifier"),
             amount: try optionalString(object, key: "amount"),
             currency: try optionalString(object, key: "currency"),
             metadata: try receiptMetadataEntries(from: object["metadata"])
@@ -177,7 +177,7 @@ class Paykit: RCTEventEmitter {
         return try jsonString([
             "reference": receipt.reference,
             "recipient_public_key": receipt.recipientPublicKey,
-            "payment_method": nullableString(receipt.paymentMethod),
+            "payment_endpoint_identifier": nullableString(receipt.paymentEndpointIdentifier),
             "amount": nullableString(receipt.amount),
             "currency": nullableString(receipt.currency),
             "metadata": receiptMetadataJsonObject(receipt.metadata),
@@ -303,7 +303,7 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    // MARK: - Payment list (read)
+    // MARK: - Payment List (read)
 
     @objc(getPaymentList:withResolver:withRejecter:)
     func getPaymentList(_ publicKey: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
@@ -317,11 +317,11 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    @objc(getPaymentEndpoint:methodId:withResolver:withRejecter:)
-    func getPaymentEndpoint(_ publicKey: String, methodId: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+    @objc(getPaymentEndpoint:paymentEndpointIdentifier:withResolver:withRejecter:)
+    func getPaymentEndpoint(_ publicKey: String, paymentEndpointIdentifier: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
         Task {
             do {
-                let result = try await paykitGetPaymentEndpoint(publicKey: publicKey, methodId: methodId)
+                let result = try await paykitGetPaymentEndpoint(publicKey: publicKey, paymentEndpointIdentifier: paymentEndpointIdentifier)
                 resolve(self.resultArray(result ?? ""))
             } catch {
                 resolve(self.errorArray(error.localizedDescription))
@@ -331,11 +331,11 @@ class Paykit: RCTEventEmitter {
 
     // MARK: - Payment endpoints (write)
 
-    @objc(setPaymentEndpoint:endpointData:withResolver:withRejecter:)
-    func setPaymentEndpoint(_ methodId: String, endpointData: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+    @objc(setPaymentEndpoint:paymentEndpointPayload:withResolver:withRejecter:)
+    func setPaymentEndpoint(_ paymentEndpointIdentifier: String, paymentEndpointPayload: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
         Task {
             do {
-                try await paykitSetPaymentEndpoint(methodId: methodId, endpointData: endpointData)
+                try await paykitSetPaymentEndpoint(paymentEndpointIdentifier: paymentEndpointIdentifier, paymentEndpointPayload: paymentEndpointPayload)
                 resolve(self.resultArray(""))
             } catch {
                 resolve(self.errorArray(error.localizedDescription))
@@ -344,10 +344,10 @@ class Paykit: RCTEventEmitter {
     }
 
     @objc(removePaymentEndpoint:withResolver:withRejecter:)
-    func removePaymentEndpoint(_ methodId: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+    func removePaymentEndpoint(_ paymentEndpointIdentifier: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
         Task {
             do {
-                try await paykitRemovePaymentEndpoint(methodId: methodId)
+                try await paykitRemovePaymentEndpoint(paymentEndpointIdentifier: paymentEndpointIdentifier)
                 resolve(self.resultArray(""))
             } catch {
                 resolve(self.errorArray(error.localizedDescription))
@@ -432,12 +432,12 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    @objc(setPrivatePayments:payloadJson:withResolver:withRejecter:)
-    func setPrivatePayments(_ linkId: String, payloadJson: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+    @objc(setPrivatePaymentEnvelope:payloadJson:withResolver:withRejecter:)
+    func setPrivatePaymentEnvelope(_ linkId: String, payloadJson: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
         Task {
             do {
-                let payload = try self.privatePaymentsPayload(from: payloadJson)
-                try await paykitSetPrivatePayments(linkId: linkId, payload: payload)
+                let envelope = try self.privatePaymentEnvelope(from: payloadJson)
+                try await paykitSetPrivatePaymentEnvelope(linkId: linkId, envelope: envelope)
                 resolve(self.resultArray(""))
             } catch {
                 resolve(self.errorArray(error.localizedDescription))
@@ -445,12 +445,12 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    @objc(getPrivatePayments:withResolver:withRejecter:)
-    func getPrivatePayments(_ linkId: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+    @objc(getPrivatePaymentEnvelope:withResolver:withRejecter:)
+    func getPrivatePaymentEnvelope(_ linkId: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
         Task {
             do {
-                let payload = try await paykitGetPrivatePayments(linkId: linkId)
-                resolve(self.resultArray(try self.privatePaymentsPayloadJson(payload)))
+                let envelope = try await paykitGetPrivatePaymentEnvelope(linkId: linkId)
+                resolve(self.resultArray(try self.privatePaymentEnvelopeJson(envelope)))
             } catch {
                 resolve(self.errorArray(error.localizedDescription))
             }

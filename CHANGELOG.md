@@ -8,7 +8,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
-- Private encrypted receipt APIs in `paykit-lib`: `ReceiptDraft`, `Receipt`,
+- Encrypted Receipt APIs in `paykit-lib`: `ReceiptDraft`, `Receipt`,
   `ReceiptAccess`, `IssuedReceipt`, `ReceiptDecryptionKey`, `issue_receipt`,
   `get_receipt_access`, and `decrypt_receipt`.
 - FFI receipt records and exports in `paykit-ffi`: `FfiReceiptDraft`,
@@ -18,19 +18,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 - **BREAKING:** `paykit-lib` now treats Pubky as the only supported transport.
-  Public endpoint APIs accept concrete Pubky SDK handles (`PubkySession` for
+  Public Payment Endpoint APIs accept concrete Pubky SDK handles (`PubkySession` for
   writes and `PublicStorage` for reads) instead of generic transport traits.
-- Private encrypted messages now distinguish latest-state private-payment
-  envelopes from event-like receipt-access messages. `get_private_payments`
-  collapses pending private-payment messages to the latest message by kind,
+- Private Application Messages now distinguish Latest-State Message
+  Private Payment Envelopes from Event Message Receipt Access messages.
+  `get_private_payment_envelope` collapses pending Private Payment Envelope
+  messages to the latest message by kind,
   then parses that selected message. If that latest envelope is malformed,
   it returns InvalidData rather than falling back to an older valid envelope,
-  while `get_receipt_access` returns all currently available receipt access
+  while `get_receipt_access` returns all currently available Receipt Access
   descriptors as a FIFO vector.
-- Unsupported syntactically valid private application message kinds are logged
+- Unsupported syntactically valid Private Application Message kinds are logged
   and dropped rather than buffered indefinitely.
-- `MethodId::new("private")` is now rejected with `PaykitError::Validation` because
-  `private` is reserved for private-payment storage paths.
+- `PaymentEndpointIdentifier::new("private")` is now rejected with `PaykitError::Validation` because
+  `private` is reserved for private Paykit storage paths.
 
 ### Removed
 - **BREAKING:** Removed the `pubky` feature flag, `AuthenticatedTransport` /
@@ -38,12 +39,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Pubky dependencies are now unconditional.
 
 ### Security
-- Receipt decryption keys are redacted from Rust `Debug`/`Display` formatting
+- Receipt Decryption Keys are redacted from Rust `Debug`/`Display` formatting
   in the library and from FFI wrapper debug output. Callers must still treat raw
   key fields returned through FFI as secrets.
-- Receipt access locations are validated against their `PaymentReference`, and
+- Receipt Locations are validated against their `PaymentReference`, and
   decrypted receipt plaintext is rejected if its reference does not match the
-  authenticated receipt location.
+  authenticated Receipt Location.
 
 ## [0.1.0-rc2] - 2026-03-10
 
@@ -63,52 +64,52 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [0.1.0-rc1] - 2026-03-04
 
 ### Changed (BREAKING)
-- **`MethodId` is now validated at construction time.** The inner field is private;
-  use `MethodId::new("lightning")?` instead of `MethodId("lightning".into())`.
+- **`PaymentEndpointIdentifier` is now validated at construction time.** The inner field is private;
+  use `PaymentEndpointIdentifier::new("lightning")?` instead of `PaymentEndpointIdentifier("lightning".into())`.
   Accepted characters: ASCII alphanumeric, hyphens, underscores, and dots (max 64
   chars). Path traversal components (`.`, `..`) are rejected.
-- **`EndpointData` inner field is now private.** Use `EndpointData::new("...")` to
+- **`PaymentEndpointPayload` inner field is now private.** Use `PaymentEndpointPayload::new("...")` to
   construct and `.as_str()` / `.into_inner()` to read.
 - **New `PaykitError::Validation` variant.** Exhaustive `match` on `PaykitError`
-  must now handle this variant, returned when `MethodId::new()` rejects invalid
+  must now handle this variant, returned when `PaymentEndpointIdentifier::new()` rejects invalid
   input.
 
 ### Added
-- `MethodId::new()` — validated constructor enforcing safe path-segment invariants.
-- `MethodId::as_str()`, `Display`, and `AsRef<str>` for read access.
-- `EndpointData::new()`, `EndpointData::as_str()`, `EndpointData::into_inner()`,
+- `PaymentEndpointIdentifier::new()` — validated constructor enforcing safe path-segment invariants.
+- `PaymentEndpointIdentifier::as_str()`, `Display`, and `AsRef<str>` for read access.
+- `PaymentEndpointPayload::new()`, `PaymentEndpointPayload::as_str()`, `PaymentEndpointPayload::into_inner()`,
   `Display`, and `AsRef<str>`.
-- 23 unit tests covering `MethodId` validation (positive and negative cases) and
-  `EndpointData` accessors.
+- 23 unit tests covering `PaymentEndpointIdentifier` validation (positive and negative cases) and
+  `PaymentEndpointPayload` accessors.
 
 ### Security
-- Mitigated path injection vulnerability in `MethodId`. Previously, a caller could
+- Mitigated path injection vulnerability in `PaymentEndpointIdentifier`. Previously, a caller could
   inject path traversal sequences (`../`), null bytes, or special characters into
-  storage paths via unvalidated `MethodId` values. Depending on how the storage
+  storage paths via unvalidated `PaymentEndpointIdentifier` values. Depending on how the storage
   backend handles paths, this could lead to writing to unintended locations, reading
   other users' data, or storage corruption.
 
 ### Migration guide
-- Replace `MethodId("name".into())` with `MethodId::new("name")?` (or `.unwrap()`
+- Replace `PaymentEndpointIdentifier("name".into())` with `PaymentEndpointIdentifier::new("name")?` (or `.unwrap()`
   for known-good literals in tests).
-- Replace `EndpointData("payload".into())` with `EndpointData::new("payload")`.
+- Replace `PaymentEndpointPayload("payload".into())` with `PaymentEndpointPayload::new("payload")`.
 - Replace `.0` field access with `.as_str()` on both types.
 - Add a `PaykitError::Validation(_)` arm to any exhaustive `match` on `PaykitError`.
-- Downstream bindings (Swift/RN/Kotlin) that construct `MethodId` must be updated to
+- Downstream bindings (Swift/RN/Kotlin) that construct `PaymentEndpointIdentifier` must be updated to
   handle the `Result` returned by `new()`.
 
 ## [0.1.0] - 2025-11-21
 
 ### Added
-- Initial public release of `paykit-lib`, exposing a stateless transport layer for the
-  Paykit protocol.
+- Initial public release of `paykit-lib`, exposing a stateless library layer for the
+  Paykit Protocol.
 - Trait-based abstraction (`AuthenticatedTransport`, `UnauthenticatedTransportRead`)
-  so integrators can inject their own SDKs or mocks.
+  so integrators can inject their own clients or mocks.
 - Feature-gated `pubky` adapters providing ready-made transport implementations plus
   exported constants for path prefixes.
-- High-level helpers to set/remove endpoints, list supported payments, and list known
-  contacts, including comprehensive async tests that run against the `pubky-testnet`
-  harness.
+- High-level helpers to set/remove Payment Endpoints, list public Payment Lists,
+  and list contacts, including comprehensive async tests that run against the
+  `pubky-testnet` harness.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 

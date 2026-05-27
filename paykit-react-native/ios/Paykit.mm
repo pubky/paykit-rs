@@ -39,16 +39,16 @@ RCT_EXTERN_METHOD(getPaymentList:(NSString *)publicKey
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(getPaymentEndpoint:(NSString *)publicKey
-                  methodId:(NSString *)methodId
+                  paymentEndpointIdentifier:(NSString *)paymentEndpointIdentifier
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(setPaymentEndpoint:(NSString *)methodId
-                  endpointData:(NSString *)endpointData
+RCT_EXTERN_METHOD(setPaymentEndpoint:(NSString *)paymentEndpointIdentifier
+                  paymentEndpointPayload:(NSString *)paymentEndpointPayload
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(removePaymentEndpoint:(NSString *)methodId
+RCT_EXTERN_METHOD(removePaymentEndpoint:(NSString *)paymentEndpointIdentifier
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
@@ -85,12 +85,12 @@ RCT_EXTERN_METHOD(setEncryptedLinkMaxSendRetries:(NSString *)linkId
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(setPrivatePayments:(NSString *)linkId
+RCT_EXTERN_METHOD(setPrivatePaymentEnvelope:(NSString *)linkId
                   payloadJson:(NSString *)payloadJson
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(getPrivatePayments:(NSString *)linkId
+RCT_EXTERN_METHOD(getPrivatePaymentEnvelope:(NSString *)linkId
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
