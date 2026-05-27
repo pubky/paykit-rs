@@ -104,7 +104,7 @@
 - **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete Payment List of a Know Peer. Latest-wins semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
 - **NOT**: A Payment List with addition fields.
 - **Synonyms to AVOID**: Private Payment List, Private Payment Method List, private payments payload
-- **Related terms**: Known Peer, Payment Endpoint, Payment Reference
+- **Related terms**: Linked Peer, Payment Endpoint, Payment Reference
 
 ### Payment Reference
 - **Definition**: A per-payment or per-request correlation identifier. In private payment flows, the Private Payment Envelope carries the Payment Reference because the envelope represents the latest private payment disclosure for that payment/request.
@@ -126,11 +126,11 @@
 
 ### Counterparty
 - **Definition**: The other party in a payment interaction.
-- **NOT**: Necessarily a Known Peer; the counterparty may or may not have an established encrypted link.
+- **NOT**: Necessarily a Linked Peer; the counterparty may or may not have an established encrypted link.
 - **Synonyms to AVOID**: peer when link state matters
-- **Related terms**: Known Peer, Payer, Payee
+- **Related terms**: Linked Peer, Payer, Payee
 
-### Known Peer
+### Linked Peer
 - **Definition**: A counterparty with an established encrypted link.
 - **NOT**: Any arbitrary payer/payee or public-key holder.
 - **Synonyms to AVOID**: counterparty when the encrypted-link invariant matters
@@ -138,13 +138,13 @@
 
 ### Payer
 - **Definition**: The party attempting to send value in a payment flow.
-- **NOT**: Always a Known Peer.
+- **NOT**: Always a Linked Peer.
 - **Synonyms to AVOID**: sender when it obscures payment role
 - **Related terms**: Payee, Counterparty
 
 ### Payee
 - **Definition**: The party receiving value in a payment flow and publishing or sharing Payment Endpoints.
-- **NOT**: Always a Known Peer.
+- **NOT**: Always a Linked Peer.
 - **Synonyms to AVOID**: receiver when it obscures payment role
 - **Related terms**: Payer, Payment List, Payment Endpoint
 
