@@ -110,19 +110,13 @@
 - **Definition**: A Paykit receipt for a payment; Paykit receipts are always encrypted.
 - **NOT**: A plain or unencrypted receipt.
 - **Synonyms to AVOID**: plain receipt, unencrypted receipt
-- **Related terms**: Encrypted Receipt, Receipt Access, Payment Reference
-
-### Encrypted Receipt
-- **Definition**: Clarifying synonym for Receipt used when emphasizing storage/security; same concept as Receipt because all Paykit receipts are encrypted.
-- **NOT**: A separate receipt subtype.
-- **Synonyms to AVOID**: plain receipt, unencrypted receipt
-- **Related terms**: Receipt, Receipt Access
+- **Related terms**: Receipt Access, Payment Reference
 
 ### Receipt Access
 - **Definition**: The descriptor/capability that lets a counterparty retrieve and decrypt a Receipt.
 - **NOT**: The Receipt payload itself.
 - **Synonyms to AVOID**: receipt token, receipt pointer when naming the protocol concept
-- **Related terms**: Receipt, Encrypted Receipt, Payment Reference
+- **Related terms**: Receipt, Payment Reference
 
 ### Counterparty
 - **Definition**: The other party in a payment interaction.
