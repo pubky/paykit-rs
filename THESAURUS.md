@@ -207,7 +207,8 @@ These terms must not be used for new Paykit domain/protocol/component names:
 - **EndpointData** → use **Payment Endpoint Payload**.
 - **SupportedPayments** → use **Payment List** for the payee-published list.
 - **PrivatePaymentsPayload** → use **Private Payment Envelope**.
-- **Private Payment Method List** / **Private Payment List** → use **Private Payment Envelope** when referring to known-peer private payment data.
+- **Private Payment List** for the whole private message → use **Private Payment Envelope**. Use **Payment List** when referring only to the endpoint collection carried inside the envelope.
+- **Private Payment Method List** → use **Payment List** or **Private Payment Envelope**, depending on whether you mean the endpoint collection or the whole private message.
 - **Payment Endpoint** for only address/invoice/IBAN/etc. data → use **Payment Endpoint Payload**.
 
 ## Component Model
