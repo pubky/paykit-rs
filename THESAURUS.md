@@ -114,9 +114,15 @@
 
 ### Latest-State Message
 - **Definition**: A private message semantic where only the newest valid message of that kind matters.
-- **NOT**: An event-like message stream where every message must be preserved and processed in order.
+- **NOT**: An Event Message where every valid message must be preserved and processed in send order.
 - **Synonyms to AVOID**: latest-wins message when naming the protocol concept
-- **Related terms**: Private Application Message, Private Message Kind, Private Payment Envelope
+- **Related terms**: Private Application Message, Private Message Kind, Event Message, Private Payment Envelope
+
+### Event Message
+- **Definition**: A private Paykit message where every valid message matters and receivers must process messages in send order.
+- **NOT**: A Latest-State Message where newer messages supersede older messages of the same kind.
+- **Synonyms to AVOID**: event-like message when naming the protocol concept
+- **Related terms**: Private Application Message, Private Message Kind, Latest-State Message, Receipt Access
 
 ### Private Payment Envelope
 - **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete Payment List of a Know Peer. Latest-State Message semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
@@ -137,10 +143,10 @@
 - **Related terms**: Receipt Access, Payment Reference
 
 ### Receipt Access
-- **Definition**: The descriptor object that lets a counterparty retrieve and decrypt a Receipt. It is sent over the Encrypted Link and carries the receipt location and decryption key. Its retrieval and processing is event-like/FIFO, unlike private payments which are latest-state. 
+- **Definition**: The descriptor object that lets a counterparty retrieve and decrypt a Receipt. It is sent over the Encrypted Link and carries the receipt location and decryption key. Its retrieval and processing follows Event Message semantics, unlike private payments which are latest-state. 
 - **NOT**: The Receipt payload itself.
 - **Synonyms to AVOID**: receipt token, receipt pointer when naming the protocol concept
-- **Related terms**: Receipt, Payment Reference
+- **Related terms**: Receipt, Payment Reference, Event Message
 
 ### Counterparty
 - **Definition**: The other party in a payment interaction.
@@ -210,6 +216,7 @@ Protocol concepts:
 - Private Application Message
 - Private Message Kind
 - Latest-State Message
+- Event Message
 - Private Payment Envelope
 - Payment Reference
 - Receipt
