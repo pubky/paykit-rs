@@ -119,22 +119,28 @@
 - **Related terms**: Receipt Access, Payment Reference
 
 ### Receipt Access
-- **Definition**: The descriptor object that lets a counterparty retrieve and decrypt a Receipt. It is sent over the encrypted link and carries the receipt location and decryption key. Its retrieval and processing is event-like/FIFO, unlike private payments which are latest-state. 
+- **Definition**: The descriptor object that lets a counterparty retrieve and decrypt a Receipt. It is sent over the Encrypted Link and carries the receipt location and decryption key. Its retrieval and processing is event-like/FIFO, unlike private payments which are latest-state. 
 - **NOT**: The Receipt payload itself.
 - **Synonyms to AVOID**: receipt token, receipt pointer when naming the protocol concept
 - **Related terms**: Receipt, Payment Reference
 
 ### Counterparty
 - **Definition**: The other party in a payment interaction.
-- **NOT**: Necessarily a Linked Peer; the counterparty may or may not have an established encrypted link.
+- **NOT**: Necessarily a Linked Peer; the counterparty may or may not have an established Encrypted Link.
 - **Synonyms to AVOID**: peer when link state matters
 - **Related terms**: Linked Peer, Payer, Payee
 
+### Encrypted Link
+- **Definition**: An established pubky-noise channel used to exchange private Paykit application messages.
+- **NOT**: The counterparty itself or arbitrary public Pubky storage.
+- **Synonyms to AVOID**: linked peer when referring to the channel itself
+- **Related terms**: Linked Peer, Private Payment Envelope, Receipt Access
+
 ### Linked Peer
-- **Definition**: A counterparty with an established encrypted link.
+- **Definition**: A counterparty with an established Encrypted Link.
 - **NOT**: Any arbitrary payer/payee or public-key holder.
 - **Synonyms to AVOID**: counterparty when the encrypted-link invariant matters
-- **Related terms**: Counterparty, Private Payment Envelope
+- **Related terms**: Counterparty, Encrypted Link, Private Payment Envelope
 
 ### Payer
 - **Definition**: The party attempting to send value in a payment flow.
@@ -181,6 +187,7 @@ Protocol concepts:
 - Payment Reference
 - Receipt
 - Receipt Access
+- Encrypted Link
 
 Future/planned:
 - Paykit Daemon
