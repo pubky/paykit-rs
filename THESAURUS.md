@@ -125,7 +125,7 @@
 - **Related terms**: Private Application Message, Private Message Kind, Latest-State Message, Receipt Access
 
 ### Private Payment Envelope
-- **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete Payment List of a Know Peer. Latest-State Message semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
+- **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete Payment List of a Linked Peer. Latest-State Message semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
 - **NOT**: A Payment List with addition fields.
 - **Synonyms to AVOID**: Private Payment List, Private Payment Method List, private payments payload
 - **Related terms**: Linked Peer, Private Application Message, Latest-State Message, Payment Endpoint, Payment Reference
@@ -201,7 +201,6 @@
 These terms must not be used for new Paykit domain/protocol/component names:
 
 - **Payment Method List** → use **Payment List**.
-- **Payment List** for the payee-published list.
 - **Payment Option** → use **Payment Endpoint** or **Payment Method**, depending on meaning.
 - **Routing Network** / **Paykit Routing Network** → use **Pubky Routing** in concrete Paykit docs.
 - **MethodId** → use **Payment Endpoint Identifier**.
