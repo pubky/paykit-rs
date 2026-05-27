@@ -134,7 +134,13 @@
 - **Definition**: An established pubky-noise channel used to exchange private Paykit application messages.
 - **NOT**: The counterparty itself or arbitrary public Pubky storage.
 - **Synonyms to AVOID**: linked peer when referring to the channel itself
-- **Related terms**: Linked Peer, Private Payment Envelope, Receipt Access
+- **Related terms**: Linked Peer, Encrypted Link Handshake, Private Payment Envelope, Receipt Access
+
+### Encrypted Link Handshake
+- **Definition**: The setup flow that establishes an Encrypted Link between two peers.
+- **NOT**: The established Encrypted Link itself or subsequent private Paykit application messages sent over it.
+- **Synonyms to AVOID**: link setup when naming the protocol concept
+- **Related terms**: Encrypted Link, Linked Peer
 
 ### Linked Peer
 - **Definition**: A counterparty with an established Encrypted Link.
@@ -188,6 +194,7 @@ Protocol concepts:
 - Receipt
 - Receipt Access
 - Encrypted Link
+- Encrypted Link Handshake
 
 Future/planned:
 - Paykit Daemon
