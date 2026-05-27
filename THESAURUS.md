@@ -146,7 +146,6 @@
 
 These terms must not be used for new Paykit domain/protocol/component names:
 
-- **Paykit SDK** → use **Paykit Library**.
 - **Payment Method List** → use **Payment List**.
 - **Payment List** for the payee-published list.
 - **Payment Option** → use **Payment Endpoint** or **Payment Method**, depending on meaning.
