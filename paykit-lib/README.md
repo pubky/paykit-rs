@@ -34,7 +34,7 @@ let endpoint = get_payment_endpoint(&public_storage, &payee_pubkey, &identifier)
 
 // List all published Payment Endpoints for a payee.
 let payment_list = get_payment_list(&public_storage, &payee_pubkey).await?;
-for (identifier, payload) in &payment_list.entries {
+for (identifier, payload) in &payment_list.payment_endpoints {
     println!("{}: {}", identifier.as_str(), payload.as_str());
 }
 ```
@@ -87,7 +87,7 @@ use paykit_lib::PaymentList;
 let payment_list: PaymentList = get_payment_list(&public_storage, &payee).await?;
 
 // Access the underlying map:
-for (identifier, payload) in &payment_list.entries {
+for (identifier, payload) in &payment_list.payment_endpoints {
     println!(
         "identifier={} payload={}",
         identifier.as_str(),
@@ -96,19 +96,19 @@ for (identifier, payload) in &payment_list.entries {
 }
 
 // Check if empty:
-if payment_list.entries.is_empty() {
+if payment_list.payment_endpoints.is_empty() {
     println!("no Payment Endpoints published");
 }
 ```
 
-Private Payment Envelopes use a versioned `PrivatePaymentEnvelope` value. The Payment Endpoint entries still use the same `HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>` layout, but the envelope also carries a UUID-v4 `PaymentReference` for correlation with later protocol artifacts such as receipts:
+Private Payment Envelopes use a versioned `PrivatePaymentEnvelope` value. The Payment Endpoints still use the same `HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>` layout, but the envelope also carries a UUID-v4 `PaymentReference` for correlation with later protocol artifacts such as receipts:
 
 ```rust,ignore
 use paykit_lib::{get_private_payment_envelope, PrivatePaymentEnvelope};
 
 if let Some(envelope) = get_private_payment_envelope(&mut link).await? {
     println!("reference={}", envelope.reference.as_str());
-    for (identifier, payload) in &envelope.entries {
+    for (identifier, payload) in &envelope.payment_endpoints {
         println!(
             "identifier={} payload={}",
             identifier.as_str(),
@@ -122,7 +122,7 @@ if let Some(envelope) = get_private_payment_envelope(&mut link).await? {
 
 Private Payment Envelopes use Latest-State Message semantics: if several envelopes are queued, `get_private_payment_envelope` returns the newest one and supersedes older envelopes. Receipt Access uses Event Message semantics: `get_receipt_access` returns all currently available Receipt Access descriptors in FIFO order.
 
-The `entries` field is a `HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>`.
+The `payment_endpoints` field is a `HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>`.
 
 ### `PaykitError`
 
@@ -216,10 +216,10 @@ use paykit_lib::{get_payment_list, PublicKey};
 
 async fn demo(public_storage: &pubky::PublicStorage, pk: &PublicKey) -> paykit_lib::Result<()> {
     let payment_list = get_payment_list(public_storage, pk).await?;
-    if payment_list.entries.is_empty() {
+    if payment_list.payment_endpoints.is_empty() {
         println!("payee published no Payment Endpoints yet");
     } else {
-        for (identifier, payload) in &payment_list.entries {
+        for (identifier, payload) in &payment_list.payment_endpoints {
             println!(
                 "identifier={} payload={}",
                 identifier.as_str(),
@@ -251,7 +251,7 @@ async fn inspect(public_storage: &pubky::PublicStorage, pk: &PublicKey) -> payki
 
 #### Consistency Note
 
-`get_payment_list` first lists available Payment Endpoint entries and then fetches each one individually. Because Pubky public storage does not support atomic reads, a **race condition** exists: between the directory listing and the individual fetches, endpoints may be added, removed, or modified by the payee. The returned `PaymentList` is therefore a **best-effort snapshot**.
+`get_payment_list` first lists available Payment Endpoints and then fetches each one individually. Because Pubky public storage does not support atomic reads, a **race condition** exists: between the directory listing and the individual fetches, endpoints may be added, removed, or modified by the payee. The returned `PaymentList` is therefore a **best-effort snapshot**.
 
 If a payment execution fails with an error suggesting the endpoint has been consumed or is no longer valid, callers should:
 
@@ -297,9 +297,9 @@ Snapshot bytes include sensitive key material and must be treated as secrets (st
 
 #### Private Payment Envelope exchange
 - `set_private_payment_envelope(link: &mut EncryptedLink, envelope: &PrivatePaymentEnvelope) -> Result<()>`
-  Serializes the complete Private Payment Envelope to JSON, encrypts it, and sends it via the Encrypted Link. The caller is responsible for managing the Payment List entries and passing the full map each time in `envelope.entries`. The envelope includes a UUID-v4 `PaymentReference`; `PaymentReference::new_v4()` generates a fresh canonical reference. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient homeserver write failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase homeserver write failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery. Deterministic state, counter, nonce, or encryption errors fail immediately.
+  Serializes the complete Private Payment Envelope to JSON, encrypts it, and sends it via the Encrypted Link. The caller is responsible for managing the Payment Endpoints in the Payment List and passing the full map each time in `envelope.payment_endpoints`. The envelope includes a UUID-v4 `PaymentReference`; `PaymentReference::new_v4()` generates a fresh canonical reference. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient homeserver write failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase homeserver write failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery. Deterministic state, counter, nonce, or encryption errors fail immediately.
 - `get_private_payment_envelope(link: &mut EncryptedLink) -> Result<Option<PrivatePaymentEnvelope>>`
-  Receives and decrypts currently available Private Application Messages from the counterparty and returns the latest Private Payment Envelope, if one is available. `Ok(None)` means no Private Payment Envelope is currently available; it is distinct from an envelope with an empty `entries` map. Private Payment Envelopes use Latest-State Message semantics: queued older envelopes are superseded by the newest one. Other supported message kinds remain buffered for their own typed receivers. Syntactically valid messages with unsupported `kind` values are logged and dropped rather than buffered indefinitely. Malformed Private Application Messages are ignored with diagnostics so they do not prevent later valid messages from being processed.
+  Receives and decrypts currently available Private Application Messages from the counterparty and returns the latest Private Payment Envelope, if one is available. `Ok(None)` means no Private Payment Envelope is currently available; it is distinct from an envelope with an empty `payment_endpoints` map. Private Payment Envelopes use Latest-State Message semantics: queued older envelopes are superseded by the newest one. Other supported message kinds remain buffered for their own typed receivers. Syntactically valid messages with unsupported `kind` values are logged and dropped rather than buffered indefinitely. Malformed Private Application Messages are ignored with diagnostics so they do not prevent later valid messages from being processed.
 
 All Private Application Messages share one ordered encrypted stream. Private Payment Envelopes use Latest-State Message semantics and intentionally collapse older queued envelopes. Receipt Access uses Event Message semantics; `get_receipt_access` drains and returns all currently available Receipt Access messages in FIFO/send order. Unsupported syntactically valid Private Application Message kinds are logged and dropped by the shared dispatcher. The in-memory buffer for supported messages dispatched but not yet consumed by a typed helper is not crash-durable; callers that perform irreversible side effects after receiving Event Messages should persist their own app-level state alongside Encrypted Link snapshots/read counters.
 

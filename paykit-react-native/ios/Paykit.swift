@@ -66,41 +66,44 @@ class Paykit: RCTEventEmitter {
         return string
     }
 
-    private func paymentEntries(from raw: Any?) throws -> [FfiPaymentEntry] {
-        guard let raw = raw, !(raw is NSNull), let entries = raw as? [[String: Any]] else {
+    private func paymentEndpoints(from raw: Any?) throws -> [FfiPaymentEndpoint] {
+        guard let raw = raw, !(raw is NSNull), let paymentEndpoints = raw as? [[String: Any]] else {
             throw NSError(domain: "Paykit", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "payment entries must be a JSON array"
+                NSLocalizedDescriptionKey: "payment_endpoints must be a JSON array"
             ])
         }
-        return try entries.map { item in
+        return try paymentEndpoints.map { item in
             guard let paymentEndpointIdentifier = item["payment_endpoint_identifier"] as? String,
                   let paymentEndpointPayload = item["payment_endpoint_payload"] as? String else {
                 throw NSError(domain: "Paykit", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "payment entries must include string payment_endpoint_identifier and payment_endpoint_payload fields"
+                    NSLocalizedDescriptionKey: "payment_endpoints must include string payment_endpoint_identifier and payment_endpoint_payload fields"
                 ])
             }
-            return FfiPaymentEntry(
+            return FfiPaymentEndpoint(
                 paymentEndpointIdentifier: paymentEndpointIdentifier,
                 paymentEndpointPayload: paymentEndpointPayload
             )
         }
     }
 
-    private func paymentEntriesJsonObject(_ entries: [FfiPaymentEntry]) -> [[String: String]] {
-        return entries.map { entry in
-            ["payment_endpoint_identifier": entry.paymentEndpointIdentifier, "payment_endpoint_payload": entry.paymentEndpointPayload]
+    private func paymentEndpointsJsonObject(_ paymentEndpoints: [FfiPaymentEndpoint]) -> [[String: String]] {
+        return paymentEndpoints.map { paymentEndpoint in
+            [
+                "payment_endpoint_identifier": paymentEndpoint.paymentEndpointIdentifier,
+                "payment_endpoint_payload": paymentEndpoint.paymentEndpointPayload,
+            ]
         }
     }
 
-    private func paymentEntriesJson(_ entries: [FfiPaymentEntry]) throws -> String {
-        return try jsonString(paymentEntriesJsonObject(entries), fallback: "[]")
+    private func paymentEndpointsJson(_ paymentEndpoints: [FfiPaymentEndpoint]) throws -> String {
+        return try jsonString(paymentEndpointsJsonObject(paymentEndpoints), fallback: "[]")
     }
 
     private func privatePaymentEnvelope(from jsonString: String) throws -> FfiPrivatePaymentEnvelope {
         let object = try jsonObject(from: jsonString, label: "Private Payment Envelope")
         return FfiPrivatePaymentEnvelope(
             reference: try requiredString(object, key: "reference"),
-            entries: try paymentEntries(from: object["entries"])
+            paymentEndpoints: try paymentEndpoints(from: object["payment_endpoints"])
         )
     }
 
@@ -110,11 +113,11 @@ class Paykit: RCTEventEmitter {
         }
         return try jsonString([
             "reference": envelope.reference,
-            "entries": paymentEntriesJsonObject(envelope.entries),
+            "payment_endpoints": paymentEndpointsJsonObject(envelope.paymentEndpoints),
         ], fallback: "{}")
     }
 
-    private func receiptMetadataEntries(from raw: Any?) throws -> [FfiReceiptMetadataEntry] {
+    private func receiptMetadataFields(from raw: Any?) throws -> [FfiReceiptMetadataField] {
         guard let raw = raw, !(raw is NSNull) else {
             return []
         }
@@ -127,16 +130,16 @@ class Paykit: RCTEventEmitter {
             guard let key = item["key"] as? String,
                   let value = item["value"] as? String else {
                 throw NSError(domain: "Paykit", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "Receipt Metadata entries must include string key and value fields"
+                    NSLocalizedDescriptionKey: "Receipt Metadata fields must include string key and value fields"
                 ])
             }
-            return FfiReceiptMetadataEntry(key: key, value: value)
+            return FfiReceiptMetadataField(key: key, value: value)
         }
     }
 
-    private func receiptMetadataJsonObject(_ metadata: [FfiReceiptMetadataEntry]) -> [[String: String]] {
-        return metadata.map { entry in
-            ["key": entry.key, "value": entry.value]
+    private func receiptMetadataJsonObject(_ metadata: [FfiReceiptMetadataField]) -> [[String: String]] {
+        return metadata.map { field in
+            ["key": field.key, "value": field.value]
         }
     }
 
@@ -147,7 +150,7 @@ class Paykit: RCTEventEmitter {
             paymentEndpointIdentifier: try optionalString(object, key: "payment_endpoint_identifier"),
             amount: try optionalString(object, key: "amount"),
             currency: try optionalString(object, key: "currency"),
-            metadata: try receiptMetadataEntries(from: object["metadata"])
+            metadata: try receiptMetadataFields(from: object["metadata"])
         )
     }
 
@@ -309,8 +312,8 @@ class Paykit: RCTEventEmitter {
     func getPaymentList(_ publicKey: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
         Task {
             do {
-                let entries = try await paykitGetPaymentList(publicKey: publicKey)
-                resolve(self.resultArray(try self.paymentEntriesJson(entries)))
+                let paymentEndpoints = try await paykitGetPaymentList(publicKey: publicKey)
+                resolve(self.resultArray(try self.paymentEndpointsJson(paymentEndpoints)))
             } catch {
                 resolve(self.errorArray(error.localizedDescription))
             }

@@ -74,18 +74,18 @@ pub async fn delete_payment_endpoint(
 
 /// Fetches all public payment endpoints for the provided payee from Pubky storage.
 ///
-/// Directory listing and per-entry fetches are not atomic; the returned list is a
+/// Directory listing and per-resource fetches are not atomic; the returned list is a
 /// best-effort snapshot of the payee's homeserver state.
 #[instrument(skip(storage), fields(payee = %payee))]
 pub async fn fetch_payment_list(storage: &PublicStorage, payee: &PublicKey) -> Result<PaymentList> {
     let addr = format!("{payee}{PAYKIT_PATH_PREFIX}");
     debug!(addr = %addr, "listing payment endpoints");
-    let entries = list_entries(storage, addr, "list payment endpoints").await?;
+    let resources = list_resources(storage, addr, "list payment endpoints").await?;
 
     let mut map = HashMap::new();
-    for resource in entries {
+    for resource in resources {
         if resource.path.as_str().ends_with('/') {
-            trace!(path = %resource.path, "skipping directory entry");
+            trace!(path = %resource.path, "skipping directory resource");
             continue;
         }
 
@@ -125,7 +125,9 @@ pub async fn fetch_payment_list(storage: &PublicStorage, payee: &PublicKey) -> R
     }
 
     debug!(count = map.len(), "Payment List collected");
-    Ok(PaymentList { entries: map })
+    Ok(PaymentList {
+        payment_endpoints: map,
+    })
 }
 
 /// Fetches an individual public payment endpoint from Pubky storage.
@@ -199,12 +201,12 @@ async fn fetch_text(storage: &PublicStorage, addr: String, label: &str) -> Resul
 }
 
 #[instrument(skip(storage), fields(addr = %addr, label = %label))]
-async fn list_entries(
+async fn list_resources(
     storage: &PublicStorage,
     addr: String,
     label: &str,
 ) -> Result<Vec<PubkyResource>> {
-    trace!("listing directory entries");
+    trace!("listing directory resources");
     let builder = match storage.list(&addr) {
         Ok(builder) => builder,
         Err(err) if is_not_found(&err) => {
@@ -221,9 +223,9 @@ async fn list_entries(
     };
 
     match builder.shallow(true).send().await {
-        Ok(entries) => {
-            debug!(count = entries.len(), "directory entries listed");
-            Ok(entries)
+        Ok(resources) => {
+            debug!(count = resources.len(), "directory resources listed");
+            Ok(resources)
         }
         Err(err) if is_not_found(&err) => {
             debug!("directory not found during send, returning empty list");

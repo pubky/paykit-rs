@@ -101,7 +101,7 @@ Link.
 
 Private Payment Envelopes use Latest-State Message semantics: newer envelopes
 supersede older queued envelopes of the same kind. The caller is responsible for
-maintaining the complete entries map and sending the full desired Payment List on
+maintaining the complete `payment_endpoints` map and sending the full desired Payment List on
 each update.
 
 ## Payment Selection

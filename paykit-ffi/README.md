@@ -73,8 +73,8 @@ Private Paykit APIs require an active session and an established Encrypted Link 
 
 #### Receipt records and key handling
 
-- `FfiReceiptDraft` is caller-provided receipt data: `reference`, optional `payment_endpoint_identifier`, optional `amount`, optional `currency`, and metadata entries.
-- `FfiReceipt` is decrypted receipt plaintext: `reference`, `recipient_public_key`, optional `payment_endpoint_identifier`, and metadata entries.
+- `FfiReceiptDraft` is caller-provided receipt data: `reference`, optional `payment_endpoint_identifier`, optional `amount`, optional `currency`, and Receipt Metadata fields.
+- `FfiReceipt` is decrypted receipt plaintext: `reference`, `recipient_public_key`, optional `payment_endpoint_identifier`, and Receipt Metadata fields.
 - `FfiIssuedReceipt` contains the issuer-side result after storing and sending Receipt Access: `reference`, Receipt Location, and raw Receipt Decryption Key material.
 - `FfiReceiptAccess` contains the counterparty-side Receipt Access descriptor: `version`, `reference`, Receipt Location, raw Receipt Decryption Key material, and `algorithm`. Current valid Receipt Access messages use version `1` and algorithm `XChaCha20Poly1305`.
 - `FfiIssuedReceipt` and `FfiReceiptAccess` contain raw Receipt Decryption Key material in their `key` field. Treat it as secret: do not log it, include it in telemetry, or store it outside platform secure storage.

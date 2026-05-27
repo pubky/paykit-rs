@@ -402,7 +402,7 @@ internal class UniffiHandleMap<T: Any> {
         return map[handle] ?: throw InternalException("UniffiHandleMap.get: Invalid handle")
     }
 
-    // Remove an entry from the handlemap and get the Kotlin object back
+    // Remove a value from the handlemap and get the Kotlin object back
     internal fun remove(handle: Long): T {
         return map.remove(handle) ?: throw InternalException("UniffiHandleMap.remove: Invalid handle")
     }
@@ -1105,7 +1105,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_paykit_get_payment_endpoint() != 12975.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 6763.toShort()) {
+        if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 64964.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_paykit_get_private_payment_envelope() != 33653.toShort()) {
@@ -1860,20 +1860,20 @@ public object FfiConverterTypeFfiIssuedReceipt: FfiConverterRustBuffer<FfiIssued
 
 
 
-public object FfiConverterTypeFfiPaymentEntry: FfiConverterRustBuffer<FfiPaymentEntry> {
-    override fun read(buf: ByteBuffer): FfiPaymentEntry {
-        return FfiPaymentEntry(
+public object FfiConverterTypeFfiPaymentEndpoint: FfiConverterRustBuffer<FfiPaymentEndpoint> {
+    override fun read(buf: ByteBuffer): FfiPaymentEndpoint {
+        return FfiPaymentEndpoint(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
         )
     }
 
-    override fun allocationSize(value: FfiPaymentEntry): ULong = (
+    override fun allocationSize(value: FfiPaymentEndpoint): ULong = (
             FfiConverterString.allocationSize(value.`paymentEndpointIdentifier`) +
             FfiConverterString.allocationSize(value.`paymentEndpointPayload`)
     )
 
-    override fun write(value: FfiPaymentEntry, buf: ByteBuffer) {
+    override fun write(value: FfiPaymentEndpoint, buf: ByteBuffer) {
         FfiConverterString.write(value.`paymentEndpointIdentifier`, buf)
         FfiConverterString.write(value.`paymentEndpointPayload`, buf)
     }
@@ -1886,18 +1886,18 @@ public object FfiConverterTypeFfiPrivatePaymentEnvelope: FfiConverterRustBuffer<
     override fun read(buf: ByteBuffer): FfiPrivatePaymentEnvelope {
         return FfiPrivatePaymentEnvelope(
             FfiConverterString.read(buf),
-            FfiConverterSequenceTypeFfiPaymentEntry.read(buf),
+            FfiConverterSequenceTypeFfiPaymentEndpoint.read(buf),
         )
     }
 
     override fun allocationSize(value: FfiPrivatePaymentEnvelope): ULong = (
             FfiConverterString.allocationSize(value.`reference`) +
-            FfiConverterSequenceTypeFfiPaymentEntry.allocationSize(value.`entries`)
+            FfiConverterSequenceTypeFfiPaymentEndpoint.allocationSize(value.`paymentEndpoints`)
     )
 
     override fun write(value: FfiPrivatePaymentEnvelope, buf: ByteBuffer) {
         FfiConverterString.write(value.`reference`, buf)
-        FfiConverterSequenceTypeFfiPaymentEntry.write(value.`entries`, buf)
+        FfiConverterSequenceTypeFfiPaymentEndpoint.write(value.`paymentEndpoints`, buf)
     }
 }
 
@@ -1912,7 +1912,7 @@ public object FfiConverterTypeFfiReceipt: FfiConverterRustBuffer<FfiReceipt> {
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
-            FfiConverterSequenceTypeFfiReceiptMetadataEntry.read(buf),
+            FfiConverterSequenceTypeFfiReceiptMetadataField.read(buf),
         )
     }
 
@@ -1922,7 +1922,7 @@ public object FfiConverterTypeFfiReceipt: FfiConverterRustBuffer<FfiReceipt> {
             FfiConverterOptionalString.allocationSize(value.`paymentEndpointIdentifier`) +
             FfiConverterOptionalString.allocationSize(value.`amount`) +
             FfiConverterOptionalString.allocationSize(value.`currency`) +
-            FfiConverterSequenceTypeFfiReceiptMetadataEntry.allocationSize(value.`metadata`)
+            FfiConverterSequenceTypeFfiReceiptMetadataField.allocationSize(value.`metadata`)
     )
 
     override fun write(value: FfiReceipt, buf: ByteBuffer) {
@@ -1931,7 +1931,7 @@ public object FfiConverterTypeFfiReceipt: FfiConverterRustBuffer<FfiReceipt> {
         FfiConverterOptionalString.write(value.`paymentEndpointIdentifier`, buf)
         FfiConverterOptionalString.write(value.`amount`, buf)
         FfiConverterOptionalString.write(value.`currency`, buf)
-        FfiConverterSequenceTypeFfiReceiptMetadataEntry.write(value.`metadata`, buf)
+        FfiConverterSequenceTypeFfiReceiptMetadataField.write(value.`metadata`, buf)
     }
 }
 
@@ -1976,7 +1976,7 @@ public object FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer<FfiReceipt
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
-            FfiConverterSequenceTypeFfiReceiptMetadataEntry.read(buf),
+            FfiConverterSequenceTypeFfiReceiptMetadataField.read(buf),
         )
     }
 
@@ -1985,7 +1985,7 @@ public object FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer<FfiReceipt
             FfiConverterOptionalString.allocationSize(value.`paymentEndpointIdentifier`) +
             FfiConverterOptionalString.allocationSize(value.`amount`) +
             FfiConverterOptionalString.allocationSize(value.`currency`) +
-            FfiConverterSequenceTypeFfiReceiptMetadataEntry.allocationSize(value.`metadata`)
+            FfiConverterSequenceTypeFfiReceiptMetadataField.allocationSize(value.`metadata`)
     )
 
     override fun write(value: FfiReceiptDraft, buf: ByteBuffer) {
@@ -1993,27 +1993,27 @@ public object FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer<FfiReceipt
         FfiConverterOptionalString.write(value.`paymentEndpointIdentifier`, buf)
         FfiConverterOptionalString.write(value.`amount`, buf)
         FfiConverterOptionalString.write(value.`currency`, buf)
-        FfiConverterSequenceTypeFfiReceiptMetadataEntry.write(value.`metadata`, buf)
+        FfiConverterSequenceTypeFfiReceiptMetadataField.write(value.`metadata`, buf)
     }
 }
 
 
 
 
-public object FfiConverterTypeFfiReceiptMetadataEntry: FfiConverterRustBuffer<FfiReceiptMetadataEntry> {
-    override fun read(buf: ByteBuffer): FfiReceiptMetadataEntry {
-        return FfiReceiptMetadataEntry(
+public object FfiConverterTypeFfiReceiptMetadataField: FfiConverterRustBuffer<FfiReceiptMetadataField> {
+    override fun read(buf: ByteBuffer): FfiReceiptMetadataField {
+        return FfiReceiptMetadataField(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
         )
     }
 
-    override fun allocationSize(value: FfiReceiptMetadataEntry): ULong = (
+    override fun allocationSize(value: FfiReceiptMetadataField): ULong = (
             FfiConverterString.allocationSize(value.`key`) +
             FfiConverterString.allocationSize(value.`value`)
     )
 
-    override fun write(value: FfiReceiptMetadataEntry, buf: ByteBuffer) {
+    override fun write(value: FfiReceiptMetadataField, buf: ByteBuffer) {
         FfiConverterString.write(value.`key`, buf)
         FfiConverterString.write(value.`value`, buf)
     }
@@ -2170,24 +2170,24 @@ public object FfiConverterOptionalTypeFfiPrivatePaymentEnvelope: FfiConverterRus
 
 
 
-public object FfiConverterSequenceTypeFfiPaymentEntry: FfiConverterRustBuffer<List<FfiPaymentEntry>> {
-    override fun read(buf: ByteBuffer): List<FfiPaymentEntry> {
+public object FfiConverterSequenceTypeFfiPaymentEndpoint: FfiConverterRustBuffer<List<FfiPaymentEndpoint>> {
+    override fun read(buf: ByteBuffer): List<FfiPaymentEndpoint> {
         val len = buf.getInt()
-        return List<FfiPaymentEntry>(len) {
-            FfiConverterTypeFfiPaymentEntry.read(buf)
+        return List<FfiPaymentEndpoint>(len) {
+            FfiConverterTypeFfiPaymentEndpoint.read(buf)
         }
     }
 
-    override fun allocationSize(value: List<FfiPaymentEntry>): ULong {
+    override fun allocationSize(value: List<FfiPaymentEndpoint>): ULong {
         val sizeForLength = 4UL
-        val sizeForItems = value.sumOf { FfiConverterTypeFfiPaymentEntry.allocationSize(it) }
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiPaymentEndpoint.allocationSize(it) }
         return sizeForLength + sizeForItems
     }
 
-    override fun write(value: List<FfiPaymentEntry>, buf: ByteBuffer) {
+    override fun write(value: List<FfiPaymentEndpoint>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
-            FfiConverterTypeFfiPaymentEntry.write(it, buf)
+            FfiConverterTypeFfiPaymentEndpoint.write(it, buf)
         }
     }
 }
@@ -2220,24 +2220,24 @@ public object FfiConverterSequenceTypeFfiReceiptAccess: FfiConverterRustBuffer<L
 
 
 
-public object FfiConverterSequenceTypeFfiReceiptMetadataEntry: FfiConverterRustBuffer<List<FfiReceiptMetadataEntry>> {
-    override fun read(buf: ByteBuffer): List<FfiReceiptMetadataEntry> {
+public object FfiConverterSequenceTypeFfiReceiptMetadataField: FfiConverterRustBuffer<List<FfiReceiptMetadataField>> {
+    override fun read(buf: ByteBuffer): List<FfiReceiptMetadataField> {
         val len = buf.getInt()
-        return List<FfiReceiptMetadataEntry>(len) {
-            FfiConverterTypeFfiReceiptMetadataEntry.read(buf)
+        return List<FfiReceiptMetadataField>(len) {
+            FfiConverterTypeFfiReceiptMetadataField.read(buf)
         }
     }
 
-    override fun allocationSize(value: List<FfiReceiptMetadataEntry>): ULong {
+    override fun allocationSize(value: List<FfiReceiptMetadataField>): ULong {
         val sizeForLength = 4UL
-        val sizeForItems = value.sumOf { FfiConverterTypeFfiReceiptMetadataEntry.allocationSize(it) }
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiReceiptMetadataField.allocationSize(it) }
         return sizeForLength + sizeForItems
     }
 
-    override fun write(value: List<FfiReceiptMetadataEntry>, buf: ByteBuffer) {
+    override fun write(value: List<FfiReceiptMetadataField>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
-            FfiConverterTypeFfiReceiptMetadataEntry.write(it, buf)
+            FfiConverterTypeFfiReceiptMetadataField.write(it, buf)
         }
     }
 }
@@ -2504,7 +2504,7 @@ public suspend fun `paykitGetPaymentEndpoint`(`publicKey`: kotlin.String, `payme
  * Fetch the public Payment List for a payee.
  */
 @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-public suspend fun `paykitGetPaymentList`(`publicKey`: kotlin.String): List<FfiPaymentEntry> {
+public suspend fun `paykitGetPaymentList`(`publicKey`: kotlin.String): List<FfiPaymentEndpoint> {
     return uniffiRustCallAsync(
         UniffiLib.uniffi_paykit_fn_func_paykit_get_payment_list(
             FfiConverterString.lower(`publicKey`),
@@ -2514,7 +2514,7 @@ public suspend fun `paykitGetPaymentList`(`publicKey`: kotlin.String): List<FfiP
         { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
         { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
         // lift function
-        { FfiConverterSequenceTypeFfiPaymentEntry.lift(it) },
+        { FfiConverterSequenceTypeFfiPaymentEndpoint.lift(it) },
         // Error FFI converter
         PaykitFfiExceptionErrorHandler,
     )

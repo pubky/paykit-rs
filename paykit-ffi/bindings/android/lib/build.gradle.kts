@@ -176,8 +176,8 @@ afterEvaluate {
 
 ktlint {
     filter {
-        exclude { entry ->
-            entry.file.toString().contains("main")
+        exclude { fileTreeElement ->
+            fileTreeElement.file.toString().contains("main")
         }
     }
 }

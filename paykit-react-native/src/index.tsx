@@ -31,17 +31,17 @@ function validateUint32(value: number, label: string): string | null {
 // Types
 // ---------------------------------------------------------------------------
 
-export interface PaymentEntry {
+export interface PaymentEndpoint {
   payment_endpoint_identifier: string;
   payment_endpoint_payload: string;
 }
 
 export interface PrivatePaymentEnvelope {
   reference: string;
-  entries: PaymentEntry[];
+  payment_endpoints: PaymentEndpoint[];
 }
 
-export interface ReceiptMetadataEntry {
+export interface ReceiptMetadataField {
   key: string;
   value: string;
 }
@@ -51,7 +51,7 @@ export interface ReceiptDraft {
   payment_endpoint_identifier?: string | null;
   amount?: string | null;
   currency?: string | null;
-  metadata?: ReceiptMetadataEntry[];
+  metadata?: ReceiptMetadataField[];
 }
 
 export interface Receipt {
@@ -60,7 +60,7 @@ export interface Receipt {
   payment_endpoint_identifier: string | null;
   amount: string | null;
   currency: string | null;
-  metadata: ReceiptMetadataEntry[];
+  metadata: ReceiptMetadataField[];
 }
 
 export interface ReceiptAccess {
@@ -269,7 +269,7 @@ export async function forceSignOut(): Promise<Result<string>> {
  */
 export async function getPaymentList(
   publicKey: string
-): Promise<Result<PaymentEntry[]>> {
+): Promise<Result<PaymentEndpoint[]>> {
   try {
     const res: string[] = await Paykit.getPaymentList(publicKey);
     if (res[0] === 'error') {

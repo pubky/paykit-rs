@@ -93,7 +93,7 @@ impl From<paykit_lib::PaykitError> for PaykitFfiError {
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
-pub struct FfiPaymentEntry {
+pub struct FfiPaymentEndpoint {
     pub payment_endpoint_identifier: String,
     pub payment_endpoint_payload: String,
 }
@@ -101,11 +101,11 @@ pub struct FfiPaymentEntry {
 #[derive(uniffi::Record, Debug, Clone)]
 pub struct FfiPrivatePaymentEnvelope {
     pub reference: String,
-    pub entries: Vec<FfiPaymentEntry>,
+    pub payment_endpoints: Vec<FfiPaymentEndpoint>,
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
-pub struct FfiReceiptMetadataEntry {
+pub struct FfiReceiptMetadataField {
     pub key: String,
     pub value: String,
 }
@@ -116,7 +116,7 @@ pub struct FfiReceiptDraft {
     pub payment_endpoint_identifier: Option<String>,
     pub amount: Option<String>,
     pub currency: Option<String>,
-    pub metadata: Vec<FfiReceiptMetadataEntry>,
+    pub metadata: Vec<FfiReceiptMetadataField>,
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
@@ -126,7 +126,7 @@ pub struct FfiReceipt {
     pub payment_endpoint_identifier: Option<String>,
     pub amount: Option<String>,
     pub currency: Option<String>,
-    pub metadata: Vec<FfiReceiptMetadataEntry>,
+    pub metadata: Vec<FfiReceiptMetadataField>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -292,30 +292,30 @@ fn decode_snapshot(encoded: &str, label: &'static str) -> Result<Vec<u8>, Paykit
     })
 }
 
-fn entries_to_map(
-    entries: Vec<FfiPaymentEntry>,
+fn payment_endpoints_to_map(
+    payment_endpoints: Vec<FfiPaymentEndpoint>,
 ) -> Result<HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>, PaykitFfiError> {
-    entries
+    payment_endpoints
         .into_iter()
-        .map(|entry| {
+        .map(|payment_endpoint| {
             Ok((
-                PaymentEndpointIdentifier::new(entry.payment_endpoint_identifier)?,
-                PaymentEndpointPayload::new(entry.payment_endpoint_payload),
+                PaymentEndpointIdentifier::new(payment_endpoint.payment_endpoint_identifier)?,
+                PaymentEndpointPayload::new(payment_endpoint.payment_endpoint_payload),
             ))
         })
         .collect()
 }
 
-fn map_to_entries(payments: paykit_lib::PaymentList) -> Vec<FfiPaymentEntry> {
-    entries_map_to_entries(payments.entries)
+fn payment_list_to_ffi(payments: paykit_lib::PaymentList) -> Vec<FfiPaymentEndpoint> {
+    payment_endpoints_map_to_ffi(payments.payment_endpoints)
 }
 
-fn entries_map_to_entries(
-    entries: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
-) -> Vec<FfiPaymentEntry> {
-    entries
+fn payment_endpoints_map_to_ffi(
+    payment_endpoints: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
+) -> Vec<FfiPaymentEndpoint> {
+    payment_endpoints
         .into_iter()
-        .map(|(identifier, payload)| FfiPaymentEntry {
+        .map(|(identifier, payload)| FfiPaymentEndpoint {
             payment_endpoint_identifier: identifier.as_str().to_string(),
             payment_endpoint_payload: payload.into_inner(),
         })
@@ -327,28 +327,28 @@ fn private_payment_envelope_to_lib(
 ) -> Result<PrivatePaymentEnvelope, PaykitFfiError> {
     Ok(PrivatePaymentEnvelope::new(
         PaymentReference::new(envelope.reference)?,
-        entries_to_map(envelope.entries)?,
+        payment_endpoints_to_map(envelope.payment_endpoints)?,
     ))
 }
 
 fn private_payment_envelope_to_ffi(envelope: PrivatePaymentEnvelope) -> FfiPrivatePaymentEnvelope {
     FfiPrivatePaymentEnvelope {
         reference: envelope.reference.as_str().to_string(),
-        entries: entries_map_to_entries(envelope.entries),
+        payment_endpoints: payment_endpoints_map_to_ffi(envelope.payment_endpoints),
     }
 }
 
-fn receipt_metadata_to_map(metadata: Vec<FfiReceiptMetadataEntry>) -> HashMap<String, String> {
+fn receipt_metadata_to_map(metadata: Vec<FfiReceiptMetadataField>) -> HashMap<String, String> {
     metadata
         .into_iter()
-        .map(|entry| (entry.key, entry.value))
+        .map(|field| (field.key, field.value))
         .collect()
 }
 
-fn receipt_metadata_to_entries(metadata: HashMap<String, String>) -> Vec<FfiReceiptMetadataEntry> {
+fn receipt_metadata_to_fields(metadata: HashMap<String, String>) -> Vec<FfiReceiptMetadataField> {
     metadata
         .into_iter()
-        .map(|(key, value)| FfiReceiptMetadataEntry { key, value })
+        .map(|(key, value)| FfiReceiptMetadataField { key, value })
         .collect()
 }
 
@@ -382,7 +382,7 @@ fn receipt_to_ffi(receipt: Receipt) -> FfiReceipt {
             .map(|identifier| identifier.as_str().to_string()),
         amount: receipt.amount,
         currency: receipt.currency,
-        metadata: receipt_metadata_to_entries(receipt.metadata),
+        metadata: receipt_metadata_to_fields(receipt.metadata),
     }
 }
 
@@ -545,14 +545,14 @@ pub async fn paykit_export_session() -> Result<String, PaykitFfiError> {
 #[uniffi::export]
 pub async fn paykit_get_payment_list(
     public_key: String,
-) -> Result<Vec<FfiPaymentEntry>, PaykitFfiError> {
+) -> Result<Vec<FfiPaymentEndpoint>, PaykitFfiError> {
     let rt = ensure_runtime();
     rt.spawn(async move {
         let pubky = get_pubky_client()?;
         let pk = parse_public_key(&public_key)?;
         let reader = make_reader(pubky);
         let payments = paykit_lib::get_payment_list(&reader, &pk).await?;
-        Ok(map_to_entries(payments))
+        Ok(payment_list_to_ffi(payments))
     })
     .await
     .unwrap_or_else(|e| Err(runtime_err(e)))

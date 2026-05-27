@@ -637,7 +637,7 @@ public func FfiConverterTypeFfiIssuedReceipt_lower(_ value: FfiIssuedReceipt) ->
 }
 
 
-public struct FfiPaymentEntry {
+public struct FfiPaymentEndpoint {
     public var paymentEndpointIdentifier: String
     public var paymentEndpointPayload: String
 
@@ -650,12 +650,12 @@ public struct FfiPaymentEntry {
 }
 
 #if compiler(>=6)
-extension FfiPaymentEntry: Sendable {}
+extension FfiPaymentEndpoint: Sendable {}
 #endif
 
 
-extension FfiPaymentEntry: Equatable, Hashable {
-    public static func ==(lhs: FfiPaymentEntry, rhs: FfiPaymentEntry) -> Bool {
+extension FfiPaymentEndpoint: Equatable, Hashable {
+    public static func ==(lhs: FfiPaymentEndpoint, rhs: FfiPaymentEndpoint) -> Bool {
         if lhs.paymentEndpointIdentifier != rhs.paymentEndpointIdentifier {
             return false
         }
@@ -671,23 +671,23 @@ extension FfiPaymentEntry: Equatable, Hashable {
     }
 }
 
-extension FfiPaymentEntry: Codable {}
+extension FfiPaymentEndpoint: Codable {}
 
 
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiPaymentEntry: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentEntry {
+public struct FfiConverterTypeFfiPaymentEndpoint: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentEndpoint {
         return
-            try FfiPaymentEntry(
+            try FfiPaymentEndpoint(
                 paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
                 paymentEndpointPayload: FfiConverterString.read(from: &buf)
         )
     }
 
-    public static func write(_ value: FfiPaymentEntry, into buf: inout [UInt8]) {
+    public static func write(_ value: FfiPaymentEndpoint, into buf: inout [UInt8]) {
         FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
         FfiConverterString.write(value.paymentEndpointPayload, into: &buf)
     }
@@ -697,27 +697,27 @@ public struct FfiConverterTypeFfiPaymentEntry: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiPaymentEntry_lift(_ buf: RustBuffer) throws -> FfiPaymentEntry {
-    return try FfiConverterTypeFfiPaymentEntry.lift(buf)
+public func FfiConverterTypeFfiPaymentEndpoint_lift(_ buf: RustBuffer) throws -> FfiPaymentEndpoint {
+    return try FfiConverterTypeFfiPaymentEndpoint.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiPaymentEntry_lower(_ value: FfiPaymentEntry) -> RustBuffer {
-    return FfiConverterTypeFfiPaymentEntry.lower(value)
+public func FfiConverterTypeFfiPaymentEndpoint_lower(_ value: FfiPaymentEndpoint) -> RustBuffer {
+    return FfiConverterTypeFfiPaymentEndpoint.lower(value)
 }
 
 
 public struct FfiPrivatePaymentEnvelope {
     public var reference: String
-    public var entries: [FfiPaymentEntry]
+    public var paymentEndpoints: [FfiPaymentEndpoint]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(reference: String, entries: [FfiPaymentEntry]) {
+    public init(reference: String, paymentEndpoints: [FfiPaymentEndpoint]) {
         self.reference = reference
-        self.entries = entries
+        self.paymentEndpoints = paymentEndpoints
     }
 }
 
@@ -731,7 +731,7 @@ extension FfiPrivatePaymentEnvelope: Equatable, Hashable {
         if lhs.reference != rhs.reference {
             return false
         }
-        if lhs.entries != rhs.entries {
+        if lhs.paymentEndpoints != rhs.paymentEndpoints {
             return false
         }
         return true
@@ -739,7 +739,7 @@ extension FfiPrivatePaymentEnvelope: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(reference)
-        hasher.combine(entries)
+        hasher.combine(paymentEndpoints)
     }
 }
 
@@ -755,13 +755,13 @@ public struct FfiConverterTypeFfiPrivatePaymentEnvelope: FfiConverterRustBuffer 
         return
             try FfiPrivatePaymentEnvelope(
                 reference: FfiConverterString.read(from: &buf),
-                entries: FfiConverterSequenceTypeFfiPaymentEntry.read(from: &buf)
+                paymentEndpoints: FfiConverterSequenceTypeFfiPaymentEndpoint.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiPrivatePaymentEnvelope, into buf: inout [UInt8]) {
         FfiConverterString.write(value.reference, into: &buf)
-        FfiConverterSequenceTypeFfiPaymentEntry.write(value.entries, into: &buf)
+        FfiConverterSequenceTypeFfiPaymentEndpoint.write(value.paymentEndpoints, into: &buf)
     }
 }
 
@@ -787,11 +787,11 @@ public struct FfiReceipt {
     public var paymentEndpointIdentifier: String?
     public var amount: String?
     public var currency: String?
-    public var metadata: [FfiReceiptMetadataEntry]
+    public var metadata: [FfiReceiptMetadataField]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(reference: String, recipientPublicKey: String, paymentEndpointIdentifier: String?, amount: String?, currency: String?, metadata: [FfiReceiptMetadataEntry]) {
+    public init(reference: String, recipientPublicKey: String, paymentEndpointIdentifier: String?, amount: String?, currency: String?, metadata: [FfiReceiptMetadataField]) {
         self.reference = reference
         self.recipientPublicKey = recipientPublicKey
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
@@ -855,7 +855,7 @@ public struct FfiConverterTypeFfiReceipt: FfiConverterRustBuffer {
                 paymentEndpointIdentifier: FfiConverterOptionString.read(from: &buf),
                 amount: FfiConverterOptionString.read(from: &buf),
                 currency: FfiConverterOptionString.read(from: &buf),
-                metadata: FfiConverterSequenceTypeFfiReceiptMetadataEntry.read(from: &buf)
+                metadata: FfiConverterSequenceTypeFfiReceiptMetadataField.read(from: &buf)
         )
     }
 
@@ -865,7 +865,7 @@ public struct FfiConverterTypeFfiReceipt: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.paymentEndpointIdentifier, into: &buf)
         FfiConverterOptionString.write(value.amount, into: &buf)
         FfiConverterOptionString.write(value.currency, into: &buf)
-        FfiConverterSequenceTypeFfiReceiptMetadataEntry.write(value.metadata, into: &buf)
+        FfiConverterSequenceTypeFfiReceiptMetadataField.write(value.metadata, into: &buf)
     }
 }
 
@@ -992,11 +992,11 @@ public struct FfiReceiptDraft {
     public var paymentEndpointIdentifier: String?
     public var amount: String?
     public var currency: String?
-    public var metadata: [FfiReceiptMetadataEntry]
+    public var metadata: [FfiReceiptMetadataField]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(reference: String, paymentEndpointIdentifier: String?, amount: String?, currency: String?, metadata: [FfiReceiptMetadataEntry]) {
+    public init(reference: String, paymentEndpointIdentifier: String?, amount: String?, currency: String?, metadata: [FfiReceiptMetadataField]) {
         self.reference = reference
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
         self.amount = amount
@@ -1054,7 +1054,7 @@ public struct FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer {
                 paymentEndpointIdentifier: FfiConverterOptionString.read(from: &buf),
                 amount: FfiConverterOptionString.read(from: &buf),
                 currency: FfiConverterOptionString.read(from: &buf),
-                metadata: FfiConverterSequenceTypeFfiReceiptMetadataEntry.read(from: &buf)
+                metadata: FfiConverterSequenceTypeFfiReceiptMetadataField.read(from: &buf)
         )
     }
 
@@ -1063,7 +1063,7 @@ public struct FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.paymentEndpointIdentifier, into: &buf)
         FfiConverterOptionString.write(value.amount, into: &buf)
         FfiConverterOptionString.write(value.currency, into: &buf)
-        FfiConverterSequenceTypeFfiReceiptMetadataEntry.write(value.metadata, into: &buf)
+        FfiConverterSequenceTypeFfiReceiptMetadataField.write(value.metadata, into: &buf)
     }
 }
 
@@ -1083,7 +1083,7 @@ public func FfiConverterTypeFfiReceiptDraft_lower(_ value: FfiReceiptDraft) -> R
 }
 
 
-public struct FfiReceiptMetadataEntry {
+public struct FfiReceiptMetadataField {
     public var key: String
     public var value: String
 
@@ -1096,12 +1096,12 @@ public struct FfiReceiptMetadataEntry {
 }
 
 #if compiler(>=6)
-extension FfiReceiptMetadataEntry: Sendable {}
+extension FfiReceiptMetadataField: Sendable {}
 #endif
 
 
-extension FfiReceiptMetadataEntry: Equatable, Hashable {
-    public static func ==(lhs: FfiReceiptMetadataEntry, rhs: FfiReceiptMetadataEntry) -> Bool {
+extension FfiReceiptMetadataField: Equatable, Hashable {
+    public static func ==(lhs: FfiReceiptMetadataField, rhs: FfiReceiptMetadataField) -> Bool {
         if lhs.key != rhs.key {
             return false
         }
@@ -1117,23 +1117,23 @@ extension FfiReceiptMetadataEntry: Equatable, Hashable {
     }
 }
 
-extension FfiReceiptMetadataEntry: Codable {}
+extension FfiReceiptMetadataField: Codable {}
 
 
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiReceiptMetadataEntry: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptMetadataEntry {
+public struct FfiConverterTypeFfiReceiptMetadataField: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptMetadataField {
         return
-            try FfiReceiptMetadataEntry(
+            try FfiReceiptMetadataField(
                 key: FfiConverterString.read(from: &buf),
                 value: FfiConverterString.read(from: &buf)
         )
     }
 
-    public static func write(_ value: FfiReceiptMetadataEntry, into buf: inout [UInt8]) {
+    public static func write(_ value: FfiReceiptMetadataField, into buf: inout [UInt8]) {
         FfiConverterString.write(value.key, into: &buf)
         FfiConverterString.write(value.value, into: &buf)
     }
@@ -1143,15 +1143,15 @@ public struct FfiConverterTypeFfiReceiptMetadataEntry: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiReceiptMetadataEntry_lift(_ buf: RustBuffer) throws -> FfiReceiptMetadataEntry {
-    return try FfiConverterTypeFfiReceiptMetadataEntry.lift(buf)
+public func FfiConverterTypeFfiReceiptMetadataField_lift(_ buf: RustBuffer) throws -> FfiReceiptMetadataField {
+    return try FfiConverterTypeFfiReceiptMetadataField.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiReceiptMetadataEntry_lower(_ value: FfiReceiptMetadataEntry) -> RustBuffer {
-    return FfiConverterTypeFfiReceiptMetadataEntry.lower(value)
+public func FfiConverterTypeFfiReceiptMetadataField_lower(_ value: FfiReceiptMetadataField) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptMetadataField.lower(value)
 }
 
 
@@ -1323,23 +1323,23 @@ fileprivate struct FfiConverterOptionTypeFfiPrivatePaymentEnvelope: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypeFfiPaymentEntry: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiPaymentEntry]
+fileprivate struct FfiConverterSequenceTypeFfiPaymentEndpoint: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiPaymentEndpoint]
 
-    public static func write(_ value: [FfiPaymentEntry], into buf: inout [UInt8]) {
+    public static func write(_ value: [FfiPaymentEndpoint], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypeFfiPaymentEntry.write(item, into: &buf)
+            FfiConverterTypeFfiPaymentEndpoint.write(item, into: &buf)
         }
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPaymentEntry] {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPaymentEndpoint] {
         let len: Int32 = try readInt(&buf)
-        var seq = [FfiPaymentEntry]()
+        var seq = [FfiPaymentEndpoint]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeFfiPaymentEntry.read(from: &buf))
+            seq.append(try FfiConverterTypeFfiPaymentEndpoint.read(from: &buf))
         }
         return seq
     }
@@ -1373,23 +1373,23 @@ fileprivate struct FfiConverterSequenceTypeFfiReceiptAccess: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypeFfiReceiptMetadataEntry: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiReceiptMetadataEntry]
+fileprivate struct FfiConverterSequenceTypeFfiReceiptMetadataField: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiReceiptMetadataField]
 
-    public static func write(_ value: [FfiReceiptMetadataEntry], into buf: inout [UInt8]) {
+    public static func write(_ value: [FfiReceiptMetadataField], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypeFfiReceiptMetadataEntry.write(item, into: &buf)
+            FfiConverterTypeFfiReceiptMetadataField.write(item, into: &buf)
         }
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiReceiptMetadataEntry] {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiReceiptMetadataField] {
         let len: Int32 = try readInt(&buf)
-        var seq = [FfiReceiptMetadataEntry]()
+        var seq = [FfiReceiptMetadataField]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeFfiReceiptMetadataEntry.read(from: &buf))
+            seq.append(try FfiConverterTypeFfiReceiptMetadataField.read(from: &buf))
         }
         return seq
     }
@@ -1653,7 +1653,7 @@ public func paykitGetPaymentEndpoint(publicKey: String, paymentEndpointIdentifie
 /**
  * Fetch the public Payment List for a payee.
  */
-public func paykitGetPaymentList(publicKey: String)async throws  -> [FfiPaymentEntry]  {
+public func paykitGetPaymentList(publicKey: String)async throws  -> [FfiPaymentEndpoint]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -1663,7 +1663,7 @@ public func paykitGetPaymentList(publicKey: String)async throws  -> [FfiPaymentE
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceTypeFfiPaymentEntry.lift,
+            liftFunc: FfiConverterSequenceTypeFfiPaymentEndpoint.lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -2080,7 +2080,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_paykit_get_payment_endpoint() != 12975) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 6763) {
+    if (uniffi_paykit_checksum_func_paykit_get_payment_list() != 64964) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_paykit_get_private_payment_envelope() != 33653) {

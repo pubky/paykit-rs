@@ -56,8 +56,8 @@ if (sessionResult.isOk()) {
 // Fetch a user's Payment Endpoints
 const listResult = await getPaymentList('user_public_key');
 if (listResult.isOk()) {
-  for (const entry of listResult.value) {
-    console.log(`${entry.payment_endpoint_identifier}: ${entry.payment_endpoint_payload}`);
+  for (const paymentEndpoint of listResult.value) {
+    console.log(`${paymentEndpoint.payment_endpoint_identifier}: ${paymentEndpoint.payment_endpoint_payload}`);
   }
 }
 
@@ -82,7 +82,7 @@ if (handshake.isOk()) {
 
     await setPrivatePaymentEnvelope(progress.value.linkHandle, {
       reference: reference.value,
-      entries: [
+      payment_endpoints: [
         { payment_endpoint_identifier: 'btc-lightning-bolt11', payment_endpoint_payload: '{"value":"lnbc1..."}' },
       ],
     });
@@ -134,7 +134,7 @@ if (handshake.isOk()) {
 - **`advanceHandshake(handshakeId)`** — Advance a handshake; returns pending handshake handle or complete link handle.
 - **`setEncryptedLinkHandshakeMaxRecoveryAttempts(handshakeId, max)`** — Override recovery attempts for a pending handshake.
 - **`setEncryptedLinkMaxSendRetries(linkId, max)`** — Override send retries for an established Encrypted Link.
-- **`setPrivatePaymentEnvelope(linkId, envelope)`** — Send the complete Private Payment Envelope over the Encrypted Link. The envelope contains `reference` and `entries`.
+- **`setPrivatePaymentEnvelope(linkId, envelope)`** — Send the complete Private Payment Envelope over the Encrypted Link. The envelope contains `reference` and `payment_endpoints`.
 - **`getPrivatePaymentEnvelope(linkId)`** — Receive the newest Private Payment Envelope from the Encrypted Link, or `null` when none is available.
 - **`issueReceipt(linkId, draft)`** — Store an encrypted Receipt and send Receipt Access over the Encrypted Link.
 - **`getReceiptAccess(linkId)`** — Receive all currently available Receipt Access descriptors in FIFO order.

@@ -218,7 +218,7 @@ impl AsRef<str> for PaymentEndpointPayload {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaymentList {
     /// Map of Payment Endpoint Identifier to Payment Endpoint Payload.
-    pub entries: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
+    pub payment_endpoints: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
 }
 
 /// UUID-v4 correlation reference used to connect Private Payment Envelopes and receipts.
@@ -295,25 +295,25 @@ pub struct PrivatePaymentEnvelope {
     /// UUID-v4 Payment Reference for this Private Payment Envelope.
     pub reference: PaymentReference,
     /// Complete Payment List carried by this Latest-State Message.
-    pub entries: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
+    pub payment_endpoints: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
 }
 
 impl PrivatePaymentEnvelope {
     /// Construct a Private Payment Envelope using protocol version 1 and the
     /// `paykit.private_payments` message kind.
     ///
-    /// `entries` must be the complete desired Payment List; callers should
+    /// `payment_endpoints` must be the complete desired Payment List; callers should
     /// include all Payment Endpoints they want the counterparty to see, not
     /// just an incremental patch.
     pub fn new(
         reference: PaymentReference,
-        entries: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
+        payment_endpoints: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
     ) -> Self {
         Self {
             version: 1,
             kind: PrivateMessageKind::PrivatePaymentEnvelope,
             reference,
-            entries,
+            payment_endpoints,
         }
     }
 
@@ -327,19 +327,19 @@ impl PrivatePaymentEnvelope {
         self.kind
     }
 
-    /// Number of Payment Endpoint entries in this envelope.
+    /// Number of Payment Endpoints in this envelope.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.payment_endpoints.len()
     }
 
-    /// Returns true when this envelope contains no Payment Endpoint entries.
+    /// Returns true when this envelope contains no Payment Endpoints.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.payment_endpoints.is_empty()
     }
 
     /// Look up a Payment Endpoint Payload by Payment Endpoint Identifier.
     pub fn get(&self, identifier: &PaymentEndpointIdentifier) -> Option<&PaymentEndpointPayload> {
-        self.entries.get(identifier)
+        self.payment_endpoints.get(identifier)
     }
 }
 
@@ -914,7 +914,7 @@ struct PrivatePaymentEnvelopeWire {
     version: u8,
     kind: String,
     reference: String,
-    entries: HashMap<String, String>,
+    payment_endpoints: HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -922,7 +922,7 @@ struct PrivatePaymentEnvelopeWireRef<'a> {
     version: u8,
     kind: &'static str,
     reference: &'a str,
-    entries: HashMap<&'a str, &'a str>,
+    payment_endpoints: HashMap<&'a str, &'a str>,
 }
 
 /// Deserializes a versioned Private Payment Envelope JSON message.
@@ -955,8 +955,8 @@ fn parse_private_payment_envelope_json(json: &str) -> Result<PrivatePaymentEnvel
             ),
             source: Some(err.into()),
         })?;
-    let mut entries = HashMap::new();
-    for (key, value) in wire.entries {
+    let mut payment_endpoints = HashMap::new();
+    for (key, value) in wire.payment_endpoints {
         let payment_endpoint_identifier =
             PaymentEndpointIdentifier::new(&key).map_err(|err| PaykitError::InvalidData {
                 context: format!(
@@ -964,18 +964,18 @@ fn parse_private_payment_envelope_json(json: &str) -> Result<PrivatePaymentEnvel
                 ),
                 source: Some(err.into()),
             })?;
-        entries.insert(
+        payment_endpoints.insert(
             payment_endpoint_identifier,
             PaymentEndpointPayload::new(value),
         );
     }
-    Ok(PrivatePaymentEnvelope::new(reference, entries))
+    Ok(PrivatePaymentEnvelope::new(reference, payment_endpoints))
 }
 
 /// Serializes a Private Payment Envelope into its JSON wire representation.
 fn serialize_private_payment_envelope_json(envelope: &PrivatePaymentEnvelope) -> Result<String> {
-    let entries = envelope
-        .entries
+    let payment_endpoints = envelope
+        .payment_endpoints
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
@@ -983,7 +983,7 @@ fn serialize_private_payment_envelope_json(envelope: &PrivatePaymentEnvelope) ->
         version: envelope.version,
         kind: envelope.kind.as_str(),
         reference: envelope.reference.as_str(),
-        entries,
+        payment_endpoints,
     };
     serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
         context: format!("failed to serialize Private Payment Envelope JSON: {err}"),
@@ -1540,7 +1540,8 @@ pub async fn set_payment_endpoint(
 /// The caller must pass a [`PrivatePaymentEnvelope`] containing a validated
 /// [`PaymentReference`] and the complete Payment List. The
 /// caller is still responsible for managing the map contents (adding/removing
-/// entries) and should pass the full desired entries map in `envelope.entries`
+/// Payment Endpoints) and should pass the full desired `payment_endpoints` map
+/// in `envelope.payment_endpoints`
 /// on every update.
 ///
 /// The envelope is serialized as a versioned JSON message before being sent over
@@ -1551,7 +1552,7 @@ pub async fn set_payment_endpoint(
 ///   "version": 1,
 ///   "kind": "paykit.private_payments",
 ///   "reference": "550e8400-e29b-41d4-a716-446655440000",
-///   "entries": {
+///   "payment_endpoints": {
 ///     "lightning": "ln..."
 ///   }
 /// }
@@ -1581,7 +1582,7 @@ pub async fn set_payment_endpoint(
 /// # Parameters
 /// - `link` — an established [`EncryptedLink`] for encryption and I/O.
 /// - `envelope` — the complete Private Payment Envelope, including the
-///   required [`PaymentReference`] and complete entries map.
+///   required [`PaymentReference`] and complete `payment_endpoints` map.
 ///
 /// # Errors
 /// - Returns [`PaykitError::Validation`] if the serialized envelope exceeds
@@ -1589,7 +1590,7 @@ pub async fn set_payment_endpoint(
 /// - Returns [`PaykitError::InvalidData`] if the envelope cannot be serialized.
 /// - Returns [`PaykitError::Transport`] if `send_message` fails after all
 ///   retry attempts are exhausted.
-#[instrument(skip(link, envelope), fields(count = envelope.entries.len()))]
+#[instrument(skip(link, envelope), fields(count = envelope.payment_endpoints.len()))]
 pub async fn set_private_payment_envelope(
     link: &mut EncryptedLink,
     envelope: &PrivatePaymentEnvelope,
@@ -1721,10 +1722,10 @@ pub async fn remove_payment_endpoint(
 /// # use paykit_lib::get_payment_list;
 /// # async fn demo(storage: &pubky::PublicStorage, pk: &paykit_lib::PublicKey) -> paykit_lib::Result<()> {
 /// let payments = get_payment_list(storage, pk).await?;
-/// if payments.entries.is_empty() {
+/// if payments.payment_endpoints.is_empty() {
 ///     println!("payee published no endpoints yet");
 /// } else {
-///     for (identifier, payload) in &payments.entries {
+///     for (identifier, payload) in &payments.payment_endpoints {
 ///         println!(
 ///             "identifier={} payload={}",
 ///             identifier.as_str(),
@@ -1744,7 +1745,10 @@ pub async fn get_payment_list(
     let result = pubky_routing::fetch_payment_list(storage, payee)
         .await
         .map_err(|err| map_error("get_payment_list", err))?;
-    debug!(count = result.entries.len(), "Payment List retrieved");
+    debug!(
+        count = result.payment_endpoints.len(),
+        "Payment List retrieved"
+    );
     Ok(result)
 }
 
@@ -1753,12 +1757,12 @@ pub async fn get_payment_list(
 ///
 /// Returns `Ok(Some(envelope))` when a Private Payment Envelope is available.
 /// The caller can access the correlation reference at `envelope.reference` and
-/// look up Payment Endpoint Payloads from `envelope.entries` or via
+/// look up Payment Endpoint Payloads from `envelope.payment_endpoints` or via
 /// [`PrivatePaymentEnvelope::get`].
 ///
 /// Returns `Ok(None)` when no Private Payment Envelope is currently available.
 /// `None` means "no message yet"; it is distinct from receiving an envelope whose
-/// `entries` map is empty.
+/// `payment_endpoints` map is empty.
 ///
 /// # Parameters
 /// - `link` — an established [`EncryptedLink`] for decryption and I/O.
@@ -1776,7 +1780,7 @@ pub async fn get_payment_list(
 /// - Syntactically valid messages with unsupported `kind` values are logged and
 ///   dropped by the shared dispatcher; they are not buffered indefinitely.
 /// - The returned envelope is the full versioned Private Payment Envelope,
-///   including its required [`PaymentReference`] and complete entries map.
+///   including its required [`PaymentReference`] and complete `payment_endpoints` map.
 /// - Returns `Err(PaykitError::InvalidData)` when the selected private
 ///   message cannot be parsed as a Private Payment Envelope.
 /// - Malformed unrelated Private Application Messages are ignored with
@@ -1801,7 +1805,7 @@ pub async fn get_private_payment_envelope(
 
     let envelope = parse_private_payment_envelope_json(&raw.plaintext)?;
     debug!(
-        count = envelope.entries.len(),
+        count = envelope.payment_endpoints.len(),
         received,
         pending = link.pending_private_messages.len(),
         "Private Payment Envelope received"
@@ -2796,7 +2800,7 @@ mod tests {
         assert_eq!(
             list,
             PaymentList {
-                entries: vec![(method.clone(), endpoint.clone())]
+                payment_endpoints: vec![(method.clone(), endpoint.clone())]
                     .into_iter()
                     .collect()
             }
@@ -2851,7 +2855,7 @@ mod tests {
         let mut expected = HashMap::new();
         expected.insert(onchain.clone(), onchain_data.clone());
         expected.insert(lightning.clone(), lightning_data.clone());
-        assert_eq!(list.entries, expected);
+        assert_eq!(list.payment_endpoints, expected);
 
         remove_payment_endpoint(&setup.session, onchain.clone())
             .await
@@ -2860,7 +2864,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            list.entries,
+            list.payment_endpoints,
             vec![(lightning.clone(), lightning_data.clone())]
                 .into_iter()
                 .collect()
@@ -2872,7 +2876,7 @@ mod tests {
         let empty = get_payment_list(&setup.public_storage, &setup.public_key)
             .await
             .unwrap();
-        assert!(empty.entries.is_empty());
+        assert!(empty.payment_endpoints.is_empty());
 
         setup.raw_session.signout().await.unwrap();
     }
@@ -3059,9 +3063,9 @@ mod tests {
     // ── Private Payment Envelopes tests ──────────────────────────────────────────
 
     fn private_payment_envelope(
-        entries: &HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
+        payment_endpoints: &HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
     ) -> PrivatePaymentEnvelope {
-        PrivatePaymentEnvelope::new(PaymentReference::new_v4(), entries.clone())
+        PrivatePaymentEnvelope::new(PaymentReference::new_v4(), payment_endpoints.clone())
     }
 
     const TEST_RECEIPT_ACCESS_JSON: &str = r#"{"version":1,"kind":"paykit.receipt_access","reference":"550e8400-e29b-41d4-a716-446655440000"}"#;
@@ -3099,13 +3103,13 @@ mod tests {
 
         let method = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
         let data = PaymentEndpointPayload::new("lnbc1...");
-        let mut entries = HashMap::new();
-        entries.insert(method.clone(), data.clone());
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(method.clone(), data.clone());
 
         let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
         set_private_payment_envelope(
             &mut setup.sender_link,
-            &PrivatePaymentEnvelope::new(reference.clone(), entries),
+            &PrivatePaymentEnvelope::new(reference.clone(), payment_endpoints),
         )
         .await
         .unwrap();
@@ -3115,8 +3119,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(received.reference, reference);
-        assert_eq!(received.entries.len(), 1);
-        assert_eq!(received.entries.get(&method), Some(&data));
+        assert_eq!(received.payment_endpoints.len(), 1);
+        assert_eq!(received.payment_endpoints.get(&method), Some(&data));
 
         setup.sender_session.signout().await.unwrap();
         setup.receiver_session.signout().await.unwrap();
@@ -3130,33 +3134,36 @@ mod tests {
         let onchain = PaymentEndpointIdentifier::new("bitcoin-p2tr").unwrap();
         let cashu = PaymentEndpointIdentifier::new("cashu-mint_id").unwrap();
 
-        let mut entries = HashMap::new();
-        entries.insert(lightning.clone(), PaymentEndpointPayload::new("ln..."));
-        entries.insert(onchain.clone(), PaymentEndpointPayload::new("bc1p..."));
-        entries.insert(
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(lightning.clone(), PaymentEndpointPayload::new("ln..."));
+        payment_endpoints.insert(onchain.clone(), PaymentEndpointPayload::new("bc1p..."));
+        payment_endpoints.insert(
             cashu.clone(),
             PaymentEndpointPayload::new("{\"mint\":\"https://...\"}"),
         );
 
-        set_private_payment_envelope(&mut setup.sender_link, &private_payment_envelope(&entries))
-            .await
-            .unwrap();
+        set_private_payment_envelope(
+            &mut setup.sender_link,
+            &private_payment_envelope(&payment_endpoints),
+        )
+        .await
+        .unwrap();
 
         let received = get_private_payment_envelope(&mut setup.receiver_link)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(received.entries.len(), 3);
+        assert_eq!(received.payment_endpoints.len(), 3);
         assert_eq!(
-            received.entries.get(&lightning),
+            received.payment_endpoints.get(&lightning),
             Some(&PaymentEndpointPayload::new("ln..."))
         );
         assert_eq!(
-            received.entries.get(&onchain),
+            received.payment_endpoints.get(&onchain),
             Some(&PaymentEndpointPayload::new("bc1p..."))
         );
         assert_eq!(
-            received.entries.get(&cashu),
+            received.payment_endpoints.get(&cashu),
             Some(&PaymentEndpointPayload::new("{\"mint\":\"https://...\"}"))
         );
 
@@ -3169,25 +3176,25 @@ mod tests {
         let mut setup = PrivateTestSetup::new().await;
 
         // First write: lightning only.
-        let mut entries_v1 = HashMap::new();
-        entries_v1.insert(
+        let mut payment_endpoints_v1 = HashMap::new();
+        payment_endpoints_v1.insert(
             PaymentEndpointIdentifier::new("bitcoin-lightning").unwrap(),
             PaymentEndpointPayload::new("v1"),
         );
         set_private_payment_envelope(
             &mut setup.sender_link,
-            &private_payment_envelope(&entries_v1),
+            &private_payment_envelope(&payment_endpoints_v1),
         )
         .await
         .unwrap();
 
         // Second write: completely different map (onchain only).
         let onchain = PaymentEndpointIdentifier::new("bitcoin-p2tr").unwrap();
-        let mut entries_v2 = HashMap::new();
-        entries_v2.insert(onchain.clone(), PaymentEndpointPayload::new("v2"));
+        let mut payment_endpoints_v2 = HashMap::new();
+        payment_endpoints_v2.insert(onchain.clone(), PaymentEndpointPayload::new("v2"));
         set_private_payment_envelope(
             &mut setup.sender_link,
-            &private_payment_envelope(&entries_v2),
+            &private_payment_envelope(&payment_endpoints_v2),
         )
         .await
         .unwrap();
@@ -3197,9 +3204,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(received.entries.len(), 1);
+        assert_eq!(received.payment_endpoints.len(), 1);
         assert_eq!(
-            received.entries.get(&onchain),
+            received.payment_endpoints.get(&onchain),
             Some(&PaymentEndpointPayload::new("v2"))
         );
 
@@ -3220,12 +3227,12 @@ mod tests {
         // Build a map whose serialized JSON exceeds PUBKY_NOISE_MSG_LEN (1000 bytes).
         let method = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
         let oversized_value = "x".repeat(1000);
-        let mut entries = HashMap::new();
-        entries.insert(method, PaymentEndpointPayload::new(oversized_value));
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(method, PaymentEndpointPayload::new(oversized_value));
 
         let result = set_private_payment_envelope(
             &mut setup.sender_link,
-            &private_payment_envelope(&entries),
+            &private_payment_envelope(&payment_endpoints),
         )
         .await;
         assert!(result.is_err());
@@ -3245,19 +3252,22 @@ mod tests {
 
         let method = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
         let data = PaymentEndpointPayload::new("lnbc1...");
-        let mut entries = HashMap::new();
-        entries.insert(method.clone(), data.clone());
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(method.clone(), data.clone());
 
-        set_private_payment_envelope(&mut setup.sender_link, &private_payment_envelope(&entries))
-            .await
-            .unwrap();
+        set_private_payment_envelope(
+            &mut setup.sender_link,
+            &private_payment_envelope(&payment_endpoints),
+        )
+        .await
+        .unwrap();
         send_raw_private_message(&mut setup.sender_link, TEST_RECEIPT_ACCESS_JSON).await;
 
         let received = get_private_payment_envelope(&mut setup.receiver_link)
             .await
             .unwrap()
             .expect("Private Payment Envelope should not be lost behind Receipt Access message");
-        assert_eq!(received.entries.get(&method), Some(&data));
+        assert_eq!(received.payment_endpoints.get(&method), Some(&data));
         assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
         assert_eq!(
             setup.receiver_link.pending_private_messages[0]
@@ -3278,12 +3288,15 @@ mod tests {
 
         let method = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
         let data = PaymentEndpointPayload::new("lnbc1...");
-        let mut entries = HashMap::new();
-        entries.insert(method.clone(), data.clone());
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(method.clone(), data.clone());
 
-        set_private_payment_envelope(&mut setup.sender_link, &private_payment_envelope(&entries))
-            .await
-            .unwrap();
+        set_private_payment_envelope(
+            &mut setup.sender_link,
+            &private_payment_envelope(&payment_endpoints),
+        )
+        .await
+        .unwrap();
 
         let received = get_private_payment_envelope(&mut setup.receiver_link)
             .await
@@ -3291,7 +3304,7 @@ mod tests {
             .expect(
                 "Private Payment Envelope should be found without dropping Receipt Access message",
             );
-        assert_eq!(received.entries.get(&method), Some(&data));
+        assert_eq!(received.payment_endpoints.get(&method), Some(&data));
         assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
         assert_eq!(
             setup.receiver_link.pending_private_messages[0]
@@ -3316,17 +3329,20 @@ mod tests {
 
         let method = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
         let data = PaymentEndpointPayload::new("lnbc1...");
-        let mut entries = HashMap::new();
-        entries.insert(method.clone(), data.clone());
-        set_private_payment_envelope(&mut setup.sender_link, &private_payment_envelope(&entries))
-            .await
-            .unwrap();
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(method.clone(), data.clone());
+        set_private_payment_envelope(
+            &mut setup.sender_link,
+            &private_payment_envelope(&payment_endpoints),
+        )
+        .await
+        .unwrap();
 
         let received = get_private_payment_envelope(&mut setup.receiver_link)
             .await
             .unwrap()
             .expect("valid Private Payment Envelope should survive unknown earlier message");
-        assert_eq!(received.entries.get(&method), Some(&data));
+        assert_eq!(received.payment_endpoints.get(&method), Some(&data));
         assert!(setup.receiver_link.pending_private_messages.is_empty());
 
         setup.sender_session.signout().await.unwrap();
@@ -3341,17 +3357,20 @@ mod tests {
 
         let method = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
         let data = PaymentEndpointPayload::new("lnbc1...");
-        let mut entries = HashMap::new();
-        entries.insert(method.clone(), data.clone());
-        set_private_payment_envelope(&mut setup.sender_link, &private_payment_envelope(&entries))
-            .await
-            .unwrap();
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(method.clone(), data.clone());
+        set_private_payment_envelope(
+            &mut setup.sender_link,
+            &private_payment_envelope(&payment_endpoints),
+        )
+        .await
+        .unwrap();
 
         let received = get_private_payment_envelope(&mut setup.receiver_link)
             .await
             .unwrap()
             .expect("valid Private Payment Envelope should survive malformed earlier message");
-        assert_eq!(received.entries.get(&method), Some(&data));
+        assert_eq!(received.payment_endpoints.get(&method), Some(&data));
         assert!(setup.receiver_link.pending_private_messages.is_empty());
 
         setup.sender_session.signout().await.unwrap();
@@ -3364,18 +3383,21 @@ mod tests {
 
         let method = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
         let data = PaymentEndpointPayload::new("lnbc1...");
-        let mut entries = HashMap::new();
-        entries.insert(method.clone(), data.clone());
-        set_private_payment_envelope(&mut setup.sender_link, &private_payment_envelope(&entries))
-            .await
-            .unwrap();
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(method.clone(), data.clone());
+        set_private_payment_envelope(
+            &mut setup.sender_link,
+            &private_payment_envelope(&payment_endpoints),
+        )
+        .await
+        .unwrap();
         send_raw_private_message(&mut setup.sender_link, "not-json").await;
 
         let received = get_private_payment_envelope(&mut setup.receiver_link)
             .await
             .unwrap()
             .expect("valid Private Payment Envelope should survive malformed later message");
-        assert_eq!(received.entries.get(&method), Some(&data));
+        assert_eq!(received.payment_endpoints.get(&method), Some(&data));
         assert!(setup.receiver_link.pending_private_messages.is_empty());
 
         setup.sender_session.signout().await.unwrap();
@@ -3387,22 +3409,22 @@ mod tests {
         let mut setup = PrivateTestSetup::new().await;
 
         let method = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
-        let mut entries_v1 = HashMap::new();
-        entries_v1.insert(method.clone(), PaymentEndpointPayload::new("v1"));
+        let mut payment_endpoints_v1 = HashMap::new();
+        payment_endpoints_v1.insert(method.clone(), PaymentEndpointPayload::new("v1"));
         set_private_payment_envelope(
             &mut setup.sender_link,
-            &private_payment_envelope(&entries_v1),
+            &private_payment_envelope(&payment_endpoints_v1),
         )
         .await
         .unwrap();
 
         send_raw_private_message(&mut setup.sender_link, TEST_RECEIPT_ACCESS_JSON).await;
 
-        let mut entries_v2 = HashMap::new();
-        entries_v2.insert(method.clone(), PaymentEndpointPayload::new("v2"));
+        let mut payment_endpoints_v2 = HashMap::new();
+        payment_endpoints_v2.insert(method.clone(), PaymentEndpointPayload::new("v2"));
         set_private_payment_envelope(
             &mut setup.sender_link,
-            &private_payment_envelope(&entries_v2),
+            &private_payment_envelope(&payment_endpoints_v2),
         )
         .await
         .unwrap();
@@ -3412,7 +3434,7 @@ mod tests {
             .unwrap()
             .expect("latest Private Payment Envelope should be returned");
         assert_eq!(
-            received.entries.get(&method),
+            received.payment_endpoints.get(&method),
             Some(&PaymentEndpointPayload::new("v2"))
         );
         assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
@@ -3444,7 +3466,7 @@ mod tests {
             );
 
             if let Some(result) = get_private_payment_envelope(link).await.unwrap() {
-                if !result.entries.is_empty() {
+                if !result.payment_endpoints.is_empty() {
                     return result;
                 }
             }
@@ -3509,16 +3531,16 @@ mod tests {
             let mut link = drive_handshake_to_completion(handshake).await;
 
             // 3. Send Private Payment Envelopes.
-            let mut entries = HashMap::new();
-            entries.insert(
+            let mut payment_endpoints = HashMap::new();
+            payment_endpoints.insert(
                 PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap(),
                 PaymentEndpointPayload::new("lnbcpriv..."),
             );
-            entries.insert(
+            payment_endpoints.insert(
                 PaymentEndpointIdentifier::new("bitcoin-p2tr").unwrap(),
                 PaymentEndpointPayload::new("bc1priv..."),
             );
-            set_private_payment_envelope(&mut link, &private_payment_envelope(&entries))
+            set_private_payment_envelope(&mut link, &private_payment_envelope(&payment_endpoints))
                 .await
                 .unwrap();
 
@@ -3548,20 +3570,20 @@ mod tests {
             // 3. Poll for Private Payment Envelopes (writer may not have sent yet).
             let private = poll_private_payment_envelope(&mut link).await;
             assert_eq!(
-                private.entries.len(),
+                private.payment_endpoints.len(),
                 2,
                 "expected 2 Payment Endpoints, got {}",
-                private.entries.len()
+                private.payment_endpoints.len()
             );
             assert_eq!(
                 private
-                    .entries
+                    .payment_endpoints
                     .get(&PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap()),
                 Some(&PaymentEndpointPayload::new("lnbcpriv...")),
             );
             assert_eq!(
                 private
-                    .entries
+                    .payment_endpoints
                     .get(&PaymentEndpointIdentifier::new("bitcoin-p2tr").unwrap()),
                 Some(&PaymentEndpointPayload::new("bc1priv...")),
             );
@@ -3680,23 +3702,26 @@ mod tests {
             drive_handshake_to_completion(restored_responder),
         );
 
-        let mut entries = HashMap::new();
-        entries.insert(
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(
             PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap(),
             PaymentEndpointPayload::new("lnrestored..."),
         );
-        set_private_payment_envelope(&mut initiator_link, &private_payment_envelope(&entries))
-            .await
-            .unwrap();
+        set_private_payment_envelope(
+            &mut initiator_link,
+            &private_payment_envelope(&payment_endpoints),
+        )
+        .await
+        .unwrap();
 
         let received = get_private_payment_envelope(&mut responder_link)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(received.entries.len(), 1);
+        assert_eq!(received.payment_endpoints.len(), 1);
         assert_eq!(
             received
-                .entries
+                .payment_endpoints
                 .get(&PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap()),
             Some(&PaymentEndpointPayload::new("lnrestored..."))
         );
@@ -3817,14 +3842,17 @@ mod tests {
         let mut setup = PrivateTestSetup::new().await;
 
         // Send a message to advance nonces beyond zero.
-        let mut entries = HashMap::new();
-        entries.insert(
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(
             PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap(),
             PaymentEndpointPayload::new("ln..."),
         );
-        set_private_payment_envelope(&mut setup.sender_link, &private_payment_envelope(&entries))
-            .await
-            .unwrap();
+        set_private_payment_envelope(
+            &mut setup.sender_link,
+            &private_payment_envelope(&payment_endpoints),
+        )
+        .await
+        .unwrap();
 
         // Take a snapshot and serialize.
         let snapshot = setup.sender_link.snapshot();
@@ -3855,14 +3883,14 @@ mod tests {
         let mut setup = PrivateTestSetup::new().await;
 
         // Send a message before snapshotting.
-        let mut entries_v1 = HashMap::new();
-        entries_v1.insert(
+        let mut payment_endpoints_v1 = HashMap::new();
+        payment_endpoints_v1.insert(
             PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap(),
             PaymentEndpointPayload::new("lnv1..."),
         );
         set_private_payment_envelope(
             &mut setup.sender_link,
-            &private_payment_envelope(&entries_v1),
+            &private_payment_envelope(&payment_endpoints_v1),
         )
         .await
         .unwrap();
@@ -3872,7 +3900,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(received_v1.entries.len(), 1);
+        assert_eq!(received_v1.payment_endpoints.len(), 1);
 
         // Snapshot both sides after the first exchange.
         let sender_snapshot = setup.sender_link.snapshot();
@@ -3903,24 +3931,27 @@ mod tests {
         .unwrap();
 
         // Send a new message from the restored sender.
-        let mut entries_v2 = HashMap::new();
-        entries_v2.insert(
+        let mut payment_endpoints_v2 = HashMap::new();
+        payment_endpoints_v2.insert(
             PaymentEndpointIdentifier::new("bitcoin-p2tr").unwrap(),
             PaymentEndpointPayload::new("bc1pv2..."),
         );
-        set_private_payment_envelope(&mut restored_sender, &private_payment_envelope(&entries_v2))
-            .await
-            .unwrap();
+        set_private_payment_envelope(
+            &mut restored_sender,
+            &private_payment_envelope(&payment_endpoints_v2),
+        )
+        .await
+        .unwrap();
 
         // Receive on the restored receiver.
         let received_v2 = get_private_payment_envelope(&mut restored_receiver)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(received_v2.entries.len(), 1);
+        assert_eq!(received_v2.payment_endpoints.len(), 1);
         assert_eq!(
             received_v2
-                .entries
+                .payment_endpoints
                 .get(&PaymentEndpointIdentifier::new("bitcoin-p2tr").unwrap()),
             Some(&PaymentEndpointPayload::new("bc1pv2...")),
         );
@@ -4325,18 +4356,18 @@ mod tests {
     #[test]
     fn test_serialize_private_payment_envelope_json_uses_versioned_envelope() {
         let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let mut entries = HashMap::new();
-        entries.insert(
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert(
             PaymentEndpointIdentifier::new("lightning").unwrap(),
             PaymentEndpointPayload::new("ln..."),
         );
-        let payload = PrivatePaymentEnvelope::new(reference.clone(), entries);
+        let payload = PrivatePaymentEnvelope::new(reference.clone(), payment_endpoints);
         let json = serialize_private_payment_envelope_json(&payload).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["version"], 1);
         assert_eq!(value["kind"], "paykit.private_payments");
         assert_eq!(value["reference"], reference.as_str());
-        assert_eq!(value["entries"]["lightning"], "ln...");
+        assert_eq!(value["payment_endpoints"]["lightning"], "ln...");
     }
 
     #[test]
@@ -4349,7 +4380,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_rejects_unsupported_version() {
-        let err = parse_private_payment_envelope_json(r#"{"version":2,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":2,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported Private Payment Envelope version 2")),
             "expected unsupported version error, got: {err}"
@@ -4358,7 +4389,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_rejects_unsupported_kind() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.receipt","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.receipt","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported Private Payment Envelope kind")),
             "expected unsupported kind error, got: {err}"
@@ -4367,7 +4398,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_rejects_invalid_reference() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"not-a-uuid","entries":{}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"not-a-uuid","payment_endpoints":{}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Reference")),
             "expected invalid reference error, got: {err}"
@@ -4455,7 +4486,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_empty_key() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"":"ln..."}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"":"ln..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData for empty key, got: {err}"
@@ -4464,7 +4495,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_path_traversal_key() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"..":"ln..."}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"..":"ln..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData for path-traversal key, got: {err}"
@@ -4473,7 +4504,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_slash_in_key() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"foo/bar":"ln..."}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"foo/bar":"ln..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData for key with slash, got: {err}"
@@ -4482,7 +4513,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_reserved_private_key() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"private":"secret..."}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"private":"secret..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData for reserved 'private' key, got: {err}"
@@ -4493,7 +4524,7 @@ mod tests {
     fn test_parse_private_payment_envelope_json_oversized_key() {
         let long_key = "a".repeat(65);
         let json = format!(
-            r#"{{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{{"{long_key}":"ln..."}}}}"#
+            r#"{{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{{"{long_key}":"ln..."}}}}"#
         );
         let err = parse_private_payment_envelope_json(&json).unwrap_err();
         assert!(
@@ -4506,7 +4537,7 @@ mod tests {
     fn test_parse_private_payment_envelope_json_one_valid_one_invalid_key() {
         // The valid key should not mask the invalid one.
         let err =
-            parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"lightning":"ln...","":"bc1..."}}"#).unwrap_err();
+            parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"lightning":"ln...","":"bc1..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData when one key is invalid, got: {err}"
@@ -4516,8 +4547,8 @@ mod tests {
     // ── Happy path ──────────────────────────────────────────────────────
 
     #[test]
-    fn test_parse_private_payment_envelope_json_valid_single_entry() {
-        let result = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"lightning":"ln..."}}"#).unwrap();
+    fn test_parse_private_payment_envelope_json_valid_single_payment_endpoint() {
+        let result = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"lightning":"ln..."}}"#).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(
             result.get(&PaymentEndpointIdentifier::new("lightning").unwrap()),
@@ -4526,9 +4557,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_private_payment_envelope_json_valid_multiple_entries() {
+    fn test_parse_private_payment_envelope_json_valid_multiple_payment_endpoints() {
         let result =
-            parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{"lightning":"ln...","onchain":"bc1..."}}"#).unwrap();
+            parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"lightning":"ln...","onchain":"bc1..."}}"#).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
             result.get(&PaymentEndpointIdentifier::new("lightning").unwrap()),
@@ -4542,7 +4573,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_empty_object() {
-        let result = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","entries":{}}"#).unwrap();
+        let result = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{}}"#).unwrap();
         assert!(result.is_empty());
     }
 }
