@@ -46,15 +46,9 @@
 
 ### Payment List
 - **Definition**: The payee-published or payee-shared list of Payment Endpoints.
-- **NOT**: The payer-side intersection of compatible endpoints.
-- **Synonyms to AVOID**: Payment Method List, Supported Payments List, Supported Payment List when referring to the payee-published list
-- **Related terms**: Payment Endpoint, Supported Payment List, Payee
-
-### Supported Payment List
-- **Definition**: The payer-side derived intersection between the payer's supported payment capabilities/preferences and the payee's Payment List.
-- **NOT**: The raw list published by the payee.
-- **Synonyms to AVOID**: Supported Payments List, Payment Method List
-- **Related terms**: Payment List, Payer, Payment Method, Payment Endpoint
+- **NOT**: The result of payer-side processing of compatible endpoints.
+- **Synonyms to AVOID**: Payment Method List
+- **Related terms**: Payment Endpoint, Payee
 
 ### Payment Endpoint
 - **Definition**: A whole payee-owned entry in a Payment List, consisting of a Payment Endpoint Identifier and a Payment Endpoint Payload.
@@ -78,7 +72,7 @@
 - **Definition**: A higher-level human/domain concept for how value can be transferred, mapping to one or more Payment Endpoint Identifiers.
 - **NOT**: A single machine identifier in all cases, and not a payee-specific endpoint payload.
 - **Synonyms to AVOID**: Payment Option
-- **Related terms**: Payment Endpoint Identifier, Supported Payment List
+- **Related terms**: Payment Endpoint Identifier,
 
 ### Asset
 - **Definition**: The unit of value being transferred, such as BTC, EUR, USD, or USDT; in identifiers this appears as the first segment.
@@ -146,7 +140,7 @@
 - **Definition**: The party attempting to send value in a payment flow.
 - **NOT**: Always a Known Peer.
 - **Synonyms to AVOID**: sender when it obscures payment role
-- **Related terms**: Payee, Supported Payment List, Counterparty
+- **Related terms**: Payee, Counterparty
 
 ### Payee
 - **Definition**: The party receiving value in a payment flow and publishing or sharing Payment Endpoints.
@@ -170,9 +164,9 @@
 
 ### SupportedPayments
 - **Definition**: Former legacy implementation name for the payee-published Payment List.
-- **NOT**: The payer-side Supported Payment List.
+- **NOT**: The payer-side post processing of Payment List.
 - **Synonyms to AVOID**: SupportedPayments in new domain-facing code/docs
-- **Related terms**: Payment List, Supported Payment List
+- **Related terms**: Payment List
 
 ### PrivatePaymentsPayload
 - **Definition**: Former legacy implementation name for Private Payment Envelope.
@@ -204,7 +198,7 @@ These terms must not be used for new Paykit domain/protocol/component names:
 
 - **Paykit SDK** → use **Paykit Library**.
 - **Payment Method List** → use **Payment List**.
-- **Supported Payments List** → use **Supported Payment List** only for the payer-side intersection; use **Payment List** for the payee-published list.
+- **Payment List** for the payee-published list.
 - **Payment Option** → use **Payment Endpoint** or **Payment Method**, depending on meaning.
 - **Routing Network** / **Paykit Routing Network** → use **Pubky Routing** in concrete Paykit docs.
 - **MethodId** → use **Payment Endpoint Identifier**.
@@ -224,7 +218,6 @@ Current/core:
 
 Protocol concepts:
 - Payment List
-- Supported Payment List
 - Payment Endpoint
 - Payment Endpoint Identifier
 - Payment Endpoint Payload
