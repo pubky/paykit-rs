@@ -3,6 +3,7 @@
 ## Project Structure & Module Organization
 - Workspace root hosts `Cargo.toml` that pins resolver `2` and registers members.
 - Core library lives in `paykit-lib/` with its own `Cargo.toml` and `src/lib.rs`; treat this crate as the canonical Pubky-backed Paykit implementation.
+- `./THESAURUS.md` is the authority for Paykit domain language. Use it before naming public APIs, docs sections, files, types, fields, endpoints, events, or components.
 - Pubky routing helpers live in `paykit-lib/src/pubky_routing.rs`; it owns public endpoint storage operations and exports `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) plus `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`). Reuse those constants instead of hard-coding strings.
 
 ## Build, Test, and Development Commands
