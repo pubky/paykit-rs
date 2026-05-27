@@ -51,7 +51,7 @@
 - **Related terms**: Paykit Protocol, Payment List
 
 ### Payment List
-- **Definition**: The payee-published or payee-shared list of Payment Endpoints.
+- **Definition**: A payee-published or payee-shared collection of Payment Endpoints. A Payment List may be publicly discoverable through Pubky public storage or privately shared inside a Private Payment Envelope.
 - **NOT**: The result of payer-side processing of compatible endpoints.
 - **Synonyms to AVOID**: Payment Method List
 - **Related terms**: Payment Endpoint, Payee
