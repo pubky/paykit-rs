@@ -1,6 +1,6 @@
 # Legacy Terms
 
-This terms are used through codebase and documentation. Their future used must be avoided.
+These terms are used through codebase and documentation. Their future used must be avoided.
 They remain documented here so existing code can be read and migrated deliberately by replacing them with the terms defined in ./THESAURUS.md.
 
 ## MethodId
