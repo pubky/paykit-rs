@@ -119,7 +119,7 @@
 - **Related terms**: Receipt Access, Payment Reference
 
 ### Receipt Access
-- **Definition**: The descriptor/capability that lets a counterparty retrieve and decrypt a Receipt.
+- **Definition**: The descriptor object that lets a counterparty retrieve and decrypt a Receipt. It is sent over the encrypted link and carries the receipt location and decryption key. Its retrieval and processing is event-like/FIFO, unlike private payments which are latest-state. 
 - **NOT**: The Receipt payload itself.
 - **Synonyms to AVOID**: receipt token, receipt pointer when naming the protocol concept
 - **Related terms**: Receipt, Payment Reference
