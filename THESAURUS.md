@@ -30,6 +30,12 @@
 - **Synonyms to AVOID**: Paykit core, Paykit runtime core
 - **Related terms**: Paykit, Paykit Library
 
+### Paykit SDK
+- **Definition**: A planned/future extension of Paykit Library with Pubky related functionality for authorization/authentication, session management, profile retreival and tag assignment.
+- **NOT**: A current core component of Paykit architecture.
+- **Synonyms to AVOID**: Paykit core, Paykit runtime core, Pubky 
+- **Related terms**: Paykit, Paykit Library, Pubky SDK
+
 ### Language Bindings
 - **Definition**: Distribution/integration surfaces under Paykit Library for languages or platforms such as Swift, Kotlin, and React Native.
 - **NOT**: First-class Paykit architecture components.
