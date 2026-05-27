@@ -148,11 +148,17 @@
 - **Synonyms to AVOID**: receipt key when the decryption purpose matters
 - **Related terms**: Receipt, Receipt Access
 
+### Receipt Location
+- **Definition**: The canonical homeserver public key and path (pubky resource) where an encrypted Receipt payload is stored.
+- **NOT**: The Receipt payload itself or the Receipt Decryption Key.
+- **Synonyms to AVOID**: receipt path when naming the protocol concept
+- **Related terms**: Receipt, Receipt Access
+
 ### Receipt Access
-- **Definition**: The descriptor object that lets a counterparty retrieve and decrypt a Receipt. It is sent over the Encrypted Link and carries the receipt location and Receipt Decryption Key. Its retrieval and processing follows Event Message semantics, unlike private payments which are latest-state. 
-- **NOT**: The Receipt payload itself or only the Receipt Decryption Key.
+- **Definition**: The descriptor object that lets a counterparty retrieve and decrypt a Receipt. It is sent over the Encrypted Link and carries the Receipt Location and Receipt Decryption Key. Its retrieval and processing follows Event Message semantics, unlike private payments which are latest-state. 
+- **NOT**: The Receipt payload itself, only the Receipt Location, or only the Receipt Decryption Key.
 - **Synonyms to AVOID**: receipt token, receipt pointer when naming the protocol concept
-- **Related terms**: Receipt, Receipt Decryption Key, Payment Reference, Event Message
+- **Related terms**: Receipt, Receipt Location, Receipt Decryption Key, Payment Reference, Event Message
 
 ### Counterparty
 - **Definition**: The other party in a payment interaction.
@@ -227,6 +233,7 @@ Protocol concepts:
 - Payment Reference
 - Receipt
 - Receipt Decryption Key
+- Receipt Location
 - Receipt Access
 - Encrypted Link
 - Encrypted Link Handshake
