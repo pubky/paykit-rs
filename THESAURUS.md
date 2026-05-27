@@ -100,11 +100,23 @@
 
 ## Private Payments and Receipts
 
+### Private Application Message
+- **Definition**: A versioned JSON message sent over an Encrypted Link and identified by a Private Message Kind.
+- **NOT**: Public Paykit data published through Pubky public storage or the Encrypted Link itself.
+- **Synonyms to AVOID**: private payload when naming the protocol concept
+- **Related terms**: Encrypted Link, Private Message Kind, Private Payment Envelope, Receipt Access
+
+### Private Message Kind
+- **Definition**: The kind discriminator for private Paykit messages, e.g. `paykit.private_payments` or `paykit.receipt_access`.
+- **NOT**: The Private Application Message body or the Rust enum/type that may represent it in an implementation.
+- **Synonyms to AVOID**: private message type when naming the protocol concept
+- **Related terms**: Private Application Message, Private Payment Envelope, Receipt Access
+
 ### Private Payment Envelope
 - **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete Payment List of a Know Peer. Latest-wins semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
 - **NOT**: A Payment List with addition fields.
 - **Synonyms to AVOID**: Private Payment List, Private Payment Method List, private payments payload
-- **Related terms**: Linked Peer, Payment Endpoint, Payment Reference
+- **Related terms**: Linked Peer, Private Application Message, Payment Endpoint, Payment Reference
 
 ### Payment Reference
 - **Definition**: A per-payment or per-request correlation identifier. In private payment flows, the Private Payment Envelope carries the Payment Reference because the envelope represents the latest private payment disclosure for that payment/request.
@@ -134,7 +146,7 @@
 - **Definition**: An established pubky-noise channel used to exchange private Paykit application messages.
 - **NOT**: The counterparty itself or arbitrary public Pubky storage.
 - **Synonyms to AVOID**: linked peer when referring to the channel itself
-- **Related terms**: Linked Peer, Encrypted Link Handshake, Private Payment Envelope, Receipt Access
+- **Related terms**: Linked Peer, Encrypted Link Handshake, Private Application Message, Private Payment Envelope, Receipt Access
 
 ### Encrypted Link Handshake
 - **Definition**: The setup flow that establishes an Encrypted Link between two peers.
@@ -189,6 +201,8 @@ Protocol concepts:
 - Payment Endpoint Identifier
 - Payment Endpoint Payload
 - Payment Method
+- Private Application Message
+- Private Message Kind
 - Private Payment Envelope
 - Payment Reference
 - Receipt
