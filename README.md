@@ -5,7 +5,9 @@
 ## Description
 
 Paykit helps apps discover where someone can receive a payment through their
-Pubky identity.
+Pubky identity. As a meta payment protocol, it also provides a layer for
+payment-related metadata such as receipts, Receipt Access, and future features
+like automated subscriptions.
 
 A payee can publish public payment details under their Pubky public key, or
 share a Private Payment Envelope with another person over an Encrypted Link. Paykit
