@@ -47,6 +47,6 @@ jobs:
       working-directory: paykit-ffi/bindings/android
       env:
         GITHUB_ACTOR: ${{ github.actor }}
-        GITHUB_TOKEN: ${{ secrets.ORG_PACKAGES_TOKEN }}
+        GITHUB_TOKEN: ${{ github.token }}
         GITHUB_REPO: ${{ github.repository }}
       run: ./gradlew publish -Pversion=${{ steps.version.outputs.version }}
