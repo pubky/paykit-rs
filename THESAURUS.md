@@ -107,7 +107,7 @@
 - **Related terms**: Encrypted Link, Private Message Kind, Private Payment Envelope, Receipt Access
 
 ### Private Message Kind
-- **Definition**: The kind discriminator for private Paykit messages, e.g. `paykit.private_payments` or `paykit.receipt_access`.
+- **Definition**: The kind discriminator for private Paykit messages, e.g. `paykit.private_payment_envelope` or `paykit.receipt_access`.
 - **NOT**: The Private Application Message body or the Rust enum/type that may represent it in an implementation.
 - **Synonyms to AVOID**: private message type when naming the protocol concept
 - **Related terms**: Private Application Message, Private Payment Envelope, Receipt Access

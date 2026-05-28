@@ -268,7 +268,7 @@ impl AsRef<str> for PaymentReference {
 /// Private Noise message kinds understood by Paykit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivateMessageKind {
-    /// Private Payment Envelope Latest-State Message (`paykit.private_payments`).
+    /// Private Payment Envelope Latest-State Message (`paykit.private_payment_envelope`).
     PrivatePaymentEnvelope,
     /// Receipt Access Event Message (`paykit.receipt_access`).
     ReceiptAccess,
@@ -277,7 +277,7 @@ pub enum PrivateMessageKind {
 impl PrivateMessageKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::PrivatePaymentEnvelope => "paykit.private_payments",
+            Self::PrivatePaymentEnvelope => "paykit.private_payment_envelope",
             Self::ReceiptAccess => "paykit.receipt_access",
         }
     }
@@ -300,7 +300,7 @@ pub struct PrivatePaymentEnvelope {
 
 impl PrivatePaymentEnvelope {
     /// Construct a Private Payment Envelope using protocol version 1 and the
-    /// `paykit.private_payments` message kind.
+    /// `paykit.private_payment_envelope` message kind.
     ///
     /// `payment_endpoints` must be the complete desired Payment List; callers should
     /// include all Payment Endpoints they want the counterparty to see, not
@@ -1550,7 +1550,7 @@ pub async fn set_payment_endpoint(
 /// ```json
 /// {
 ///   "version": 1,
-///   "kind": "paykit.private_payments",
+///   "kind": "paykit.private_payment_envelope",
 ///   "reference": "550e8400-e29b-41d4-a716-446655440000",
 ///   "payment_endpoints": {
 ///     "lightning": "ln..."
@@ -4366,7 +4366,7 @@ mod tests {
         let json = serialize_private_payment_envelope_json(&payload).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["version"], 1);
-        assert_eq!(value["kind"], "paykit.private_payments");
+        assert_eq!(value["kind"], "paykit.private_payment_envelope");
         assert_eq!(value["reference"], reference.as_str());
         assert_eq!(value["payment_endpoints"]["lightning"], "ln...");
     }
@@ -4381,7 +4381,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_rejects_unsupported_version() {
-        let err = parse_private_payment_envelope_json(r#"{"version":2,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":2,"kind":"paykit.private_payment_envelope","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported Private Payment Envelope version 2")),
             "expected unsupported version error, got: {err}"
@@ -4399,7 +4399,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_rejects_invalid_reference() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"not-a-uuid","payment_endpoints":{}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payment_envelope","reference":"not-a-uuid","payment_endpoints":{}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Reference")),
             "expected invalid reference error, got: {err}"
@@ -4487,7 +4487,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_empty_key() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"":"ln..."}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payment_envelope","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"":"ln..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData for empty key, got: {err}"
@@ -4496,7 +4496,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_path_traversal_key() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"..":"ln..."}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payment_envelope","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"..":"ln..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData for path-traversal key, got: {err}"
@@ -4505,7 +4505,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_slash_in_key() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"foo/bar":"ln..."}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payment_envelope","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"foo/bar":"ln..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData for key with slash, got: {err}"
@@ -4514,7 +4514,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_reserved_private_key() {
-        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"private":"secret..."}}"#).unwrap_err();
+        let err = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payment_envelope","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"private":"secret..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData for reserved 'private' key, got: {err}"
@@ -4525,7 +4525,7 @@ mod tests {
     fn test_parse_private_payment_envelope_json_oversized_key() {
         let long_key = "a".repeat(65);
         let json = format!(
-            r#"{{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{{"{long_key}":"ln..."}}}}"#
+            r#"{{"version":1,"kind":"paykit.private_payment_envelope","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{{"{long_key}":"ln..."}}}}"#
         );
         let err = parse_private_payment_envelope_json(&json).unwrap_err();
         assert!(
@@ -4538,7 +4538,7 @@ mod tests {
     fn test_parse_private_payment_envelope_json_one_valid_one_invalid_key() {
         // The valid key should not mask the invalid one.
         let err =
-            parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"lightning":"ln...","":"bc1..."}}"#).unwrap_err();
+            parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payment_envelope","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"lightning":"ln...","":"bc1..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData when one key is invalid, got: {err}"
@@ -4549,7 +4549,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_valid_single_payment_endpoint() {
-        let result = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"lightning":"ln..."}}"#).unwrap();
+        let result = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payment_envelope","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"lightning":"ln..."}}"#).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(
             result.get(&PaymentEndpointIdentifier::new("lightning").unwrap()),
@@ -4560,7 +4560,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_envelope_json_valid_multiple_payment_endpoints() {
         let result =
-            parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"lightning":"ln...","onchain":"bc1..."}}"#).unwrap();
+            parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payment_envelope","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{"lightning":"ln...","onchain":"bc1..."}}"#).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
             result.get(&PaymentEndpointIdentifier::new("lightning").unwrap()),
@@ -4574,7 +4574,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_payment_envelope_json_empty_object() {
-        let result = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payments","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{}}"#).unwrap();
+        let result = parse_private_payment_envelope_json(r#"{"version":1,"kind":"paykit.private_payment_envelope","reference":"550e8400-e29b-41d4-a716-446655440000","payment_endpoints":{}}"#).unwrap();
         assert!(result.is_empty());
     }
 }

@@ -64,52 +64,52 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [0.1.0-rc1] - 2026-03-04
 
 ### Changed (BREAKING)
-- **`PaymentEndpointIdentifier` is now validated at construction time.** The inner field is private;
-  use `PaymentEndpointIdentifier::new("lightning")?` instead of `PaymentEndpointIdentifier("lightning".into())`.
+- **`MethodId` is now validated at construction time.** The inner field is private;
+  use `MethodId::new("lightning")?` instead of `MethodId("lightning".into())`.
   Accepted characters: ASCII alphanumeric, hyphens, underscores, and dots (max 64
   chars). Path traversal components (`.`, `..`) are rejected.
-- **`PaymentEndpointPayload` inner field is now private.** Use `PaymentEndpointPayload::new("...")` to
+- **`EndpointData` inner field is now private.** Use `EndpointData::new("...")` to
   construct and `.as_str()` / `.into_inner()` to read.
 - **New `PaykitError::Validation` variant.** Exhaustive `match` on `PaykitError`
-  must now handle this variant, returned when `PaymentEndpointIdentifier::new()` rejects invalid
+  must now handle this variant, returned when `MethodId::new()` rejects invalid
   input.
 
 ### Added
-- `PaymentEndpointIdentifier::new()` — validated constructor enforcing safe path-segment invariants.
-- `PaymentEndpointIdentifier::as_str()`, `Display`, and `AsRef<str>` for read access.
-- `PaymentEndpointPayload::new()`, `PaymentEndpointPayload::as_str()`, `PaymentEndpointPayload::into_inner()`,
+- `MethodId::new()` — validated constructor enforcing safe path-segment invariants.
+- `MethodId::as_str()`, `Display`, and `AsRef<str>` for read access.
+- `EndpointData::new()`, `EndpointData::as_str()`, `EndpointData::into_inner()`,
   `Display`, and `AsRef<str>`.
-- 23 unit tests covering `PaymentEndpointIdentifier` validation (positive and negative cases) and
-  `PaymentEndpointPayload` accessors.
+- 23 unit tests covering `MethodId` validation (positive and negative cases) and
+  `EndpointData` accessors.
 
 ### Security
-- Mitigated path injection vulnerability in `PaymentEndpointIdentifier`. Previously, a caller could
+- Mitigated path injection vulnerability in `MethodId`. Previously, a caller could
   inject path traversal sequences (`../`), null bytes, or special characters into
-  storage paths via unvalidated `PaymentEndpointIdentifier` values. Depending on how the storage
+  storage paths via unvalidated `MethodId` values. Depending on how the storage
   backend handles paths, this could lead to writing to unintended locations, reading
   other users' data, or storage corruption.
 
 ### Migration guide
-- Replace `PaymentEndpointIdentifier("name".into())` with `PaymentEndpointIdentifier::new("name")?` (or `.unwrap()`
+- Replace `MethodId("name".into())` with `MethodId::new("name")?` (or `.unwrap()`
   for known-good literals in tests).
-- Replace `PaymentEndpointPayload("payload".into())` with `PaymentEndpointPayload::new("payload")`.
+- Replace `EndpointData("payload".into())` with `EndpointData::new("payload")`.
 - Replace `.0` field access with `.as_str()` on both types.
 - Add a `PaykitError::Validation(_)` arm to any exhaustive `match` on `PaykitError`.
-- Downstream bindings (Swift/RN/Kotlin) that construct `PaymentEndpointIdentifier` must be updated to
+- Downstream bindings (Swift/RN/Kotlin) that construct `MethodId` must be updated to
   handle the `Result` returned by `new()`.
 
 ## [0.1.0] - 2025-11-21
 
 ### Added
-- Initial public release of `paykit-lib`, exposing a stateless library layer for the
-  Paykit Protocol.
+- Initial public release of `paykit-lib`, exposing a stateless transport layer for the
+  Paykit protocol.
 - Trait-based abstraction (`AuthenticatedTransport`, `UnauthenticatedTransportRead`)
-  so integrators can inject their own clients or mocks.
+  so integrators can inject their own SDKs or mocks.
 - Feature-gated `pubky` adapters providing ready-made transport implementations plus
   exported constants for path prefixes.
-- High-level helpers to set/remove Payment Endpoints, list public Payment Lists,
-  and list contacts, including comprehensive async tests that run against the
-  `pubky-testnet` harness.
+- High-level helpers to set/remove endpoints, list supported payments, and list known
+  contacts, including comprehensive async tests that run against the `pubky-testnet`
+  harness.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
