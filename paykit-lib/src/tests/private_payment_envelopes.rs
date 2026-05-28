@@ -187,13 +187,9 @@ async fn get_private_payment_envelope_preserves_newer_receipt_access_messages() 
         .unwrap()
         .expect("Private Payment Envelope should not be lost behind Receipt Access message");
     assert_eq!(received.payment_endpoints.get(&method), Some(&data));
-    assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
-    assert_eq!(
-        setup.receiver_link.pending_private_messages[0]
-            .kind
-            .as_str(),
-        "paykit.receipt_access"
-    );
+    let pending_kinds = setup.receiver_link.pending_private_message_kinds_for_test();
+    assert_eq!(pending_kinds.len(), 1);
+    assert_eq!(pending_kinds[0].as_str(), "paykit.receipt_access");
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
@@ -222,13 +218,9 @@ async fn get_private_payment_envelope_preserves_older_receipt_access_messages() 
         .unwrap()
         .expect("Private Payment Envelope should be found without dropping Receipt Access message");
     assert_eq!(received.payment_endpoints.get(&method), Some(&data));
-    assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
-    assert_eq!(
-        setup.receiver_link.pending_private_messages[0]
-            .kind
-            .as_str(),
-        "paykit.receipt_access"
-    );
+    let pending_kinds = setup.receiver_link.pending_private_message_kinds_for_test();
+    assert_eq!(pending_kinds.len(), 1);
+    assert_eq!(pending_kinds[0].as_str(), "paykit.receipt_access");
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
@@ -260,7 +252,7 @@ async fn get_private_payment_envelope_drops_unknown_messages_without_buffering_t
         .unwrap()
         .expect("valid Private Payment Envelope should survive unknown earlier message");
     assert_eq!(received.payment_endpoints.get(&method), Some(&data));
-    assert!(setup.receiver_link.pending_private_messages.is_empty());
+    assert_eq!(setup.receiver_link.pending_private_message_count(), 0);
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
@@ -288,7 +280,7 @@ async fn get_private_payment_envelope_ignores_malformed_messages_before_valid_pa
         .unwrap()
         .expect("valid Private Payment Envelope should survive malformed earlier message");
     assert_eq!(received.payment_endpoints.get(&method), Some(&data));
-    assert!(setup.receiver_link.pending_private_messages.is_empty());
+    assert_eq!(setup.receiver_link.pending_private_message_count(), 0);
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
@@ -315,7 +307,7 @@ async fn get_private_payment_envelope_ignores_malformed_messages_after_valid_pay
         .unwrap()
         .expect("valid Private Payment Envelope should survive malformed later message");
     assert_eq!(received.payment_endpoints.get(&method), Some(&data));
-    assert!(setup.receiver_link.pending_private_messages.is_empty());
+    assert_eq!(setup.receiver_link.pending_private_message_count(), 0);
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
@@ -354,13 +346,9 @@ async fn get_private_payment_envelope_keeps_latest_payment_without_dropping_othe
         received.payment_endpoints.get(&method),
         Some(&PaymentEndpointPayload::new("v2"))
     );
-    assert_eq!(setup.receiver_link.pending_private_messages.len(), 1);
-    assert_eq!(
-        setup.receiver_link.pending_private_messages[0]
-            .kind
-            .as_str(),
-        "paykit.receipt_access"
-    );
+    let pending_kinds = setup.receiver_link.pending_private_message_kinds_for_test();
+    assert_eq!(pending_kinds.len(), 1);
+    assert_eq!(pending_kinds[0].as_str(), "paykit.receipt_access");
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();

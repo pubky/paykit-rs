@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::{EncryptedLink, PaykitError, Result};
+use crate::{PaykitError, Result};
 
 /// Private Noise message kinds understood by Paykit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,20 +22,29 @@ impl PrivateMessageKind {
         }
     }
 
-    pub(crate) fn is_supported(kind: &str) -> bool {
+    fn is_supported(kind: &str) -> bool {
         kind == Self::PrivatePaymentEnvelope.as_str() || kind == Self::ReceiptAccess.as_str()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BufferedPrivateMessage {
-    pub(crate) kind: String,
-    pub(crate) plaintext: String,
+    kind: String,
+    plaintext: String,
 }
 
 impl BufferedPrivateMessage {
-    pub(crate) fn is_kind(&self, kind: PrivateMessageKind) -> bool {
+    fn is_kind(&self, kind: PrivateMessageKind) -> bool {
         self.kind == kind.as_str()
+    }
+
+    fn into_plaintext(self) -> String {
+        self.plaintext
+    }
+
+    #[cfg(test)]
+    pub(crate) fn kind(&self) -> &str {
+        &self.kind
     }
 }
 
@@ -68,20 +77,22 @@ fn decode_private_message(
     })
 }
 
-pub(crate) async fn receive_private_messages(link: &mut EncryptedLink) -> Result<usize> {
+pub(crate) async fn receive_private_messages(
+    encryptor: &mut pubky_noise::PubkyNoiseEncryptor,
+    pending: &mut VecDeque<BufferedPrivateMessage>,
+) -> Result<usize> {
     let mut received = 0usize;
     let mut malformed = 0usize;
     let mut unknown = 0usize;
 
     loop {
-        let messages =
-            link.encryptor
-                .receive_message()
-                .await
-                .map_err(|err| PaykitError::Transport {
-                    context: format!("failed to receive private messages: {err:?}"),
-                    source: anyhow::anyhow!("pubky-noise receive_message failed: {err:?}"),
-                })?;
+        let messages = encryptor
+            .receive_message()
+            .await
+            .map_err(|err| PaykitError::Transport {
+                context: format!("failed to receive private messages: {err:?}"),
+                source: anyhow::anyhow!("pubky-noise receive_message failed: {err:?}"),
+            })?;
 
         if messages.is_empty() {
             break;
@@ -91,7 +102,7 @@ pub(crate) async fn receive_private_messages(link: &mut EncryptedLink) -> Result
         for raw in messages {
             match decode_private_message(&raw) {
                 Ok(message) if PrivateMessageKind::is_supported(&message.kind) => {
-                    link.pending_private_messages.push_back(message)
+                    pending.push_back(message)
                 }
                 Ok(message) => {
                     unknown += 1;
@@ -131,13 +142,13 @@ pub(crate) async fn receive_private_messages(link: &mut EncryptedLink) -> Result
 pub(crate) fn take_latest_pending_message(
     pending: &mut VecDeque<BufferedPrivateMessage>,
     kind: PrivateMessageKind,
-) -> Option<BufferedPrivateMessage> {
+) -> Option<String> {
     let mut retained = VecDeque::with_capacity(pending.len());
     let mut latest = None;
 
     while let Some(message) = pending.pop_front() {
         if message.is_kind(kind) {
-            latest = Some(message);
+            latest = Some(message.into_plaintext());
         } else {
             retained.push_back(message);
         }
@@ -150,13 +161,13 @@ pub(crate) fn take_latest_pending_message(
 pub(crate) fn take_all_pending_messages(
     pending: &mut VecDeque<BufferedPrivateMessage>,
     kind: PrivateMessageKind,
-) -> Vec<BufferedPrivateMessage> {
+) -> Vec<String> {
     let mut retained = VecDeque::with_capacity(pending.len());
     let mut selected = Vec::new();
 
     while let Some(message) = pending.pop_front() {
         if message.is_kind(kind) {
-            selected.push(message);
+            selected.push(message.into_plaintext());
         } else {
             retained.push_back(message);
         }
@@ -166,16 +177,17 @@ pub(crate) fn take_all_pending_messages(
     selected
 }
 
-pub(crate) fn send_attempts_from_retries(max_send_retries: u32) -> u32 {
+fn send_attempts_from_retries(max_send_retries: u32) -> u32 {
     max_send_retries.saturating_add(1)
 }
 
-pub(crate) fn is_retryable_private_send_error(err: &pubky_noise::PubkyNoiseError) -> bool {
+fn is_retryable_private_send_error(err: &pubky_noise::PubkyNoiseError) -> bool {
     matches!(err, pubky_noise::PubkyNoiseError::HomeserverWriteError)
 }
 
 pub(crate) async fn send_private_message(
-    link: &mut EncryptedLink,
+    encryptor: &mut pubky_noise::PubkyNoiseEncryptor,
+    max_send_retries: u32,
     plaintext: &[u8],
     context: &'static str,
 ) -> Result<()> {
@@ -187,11 +199,11 @@ pub(crate) async fn send_private_message(
         )));
     }
 
-    let max_attempts = send_attempts_from_retries(link.max_send_retries);
+    let max_attempts = send_attempts_from_retries(max_send_retries);
     let mut last_error: Option<String> = None;
 
     for attempt in 1..=max_attempts {
-        match link.encryptor.send_message(plaintext).await {
+        match encryptor.send_message(plaintext).await {
             Ok(()) => {
                 debug!(context, "private message sent successfully");
                 return Ok(());
@@ -201,7 +213,7 @@ pub(crate) async fn send_private_message(
                 if attempt < max_attempts {
                     warn!(
                         attempt,
-                        max_retries = link.max_send_retries,
+                        max_retries = max_send_retries,
                         error = ?err,
                         context,
                         "send_message failed, retrying"

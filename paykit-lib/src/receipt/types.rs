@@ -79,7 +79,7 @@ impl ReceiptDecryptionKey {
         &self.0
     }
 
-    pub(crate) fn bytes(&self) -> Result<[u8; 32]> {
+    pub(super) fn bytes(&self) -> Result<[u8; 32]> {
         let bytes = URL_SAFE_NO_PAD
             .decode(&self.0)
             .map_err(|err| PaykitError::InvalidData {

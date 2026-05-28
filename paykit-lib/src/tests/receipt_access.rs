@@ -1,5 +1,16 @@
 use super::*;
-use crate::receipt::serialize_receipt_access_json;
+
+fn receipt_access_json(access: &ReceiptAccess) -> String {
+    serde_json::json!({
+        "version": access.version,
+        "kind": "paykit.receipt_access",
+        "reference": access.reference.as_str(),
+        "location": &access.location,
+        "key": access.key.as_str(),
+        "algorithm": &access.algorithm,
+    })
+    .to_string()
+}
 
 #[tokio::test]
 async fn issue_receipt_stores_encrypted_receipt_and_sends_access_message() {
@@ -33,7 +44,7 @@ async fn issue_receipt_stores_encrypted_receipt_and_sends_access_message() {
     assert_eq!(receipt.reference, reference);
     assert_eq!(
         receipt.recipient_public_key,
-        setup.sender_link.recipient.clone()
+        setup.sender_link.recipient().clone()
     );
     assert_eq!(receipt.amount.as_deref(), Some("1000"));
 
@@ -66,8 +77,8 @@ async fn get_receipt_access_returns_all_available_receipts_in_fifo_order() {
         algorithm: "XChaCha20Poly1305".to_string(),
     };
 
-    let first_json = serialize_receipt_access_json(&first_access).unwrap();
-    let second_json = serialize_receipt_access_json(&second_access).unwrap();
+    let first_json = receipt_access_json(&first_access);
+    let second_json = receipt_access_json(&second_access);
     send_raw_private_message(&mut setup.sender_link, &first_json).await;
     send_raw_private_message(&mut setup.sender_link, &second_json).await;
 
@@ -112,9 +123,9 @@ async fn get_receipt_access_preserves_valid_receipts_when_one_selected_message_i
         algorithm: "XChaCha20Poly1305".to_string(),
     };
 
-    let first_json = serialize_receipt_access_json(&first_access).unwrap();
-    let malformed_json = serialize_receipt_access_json(&malformed_access).unwrap();
-    let second_json = serialize_receipt_access_json(&second_access).unwrap();
+    let first_json = receipt_access_json(&first_access);
+    let malformed_json = receipt_access_json(&malformed_access);
+    let second_json = receipt_access_json(&second_access);
     send_raw_private_message(&mut setup.sender_link, &first_json).await;
     send_raw_private_message(&mut setup.sender_link, &malformed_json).await;
     send_raw_private_message(&mut setup.sender_link, &second_json).await;

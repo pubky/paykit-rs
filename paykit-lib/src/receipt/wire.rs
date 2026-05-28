@@ -9,34 +9,34 @@ use crate::{
 use super::{Receipt, ReceiptAccess, ReceiptDecryptionKey};
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ReceiptWire {
-    pub(crate) version: u8,
-    pub(crate) kind: String,
-    pub(crate) reference: String,
-    pub(crate) recipient_public_key: String,
-    pub(crate) payment_endpoint_identifier: Option<String>,
-    pub(crate) amount: Option<String>,
-    pub(crate) currency: Option<String>,
-    pub(crate) metadata: HashMap<String, String>,
+pub(super) struct ReceiptWire {
+    pub(super) version: u8,
+    pub(super) kind: String,
+    pub(super) reference: String,
+    pub(super) recipient_public_key: String,
+    pub(super) payment_endpoint_identifier: Option<String>,
+    pub(super) amount: Option<String>,
+    pub(super) currency: Option<String>,
+    pub(super) metadata: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct EncryptedReceiptWire {
-    pub(crate) version: u8,
-    pub(crate) kind: String,
-    pub(crate) algorithm: String,
-    pub(crate) nonce: String,
-    pub(crate) ciphertext: String,
+pub(super) struct EncryptedReceiptWire {
+    pub(super) version: u8,
+    pub(super) kind: String,
+    pub(super) algorithm: String,
+    pub(super) nonce: String,
+    pub(super) ciphertext: String,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ReceiptAccessWire {
-    pub(crate) version: u8,
-    pub(crate) kind: String,
-    pub(crate) reference: String,
-    pub(crate) location: String,
-    pub(crate) key: String,
-    pub(crate) algorithm: String,
+pub(super) struct ReceiptAccessWire {
+    pub(super) version: u8,
+    pub(super) kind: String,
+    pub(super) reference: String,
+    pub(super) location: String,
+    pub(super) key: String,
+    pub(super) algorithm: String,
 }
 
 impl From<&Receipt> for ReceiptWire {
@@ -149,7 +149,7 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
     }
 }
 
-pub(crate) fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<String> {
+pub(super) fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<String> {
     serde_json::to_string(&ReceiptAccessWire::from(access)).map_err(|err| {
         PaykitError::InvalidData {
             context: format!("failed to serialize Receipt Access JSON: {err}"),
@@ -158,7 +158,7 @@ pub(crate) fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<St
     })
 }
 
-pub(crate) fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
+pub(super) fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
     let wire: ReceiptAccessWire =
         serde_json::from_str(json).map_err(|err| PaykitError::InvalidData {
             context: format!("failed to parse Receipt Access JSON: {err}"),

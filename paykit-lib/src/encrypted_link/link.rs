@@ -2,7 +2,10 @@ use std::collections::VecDeque;
 
 use tracing::{debug, instrument};
 
-use crate::{private_message::BufferedPrivateMessage, PaykitError, PublicKey, Result};
+use crate::{
+    private_message::{self, BufferedPrivateMessage, PrivateMessageKind},
+    PaykitError, PublicKey, Result,
+};
 
 use super::{paths::compute_private_payment_paths, EncryptedLinkSnapshot};
 
@@ -43,24 +46,38 @@ use super::{paths::compute_private_payment_paths, EncryptedLinkSnapshot};
 /// corrupt the Noise state, retries are safe without snapshot-based recovery.
 pub struct EncryptedLink {
     /// The Noise session manager in transport mode.
-    pub(crate) encryptor: pubky_noise::PubkyNoiseEncryptor,
+    encryptor: pubky_noise::PubkyNoiseEncryptor,
     /// The counterparty's public key.
-    pub(crate) recipient: PublicKey,
+    recipient: PublicKey,
     /// Shared Noise configuration retained for snapshot-based session resumption.
-    pub(crate) config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
     /// Maximum number of automatic `send_message` retries in
     /// [`crate::set_private_payment_envelope`].
-    pub(crate) max_send_retries: u32,
+    max_send_retries: u32,
     /// Decrypted application messages that have been read from the ordered
     /// Noise stream but not yet consumed by a typed Paykit helper.
     ///
     /// This prevents a typed getter such as [`crate::get_private_payment_envelope`] from
     /// discarding unrelated supported message kinds (for example Receipt Access
     /// messages) after the underlying Noise read counter has advanced.
-    pub(crate) pending_private_messages: VecDeque<BufferedPrivateMessage>,
+    pending_private_messages: VecDeque<BufferedPrivateMessage>,
 }
 
 impl EncryptedLink {
+    pub(super) fn from_parts(
+        encryptor: pubky_noise::PubkyNoiseEncryptor,
+        recipient: PublicKey,
+        config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    ) -> Self {
+        Self {
+            encryptor,
+            recipient,
+            config,
+            max_send_retries: DEFAULT_MAX_SEND_RETRIES,
+            pending_private_messages: VecDeque::new(),
+        }
+    }
+
     /// Set the maximum number of automatic `send_message` retries before
     /// [`crate::set_private_payment_envelope`] gives up and returns [`PaykitError::Transport`].
     ///
@@ -87,10 +104,7 @@ impl EncryptedLink {
     /// Snapshot bytes include sensitive key material and must be treated as
     /// secrets (never log or expose them in telemetry/crash reports).
     pub fn snapshot(&self) -> EncryptedLinkSnapshot {
-        EncryptedLinkSnapshot {
-            state: self.encryptor.snapshot(),
-            recipient: self.recipient.clone(),
-        }
+        EncryptedLinkSnapshot::from_state(self.encryptor.snapshot(), self.recipient.clone())
     }
 
     /// Serialize the current link state to bytes for persistence.
@@ -111,6 +125,51 @@ impl EncryptedLink {
     /// Access the counterparty public key for this Encrypted Link.
     pub fn recipient(&self) -> &PublicKey {
         &self.recipient
+    }
+
+    pub(crate) async fn send_private_message(
+        &mut self,
+        plaintext: &[u8],
+        context: &'static str,
+    ) -> Result<()> {
+        private_message::send_private_message(
+            &mut self.encryptor,
+            self.max_send_retries,
+            plaintext,
+            context,
+        )
+        .await
+    }
+
+    pub(crate) async fn receive_private_messages(&mut self) -> Result<usize> {
+        private_message::receive_private_messages(
+            &mut self.encryptor,
+            &mut self.pending_private_messages,
+        )
+        .await
+    }
+
+    pub(crate) fn take_latest_pending_message(
+        &mut self,
+        kind: PrivateMessageKind,
+    ) -> Option<String> {
+        private_message::take_latest_pending_message(&mut self.pending_private_messages, kind)
+    }
+
+    pub(crate) fn take_all_pending_messages(&mut self, kind: PrivateMessageKind) -> Vec<String> {
+        private_message::take_all_pending_messages(&mut self.pending_private_messages, kind)
+    }
+
+    pub(crate) fn pending_private_message_count(&self) -> usize {
+        self.pending_private_messages.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_private_message_kinds_for_test(&self) -> Vec<String> {
+        self.pending_private_messages
+            .iter()
+            .map(|message| message.kind().to_owned())
+            .collect()
     }
 }
 
@@ -246,33 +305,27 @@ async fn restore_encrypted_link_inner(
         )));
     }
 
-    if !matches!(
-        snapshot.state.phase,
-        pubky_noise::snow_crypto::NoisePhase::Transport
-    ) {
+    let phase = snapshot.phase();
+    if !matches!(phase, pubky_noise::snow_crypto::NoisePhase::Transport) {
         return Err(PaykitError::Validation(format!(
             "Encrypted Link restore requires transport-phase snapshot, got {:?}",
-            snapshot.state.phase,
+            phase,
         )));
     }
 
-    let encryptor = pubky_noise::PubkyNoiseEncryptor::restore(
-        config.clone(),
-        snapshot.state,
-        remote_pubkey.clone(),
-    )
-    .await
-    .map_err(|err| PaykitError::Transport {
-        context: format!("failed to restore Encrypted Link: {err:?}"),
-        source: anyhow::anyhow!("pubky-noise restore failed: {err:?}"),
-    })?;
+    let state = snapshot.into_state();
+    let encryptor =
+        pubky_noise::PubkyNoiseEncryptor::restore(config.clone(), state, remote_pubkey.clone())
+            .await
+            .map_err(|err| PaykitError::Transport {
+                context: format!("failed to restore Encrypted Link: {err:?}"),
+                source: anyhow::anyhow!("pubky-noise restore failed: {err:?}"),
+            })?;
 
     debug!("Encrypted Link restored successfully");
-    Ok(EncryptedLink {
+    Ok(EncryptedLink::from_parts(
         encryptor,
-        recipient: remote_pubkey.clone(),
+        remote_pubkey.clone(),
         config,
-        max_send_retries: DEFAULT_MAX_SEND_RETRIES,
-        pending_private_messages: VecDeque::new(),
-    })
+    ))
 }

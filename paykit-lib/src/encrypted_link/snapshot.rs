@@ -22,9 +22,9 @@ use crate::{PaykitError, PublicKey, Result};
 /// automatically during deserialization.
 pub struct EncryptedLinkSnapshot {
     /// The underlying pubky-noise session state.
-    pub(crate) state: pubky_noise::serializer::PubkyNoiseSessionState,
+    state: pubky_noise::serializer::PubkyNoiseSessionState,
     /// The counterparty's public key (derived from `state.endpoint_pubkey`).
-    pub(crate) recipient: PublicKey,
+    recipient: PublicKey,
 }
 
 fn recipient_from_snapshot_state(
@@ -52,6 +52,21 @@ impl std::fmt::Debug for EncryptedLinkSnapshot {
 }
 
 impl EncryptedLinkSnapshot {
+    pub(super) fn from_state(
+        state: pubky_noise::serializer::PubkyNoiseSessionState,
+        recipient: PublicKey,
+    ) -> Self {
+        Self { state, recipient }
+    }
+
+    pub(super) fn phase(&self) -> pubky_noise::snow_crypto::NoisePhase {
+        self.state.phase
+    }
+
+    pub(super) fn into_state(self) -> pubky_noise::serializer::PubkyNoiseSessionState {
+        self.state
+    }
+
     /// Serialize to a compact binary format for durable storage.
     ///
     /// The output is 197 bytes and can be passed to
@@ -112,9 +127,9 @@ impl EncryptedLinkSnapshot {
 /// automatically during deserialization.
 pub struct EncryptedLinkHandshakeSnapshot {
     /// The underlying pubky-noise session state.
-    pub(crate) state: pubky_noise::serializer::PubkyNoiseSessionState,
+    state: pubky_noise::serializer::PubkyNoiseSessionState,
     /// The counterparty's public key (derived from `state.endpoint_pubkey`).
-    pub(crate) recipient: PublicKey,
+    recipient: PublicKey,
 }
 
 impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
@@ -126,6 +141,21 @@ impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
 }
 
 impl EncryptedLinkHandshakeSnapshot {
+    pub(super) fn from_state(
+        state: pubky_noise::serializer::PubkyNoiseSessionState,
+        recipient: PublicKey,
+    ) -> Self {
+        Self { state, recipient }
+    }
+
+    pub(super) fn phase(&self) -> pubky_noise::snow_crypto::NoisePhase {
+        self.state.phase
+    }
+
+    pub(super) fn into_state(self) -> pubky_noise::serializer::PubkyNoiseSessionState {
+        self.state
+    }
+
     /// Serialize to a compact binary format for durable storage.
     ///
     /// The output is 197 bytes and can be passed to

@@ -4,13 +4,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use crate::{
-    error::map_error,
-    private_message::{
-        receive_private_messages, send_private_message, take_latest_pending_message,
-        PrivateMessageKind,
-    },
-    EncryptedLink, PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload,
-    PaymentReference, Result,
+    error::map_error, EncryptedLink, PaykitError, PaymentEndpointIdentifier,
+    PaymentEndpointPayload, PaymentReference, PrivateMessageKind, Result,
 };
 
 /// Versioned Private Payment Envelope sent over an established Encrypted Link.
@@ -86,7 +81,7 @@ struct PrivatePaymentEnvelopeWireRef<'a> {
 }
 
 /// Deserializes a versioned Private Payment Envelope JSON message.
-pub(crate) fn parse_private_payment_envelope_json(json: &str) -> Result<PrivatePaymentEnvelope> {
+fn parse_private_payment_envelope_json(json: &str) -> Result<PrivatePaymentEnvelope> {
     let wire: PrivatePaymentEnvelopeWire =
         serde_json::from_str(json).map_err(|err| PaykitError::InvalidData {
             context: format!("failed to parse Private Payment Envelope JSON: {err}"),
@@ -133,9 +128,7 @@ pub(crate) fn parse_private_payment_envelope_json(json: &str) -> Result<PrivateP
 }
 
 /// Serializes a Private Payment Envelope into its JSON wire representation.
-pub(crate) fn serialize_private_payment_envelope_json(
-    envelope: &PrivatePaymentEnvelope,
-) -> Result<String> {
+fn serialize_private_payment_envelope_json(envelope: &PrivatePaymentEnvelope) -> Result<String> {
     let payment_endpoints = envelope
         .payment_endpoints
         .iter()
@@ -217,7 +210,7 @@ pub async fn set_private_payment_envelope(
     debug!("sending Private Payment Envelope");
     let json = serialize_private_payment_envelope_json(envelope)
         .map_err(|err| map_error("set_private_payment_envelope", err))?;
-    send_private_message(link, json.as_bytes(), "Private Payment Envelope")
+    link.send_private_message(json.as_bytes(), "Private Payment Envelope")
         .await
         .map_err(|err| map_error("set_private_payment_envelope", err))
 }
@@ -264,20 +257,18 @@ pub async fn get_private_payment_envelope(
 ) -> Result<Option<PrivatePaymentEnvelope>> {
     debug!("receiving Private Payment Envelope");
 
-    let received = receive_private_messages(link).await?;
-    let Some(raw) = take_latest_pending_message(
-        &mut link.pending_private_messages,
-        PrivateMessageKind::PrivatePaymentEnvelope,
-    ) else {
+    let received = link.receive_private_messages().await?;
+    let Some(raw) = link.take_latest_pending_message(PrivateMessageKind::PrivatePaymentEnvelope)
+    else {
         debug!(received, "no Private Payment Envelopes available");
         return Ok(None);
     };
 
-    let envelope = parse_private_payment_envelope_json(&raw.plaintext)?;
+    let envelope = parse_private_payment_envelope_json(&raw)?;
     debug!(
         count = envelope.payment_endpoints.len(),
         received,
-        pending = link.pending_private_messages.len(),
+        pending = link.pending_private_message_count(),
         "Private Payment Envelope received"
     );
     Ok(Some(envelope))

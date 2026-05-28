@@ -1,17 +1,13 @@
 use tracing::{debug, instrument, warn};
 
 use crate::{
-    error::map_error,
-    private_message::{
-        receive_private_messages, send_private_message, take_all_pending_messages,
-        PrivateMessageKind,
-    },
-    EncryptedLink, PaykitError, PaymentReference, Result, PAYKIT_PATH_PREFIX,
+    error::map_error, EncryptedLink, PaykitError, PaymentReference, PrivateMessageKind, Result,
+    PAYKIT_PATH_PREFIX,
 };
 
 use super::{
-    parse_receipt_access_json, serialize_receipt_access_json, IssuedReceipt, Receipt,
-    ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
+    wire::{parse_receipt_access_json, serialize_receipt_access_json},
+    IssuedReceipt, Receipt, ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
 };
 
 impl ReceiptAccess {
@@ -93,7 +89,7 @@ pub async fn issue_receipt(
     let key = ReceiptDecryptionKey::generate();
     let receipt = Receipt {
         reference: reference.clone(),
-        recipient_public_key: link.recipient.clone(),
+        recipient_public_key: link.recipient().clone(),
         payment_endpoint_identifier: draft.payment_endpoint_identifier,
         amount: draft.amount,
         currency: draft.currency,
@@ -122,7 +118,7 @@ pub async fn issue_receipt(
     };
     let json =
         serialize_receipt_access_json(&access).map_err(|err| map_error("issue_receipt", err))?;
-    send_private_message(link, json.as_bytes(), "Receipt Access")
+    link.send_private_message(json.as_bytes(), "Receipt Access")
         .await
         .map_err(|err| map_error("issue_receipt", err))?;
 
@@ -159,11 +155,8 @@ pub async fn issue_receipt(
 pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptAccess>> {
     debug!("receiving Receipt Access messages");
 
-    let received = receive_private_messages(link).await?;
-    let raw_messages = take_all_pending_messages(
-        &mut link.pending_private_messages,
-        PrivateMessageKind::ReceiptAccess,
-    );
+    let received = link.receive_private_messages().await?;
+    let raw_messages = link.take_all_pending_messages(PrivateMessageKind::ReceiptAccess);
     if raw_messages.is_empty() {
         debug!(received, "no Receipt Access messages available");
         return Ok(Vec::new());
@@ -172,7 +165,7 @@ pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptA
     let mut access = Vec::new();
     let mut malformed = 0usize;
     for raw in &raw_messages {
-        match parse_receipt_access_json(&raw.plaintext) {
+        match parse_receipt_access_json(raw) {
             Ok(parsed) => access.push(parsed),
             Err(err) => {
                 malformed += 1;
@@ -193,7 +186,7 @@ pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptA
     debug!(
         count = access.len(),
         received,
-        pending = link.pending_private_messages.len(),
+        pending = link.pending_private_message_count(),
         "Receipt Access messages received"
     );
     Ok(access)

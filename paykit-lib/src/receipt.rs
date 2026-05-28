@@ -7,7 +7,6 @@ pub use access::{get_receipt_access, issue_receipt};
 pub use crypto::decrypt_receipt;
 pub use types::{IssuedReceipt, Receipt, ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft};
 
-pub(crate) use wire::{parse_receipt_access_json, serialize_receipt_access_json};
 #[cfg(test)]
 use wire::{EncryptedReceiptWire, ReceiptWire};
 
@@ -124,9 +123,9 @@ mod tests {
             key: ReceiptDecryptionKey::generate(),
             algorithm: "XChaCha20Poly1305".to_string(),
         };
-        let json = serialize_receipt_access_json(&access).unwrap();
+        let json = wire::serialize_receipt_access_json(&access).unwrap();
 
-        let err = parse_receipt_access_json(&json).unwrap_err();
+        let err = wire::parse_receipt_access_json(&json).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("Receipt Access location does not match Payment Reference")),
             "expected mismatched location error, got: {err}"

@@ -87,9 +87,9 @@ async fn test_handshake_restore_and_complete() {
     .await
     .unwrap();
 
-    assert_eq!(restored_initiator.recovery_attempts, 0);
+    assert_eq!(restored_initiator.recovery_attempts_for_test(), 0);
     assert_eq!(
-        restored_initiator.max_recovery_attempts,
+        restored_initiator.max_recovery_attempts_for_test(),
         DEFAULT_MAX_RECOVERY_ATTEMPTS
     );
 

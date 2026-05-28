@@ -12,7 +12,7 @@ use super::{
 };
 
 impl Receipt {
-    pub(crate) fn aad_for_location(location: &str) -> String {
+    pub(super) fn aad_for_location(location: &str) -> String {
         format!("paykit.receipt.v1:{location}")
     }
 

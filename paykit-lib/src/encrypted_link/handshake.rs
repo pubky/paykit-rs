@@ -1,12 +1,9 @@
-use std::collections::VecDeque;
-
 use tracing::{debug, instrument, warn};
 
 use crate::{PaykitError, PublicKey, Result};
 
 use super::{
-    link::{EncryptedLink, DEFAULT_MAX_SEND_RETRIES},
-    paths::compute_private_payment_paths,
+    link::EncryptedLink, paths::compute_private_payment_paths,
     snapshot::EncryptedLinkHandshakeSnapshot,
 };
 
@@ -48,15 +45,15 @@ pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 /// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`].
 pub struct EncryptedLinkHandshake {
     /// The Noise session manager in handshake mode.
-    pub(crate) encryptor: pubky_noise::PubkyNoiseEncryptor,
+    encryptor: pubky_noise::PubkyNoiseEncryptor,
     /// The counterparty's public key (used for homeserver path construction).
-    pub(crate) remote_pubkey: PublicKey,
+    remote_pubkey: PublicKey,
     /// Shared Noise configuration needed for snapshot-based recovery.
-    pub(crate) config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
     /// Number of consecutive recovery attempts so far.
-    pub(crate) recovery_attempts: u32,
+    recovery_attempts: u32,
     /// Maximum consecutive recovery attempts before giving up.
-    pub(crate) max_recovery_attempts: u32,
+    max_recovery_attempts: u32,
 }
 
 impl EncryptedLinkHandshake {
@@ -78,10 +75,10 @@ impl EncryptedLinkHandshake {
     /// handshake later via [`restore_encrypted_link_handshake`] or
     /// [`restore_encrypted_link_handshake_from_config`].
     pub fn snapshot(&self) -> EncryptedLinkHandshakeSnapshot {
-        EncryptedLinkHandshakeSnapshot {
-            state: self.encryptor.snapshot(),
-            recipient: self.remote_pubkey.clone(),
-        }
+        EncryptedLinkHandshakeSnapshot::from_state(
+            self.encryptor.snapshot(),
+            self.remote_pubkey.clone(),
+        )
     }
 
     /// Serialize the current handshake state to bytes for persistence.
@@ -97,6 +94,16 @@ impl EncryptedLinkHandshake {
     /// when performing in-process recovery without an app restart.
     pub fn config(&self) -> &std::sync::Arc<pubky_noise::PubkyNoiseConfig> {
         &self.config
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_attempts_for_test(&self) -> u32 {
+        self.recovery_attempts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_recovery_attempts_for_test(&self) -> u32 {
+        self.max_recovery_attempts
     }
 }
 
@@ -397,13 +404,11 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
             })?;
 
     debug!("Encrypted Link established");
-    Ok(HandshakeProgress::Complete(EncryptedLink {
-        encryptor: handshake.encryptor,
-        recipient: handshake.remote_pubkey,
-        config: handshake.config,
-        max_send_retries: DEFAULT_MAX_SEND_RETRIES,
-        pending_private_messages: VecDeque::new(),
-    }))
+    Ok(HandshakeProgress::Complete(EncryptedLink::from_parts(
+        handshake.encryptor,
+        handshake.remote_pubkey,
+        handshake.config,
+    )))
 }
 
 /// Restores an [`EncryptedLinkHandshake`] from a previously saved snapshot.
@@ -516,26 +521,22 @@ async fn restore_encrypted_link_handshake_inner(
         )));
     }
 
-    if !matches!(
-        snapshot.state.phase,
-        pubky_noise::snow_crypto::NoisePhase::HandShake
-    ) {
+    let phase = snapshot.phase();
+    if !matches!(phase, pubky_noise::snow_crypto::NoisePhase::HandShake) {
         return Err(PaykitError::Validation(format!(
             "handshake restore requires handshake-phase snapshot, got {:?}",
-            snapshot.state.phase,
+            phase,
         )));
     }
 
-    let encryptor = pubky_noise::PubkyNoiseEncryptor::restore(
-        config.clone(),
-        snapshot.state,
-        remote_pubkey.clone(),
-    )
-    .await
-    .map_err(|err| PaykitError::Transport {
-        context: format!("failed to restore Encrypted Link handshake: {err:?}"),
-        source: anyhow::anyhow!("pubky-noise handshake restore failed: {err:?}"),
-    })?;
+    let state = snapshot.into_state();
+    let encryptor =
+        pubky_noise::PubkyNoiseEncryptor::restore(config.clone(), state, remote_pubkey.clone())
+            .await
+            .map_err(|err| PaykitError::Transport {
+                context: format!("failed to restore Encrypted Link handshake: {err:?}"),
+                source: anyhow::anyhow!("pubky-noise handshake restore failed: {err:?}"),
+            })?;
 
     debug!("Encrypted Link handshake restored successfully (recovery tuning reset to defaults)");
 
