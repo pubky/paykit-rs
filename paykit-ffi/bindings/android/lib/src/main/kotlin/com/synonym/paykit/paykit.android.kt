@@ -402,7 +402,7 @@ internal class UniffiHandleMap<T: Any> {
         return map[handle] ?: throw InternalException("UniffiHandleMap.get: Invalid handle")
     }
 
-    // Remove a value from the handlemap and get the Kotlin object back
+    // Remove an entry from the handlemap and get the Kotlin object back
     internal fun remove(handle: Long): T {
         return map.remove(handle) ?: throw InternalException("UniffiHandleMap.remove: Invalid handle")
     }
