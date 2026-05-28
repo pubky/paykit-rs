@@ -12,34 +12,35 @@ use pubky::{
 };
 use tracing::{debug, error, instrument, trace};
 
-use crate::{EndpointData, MethodId, PaykitError, Result, SupportedPayments};
+use crate::{PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList, Result};
 
 /// Conventional prefix for public Paykit data hosted on Pubky storage.
 ///
 /// `v0` stores public payment endpoints as:
-/// `/pub/paykit/v0/{method_id}` with the file payload being the payment endpoint.
+/// `/pub/paykit/v0/{payment_endpoint_identifier}` with the file contents being
+/// the Payment Endpoint Payload.
 pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
 
 /// Conventional prefix for private (encrypted) Paykit data.
 ///
 /// This prefix is used as the base path for pubky-noise's encrypted messaging.
-/// The actual write and read paths are derived per-peer-pair using
+/// The actual write and read paths are derived per-counterparty pair using
 /// [`pubky_noise::path_derivation::derive_asymmetric_paths`]. Pubky-noise manages
 /// individual file slots within the derived folders using a counter-based scheme.
 pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit/v0/private";
 
 /// Writes or updates a payment endpoint document in the authenticated Pubky session.
-#[instrument(skip(session, data), fields(method = %method))]
+#[instrument(skip(session, payload), fields(identifier = %identifier))]
 pub async fn upsert_payment_endpoint(
     session: &PubkySession,
-    method: &MethodId,
-    data: &EndpointData,
+    identifier: &PaymentEndpointIdentifier,
+    payload: &PaymentEndpointPayload,
 ) -> Result<()> {
-    let path = payment_endpoint_path(method);
+    let path = payment_endpoint_path(identifier);
     debug!(path = %path, "writing payment endpoint to Pubky storage");
     session
         .storage()
-        .put(path, data.as_str().to_string())
+        .put(path, payload.as_str().to_string())
         .await
         .map_err(|err| {
             error!(error = %err, "failed to put payment endpoint");
@@ -53,9 +54,12 @@ pub async fn upsert_payment_endpoint(
 }
 
 /// Removes an existing payment endpoint from the authenticated Pubky session.
-#[instrument(skip(session), fields(method = %method))]
-pub async fn delete_payment_endpoint(session: &PubkySession, method: &MethodId) -> Result<()> {
-    let path = payment_endpoint_path(method);
+#[instrument(skip(session), fields(identifier = %identifier))]
+pub async fn delete_payment_endpoint(
+    session: &PubkySession,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<()> {
+    let path = payment_endpoint_path(identifier);
     debug!(path = %path, "deleting payment endpoint from Pubky storage");
     session.storage().delete(path).await.map_err(|err| {
         error!(error = %err, "failed to delete payment endpoint");
@@ -70,35 +74,32 @@ pub async fn delete_payment_endpoint(session: &PubkySession, method: &MethodId) 
 
 /// Fetches all public payment endpoints for the provided payee from Pubky storage.
 ///
-/// Directory listing and per-entry fetches are not atomic; the returned list is a
+/// Directory listing and per-resource fetches are not atomic; the returned list is a
 /// best-effort snapshot of the payee's homeserver state.
 #[instrument(skip(storage), fields(payee = %payee))]
-pub async fn fetch_supported_payments(
-    storage: &PublicStorage,
-    payee: &PublicKey,
-) -> Result<SupportedPayments> {
+pub async fn fetch_payment_list(storage: &PublicStorage, payee: &PublicKey) -> Result<PaymentList> {
     let addr = format!("{payee}{PAYKIT_PATH_PREFIX}");
-    debug!(addr = %addr, "listing supported payment methods");
-    let entries = list_entries(storage, addr, "list supported payments").await?;
+    debug!(addr = %addr, "listing payment endpoints");
+    let resources = list_resources(storage, addr, "list payment endpoints").await?;
 
     let mut map = HashMap::new();
-    for resource in entries {
+    for resource in resources {
         if resource.path.as_str().ends_with('/') {
-            trace!(path = %resource.path, "skipping directory entry");
+            trace!(path = %resource.path, "skipping directory resource");
             continue;
         }
 
-        let method = resource
+        let identifier_text = resource
             .path
             .as_str()
             .rsplit('/')
             .next()
             .filter(|segment| !segment.is_empty())
             .ok_or_else(|| {
-                error!(path = %resource.path, "invalid resource path for payment entry");
+                error!(path = %resource.path, "invalid resource path for Payment Endpoint");
                 PaykitError::InvalidData {
                     context: format!(
-                        "cannot extract method from resource path '{}'",
+                        "cannot extract Payment Endpoint Identifier from resource path '{}'",
                         resource.path
                     ),
                     source: None,
@@ -106,34 +107,42 @@ pub async fn fetch_supported_payments(
             })?
             .to_string();
 
-        let label = format!("fetch endpoint {method}");
+        let label = format!("fetch payment endpoint {identifier_text}");
         if let Some(payload) = fetch_text(storage, resource.to_string(), &label).await? {
-            debug!(method = %method, "fetched payment endpoint payload");
-            let method_id = MethodId::new(&method).map_err(|err| PaykitError::InvalidData {
-                context: format!("storage returned invalid method identifier '{method}'"),
-                source: Some(err.into()),
-            })?;
-            map.insert(method_id, EndpointData::new(payload));
+            debug!(identifier = %identifier_text, "fetched Payment Endpoint Payload");
+            let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&identifier_text)
+                .map_err(|err| PaykitError::InvalidData {
+                    context: format!(
+                        "storage returned invalid Payment Endpoint Identifier '{identifier_text}'"
+                    ),
+                    source: Some(err.into()),
+                })?;
+            map.insert(
+                payment_endpoint_identifier,
+                PaymentEndpointPayload::new(payload),
+            );
         }
     }
 
-    debug!(count = map.len(), "supported payments collected");
-    Ok(SupportedPayments { entries: map })
+    debug!(count = map.len(), "Payment List collected");
+    Ok(PaymentList {
+        payment_endpoints: map,
+    })
 }
 
 /// Fetches an individual public payment endpoint from Pubky storage.
-#[instrument(skip(storage), fields(payee = %payee, method = %method))]
+#[instrument(skip(storage), fields(payee = %payee, identifier = %identifier))]
 pub async fn fetch_payment_endpoint(
     storage: &PublicStorage,
     payee: &PublicKey,
-    method: &MethodId,
-) -> Result<Option<EndpointData>> {
-    let addr = format!("{payee}{}", payment_endpoint_path(method));
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<Option<PaymentEndpointPayload>> {
+    let addr = format!("{payee}{}", payment_endpoint_path(identifier));
     debug!(addr = %addr, "fetching individual payment endpoint");
     match fetch_text(storage, addr, "fetch endpoint").await? {
         Some(payload) => {
             debug!("payment endpoint found");
-            Ok(Some(EndpointData::new(payload)))
+            Ok(Some(PaymentEndpointPayload::new(payload)))
         }
         None => {
             debug!("payment endpoint not found");
@@ -142,8 +151,8 @@ pub async fn fetch_payment_endpoint(
     }
 }
 
-fn payment_endpoint_path(method: &MethodId) -> String {
-    format!("{PAYKIT_PATH_PREFIX}{}", method.as_str())
+fn payment_endpoint_path(identifier: &PaymentEndpointIdentifier) -> String {
+    format!("{PAYKIT_PATH_PREFIX}{}", identifier.as_str())
 }
 
 #[instrument(skip(storage), fields(addr = %addr, label = %label))]
@@ -192,12 +201,12 @@ async fn fetch_text(storage: &PublicStorage, addr: String, label: &str) -> Resul
 }
 
 #[instrument(skip(storage), fields(addr = %addr, label = %label))]
-async fn list_entries(
+async fn list_resources(
     storage: &PublicStorage,
     addr: String,
     label: &str,
 ) -> Result<Vec<PubkyResource>> {
-    trace!("listing directory entries");
+    trace!("listing directory resources");
     let builder = match storage.list(&addr) {
         Ok(builder) => builder,
         Err(err) if is_not_found(&err) => {
@@ -214,9 +223,9 @@ async fn list_entries(
     };
 
     match builder.shallow(true).send().await {
-        Ok(entries) => {
-            debug!(count = entries.len(), "directory entries listed");
-            Ok(entries)
+        Ok(resources) => {
+            debug!(count = resources.len(), "directory resources listed");
+            Ok(resources)
         }
         Err(err) if is_not_found(&err) => {
             debug!("directory not found during send, returning empty list");

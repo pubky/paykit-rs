@@ -8,7 +8,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
-- Private encrypted receipt APIs in `paykit-lib`: `ReceiptDraft`, `Receipt`,
+- Encrypted Receipt APIs in `paykit-lib`: `ReceiptDraft`, `Receipt`,
   `ReceiptAccess`, `IssuedReceipt`, `ReceiptDecryptionKey`, `issue_receipt`,
   `get_receipt_access`, and `decrypt_receipt`.
 - FFI receipt records and exports in `paykit-ffi`: `FfiReceiptDraft`,
@@ -18,19 +18,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 - **BREAKING:** `paykit-lib` now treats Pubky as the only supported transport.
-  Public endpoint APIs accept concrete Pubky SDK handles (`PubkySession` for
+  Public Payment Endpoint APIs accept concrete Pubky SDK handles (`PubkySession` for
   writes and `PublicStorage` for reads) instead of generic transport traits.
-- Private encrypted messages now distinguish latest-state private-payment
-  envelopes from event-like receipt-access messages. `get_private_payments`
-  collapses pending private-payment messages to the latest message by kind,
+- Private Application Messages now distinguish Latest-State Message
+  Private Payment Envelopes from Event Message Receipt Access messages.
+  `get_private_payment_envelope` collapses pending Private Payment Envelope
+  messages to the latest message by kind,
   then parses that selected message. If that latest envelope is malformed,
   it returns InvalidData rather than falling back to an older valid envelope,
-  while `get_receipt_access` returns all currently available receipt access
+  while `get_receipt_access` returns all currently available Receipt Access
   descriptors as a FIFO vector.
-- Unsupported syntactically valid private application message kinds are logged
+- Unsupported syntactically valid Private Application Message kinds are logged
   and dropped rather than buffered indefinitely.
-- `MethodId::new("private")` is now rejected with `PaykitError::Validation` because
-  `private` is reserved for private-payment storage paths.
+- `PaymentEndpointIdentifier::new("private")` is now rejected with `PaykitError::Validation` because
+  `private` is reserved for private Paykit storage paths.
 
 ### Removed
 - **BREAKING:** Removed the `pubky` feature flag, `AuthenticatedTransport` /
@@ -38,12 +39,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Pubky dependencies are now unconditional.
 
 ### Security
-- Receipt decryption keys are redacted from Rust `Debug`/`Display` formatting
+- Receipt Decryption Keys are redacted from Rust `Debug`/`Display` formatting
   in the library and from FFI wrapper debug output. Callers must still treat raw
   key fields returned through FFI as secrets.
-- Receipt access locations are validated against their `PaymentReference`, and
+- Receipt Locations are validated against their `PaymentReference`, and
   decrypted receipt plaintext is rejected if its reference does not match the
-  authenticated receipt location.
+  authenticated Receipt Location.
 
 ## [0.1.0-rc2] - 2026-03-10
 

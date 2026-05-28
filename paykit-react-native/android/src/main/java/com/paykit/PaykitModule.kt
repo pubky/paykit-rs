@@ -30,46 +30,46 @@ class PaykitModule(reactContext: ReactApplicationContext) :
         pushString(message)
     }
 
-    private fun entriesFromJsonArray(array: JSONArray): List<FfiPaymentEntry> {
+    private fun paymentEndpointsFromJsonArray(array: JSONArray): List<FfiPaymentEndpoint> {
         return List(array.length()) { index ->
             val item = array.getJSONObject(index)
-            FfiPaymentEntry(
-                methodId = item.getString("method_id"),
-                endpointData = item.getString("endpoint_data")
+            FfiPaymentEndpoint(
+                paymentEndpointIdentifier = item.getString("payment_endpoint_identifier"),
+                paymentEndpointPayload = item.getString("payment_endpoint_payload")
             )
         }
     }
 
-    private fun entriesJsonArray(entries: List<FfiPaymentEntry>): JSONArray {
+    private fun paymentEndpointsJsonArray(paymentEndpoints: List<FfiPaymentEndpoint>): JSONArray {
         return JSONArray().apply {
-            entries.forEach { entry ->
+            paymentEndpoints.forEach { paymentEndpoint ->
                 put(JSONObject().apply {
-                    put("method_id", entry.methodId)
-                    put("endpoint_data", entry.endpointData)
+                    put("payment_endpoint_identifier", paymentEndpoint.paymentEndpointIdentifier)
+                    put("payment_endpoint_payload", paymentEndpoint.paymentEndpointPayload)
                 })
             }
         }
     }
 
-    private fun entriesJson(entries: List<FfiPaymentEntry>): String {
-        return entriesJsonArray(entries).toString()
+    private fun paymentEndpointsJson(paymentEndpoints: List<FfiPaymentEndpoint>): String {
+        return paymentEndpointsJsonArray(paymentEndpoints).toString()
     }
 
-    private fun privatePaymentsPayloadFromJson(json: String): FfiPrivatePaymentsPayload {
-        val payload = JSONObject(json)
-        return FfiPrivatePaymentsPayload(
-            reference = payload.getString("reference"),
-            entries = entriesFromJsonArray(payload.getJSONArray("entries"))
+    private fun privatePaymentEnvelopeFromJson(json: String): FfiPrivatePaymentEnvelope {
+        val envelope = JSONObject(json)
+        return FfiPrivatePaymentEnvelope(
+            reference = envelope.getString("reference"),
+            paymentEndpoints = paymentEndpointsFromJsonArray(envelope.getJSONArray("payment_endpoints"))
         )
     }
 
-    private fun privatePaymentsPayloadJson(payload: FfiPrivatePaymentsPayload?): String {
-        if (payload == null) {
+    private fun privatePaymentEnvelopeJson(envelope: FfiPrivatePaymentEnvelope?): String {
+        if (envelope == null) {
             return "null"
         }
         return JSONObject().apply {
-            put("reference", payload.reference)
-            put("entries", entriesJsonArray(payload.entries))
+            put("reference", envelope.reference)
+            put("payment_endpoints", paymentEndpointsJsonArray(envelope.paymentEndpoints))
         }.toString()
     }
 
@@ -85,25 +85,25 @@ class PaykitModule(reactContext: ReactApplicationContext) :
             ?: throw IllegalArgumentException("$key must be a JSON array")
     }
 
-    private fun metadataFromJsonArray(array: JSONArray?): List<FfiReceiptMetadataEntry> {
+    private fun metadataFromJsonArray(array: JSONArray?): List<FfiReceiptMetadataField> {
         if (array == null) {
             return emptyList()
         }
         return List(array.length()) { index ->
             val item = array.getJSONObject(index)
-            FfiReceiptMetadataEntry(
+            FfiReceiptMetadataField(
                 key = item.getString("key"),
                 value = item.getString("value")
             )
         }
     }
 
-    private fun metadataJsonArray(metadata: List<FfiReceiptMetadataEntry>): JSONArray {
+    private fun metadataJsonArray(metadata: List<FfiReceiptMetadataField>): JSONArray {
         return JSONArray().apply {
-            metadata.forEach { entry ->
+            metadata.forEach { field ->
                 put(JSONObject().apply {
-                    put("key", entry.key)
-                    put("value", entry.value)
+                    put("key", field.key)
+                    put("value", field.value)
                 })
             }
         }
@@ -113,7 +113,7 @@ class PaykitModule(reactContext: ReactApplicationContext) :
         val draft = JSONObject(json)
         return FfiReceiptDraft(
             reference = draft.getString("reference"),
-            paymentMethod = optionalString(draft, "payment_method"),
+            paymentEndpointIdentifier = optionalString(draft, "payment_endpoint_identifier"),
             amount = optionalString(draft, "amount"),
             currency = optionalString(draft, "currency"),
             metadata = metadataFromJsonArray(optionalJsonArray(draft, "metadata"))
@@ -150,7 +150,7 @@ class PaykitModule(reactContext: ReactApplicationContext) :
         return JSONObject().apply {
             put("reference", receipt.reference)
             put("recipient_public_key", receipt.recipientPublicKey)
-            put("payment_method", receipt.paymentMethod ?: JSONObject.NULL)
+            put("payment_endpoint_identifier", receipt.paymentEndpointIdentifier ?: JSONObject.NULL)
             put("amount", receipt.amount ?: JSONObject.NULL)
             put("currency", receipt.currency ?: JSONObject.NULL)
             put("metadata", metadataJsonArray(receipt.metadata))
@@ -332,16 +332,16 @@ class PaykitModule(reactContext: ReactApplicationContext) :
     }
 
     // -----------------------------------------------------------------------
-    // Payment list (read)
+    // Payment List (read)
     // -----------------------------------------------------------------------
 
     @ReactMethod
     fun getPaymentList(publicKey: String, promise: Promise) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val entries = paykitGetPaymentList(publicKey)
+                val paymentEndpoints = paykitGetPaymentList(publicKey)
                 withContext(Dispatchers.Main) {
-                    promise.resolve(resultArray(entriesJson(entries)))
+                    promise.resolve(resultArray(paymentEndpointsJson(paymentEndpoints)))
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -352,10 +352,10 @@ class PaykitModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun getPaymentEndpoint(publicKey: String, methodId: String, promise: Promise) {
+    fun getPaymentEndpoint(publicKey: String, paymentEndpointIdentifier: String, promise: Promise) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val result = paykitGetPaymentEndpoint(publicKey, methodId)
+                val result = paykitGetPaymentEndpoint(publicKey, paymentEndpointIdentifier)
                 withContext(Dispatchers.Main) {
                     promise.resolve(resultArray(result ?: ""))
                 }
@@ -372,10 +372,10 @@ class PaykitModule(reactContext: ReactApplicationContext) :
     // -----------------------------------------------------------------------
 
     @ReactMethod
-    fun setPaymentEndpoint(methodId: String, endpointData: String, promise: Promise) {
+    fun setPaymentEndpoint(paymentEndpointIdentifier: String, paymentEndpointPayload: String, promise: Promise) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                paykitSetPaymentEndpoint(methodId, endpointData)
+                paykitSetPaymentEndpoint(paymentEndpointIdentifier, paymentEndpointPayload)
                 withContext(Dispatchers.Main) {
                     promise.resolve(resultArray(""))
                 }
@@ -388,10 +388,10 @@ class PaykitModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun removePaymentEndpoint(methodId: String, promise: Promise) {
+    fun removePaymentEndpoint(paymentEndpointIdentifier: String, promise: Promise) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                paykitRemovePaymentEndpoint(methodId)
+                paykitRemovePaymentEndpoint(paymentEndpointIdentifier)
                 withContext(Dispatchers.Main) {
                     promise.resolve(resultArray(""))
                 }
@@ -521,10 +521,10 @@ class PaykitModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun setPrivatePayments(linkId: String, payloadJson: String, promise: Promise) {
+    fun setPrivatePaymentEnvelope(linkId: String, payloadJson: String, promise: Promise) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                paykitSetPrivatePayments(linkId, privatePaymentsPayloadFromJson(payloadJson))
+                paykitSetPrivatePaymentEnvelope(linkId, privatePaymentEnvelopeFromJson(payloadJson))
                 withContext(Dispatchers.Main) {
                     promise.resolve(resultArray(""))
                 }
@@ -537,12 +537,12 @@ class PaykitModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun getPrivatePayments(linkId: String, promise: Promise) {
+    fun getPrivatePaymentEnvelope(linkId: String, promise: Promise) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val payload = paykitGetPrivatePayments(linkId)
+                val envelope = paykitGetPrivatePaymentEnvelope(linkId)
                 withContext(Dispatchers.Main) {
-                    promise.resolve(resultArray(privatePaymentsPayloadJson(payload)))
+                    promise.resolve(resultArray(privatePaymentEnvelopeJson(envelope)))
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
