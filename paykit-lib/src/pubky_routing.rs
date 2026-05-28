@@ -24,7 +24,7 @@ pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
 /// Conventional prefix for private (encrypted) Paykit data.
 ///
 /// This prefix is used as the base path for pubky-noise's encrypted messaging.
-/// The actual write and read paths are derived per-peer-pair using
+/// The actual write and read paths are derived per-counterparty pair using
 /// [`pubky_noise::path_derivation::derive_asymmetric_paths`]. Pubky-noise manages
 /// individual file slots within the derived folders using a counter-based scheme.
 pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit/v0/private";

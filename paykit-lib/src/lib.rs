@@ -859,9 +859,9 @@ impl EncryptedLinkHandshake {
 
 /// Result of a single [`advance_handshake`] step.
 pub enum HandshakeProgress {
-    /// Handshake is still in progress. The peer may not have written their next
-    /// message yet. Pass the returned handle back to [`advance_handshake`] after
-    /// a caller-chosen delay.
+    /// Handshake is still in progress. The counterparty may not have written
+    /// their next message yet. Pass the returned handle back to
+    /// [`advance_handshake`] after a caller-chosen delay.
     Pending(EncryptedLinkHandshake),
 
     /// Handshake completed successfully. The [`EncryptedLink`] is ready for use
@@ -878,7 +878,7 @@ const PAYKIT_PATH_DOMAIN: &[u8] = b"paykit-path-v0";
 /// Computes the write and read path components for private payment storage.
 ///
 /// Uses [`pubky_noise::path_derivation::derive_asymmetric_paths`] to derive
-/// per-peer-pair paths from a DH shared secret. The derivation formula is:
+/// per-counterparty-pair paths from a DH shared secret. The derivation formula is:
 ///
 /// ```text
 /// dh_secret  = X25519(to_scalar_bytes(local_ed25519_seed), to_montgomery(remote_ed25519_pk))
@@ -1603,7 +1603,8 @@ pub async fn set_private_payment_envelope(
         .map_err(|err| map_error("set_private_payment_envelope", err))
 }
 
-/// Issues, stores, and shares an encrypted payment receipt with the Linked Peer.
+/// Issues, stores, and shares an encrypted payment receipt with the counterparty
+/// over an Encrypted Link.
 ///
 /// The encrypted receipt is written to the caller's homeserver at a deterministic
 /// Receipt Location derived from `draft.reference`. A fresh symmetric
@@ -2118,7 +2119,7 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
     // Process the next handshake step.
     match handshake.encryptor.handle_handshake().await {
         Ok(pubky_noise::HandshakeResult::Pending) => {
-            debug!("handshake step pending (waiting for peer)");
+            debug!("handshake step pending (waiting for counterparty)");
             handshake.recovery_attempts = 0;
             Ok(HandshakeProgress::Pending(handshake))
         }
@@ -2217,7 +2218,7 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
 /// # Parameters
 /// - `session` — authenticated Pubky session for writing handshake messages
 ///   (a fresh session after app restart).
-/// - `secret_key` — 32-byte Ed25519 secret key of the local peer (same key
+/// - `secret_key` — 32-byte Ed25519 secret key of the local party (same key
 ///   used in the original [`initiate_encrypted_link`] or
 ///   [`accept_encrypted_link`] call).
 /// - `remote_pubkey` — public key of the counterparty.
@@ -2372,7 +2373,7 @@ pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
 /// # Parameters
 /// - `session` — authenticated Pubky session for writing messages
 ///   (a fresh session after app restart).
-/// - `secret_key` — 32-byte Ed25519 secret key of the local peer (same key
+/// - `secret_key` — 32-byte Ed25519 secret key of the local party (same key
 ///   used in the original [`initiate_encrypted_link`] or
 ///   [`accept_encrypted_link`] call).
 /// - `remote_pubkey` — public key of the counterparty.

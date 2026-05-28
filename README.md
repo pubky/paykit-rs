@@ -90,8 +90,8 @@ Payloads unless that matches the payee's privacy model.
 
 ### Private Payment Envelopes
 
-Private Payment Envelopes are shared only with a Linked Peer over an Encrypted
-Link.
+Private Payment Envelopes are shared only with a counterparty over an
+established Encrypted Link.
 
 1. The counterparties create an Encrypted Link with `initiate_encrypted_link` /
    `accept_encrypted_link` and advance it with `advance_handshake`.
@@ -112,10 +112,10 @@ Paykit helps wallets and processors discover candidate Payment Endpoints. It
 does not execute payments or choose the final endpoint. The caller decides which
 Payment Endpoint to use according to its own Payment Selection Policy.
 
-For a Linked Peer, callers can prefer the latest Private Payment Envelope. If no
-Encrypted Link or Private Payment Envelope is available, callers can fall back to the
-payee's public Payment List when that is acceptable for the payment's privacy
-model.
+When an Encrypted Link exists, callers can prefer the latest Private Payment
+Envelope. If no Encrypted Link or Private Payment Envelope is available, callers
+can fall back to the payee's public Payment List when that is acceptable for the
+payment's privacy model.
 
 If a payment attempt fails because an endpoint was consumed, expired, or changed,
 callers should re-fetch the relevant Payment Endpoint or Payment List and apply
@@ -181,7 +181,7 @@ Paykit currently does not:
 - execute payments
 - choose the final Payment Endpoint for a payer
 - manage subscriptions
-- maintain a stateful daemon/runtime
+- maintain a stateful background service/runtime
 - fetch profiles or contacts
 - manage Pubky session creation, authorization scope, key rotation, or account
   recovery
@@ -334,7 +334,5 @@ cd paykit-ffi
 
 - First draft implementation of paykit library:
   <https://github.com/pubky/paykit-pdk>
-- First draft implementation of paykit daemon:
-  <https://github.com/pubky/paykit>
 - Product overview:
   <https://docs.google.com/document/d/1Z1HHdxpkOtelOXJRgPldso4_-lchzs3NL_JqDxCdiu8/edit?pli=1&tab=t.0>

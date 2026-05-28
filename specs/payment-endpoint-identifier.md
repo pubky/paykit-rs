@@ -239,7 +239,7 @@ specification either.
 
 ## 10. Security considerations
 
-- Identifiers are untrusted input when received from a peer. Implementations
+- Identifiers are untrusted input when received from a counterparty. Implementations
   MUST treat them as opaque tokens and MUST NOT interpret any segment as a
   filesystem path, URL component, or shell argument without prior
   validation. `PaymentEndpointIdentifier::new` already rejects path-traversal sequences;
