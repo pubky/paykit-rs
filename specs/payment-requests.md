@@ -74,7 +74,7 @@ Payment Requests are payee-initiated in v0.2:
 
 Common cases:
 
-- Invoice/request for payment: payee proposes, payer accepts or pays.
+- Invoice/request for payment: payee proposes, payer accepts, then payer pays.
 - Subscription: payee proposes a recurring Payment Request, payer accepts.
 
 Because the Encrypted Link already identifies the local party and counterparty, the request does not need to embed both Pubky public keys. Each side derives payer/payee from the message direction.
@@ -539,7 +539,7 @@ Open detail for later:
 
 1. Payee creates `paykit.payment_request` with `recurrence: null`.
 2. Payer validates the terms.
-3. Payer sends `paykit.payment_request_acceptance`, or pays directly if the implementation treats payment as implicit acceptance.
+3. Payer sends `paykit.payment_request_acceptance`.
 4. Payer selects an allowed Payment Endpoint.
 5. Payer fetches current private payment details for the payee.
 6. Payer generates a new `PaymentReference`.
