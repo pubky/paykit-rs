@@ -205,15 +205,15 @@
 ## Payment Requests
 
 ### Payment Request
-- **Definition**: A private Paykit protocol object where one Linked Peer asks the other for a payment. A Payment Request may be one-time or recurring.
-- **NOT**: A Payment Endpoint, Payment List, payment execution, or public invoice URL.
+- **Definition**: A private Paykit protocol object where a payee asks a payer for payment. A Payment Request may be one-time or recurring.
+- **NOT**: A Payment Endpoint, Payment List, payment execution, public invoice URL, or payer-initiated standing order.
 - **Synonyms to AVOID**: SubscriptionAgreement, subscription proposal when naming the base protocol object
 - **Related terms**: Recurring Payment Request, Payment Request ID, Payment Reference, Payment Proof, Linked Peer
 
 ### Recurring Payment Request
-- **Definition**: A Payment Request with non-null Recurrence that can lead to repeated payer-controlled payment attempts after acceptance.
+- **Definition**: A payee-initiated Payment Request with non-null Recurrence that can lead to repeated payer-controlled payment attempts after acceptance.
 - **NOT**: A separate protocol family from Payment Request, or a payee-controlled pull authorization.
-- **Synonyms to AVOID**: subscription when naming the protocol object, push subscription
+- **Synonyms to AVOID**: subscription when naming the protocol object, pull subscription
 - **Related terms**: Payment Request, Subscription, Recurrence, Billing Period
 
 ### Subscription
@@ -258,6 +258,12 @@
 - **Synonyms to AVOID**: payment attempt when the sender only needs fresher receiving details
 - **Related terms**: Payment Endpoint, Payment List, Private Payment Envelope, Payment Request
 
+### Standing Order
+- **Definition**: Payer-initiated recurring payment scheduling, such as "send this amount to this payee every month." In v0.2 this is wallet, processor, SDK, or runtime behavior rather than a Paykit Payment Request.
+- **NOT**: A payee-initiated Payment Request, Recurring Payment Request, or Paykit pull/allowance authorization.
+- **Synonyms to AVOID**: push subscription when naming payer-side scheduling
+- **Related terms**: Payment Endpoint, Payment Request, Recurring Payment Request
+
 ## Forbidden Lexicon
 
 These terms must not be used for new Paykit domain/protocol/component names:
@@ -274,6 +280,8 @@ These terms must not be used for new Paykit domain/protocol/component names:
 - **Payment Endpoint** for only address/invoice/IBAN/etc. data → use **Payment Endpoint Payload**.
 - **SubscriptionAgreement** → use **Payment Request** or **Recurring Payment Request**, depending on whether recurrence is present.
 - **subscription_id** → use **Payment Request ID** for the long-lived request identifier.
+- **push subscription** → use **Standing Order** for payer-initiated scheduling, or **Recurring Payment Request** for payee-initiated recurring requests.
+- **pull subscription** → use **Recurring Payment Request** for payee-initiated recurring requests. Future payee-pull authorization should be named separately.
 - **payment_receipt** / **PaymentReceipt** for method-specific proof → use **Payment Proof**.
 - **accepted_methods** → use **accepted Payment Endpoint Identifiers** or the concrete field `accepted_payment_endpoint_identifiers`.
 - **payment_attempt** as a protocol message → use local payment attempt state. Use **Payment Endpoint Refresh Request** only when asking for fresher receiving details.

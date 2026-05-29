@@ -8,14 +8,14 @@ Supersedes: `paykit-subscriptions-v0.1.md`
 
 This version reframes the previous subscription draft around Payment Requests.
 
-1. A **Payment Request** is the base protocol object: one party requests a payment from the other.
+1. A **Payment Request** is the base protocol object: a payee requests a payment from a payer.
 2. A subscription is an accepted **recurring Payment Request**, not a separate protocol family.
 3. `payment_request_id` identifies the long-lived request or recurring agreement.
 4. `PaymentReference` identifies one concrete payment attempt.
 5. Payment Requests are private-first: public Payment Requests may be explored later, but implementation scope is private-only for now.
 6. The old URL-secret pull design is replaced by `pubky-noise` Private Application Messages.
-7. Payment Request messages may be created by either payer or payee.
-8. The proposer role is carried explicitly so payer/payee can be derived from the Encrypted Link participants.
+7. Payment Request messages are payee-initiated in v0.2.
+8. Payer-initiated standing orders are outside Paykit Payment Requests in v0.2; they are wallet/runtime scheduling concerns unless future counterparty coordination is needed.
 9. One-time requests use `recurrence: null`; recurring requests use an explicit recurrence object.
 10. `expires_at` is required on proposals, but may be `null` for requests with no protocol-level expiry.
 11. Event messages carry stable `event_id` values for dedupe, indexing, and recovery.
@@ -41,6 +41,7 @@ Define the minimal Paykit Payment Request model for one-time and recurring payme
 - No local database schema beyond conceptual indexing and recovery requirements.
 - No UI/UX spec.
 - No attempt to replace native recurring-payment mechanisms such as SEPA standing orders, BOLT12 recurrence, app-store subscriptions, etc.
+- No payer-initiated standing order protocol in v0.2.
 - No full allowance/authorization protocol. The model should be compatible with future allowance-like recurring requests, but detailed authorization limits are deferred.
 - No protocol-level resync message for recovering from lost local state.
 
@@ -65,15 +66,19 @@ A Payment Request has two economic roles:
 - `payer`: the party expected to pay
 - `payee`: the party expected to receive payment
 
-Either role may create the initial proposal.
+Payment Requests are payee-initiated in v0.2:
+
+- the sender of `paykit.payment_request` is the payee
+- the receiver of `paykit.payment_request` is the payer
 
 Common cases:
 
 - Invoice/request for payment: payee proposes, payer accepts or pays.
-- Recurring donation: payer proposes, payee accepts.
 - Subscription: payee proposes a recurring Payment Request, payer accepts.
 
-Because the Encrypted Link already identifies the local party and counterparty, the request does not need to embed both Pubky public keys. Instead, proposals carry `proposer_role`, so each side can derive payer/payee from local vs remote identity.
+Because the Encrypted Link already identifies the local party and counterparty, the request does not need to embed both Pubky public keys. Each side derives payer/payee from the message direction.
+
+Payer-initiated recurring payments, such as standing orders, are not Payment Requests in v0.2. They can be represented as payer-side wallet, processor, SDK, or runtime scheduling state. Paykit may still be used to discover current Payment Endpoints when each scheduled payment is executed.
 
 ## Identifier model
 
@@ -234,7 +239,6 @@ Initial one-time shape:
 ```json
 {
   "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "proposer_role": "payee",
   "amount": {
     "value": "10.00",
     "currency": "USD"
@@ -251,7 +255,6 @@ Initial recurring shape:
 ```json
 {
   "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "proposer_role": "payee",
   "amount": {
     "value": "10.00",
     "currency": "USD"
@@ -268,22 +271,6 @@ Initial recurring shape:
   "metadata": {}
 }
 ```
-
-### proposer_role
-
-`proposer_role` tells the receiver which economic role the sender is taking.
-
-Allowed values:
-
-- `payer`
-- `payee`
-
-Rules:
-
-- If `proposer_role` is `payer`, the sender is the payer and the receiver is the payee.
-- If `proposer_role` is `payee`, the sender is the payee and the receiver is the payer.
-- `proposer_role` is interpreted relative to the sender of the event carrying the request terms; it is not a standalone identity field.
-- Updates must not change the economic payer/payee roles of an accepted Payment Request. If updated terms imply different roles, the update must be rejected and a new Payment Request should be created instead.
 
 ### amount
 
@@ -377,7 +364,7 @@ Rules:
 
 Creates a proposed Payment Request.
 
-May be sent by payer or payee.
+Sent by the payee to the payer.
 
 ```json
 {
@@ -387,7 +374,6 @@ May be sent by payer or payee.
   "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
   "request": {
     "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
-    "proposer_role": "payee",
     "amount": {
       "value": "10.00",
       "currency": "USD"
@@ -405,7 +391,7 @@ Validation rules:
 - Envelope `payment_request_id` must equal `request.payment_request_id`.
 - `event_id` must be UUID-v4.
 - `payment_request_id` must be UUID-v4.
-- `proposer_role` must be `payer` or `payee`.
+- The sender must be the payee and the receiver must be the payer.
 - `amount.value` must be a decimal string.
 - `expires_at` must be `null` or a valid RFC3339 UTC timestamp using the `Z` suffix. A non-null `expires_at` must not already be expired when accepted.
 - `recurrence` must be `null` or valid recurrence.
@@ -429,7 +415,7 @@ Accepts a Payment Request proposal or update proposal.
 Rules:
 
 - Must refer to a known proposal or update proposal.
-- Must be sent by the counterparty who did not create the accepted event.
+- Must be sent by the payer.
 - The accepted event is identified by `accepted_event_id`. Reusing the same `event_id` with different payload bytes is invalid.
 
 ### paykit.payment_request_rejection
@@ -447,6 +433,10 @@ Rejects a Payment Request proposal or update proposal.
 }
 ```
 
+Rules:
+
+- Must be sent by the payer.
+
 ### paykit.payment_request_update
 
 Proposes changed terms for an existing accepted Payment Request.
@@ -459,7 +449,6 @@ Proposes changed terms for an existing accepted Payment Request.
   "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
   "request": {
     "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
-    "proposer_role": "payee",
     "amount": {
       "value": "12.00",
       "currency": "USD"
@@ -481,6 +470,7 @@ Proposes changed terms for an existing accepted Payment Request.
 Rules:
 
 - Updates are Event Messages.
+- Updates are sent by the payee to the payer.
 - `request` is the complete proposed replacement terms, not a partial patch.
 - Envelope `payment_request_id` must equal `request.payment_request_id`.
 - Updated terms must satisfy the same validation rules as an initial Payment Request.
@@ -591,9 +581,9 @@ If a payer needs fresher payment details before paying, a future protocol versio
 
 ## One-time Payment Request flow v0.2
 
-1. Either payer or payee creates `paykit.payment_request` with `recurrence: null`.
-2. Counterparty validates the terms.
-3. Counterparty sends `paykit.payment_request_acceptance`, or pays directly if the implementation treats payment as implicit acceptance.
+1. Payee creates `paykit.payment_request` with `recurrence: null`.
+2. Payer validates the terms.
+3. Payer sends `paykit.payment_request_acceptance`, or pays directly if the implementation treats payment as implicit acceptance.
 4. Payer selects an allowed Payment Endpoint.
 5. Payer fetches current private payment details for the payee.
 6. Payer generates a new `PaymentReference`.
@@ -605,9 +595,9 @@ If a payer needs fresher payment details before paying, a future protocol versio
 
 A subscription is an accepted recurring Payment Request.
 
-1. Either payer or payee creates `paykit.payment_request` with a non-null `recurrence`.
-2. Counterparty validates the terms.
-3. Counterparty sends `paykit.payment_request_acceptance`.
+1. Payee creates `paykit.payment_request` with a non-null `recurrence`.
+2. Payer validates the terms.
+3. Payer sends `paykit.payment_request_acceptance`.
 4. Both sides index the accepted recurring request locally.
 
 On each due interval:
@@ -622,11 +612,13 @@ On each due interval:
 
 ## Important property
 
-Payment Requests are payer-controlled at execution time.
+Payment Requests are payee-initiated and payer-controlled at execution time.
 
 The payee cannot directly pull funds in v0.2. The payee can only provide receiving details, receive lifecycle messages, and verify payment proofs.
 
 Future allowance or pull-style flows need additional authorization messages and are out of scope for v0.2.
+
+Payer-initiated recurring payments are standing-order-like scheduling behavior. They are outside Payment Request v0.2 because they do not require Paykit lifecycle coordination with the payee beyond normal Payment Endpoint discovery.
 
 ## Library vs SDK/runtime responsibilities
 
@@ -657,6 +649,7 @@ The SDK/runtime provides automation:
 - persistent Payment Request event index
 - derived state index
 - recurrence evaluation
+- payer-side tracking of accepted recurring Payment Requests and outstanding payments
 - retry policy
 - payment-method execution integration
 - payment proof generation
@@ -707,6 +700,7 @@ lost or inconsistent local event/link state -> recovery_required
 - `PaymentReference` must be UUID-v4 and is per attempt.
 - Every lifecycle event must include `payment_request_id`.
 - Every event-like message must include `event_id`.
+- Payment Request proposals and updates must be sent by the payee to the payer in v0.2.
 - Every payment proof must include `payment_request_id`, `payment_reference`, `billing_period`, and `payment_endpoint_identifier`.
 - All non-null timestamps must be RFC3339 UTC timestamps using the `Z` suffix.
 - Private Payment Request messages must be versioned JSON envelopes.
@@ -724,7 +718,7 @@ lost or inconsistent local event/link state -> recovery_required
 4. Should proof validation be part of Paykit Payment Endpoint specs?
 5. Is an explicit `paykit.payment_endpoint_refresh_request` message needed?
 6. Can either party unilaterally pause a recurring Payment Request, or only the payer?
-7. Can either party unilaterally update terms, or must all updates be proposal + acceptance?
+7. Should payer-requested term changes be modeled as a future separate event, or remain out of protocol scope?
 8. How should implementations handle conflicting simultaneous events?
 9. What local runtime DB indexes are minimally required?
 10. What protocol-level resync message is needed if local event history is lost?
