@@ -54,7 +54,7 @@ Paykit is responsible for:
 - identifying the counterparty through the Encrypted Link
 - exchanging Payment Request lifecycle messages
 - discovering current compatible Payment Endpoints
-- correlating payment executions and proofs
+- correlating local payment execution state with proofs
 - giving applications/SDKs/runtimes a common state model
 
 Payment execution remains method-specific and application/SDK/runtime-specific.
@@ -91,7 +91,7 @@ Rules:
 - UUID-v4.
 - Stable for the life of the request.
 - Shared by all lifecycle events for the same request.
-- Referenced by payment executions and payment proofs.
+- Used to associate local payment execution state and payment proofs with the request.
 - For a one-time request, it identifies the single requested payment lifecycle.
 - For a recurring request, it identifies the recurring payment relationship.
 
