@@ -230,15 +230,16 @@ Rules:
 - `payment_request_id` is required on every Payment Request lifecycle message.
 - Message payloads must fit within the current `pubky-noise` message size unless a future chunking or indirection mechanism is explicitly specified.
 
-## Core object: PaymentRequest
+## Core request payload
 
-A `PaymentRequest` describes one requested payment or recurring payment relationship.
+The `request` payload describes the terms for one requested payment or recurring payment relationship.
+
+The stable `payment_request_id` is carried by the message envelope, not repeated inside the `request` payload.
 
 Initial one-time shape:
 
 ```json
 {
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
   "amount": {
     "value": "10.00",
     "currency": "USD"
@@ -254,7 +255,6 @@ Initial recurring shape:
 
 ```json
 {
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
   "amount": {
     "value": "10.00",
     "currency": "USD"
@@ -373,7 +373,6 @@ Sent by the payee to the payer.
   "event_id": "650e8400-e29b-41d4-a716-446655440000",
   "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
   "request": {
-    "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
     "amount": {
       "value": "10.00",
       "currency": "USD"
@@ -388,7 +387,6 @@ Sent by the payee to the payer.
 
 Validation rules:
 
-- Envelope `payment_request_id` must equal `request.payment_request_id`.
 - `event_id` must be UUID-v4.
 - `payment_request_id` must be UUID-v4.
 - The sender must be the payee and the receiver must be the payer.
@@ -448,7 +446,6 @@ Proposes changed terms for an existing accepted Payment Request.
   "event_id": "650e8400-e29b-41d4-a716-446655440003",
   "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
   "request": {
-    "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
     "amount": {
       "value": "12.00",
       "currency": "USD"
@@ -472,7 +469,6 @@ Rules:
 - Updates are Event Messages.
 - Updates are sent by the payee to the payer.
 - `request` is the complete proposed replacement terms, not a partial patch.
-- Envelope `payment_request_id` must equal `request.payment_request_id`.
 - Updated terms must satisfy the same validation rules as an initial Payment Request.
 - Updates require counterparty acceptance before becoming active.
 - While an update is pending, automatic payment attempts for the current accepted request are paused/stopped until the update is accepted, rejected, cancelled, or expired. This avoids needing to settle differences for payments due during the update proposal window.
