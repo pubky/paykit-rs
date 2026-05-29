@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 - Workspace root hosts `Cargo.toml` that pins resolver `2` and registers members.
-- Core library lives in `paykit-lib/` with its own `Cargo.toml` and `src/lib.rs`; treat this crate as the canonical Pubky-backed Paykit implementation.
+- Core library lives in `paykit-lib/` with its own `Cargo.toml`; `src/lib.rs` is the public re-export facade, and feature modules under `src/` hold the implementation. Treat this crate as the canonical Pubky-backed Paykit implementation.
 - `./THESAURUS.md` is the authority for Paykit domain language. Use it before naming public APIs, docs sections, files, types, fields, endpoints, events, or components.
 - Pubky routing helpers live in `paykit-lib/src/pubky_routing.rs`; it owns public Payment Endpoint storage operations and exports `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) plus `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`). Reuse those constants instead of hard-coding strings.
 
@@ -29,7 +29,7 @@
 ### Public vs. Private Payload Types
 - **Public** Payment Endpoints use `PaymentEndpointPayload` (a UTF-8 `String` wrapper). Each endpoint is stored as a separate file at a well-known Pubky path under `PAYKIT_PATH_PREFIX`. `set_payment_endpoint` / `remove_payment_endpoint` operate on `PubkySession`; `get_payment_list` / `get_payment_endpoint` operate on `PublicStorage`.
 - Counterparty-specific Payment Lists are carried inside Private Payment Envelopes handled by `pubky-noise`'s `PubkyNoiseEncryptor`, which manages encryption, file naming, and storage via `send_message`/`receive_message`. The Private Payment Envelope plaintext is versioned JSON (`version`, `kind`, UUID-v4 `reference`, and `payment_endpoints`). The `write_path` and `read_path` (asymmetric folder prefixes derived per-counterparty pair via `pubky_noise::path_derivation::derive_asymmetric_paths`) are set during `initiate_encrypted_link` / `accept_encrypted_link`; pubky-noise manages individual file slots within those folders using a counter-based scheme.
-- The helper functions `set_private_payment_envelope` and `get_private_payment_envelope` in `lib.rs` compose JSON serialization with `PubkyNoiseEncryptor::send_message`/`receive_message`. The caller is responsible for managing the Payment Endpoints in the Payment List and passing the complete map inside `PrivatePaymentEnvelope` to `set_private_payment_envelope`.
+- The helper functions `set_private_payment_envelope` and `get_private_payment_envelope` in `paykit-lib/src/private_payment_envelope.rs` compose JSON serialization with typed Encrypted Link send/receive helpers. The caller is responsible for managing the Payment Endpoints in the Payment List and passing the complete map inside `PrivatePaymentEnvelope` to `set_private_payment_envelope`.
 - Private Payment Envelopes use Latest-State Message semantics: when multiple envelopes are queued, `get_private_payment_envelope` returns the latest and supersedes older envelopes. Receipt Access uses Event Message semantics: `get_receipt_access` must return every currently available `paykit.receipt_access` message as a FIFO vector instead of using Latest-State Message or one-at-a-time semantics. Unsupported syntactically valid Private Application Message kinds must be logged and dropped rather than buffered indefinitely. Future Event Message kinds must preserve all messages in send order once they are explicitly recognized by Paykit.
 - The serialized Private Payment Envelope JSON must fit within a single pubky-noise message (`PUBKY_NOISE_MSG_LEN`, currently 1000 bytes).
 
