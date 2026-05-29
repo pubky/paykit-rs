@@ -535,12 +535,6 @@ Open detail for later:
 - Whether proof payloads should be opaque strings, structured JSON, or method-specific typed envelopes.
 - Whether a Payment Proof may include a Paykit Receipt Location or Receipt Access reference.
 
-## Payment endpoint refresh requests
-
-Refreshing private payment details is a separate concept from recording local payment execution state.
-
-If a payer needs fresher payment details before paying, a future protocol version may add an explicit refresh request message, such as `paykit.payment_endpoint_refresh_request`. That message should not be modeled as `paykit.payment_attempt`, because that name would imply local runtime state about trying to pay, while a refresh request only asks the payee to publish or send updated receiving details.
-
 ## One-time Payment Request flow v0.2
 
 1. Payee creates `paykit.payment_request` with `recurrence: null`.
