@@ -235,8 +235,8 @@
 - **Related terms**: Recurring Payment Request, Billing Period, Proposal Expiry
 
 ### Billing Period
-- **Definition**: The concrete time interval a recurring payment attempt or Payment Proof applies to.
-- **NOT**: A Payment Request ID, Payment Reference, or Recurrence rule.
+- **Definition**: The concrete time interval a recurring payment execution or Payment Proof applies to.
+- **NOT**: A Payment Request ID, Payment Reference, Recurrence rule, or protocol message kind.
 - **Synonyms to AVOID**: billing cycle when naming the protocol field
 - **Related terms**: Recurring Payment Request, Recurrence, Payment Proof, Payment Reference
 
@@ -251,12 +251,6 @@
 - **NOT**: A Paykit Receipt, Receipt Access, or proof that Paykit itself validates generically.
 - **Synonyms to AVOID**: PaymentReceipt, payment receipt when referring to method-specific proof
 - **Related terms**: Payment Request, Payment Reference, Billing Period, Receipt, Receipt Access
-
-### Payment Endpoint Refresh Request
-- **Definition**: A possible future Event Message asking a counterparty to publish or send refreshed Payment Endpoint details before payment execution.
-- **NOT**: A payment attempt, Payment Proof, or requirement in current Payment Request v0.2.
-- **Synonyms to AVOID**: payment attempt when the sender only needs fresher receiving details
-- **Related terms**: Payment Endpoint, Payment List, Private Payment Envelope, Payment Request
 
 ## Forbidden Lexicon
 
@@ -278,7 +272,7 @@ These terms must not be used for new Paykit domain/protocol/component names:
 - **pull subscription** → use **Recurring Payment Request** for payee-initiated recurring requests. Future payee-pull authorization should be named separately.
 - **payment_receipt** / **PaymentReceipt** for method-specific proof → use **Payment Proof**.
 - **accepted_methods** → use **accepted Payment Endpoint Identifiers** or the concrete field `accepted_payment_endpoint_identifiers`.
-- **payment_attempt** as a protocol message → use local payment attempt state. Use **Payment Endpoint Refresh Request** only when asking for fresher receiving details.
+- **payment_attempt** as a protocol message → use local payment attempt state; do not model it as a Paykit Event Message in Payment Request v0.2.
 
 ## Component Model
 
@@ -317,7 +311,6 @@ Protocol concepts:
 
 Future/planned:
 - Paykit Daemon
-- Payment Endpoint Refresh Request
 
 Implementation/legacy details:
 - Paykit FFI
