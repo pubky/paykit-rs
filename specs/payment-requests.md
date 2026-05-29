@@ -99,6 +99,7 @@ Rules:
 - UUID-v4.
 - Required on every event-like Payment Request message.
 - Stable across retries/resends of the same event.
+- Reusing the same `event_id` with a different payload is invalid.
 - Used for idempotent storage, replay dedupe, local indexing, and recovery.
 
 `payment_request_id` identifies the request; `event_id` identifies one event within that request. Both are needed.
@@ -140,7 +141,6 @@ Instead:
 - pauses
 - resumes
 - cancellations
-- payment attempts
 - payment proofs
 
 are exchanged as typed `pubky-noise` Private Application Messages.
@@ -177,7 +177,7 @@ Applications, SDKs, or runtimes that process Payment Request events must persist
 - raw message or canonical parsed payload
 - validation result
 - derived Payment Request state
-- payment attempt/proof indexes
+- local payment attempt indexes and payment proof indexes
 - latest Encrypted Link snapshot and read progress
 
 Recommended receive flow:
@@ -349,13 +349,14 @@ Rules:
 - `anchor` defines the recurring schedule anchor.
 - `ends_at` is optional and may be `null`.
 - Time values must be RFC3339 UTC timestamps using the `Z` suffix.
+- For monthly and yearly recurrence, if the anchor day does not exist in a target month, the due date is clamped to the last day of that month and returns to the original anchor day when that day exists again.
+- Example: a monthly request anchored on January 31 is due on February 28 or 29, then March 31, then April 30.
 - Cron-like schedules are out of scope.
 - ISO8601 durations are out of scope for v0.2.
 - Implementations may support only a subset of allowed schema units. Unsupported units must be rejected before acceptance and should be documented by the implementation.
 
 Open detail for later:
 
-- Month-end behavior: e.g. recurrence anchored on January 31.
 - Grace periods.
 - Retry windows.
 - Timezone/user-local billing semantics.
@@ -421,8 +422,7 @@ Accepts a Payment Request proposal or update proposal.
   "kind": "paykit.payment_request_acceptance",
   "event_id": "650e8400-e29b-41d4-a716-446655440001",
   "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "accepted_event_id": "650e8400-e29b-41d4-a716-446655440000",
-  "accepted_event_hash": "<hash-of-accepted-message>"
+  "accepted_event_id": "650e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
@@ -430,11 +430,7 @@ Rules:
 
 - Must refer to a known proposal or update proposal.
 - Must be sent by the counterparty who did not create the accepted event.
-- The accepted event hash binds acceptance to exact terms.
-
-Open detail for later:
-
-- Hash algorithm and canonical JSON rules.
+- The accepted event is identified by `accepted_event_id`. Reusing the same `event_id` with different payload bytes is invalid.
 
 ### paykit.payment_request_rejection
 
@@ -542,39 +538,6 @@ Open detail for later:
 
 - Whether cancellation can be unilateral or must be acknowledged.
 
-### paykit.payment_attempt
-
-Records that a payer runtime is attempting a payment for a Payment Request.
-
-```json
-{
-  "version": 1,
-  "kind": "paykit.payment_attempt",
-  "event_id": "650e8400-e29b-41d4-a716-446655440007",
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "payment_reference": "550e8400-e29b-41d4-a716-446655440001",
-  "billing_period": null,
-  "payment_endpoint_identifier": "btc-lightning-bolt11"
-}
-```
-
-For recurring requests, `billing_period` identifies the period being paid:
-
-```json
-{
-  "starts_at": "2026-06-01T00:00:00Z",
-  "ends_at": "2026-07-01T00:00:00Z"
-}
-```
-
-Rules:
-
-- `payment_reference` is generated per attempt.
-- `billing_period` is `null` for one-time requests.
-- Multiple attempts may exist for the same billing period.
-- Each attempt should result in either a method-specific payment proof or a local failure record.
-- Failed attempts are local state in v0.2 unless a future protocol event becomes actionable for the counterparty.
-
 ### paykit.payment_proof
 
 Carries method-specific proof for one payment attempt.
@@ -586,6 +549,7 @@ Carries method-specific proof for one payment attempt.
   "event_id": "650e8400-e29b-41d4-a716-446655440008",
   "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
   "payment_reference": "550e8400-e29b-41d4-a716-446655440001",
+  "billing_period": null,
   "payment_endpoint_identifier": "btc-lightning-bolt11",
   "proof": {
     "type": "bitcoin-bolt11-preimage",
@@ -598,14 +562,32 @@ Rules:
 
 - Payment Proof is a separate concept from Paykit Receipt.
 - `payment_reference` must match the payment attempt being proven.
+- `billing_period` is `null` for one-time requests.
+- For recurring requests, `billing_period` identifies the period being paid.
 - `payment_endpoint_identifier` identifies which method-specific proof rules apply.
 - Paykit stores/transports the proof; method-specific code validates it.
 - Paykit Receipt and Receipt Access remain separate optional artifacts.
+- Failed attempts are local state in v0.2 unless a future protocol event becomes actionable for the counterparty.
+
+For recurring requests, `billing_period` has this shape:
+
+```json
+{
+  "starts_at": "2026-06-01T00:00:00Z",
+  "ends_at": "2026-07-01T00:00:00Z"
+}
+```
 
 Open detail for later:
 
 - Whether proof payloads should be opaque strings, structured JSON, or method-specific typed envelopes.
 - Whether a Payment Proof may include a Paykit Receipt Location or Receipt Access reference.
+
+## Payment endpoint refresh requests
+
+Refreshing private payment details is a separate concept from recording a payment attempt.
+
+If a payer needs fresher payment details before paying, a future protocol version may add an explicit refresh request message, such as `paykit.payment_endpoint_refresh_request`. That message should not be modeled as `paykit.payment_attempt`, because an attempt means the payer is trying to pay, while a refresh request only asks the payee to publish or send updated receiving details.
 
 ## One-time Payment Request flow v0.2
 
@@ -615,10 +597,9 @@ Open detail for later:
 4. Payer selects an allowed Payment Endpoint.
 5. Payer fetches current private payment details for the payee.
 6. Payer generates a new `PaymentReference`.
-7. Payer optionally sends `paykit.payment_attempt`.
-8. Payer executes the payment with method-specific code.
-9. Payer sends `paykit.payment_proof` with method-specific proof.
-10. Both sides index the proof locally.
+7. Payer executes the payment with method-specific code.
+8. Payer sends `paykit.payment_proof` with method-specific proof.
+9. Both sides index the proof locally.
 
 ## Recurring Payment Request flow v0.2
 
@@ -635,10 +616,9 @@ On each due interval:
 2. Payer runtime selects an allowed Payment Endpoint.
 3. Payer runtime fetches current private payment details for the payee.
 4. Payer runtime generates a new `PaymentReference` for this attempt.
-5. Payer runtime optionally sends `paykit.payment_attempt`.
-6. Payer runtime executes the payment with method-specific code.
-7. Payer runtime sends `paykit.payment_proof` with method-specific proof.
-8. Both sides index the proof locally.
+5. Payer runtime executes the payment with method-specific code.
+6. Payer runtime sends `paykit.payment_proof` with method-specific proof and billing period.
+7. Both sides index the proof locally.
 
 ## Important property
 
@@ -727,7 +707,7 @@ lost or inconsistent local event/link state -> recovery_required
 - `PaymentReference` must be UUID-v4 and is per attempt.
 - Every lifecycle event must include `payment_request_id`.
 - Every event-like message must include `event_id`.
-- Every payment attempt and proof must include `payment_request_id`, `payment_reference`, and `payment_endpoint_identifier`.
+- Every payment proof must include `payment_request_id`, `payment_reference`, `billing_period`, and `payment_endpoint_identifier`.
 - All non-null timestamps must be RFC3339 UTC timestamps using the `Z` suffix.
 - Private Payment Request messages must be versioned JSON envelopes.
 - Private Payment Request messages must preserve event order.
@@ -738,16 +718,14 @@ lost or inconsistent local event/link state -> recovery_required
 
 ## Open questions for v0.3
 
-1. What canonical JSON and hash algorithm should be used for `accepted_event_hash`?
-2. How should month-end recurrence behave?
-3. Are grace periods part of the Payment Request object or runtime policy?
-4. Are retry windows part of the Payment Request object or runtime policy?
-5. Should `paykit.payment_attempt` be required, optional, or removed?
-6. What is the proof envelope shape for `paykit.payment_proof`?
-7. Should proof validation be part of Paykit Payment Endpoint specs?
-8. Can either party unilaterally pause a recurring Payment Request, or only the payer?
-9. Can either party unilaterally update terms, or must all updates be proposal + acceptance?
-10. How should implementations handle conflicting simultaneous events?
-11. What local runtime DB indexes are minimally required?
-12. What protocol-level resync message is needed if local event history is lost?
-13. How should future allowance/pull-style authorization build on recurring Payment Requests?
+1. Are grace periods part of the Payment Request object or runtime policy?
+2. Are retry windows part of the Payment Request object or runtime policy?
+3. What is the proof envelope shape for `paykit.payment_proof`?
+4. Should proof validation be part of Paykit Payment Endpoint specs?
+5. Is an explicit `paykit.payment_endpoint_refresh_request` message needed?
+6. Can either party unilaterally pause a recurring Payment Request, or only the payer?
+7. Can either party unilaterally update terms, or must all updates be proposal + acceptance?
+8. How should implementations handle conflicting simultaneous events?
+9. What local runtime DB indexes are minimally required?
+10. What protocol-level resync message is needed if local event history is lost?
+11. How should future allowance/pull-style authorization build on recurring Payment Requests?
