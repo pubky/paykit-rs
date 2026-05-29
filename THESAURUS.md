@@ -137,7 +137,7 @@
 - **Related terms**: Linked Peer, Private Application Message, Latest-State Message, Payment Endpoint, Payment Reference
 
 ### Payment Reference
-- **Definition**: A per-payment-attempt or one-off payment correlation identifier. In Payment Request flows, a new Payment Reference is created for each concrete payment attempt. In private payment flows, the Private Payment Envelope carries the Payment Reference for the concrete payment interaction that needs receiving details.
+- **Definition**: A per-payment-execution or one-off payment correlation identifier. In Payment Request flows, a new Payment Reference is created for each concrete payment execution. In private payment flows, the Private Payment Envelope carries the Payment Reference for the concrete payment interaction that needs receiving details.
 - **NOT**: A stable relationship identifier, Payment Request ID, or billing period identifier.
 - **Synonyms to AVOID**: peer reference, relationship reference, request id when referring to a Payment Request
 - **Related terms**: Private Payment Envelope, Payment Request, Payment Request ID, Payment Proof, Receipt
@@ -211,7 +211,7 @@
 - **Related terms**: Recurring Payment Request, Payment Request ID, Payment Reference, Payment Proof, Linked Peer
 
 ### Recurring Payment Request
-- **Definition**: A payee-initiated Payment Request with non-null Recurrence that can lead to repeated payer-controlled payment attempts after acceptance.
+- **Definition**: A payee-initiated Payment Request with non-null Recurrence that can lead to repeated payer-controlled payments after acceptance.
 - **NOT**: A separate protocol family from Payment Request, or a payee-controlled pull authorization.
 - **Synonyms to AVOID**: subscription when naming the protocol object, pull subscription
 - **Related terms**: Payment Request, Subscription, Recurrence, Billing Period
@@ -247,7 +247,7 @@
 - **Related terms**: Payment Request, Recurrence
 
 ### Payment Proof
-- **Definition**: Method-specific evidence for one concrete payment attempt, correlated by Payment Request ID and Payment Reference.
+- **Definition**: Method-specific evidence for one concrete payment execution, correlated by Payment Request ID and Payment Reference.
 - **NOT**: A Paykit Receipt, Receipt Access, or proof that Paykit itself validates generically.
 - **Synonyms to AVOID**: PaymentReceipt, payment receipt when referring to method-specific proof
 - **Related terms**: Payment Request, Payment Reference, Billing Period, Receipt, Receipt Access
@@ -272,7 +272,7 @@ These terms must not be used for new Paykit domain/protocol/component names:
 - **pull subscription** → use **Recurring Payment Request** for payee-initiated recurring requests. Future payee-pull authorization should be named separately.
 - **payment_receipt** / **PaymentReceipt** for method-specific proof → use **Payment Proof**.
 - **accepted_methods** → use **accepted Payment Endpoint Identifiers** or the concrete field `accepted_payment_endpoint_identifiers`.
-- **payment_attempt** as a protocol message → use local payment attempt state; do not model it as a Paykit Event Message in Payment Request v0.2.
+- **payment_attempt** as a protocol message → use local payment execution state; do not model it as a Paykit Event Message in Payment Request v0.2.
 
 ## Component Model
 

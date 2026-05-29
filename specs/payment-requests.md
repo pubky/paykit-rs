@@ -11,7 +11,7 @@ This version reframes the previous subscription draft around Payment Requests.
 1. A **Payment Request** is the base protocol object: a payee requests a payment from a payer.
 2. A subscription is an accepted **recurring Payment Request**, not a separate protocol family.
 3. `payment_request_id` identifies the long-lived request or recurring agreement.
-4. `PaymentReference` identifies one concrete payment attempt.
+4. `PaymentReference` identifies one concrete payment execution.
 5. Payment Requests are private-first: public Payment Requests may be explored later, but implementation scope is private-only for now.
 6. The old URL-secret pull design is replaced by `pubky-noise` Private Application Messages.
 7. Payment Request messages are payee-initiated in v0.2.
@@ -19,7 +19,7 @@ This version reframes the previous subscription draft around Payment Requests.
 9. One-time requests use `recurrence: null`; recurring requests use an explicit recurrence object.
 10. `expires_at` is required on proposals, but may be `null` for requests with no protocol-level expiry.
 11. Event messages carry stable `event_id` values for dedupe, indexing, and recovery.
-12. Failed payment attempts are local state in v0.2 unless a future event becomes actionable.
+12. Failed payment executions are local state in v0.2 unless a future event becomes actionable.
 13. Method-specific payment evidence is modeled as Payment Proof, not as Paykit Receipt.
 14. The Paykit library exposes primitives; SDKs/runtimes provide automation.
 
@@ -31,7 +31,7 @@ Define the minimal Paykit Payment Request model for one-time and recurring payme
 - existing Private Payment Envelopes for payment endpoint discovery
 - stable `payment_request_id` values
 - stable `event_id` values for event messages
-- per-attempt `PaymentReference` values
+- per-payment-execution `PaymentReference` values
 - method-specific `PaymentProof` messages
 
 ## Non-goals for v0.2
@@ -54,7 +54,7 @@ Paykit is responsible for:
 - identifying the counterparty through the Encrypted Link
 - exchanging Payment Request lifecycle messages
 - discovering current compatible Payment Endpoints
-- correlating attempts and proofs
+- correlating payment executions and proofs
 - giving applications/SDKs/runtimes a common state model
 
 Payment execution remains method-specific and application/SDK/runtime-specific.
@@ -91,7 +91,7 @@ Rules:
 - UUID-v4.
 - Stable for the life of the request.
 - Shared by all lifecycle events for the same request.
-- Referenced by payment attempts and payment proofs.
+- Referenced by payment executions and payment proofs.
 - For a one-time request, it identifies the single requested payment lifecycle.
 - For a recurring request, it identifies the recurring payment relationship.
 
@@ -111,19 +111,19 @@ Rules:
 
 ### PaymentReference
 
-`PaymentReference` identifies one concrete payment attempt.
+`PaymentReference` identifies one concrete payment execution.
 
 Rules:
 
 - UUID-v4.
-- Created per payment attempt, not per Payment Request and not per billing period.
+- Created per payment execution, not per Payment Request and not per billing period.
 - Referenced by the corresponding method-specific `PaymentProof`.
-- Multiple payment attempts may exist for the same Payment Request and billing period.
-- Retries must use new `PaymentReference` values unless explicitly modeled as the same attempt by a payment-method-specific layer.
+- Multiple payment executions may exist for the same Payment Request and billing period.
+- Retries must use new `PaymentReference` values unless explicitly modeled as the same execution by a payment-method-specific layer.
 
 Rationale:
 
-A billing period can have multiple attempts: failed Lightning payment, fallback onchain payment, retry with refreshed endpoint, etc. Attempt-level references make proofs precise and avoid overloading one ID across ambiguous retry flows.
+A billing period can have multiple payment executions: failed Lightning payment, fallback onchain payment, retry with refreshed endpoint, etc. Execution-level references make proofs precise and avoid overloading one ID across ambiguous retry flows.
 
 ## Privacy scope
 
@@ -182,7 +182,7 @@ Applications, SDKs, or runtimes that process Payment Request events must persist
 - raw message or canonical parsed payload
 - validation result
 - derived Payment Request state
-- local payment attempt indexes and payment proof indexes
+- local payment execution indexes and payment proof indexes
 - latest Encrypted Link snapshot and read progress
 
 Recommended receive flow:
@@ -298,7 +298,7 @@ Rules:
 - `null` means the protocol does not define an expiry for the proposal.
 - Implementations may reject `expires_at: null` or apply a local maximum expiry by policy.
 - Before acceptance, a proposal with a non-null `expires_at` in the past must be rejected.
-- For one-time Payment Requests with non-null `expires_at`, automatic payment attempts must not be started after `expires_at` unless an implementation has explicit user approval to override expiry.
+- For one-time Payment Requests with non-null `expires_at`, automatic payment execution must not start after `expires_at` unless an implementation has explicit user approval to override expiry.
 - For recurring Payment Requests, `expires_at` applies to proposal acceptance. After acceptance, recurrence timing is controlled by `recurrence.starts_at`, `recurrence.anchor`, and `recurrence.ends_at`.
 
 ### recurrence
@@ -471,7 +471,7 @@ Rules:
 - `request` is the complete proposed replacement terms, not a partial patch.
 - Updated terms must satisfy the same validation rules as an initial Payment Request.
 - Updates require counterparty acceptance before becoming active.
-- While an update is pending, automatic payment attempts for the current accepted request are paused/stopped until the update is accepted, rejected, cancelled, or expired. This avoids needing to settle differences for payments due during the update proposal window.
+- While an update is pending, automatic payments for the current accepted request are paused/stopped until the update is accepted, rejected, cancelled, or expired. This avoids needing to settle differences for payments due during the update proposal window.
 
 ### paykit.payment_request_pause
 
@@ -518,7 +518,7 @@ Rules:
 
 - Either payer or payee may cancel.
 - Cancellation is an Event Message.
-- After cancellation, payer runtimes must not execute new payment attempts for the request.
+- After cancellation, payer runtimes must not execute new payments for the request.
 
 Open detail for later:
 
@@ -526,7 +526,7 @@ Open detail for later:
 
 ### paykit.payment_proof
 
-Carries method-specific proof for one payment attempt.
+Carries method-specific proof for one payment execution.
 
 ```json
 {
@@ -547,13 +547,13 @@ Carries method-specific proof for one payment attempt.
 Rules:
 
 - Payment Proof is a separate concept from Paykit Receipt.
-- `payment_reference` must match the payment attempt being proven.
+- `payment_reference` must match the payment execution being proven.
 - `billing_period` is `null` for one-time requests.
 - For recurring requests, `billing_period` identifies the period being paid.
 - `payment_endpoint_identifier` identifies which method-specific proof rules apply.
 - Paykit stores/transports the proof; method-specific code validates it.
 - Paykit Receipt and Receipt Access remain separate optional artifacts.
-- Failed attempts are local state in v0.2 unless a future protocol event becomes actionable for the counterparty.
+- Failed payment executions are local state in v0.2 unless a future protocol event becomes actionable for the counterparty.
 
 For recurring requests, `billing_period` has this shape:
 
@@ -571,9 +571,9 @@ Open detail for later:
 
 ## Payment endpoint refresh requests
 
-Refreshing private payment details is a separate concept from recording a payment attempt.
+Refreshing private payment details is a separate concept from recording local payment execution state.
 
-If a payer needs fresher payment details before paying, a future protocol version may add an explicit refresh request message, such as `paykit.payment_endpoint_refresh_request`. That message should not be modeled as `paykit.payment_attempt`, because an attempt means the payer is trying to pay, while a refresh request only asks the payee to publish or send updated receiving details.
+If a payer needs fresher payment details before paying, a future protocol version may add an explicit refresh request message, such as `paykit.payment_endpoint_refresh_request`. That message should not be modeled as `paykit.payment_attempt`, because payment attempts are local runtime state about trying to pay, while a refresh request only asks the payee to publish or send updated receiving details.
 
 ## One-time Payment Request flow v0.2
 
@@ -601,7 +601,7 @@ On each due interval:
 1. Payer runtime derives the billing period from the accepted recurrence.
 2. Payer runtime selects an allowed Payment Endpoint.
 3. Payer runtime fetches current private payment details for the payee.
-4. Payer runtime generates a new `PaymentReference` for this attempt.
+4. Payer runtime generates a new `PaymentReference` for this execution.
 5. Payer runtime executes the payment with method-specific code.
 6. Payer runtime sends `paykit.payment_proof` with method-specific proof and billing period.
 7. Both sides index the proof locally.
@@ -693,7 +693,7 @@ lost or inconsistent local event/link state -> recovery_required
 
 - `payment_request_id` must be UUID-v4.
 - `event_id` must be UUID-v4 and unique per event.
-- `PaymentReference` must be UUID-v4 and is per attempt.
+- `PaymentReference` must be UUID-v4 and is per payment execution.
 - Every lifecycle event must include `payment_request_id`.
 - Every event-like message must include `event_id`.
 - Payment Request proposals and updates must be sent by the payee to the payer in v0.2.
