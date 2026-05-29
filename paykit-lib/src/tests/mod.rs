@@ -250,7 +250,7 @@ async fn send_raw_private_message(link: &mut EncryptedLink, json: &str) {
         json.len() <= pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN,
         "test raw message exceeds pubky-noise message size"
     );
-    link.send_private_message(json.as_bytes(), "raw test Private Application Message")
+    link.send_private_application_message_for_test(json.as_bytes())
         .await
         .expect("raw private message should send");
 }

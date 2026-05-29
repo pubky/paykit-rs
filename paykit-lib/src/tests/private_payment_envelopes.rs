@@ -252,7 +252,10 @@ async fn get_private_payment_envelope_drops_unknown_messages_without_buffering_t
         .unwrap()
         .expect("valid Private Payment Envelope should survive unknown earlier message");
     assert_eq!(received.payment_endpoints.get(&method), Some(&data));
-    assert_eq!(setup.receiver_link.pending_private_message_count(), 0);
+    assert_eq!(
+        setup.receiver_link.pending_private_message_count_for_test(),
+        0
+    );
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
@@ -280,7 +283,10 @@ async fn get_private_payment_envelope_ignores_malformed_messages_before_valid_pa
         .unwrap()
         .expect("valid Private Payment Envelope should survive malformed earlier message");
     assert_eq!(received.payment_endpoints.get(&method), Some(&data));
-    assert_eq!(setup.receiver_link.pending_private_message_count(), 0);
+    assert_eq!(
+        setup.receiver_link.pending_private_message_count_for_test(),
+        0
+    );
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
@@ -307,7 +313,10 @@ async fn get_private_payment_envelope_ignores_malformed_messages_after_valid_pay
         .unwrap()
         .expect("valid Private Payment Envelope should survive malformed later message");
     assert_eq!(received.payment_endpoints.get(&method), Some(&data));
-    assert_eq!(setup.receiver_link.pending_private_message_count(), 0);
+    assert_eq!(
+        setup.receiver_link.pending_private_message_count_for_test(),
+        0
+    );
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();

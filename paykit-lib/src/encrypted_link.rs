@@ -1,6 +1,7 @@
 mod handshake;
 mod link;
 mod paths;
+mod private_message;
 mod snapshot;
 
 pub use handshake::{
@@ -12,4 +13,5 @@ pub use link::{
     close_encrypted_link, restore_encrypted_link, restore_encrypted_link_from_config,
     EncryptedLink, DEFAULT_MAX_SEND_RETRIES,
 };
+pub use private_message::PrivateMessageKind;
 pub use snapshot::{EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot};

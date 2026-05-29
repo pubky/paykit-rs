@@ -28,7 +28,7 @@ impl PrivateMessageKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BufferedPrivateMessage {
+pub(super) struct BufferedPrivateMessage {
     kind: String,
     plaintext: String,
 }
@@ -43,7 +43,7 @@ impl BufferedPrivateMessage {
     }
 
     #[cfg(test)]
-    pub(crate) fn kind(&self) -> &str {
+    pub(super) fn kind(&self) -> &str {
         &self.kind
     }
 }
@@ -77,7 +77,7 @@ fn decode_private_message(
     })
 }
 
-pub(crate) async fn receive_private_messages(
+pub(super) async fn receive_private_messages(
     encryptor: &mut pubky_noise::PubkyNoiseEncryptor,
     pending: &mut VecDeque<BufferedPrivateMessage>,
 ) -> Result<usize> {
@@ -139,7 +139,7 @@ pub(crate) async fn receive_private_messages(
     Ok(received)
 }
 
-pub(crate) fn take_latest_pending_message(
+pub(super) fn take_latest_pending_message(
     pending: &mut VecDeque<BufferedPrivateMessage>,
     kind: PrivateMessageKind,
 ) -> Option<String> {
@@ -158,7 +158,7 @@ pub(crate) fn take_latest_pending_message(
     latest
 }
 
-pub(crate) fn take_all_pending_messages(
+pub(super) fn take_all_pending_messages(
     pending: &mut VecDeque<BufferedPrivateMessage>,
     kind: PrivateMessageKind,
 ) -> Vec<String> {
@@ -185,7 +185,7 @@ fn is_retryable_private_send_error(err: &pubky_noise::PubkyNoiseError) -> bool {
     matches!(err, pubky_noise::PubkyNoiseError::HomeserverWriteError)
 }
 
-pub(crate) async fn send_private_message(
+pub(super) async fn send_private_message(
     encryptor: &mut pubky_noise::PubkyNoiseEncryptor,
     max_send_retries: u32,
     plaintext: &[u8],

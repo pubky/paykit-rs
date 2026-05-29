@@ -2,12 +2,13 @@ use std::collections::VecDeque;
 
 use tracing::{debug, instrument};
 
-use crate::{
-    private_message::{self, BufferedPrivateMessage, PrivateMessageKind},
-    PaykitError, PublicKey, Result,
-};
+use crate::{PaykitError, PublicKey, Result};
 
-use super::{paths::compute_private_payment_paths, EncryptedLinkSnapshot};
+use super::{
+    paths::compute_private_payment_paths,
+    private_message::{self, BufferedPrivateMessage, PrivateMessageKind},
+    EncryptedLinkSnapshot,
+};
 
 /// Handle to an established Encrypted Link with a counterparty.
 ///
@@ -40,8 +41,9 @@ use super::{paths::compute_private_payment_paths, EncryptedLinkSnapshot};
 ///
 /// # Automatic send retry
 ///
-/// [`crate::set_private_payment_envelope`] automatically retries failed `send_message` calls
-/// up to [`max_send_retries`](Self::set_max_send_retries) times (default:
+/// Paykit helpers that send Private Application Messages automatically retry
+/// failed `send_message` calls up to
+/// [`max_send_retries`](Self::set_max_send_retries) times (default:
 /// [`DEFAULT_MAX_SEND_RETRIES`]). Since transport-phase send failures do not
 /// corrupt the Noise state, retries are safe without snapshot-based recovery.
 pub struct EncryptedLink {
@@ -51,8 +53,8 @@ pub struct EncryptedLink {
     recipient: PublicKey,
     /// Shared Noise configuration retained for snapshot-based session resumption.
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
-    /// Maximum number of automatic `send_message` retries in
-    /// [`crate::set_private_payment_envelope`].
+    /// Maximum number of automatic Private Application Message `send_message`
+    /// retries.
     max_send_retries: u32,
     /// Decrypted application messages that have been read from the ordered
     /// Noise stream but not yet consumed by a typed Paykit helper.
@@ -78,8 +80,9 @@ impl EncryptedLink {
         }
     }
 
-    /// Set the maximum number of automatic `send_message` retries before
-    /// [`crate::set_private_payment_envelope`] gives up and returns [`PaykitError::Transport`].
+    /// Set the maximum number of automatic Private Application Message
+    /// `send_message` retries before Paykit gives up and returns
+    /// [`PaykitError::Transport`].
     ///
     /// Transport-phase send failures do not corrupt the Noise state, so retries
     /// are safe without snapshot-based recovery.
@@ -127,7 +130,7 @@ impl EncryptedLink {
         &self.recipient
     }
 
-    pub(crate) async fn send_private_message(
+    async fn send_private_message(
         &mut self,
         plaintext: &[u8],
         context: &'static str,
@@ -141,7 +144,28 @@ impl EncryptedLink {
         .await
     }
 
-    pub(crate) async fn receive_private_messages(&mut self) -> Result<usize> {
+    pub(crate) async fn send_private_payment_envelope_message(
+        &mut self,
+        plaintext: &[u8],
+    ) -> Result<()> {
+        self.send_private_message(plaintext, "Private Payment Envelope")
+            .await
+    }
+
+    pub(crate) async fn send_receipt_access_message(&mut self, plaintext: &[u8]) -> Result<()> {
+        self.send_private_message(plaintext, "Receipt Access").await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn send_private_application_message_for_test(
+        &mut self,
+        plaintext: &[u8],
+    ) -> Result<()> {
+        self.send_private_message(plaintext, "raw test Private Application Message")
+            .await
+    }
+
+    async fn receive_private_messages(&mut self) -> Result<usize> {
         private_message::receive_private_messages(
             &mut self.encryptor,
             &mut self.pending_private_messages,
@@ -149,18 +173,30 @@ impl EncryptedLink {
         .await
     }
 
-    pub(crate) fn take_latest_pending_message(
+    pub(crate) async fn receive_latest_private_payment_envelope_message(
         &mut self,
-        kind: PrivateMessageKind,
-    ) -> Option<String> {
-        private_message::take_latest_pending_message(&mut self.pending_private_messages, kind)
+    ) -> Result<(usize, Option<String>, usize)> {
+        let received = self.receive_private_messages().await?;
+        let message = private_message::take_latest_pending_message(
+            &mut self.pending_private_messages,
+            PrivateMessageKind::PrivatePaymentEnvelope,
+        );
+        Ok((received, message, self.pending_private_messages.len()))
     }
 
-    pub(crate) fn take_all_pending_messages(&mut self, kind: PrivateMessageKind) -> Vec<String> {
-        private_message::take_all_pending_messages(&mut self.pending_private_messages, kind)
+    pub(crate) async fn receive_receipt_access_messages(
+        &mut self,
+    ) -> Result<(usize, Vec<String>, usize)> {
+        let received = self.receive_private_messages().await?;
+        let messages = private_message::take_all_pending_messages(
+            &mut self.pending_private_messages,
+            PrivateMessageKind::ReceiptAccess,
+        );
+        Ok((received, messages, self.pending_private_messages.len()))
     }
 
-    pub(crate) fn pending_private_message_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn pending_private_message_count_for_test(&self) -> usize {
         self.pending_private_messages.len()
     }
 
@@ -173,8 +209,8 @@ impl EncryptedLink {
     }
 }
 
-/// Default maximum number of automatic `send_message` retries before
-/// [`crate::set_private_payment_envelope`] gives up and returns an error.
+/// Default maximum number of automatic Private Application Message
+/// `send_message` retries before Paykit gives up and returns an error.
 ///
 /// Override per-link via [`EncryptedLink::set_max_send_retries`].
 pub const DEFAULT_MAX_SEND_RETRIES: u32 = 3;

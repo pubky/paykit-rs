@@ -118,7 +118,7 @@ pub async fn issue_receipt(
     };
     let json =
         serialize_receipt_access_json(&access).map_err(|err| map_error("issue_receipt", err))?;
-    link.send_private_message(json.as_bytes(), "Receipt Access")
+    link.send_receipt_access_message(json.as_bytes())
         .await
         .map_err(|err| map_error("issue_receipt", err))?;
 
@@ -155,8 +155,7 @@ pub async fn issue_receipt(
 pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptAccess>> {
     debug!("receiving Receipt Access messages");
 
-    let received = link.receive_private_messages().await?;
-    let raw_messages = link.take_all_pending_messages(PrivateMessageKind::ReceiptAccess);
+    let (received, raw_messages, pending) = link.receive_receipt_access_messages().await?;
     if raw_messages.is_empty() {
         debug!(received, "no Receipt Access messages available");
         return Ok(Vec::new());
@@ -185,9 +184,7 @@ pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptA
     }
     debug!(
         count = access.len(),
-        received,
-        pending = link.pending_private_message_count(),
-        "Receipt Access messages received"
+        received, pending, "Receipt Access messages received"
     );
     Ok(access)
 }
