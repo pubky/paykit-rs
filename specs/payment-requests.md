@@ -682,8 +682,9 @@ Implementations may maintain a local recovery safety status such as `recovery_re
 4. Should proof validation be part of Paykit Payment Endpoint specs?
 5. Is an explicit `paykit.payment_endpoint_refresh_request` message needed?
 6. Can either party unilaterally pause a recurring Payment Request, or only the payer?
-7. Should payer-requested term changes be modeled as a future separate event, or remain out of protocol scope?
-8. How should implementations handle conflicting simultaneous events?
-9. What local runtime DB indexes are minimally required?
-10. What protocol-level resync message is needed if local event history is lost?
-11. How should future allowance/pull-style authorization build on recurring Payment Requests?
+7. Should future versions model Payment Request updates or replacement links, or keep v0.2's cancel-and-new-request model?
+8. Should payer-requested term changes be modeled as a future separate event, or remain out of protocol scope?
+9. How should implementations handle conflicting simultaneous events?
+10. What local runtime DB indexes are minimally required?
+11. What protocol-level resync message is needed if local event history is lost?
+12. How should future allowance/pull-style authorization build on recurring Payment Requests?
