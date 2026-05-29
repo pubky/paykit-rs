@@ -22,6 +22,7 @@ This version reframes the previous subscription draft around Payment Requests.
 12. Failed payment executions are local state in v0.2 unless a future event becomes actionable.
 13. Method-specific payment evidence is modeled as Payment Proof, not as Paykit Receipt.
 14. The Paykit library exposes primitives; SDKs/runtimes provide automation.
+15. Payment Request terms are immutable in v0.2. Changed terms require cancelling the old request and creating a new Payment Request; v0.2 has no protocol-level replacement link.
 
 ## Goal
 
@@ -94,6 +95,7 @@ Rules:
 - Used to associate local payment execution state and payment proofs with the request.
 - For a one-time request, it identifies the single requested payment lifecycle.
 - For a recurring request, it identifies the recurring payment relationship.
+- A new `payment_request_id` is required when creating a new request after changed terms.
 
 ### event_id
 
@@ -142,7 +144,6 @@ Instead:
 - Payment Request proposals
 - acceptances
 - rejections
-- updates
 - pauses
 - resumes
 - cancellations
@@ -169,6 +170,8 @@ They must not use Latest-State Message semantics.
 Receivers must preserve and process all valid recognized Payment Request events in order. Typed getters for one recognized Event Message kind must not discard unrelated recognized Event Message kinds.
 
 Unsupported Private Application Message kinds may follow the library's normal unsupported-message policy until Paykit explicitly recognizes them. Once a Payment Request message kind is recognized, implementations must preserve all valid messages of that kind in send order.
+
+Paykit v0.2 does not define separate app-level acknowledgement messages for event processing. Correctness relies on senders retrying the same event with the same `event_id` and payload, and receivers persisting and deduping events idempotently before side effects.
 
 ## Recovery and durability expectations
 
@@ -205,7 +208,7 @@ Risks if this is not done:
 
 If local derived state is lost but durable events and link progress remain, the runtime should rebuild state from stored events and resume from the saved link snapshot.
 
-If local event history and link progress are missing or inconsistent, the runtime must not guess. It should mark affected requests as `recovery_required` (or equivalent), stop automatic execution, and require explicit user/counterparty resync. A protocol-level resync message may be added later, but is out of scope for v0.2.
+If local event history and link progress are missing or inconsistent, the runtime must fail closed. It should stop automatic execution for affected requests and require explicit user or counterparty resync before continuing. Implementations may track a local `recovery_required`, `needs_resync`, or equivalent safety status, but this is not a Payment Request protocol state. If the Encrypted Link session context is still usable, the runtime should replay stored events or unread link messages rather than create a new link. A new handshake should only be needed when the link/session context itself is lost or unusable; it restores communication, not missing Payment Request history. A protocol-level resync message may be added later, but is out of scope for v0.2.
 
 ## Message envelope conventions
 
@@ -235,6 +238,8 @@ Rules:
 The `request` payload describes the terms for one requested payment or recurring payment relationship.
 
 The stable `payment_request_id` is carried by the message envelope, not repeated inside the `request` payload.
+
+Request terms are immutable in v0.2. Once a `paykit.payment_request` is proposed, later term changes require cancelling the existing request and creating a new Payment Request with a new `payment_request_id`.
 
 Initial one-time shape:
 
@@ -395,30 +400,29 @@ Validation rules:
 - `recurrence` must be `null` or valid recurrence.
 - `accepted_payment_endpoint_identifiers` must be non-empty.
 - Each accepted identifier must be a valid `PaymentEndpointIdentifier`.
+- The first valid `paykit.payment_request` event for a `payment_request_id` defines the immutable terms for that request. Conflicting later proposals with the same `payment_request_id` are invalid.
 
 ### paykit.payment_request_acceptance
 
-Accepts a Payment Request proposal or update proposal.
+Accepts a Payment Request proposal.
 
 ```json
 {
   "version": 1,
   "kind": "paykit.payment_request_acceptance",
   "event_id": "650e8400-e29b-41d4-a716-446655440001",
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "accepted_event_id": "650e8400-e29b-41d4-a716-446655440000"
+  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
 Rules:
 
-- Must refer to a known proposal or update proposal.
+- Must refer to a known proposed Payment Request.
 - Must be sent by the payer.
-- The accepted event is identified by `accepted_event_id`. Reusing the same `event_id` with different payload bytes is invalid.
 
 ### paykit.payment_request_rejection
 
-Rejects a Payment Request proposal or update proposal.
+Rejects a Payment Request proposal.
 
 ```json
 {
@@ -426,52 +430,14 @@ Rejects a Payment Request proposal or update proposal.
   "kind": "paykit.payment_request_rejection",
   "event_id": "650e8400-e29b-41d4-a716-446655440002",
   "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "rejected_event_id": "650e8400-e29b-41d4-a716-446655440000",
   "reason": "user_rejected"
 }
 ```
 
 Rules:
 
+- Must refer to a known proposed Payment Request.
 - Must be sent by the payer.
-
-### paykit.payment_request_update
-
-Proposes changed terms for an existing accepted Payment Request.
-
-```json
-{
-  "version": 1,
-  "kind": "paykit.payment_request_update",
-  "event_id": "650e8400-e29b-41d4-a716-446655440003",
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "request": {
-    "amount": {
-      "value": "12.00",
-      "currency": "USD"
-    },
-    "expires_at": "2026-07-01T00:00:00Z",
-    "recurrence": {
-      "every": 1,
-      "unit": "month",
-      "starts_at": "2026-07-01T00:00:00Z",
-      "anchor": "2026-07-01T00:00:00Z",
-      "ends_at": null
-    },
-    "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
-    "metadata": {}
-  }
-}
-```
-
-Rules:
-
-- Updates are Event Messages.
-- Updates are sent by the payee to the payer.
-- `request` is the complete proposed replacement terms, not a partial patch.
-- Updated terms must satisfy the same validation rules as an initial Payment Request.
-- Updates require counterparty acceptance before becoming active.
-- While an update is pending, automatic payments for the current accepted request are paused/stopped until the update is accepted, rejected, cancelled, or expired. This avoids needing to settle differences for payments due during the update proposal window.
 
 ### paykit.payment_request_pause
 
@@ -522,7 +488,7 @@ Rules:
 
 Open detail for later:
 
-- Whether cancellation can be unilateral or must be acknowledged.
+- Whether cancellation can be unilateral or must be counterparty-confirmed.
 
 ### paykit.payment_proof
 
@@ -573,7 +539,7 @@ Open detail for later:
 
 Refreshing private payment details is a separate concept from recording local payment execution state.
 
-If a payer needs fresher payment details before paying, a future protocol version may add an explicit refresh request message, such as `paykit.payment_endpoint_refresh_request`. That message should not be modeled as `paykit.payment_attempt`, because payment attempts are local runtime state about trying to pay, while a refresh request only asks the payee to publish or send updated receiving details.
+If a payer needs fresher payment details before paying, a future protocol version may add an explicit refresh request message, such as `paykit.payment_endpoint_refresh_request`. That message should not be modeled as `paykit.payment_attempt`, because that name would imply local runtime state about trying to pay, while a refresh request only asks the payee to publish or send updated receiving details.
 
 ## One-time Payment Request flow v0.2
 
@@ -606,6 +572,17 @@ On each due interval:
 6. Payer runtime sends `paykit.payment_proof` with method-specific proof and billing period.
 7. Both sides index the proof locally.
 
+## Changing terms in v0.2
+
+Payment Request terms are immutable. To change terms in v0.2:
+
+1. Cancel the existing Payment Request with `paykit.payment_request_cancellation`.
+2. Create a new `paykit.payment_request` with a new `payment_request_id`.
+3. The payer validates and accepts or rejects the new request independently.
+4. Historical Payment Proofs and local payment execution records remain associated with the old `payment_request_id`.
+
+V0.2 does not define a protocol-level replacement link between the old and new requests. Applications may present the two requests as related in local UI or metadata, but Paykit protocol state treats them as separate requests.
+
 ## Important property
 
 Payment Requests are payee-initiated and payer-controlled at execution time.
@@ -625,7 +602,7 @@ The library should expose primitives for apps, SDKs, and runtimes:
 - typed Payment Request payload structs
 - typed Payment Proof payload structs
 - JSON serialization/deserialization
-- validation for IDs, references, Payment Endpoint Identifiers, recurrence, amount shape, and expiry
+- validation for IDs, Payment Endpoint Identifiers, recurrence, amount shape, and expiry
 - private message send/receive helpers for Payment Request and Payment Proof message kinds
 - ordered Event Message retrieval semantics for lifecycle events
 
@@ -664,12 +641,10 @@ Minimal states:
 - `proposed`
 - `accepted`
 - `active`
-- `pending_update`
 - `paused`
 - `cancelled`
 - `completed`
 - `expired`
-- `recovery_required`
 
 State transitions:
 
@@ -680,14 +655,12 @@ accepted one-time request + payment_proof -> completed
 accepted recurring request + recurrence starts -> active
 active + pause -> paused
 paused + resume -> active
-active|paused + cancellation -> cancelled
-active + update -> pending_update
-pending_update + acceptance -> active under new terms
-pending_update + rejection|expiry|cancellation -> active under previous terms, paused, or cancelled as indicated by the event
+accepted|active|paused + cancellation -> cancelled
 active + recurrence end reached -> completed
-proposal/update with non-null expires_at past expiry -> expired
-lost or inconsistent local event/link state -> recovery_required
+proposal with non-null expires_at past expiry -> expired
 ```
+
+Implementations may maintain a local recovery safety status such as `recovery_required` or `needs_resync`, but that status is outside the Payment Request protocol state machine.
 
 ## Validation invariants
 
@@ -696,7 +669,8 @@ lost or inconsistent local event/link state -> recovery_required
 - `PaymentReference` must be UUID-v4 and is per payment execution.
 - Every lifecycle event must include `payment_request_id`.
 - Every event-like message must include `event_id`.
-- Payment Request proposals and updates must be sent by the payee to the payer in v0.2.
+- Payment Request proposals must be sent by the payee to the payer in v0.2.
+- Payment Request terms are immutable. A `payment_request_id` must have exactly one valid proposal event; changed terms require cancelling the old request and creating a separate new Payment Request.
 - Every payment proof must include `payment_request_id`, `payment_reference`, `billing_period`, and `payment_endpoint_identifier`.
 - All non-null timestamps must be RFC3339 UTC timestamps using the `Z` suffix.
 - Private Payment Request messages must be versioned JSON envelopes.

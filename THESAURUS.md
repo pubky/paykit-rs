@@ -241,7 +241,7 @@
 - **Related terms**: Recurring Payment Request, Recurrence, Payment Proof, Payment Reference
 
 ### Proposal Expiry
-- **Definition**: The `expires_at` value on a Payment Request proposal or update that defines when the proposal stops being actionable. A null value means no protocol-level expiry.
+- **Definition**: The `expires_at` value on a Payment Request proposal that defines when the proposal stops being actionable. A null value means no protocol-level expiry.
 - **NOT**: The recurrence end date, billing period end, or receipt expiry.
 - **Synonyms to AVOID**: request expiry when it is ambiguous with recurrence end
 - **Related terms**: Payment Request, Recurrence
@@ -273,6 +273,7 @@ These terms must not be used for new Paykit domain/protocol/component names:
 - **payment_receipt** / **PaymentReceipt** for method-specific proof → use **Payment Proof**.
 - **accepted_methods** → use **accepted Payment Endpoint Identifiers** or the concrete field `accepted_payment_endpoint_identifiers`.
 - **payment_attempt** as a protocol message → use local payment execution state; do not model it as a Paykit Event Message in Payment Request v0.2.
+- **payment_request_update** / **paykit.payment_request_update** → cancel the old Payment Request and create a separate new Payment Request in v0.2.
 
 ## Component Model
 
