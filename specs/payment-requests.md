@@ -17,7 +17,7 @@ This version reframes the previous subscription draft around Payment Requests.
 7. Payment Request messages may be created by either payer or payee.
 8. The proposer role is carried explicitly so payer/payee can be derived from the Encrypted Link participants.
 9. One-time requests use `recurrence: null`; recurring requests use an explicit recurrence object.
-10. `expires_at` is required on proposals so stale requests do not remain actionable forever.
+10. `expires_at` is required on proposals, but may be `null` for requests with no protocol-level expiry.
 11. Event messages carry stable `event_id` values for dedupe, indexing, and recovery.
 12. Failed payment attempts are local state in v0.2 unless a future event becomes actionable.
 13. Method-specific payment evidence is modeled as Payment Proof, not as Paykit Receipt.
@@ -302,14 +302,16 @@ Open detail for later:
 
 ### expires_at
 
-`expires_at` defines when the proposed request stops being actionable.
+`expires_at` defines when the proposed request stops being actionable, or `null` when the request has no protocol-level expiry.
 
 Rules:
 
-- Required on every Payment Request proposal.
-- Must be a UTC timestamp.
-- Before acceptance, a proposal past `expires_at` must be rejected.
-- For one-time Payment Requests, automatic payment attempts must not be started after `expires_at` unless an implementation has explicit user approval to override expiry.
+- The `expires_at` field is required on every Payment Request proposal.
+- The value must be either `null` or an RFC3339 UTC timestamp using the `Z` suffix, such as `2026-06-01T00:00:00Z`.
+- `null` means the protocol does not define an expiry for the proposal.
+- Implementations may reject `expires_at: null` or apply a local maximum expiry by policy.
+- Before acceptance, a proposal with a non-null `expires_at` in the past must be rejected.
+- For one-time Payment Requests with non-null `expires_at`, automatic payment attempts must not be started after `expires_at` unless an implementation has explicit user approval to override expiry.
 - For recurring Payment Requests, `expires_at` applies to proposal acceptance. After acceptance, recurrence timing is controlled by `recurrence.starts_at`, `recurrence.anchor`, and `recurrence.ends_at`.
 
 ### recurrence
@@ -346,7 +348,7 @@ Rules:
 - `starts_at` defines when the recurring request becomes eligible for payment.
 - `anchor` defines the recurring schedule anchor.
 - `ends_at` is optional and may be `null`.
-- Time values are UTC timestamps.
+- Time values must be RFC3339 UTC timestamps using the `Z` suffix.
 - Cron-like schedules are out of scope.
 - ISO8601 durations are out of scope for v0.2.
 - Implementations may support only a subset of allowed schema units. Unsupported units must be rejected before acceptance and should be documented by the implementation.
@@ -404,7 +406,7 @@ Validation rules:
 - `payment_request_id` must be UUID-v4.
 - `proposer_role` must be `payer` or `payee`.
 - `amount.value` must be a decimal string.
-- `expires_at` must be a valid UTC timestamp and must not already be expired when accepted.
+- `expires_at` must be `null` or a valid RFC3339 UTC timestamp using the `Z` suffix. A non-null `expires_at` must not already be expired when accepted.
 - `recurrence` must be `null` or valid recurrence.
 - `accepted_payment_endpoint_identifiers` must be non-empty.
 - Each accepted identifier must be a valid `PaymentEndpointIdentifier`.
@@ -714,7 +716,7 @@ active + update -> pending_update
 pending_update + acceptance -> active under new terms
 pending_update + rejection|expiry|cancellation -> active under previous terms, paused, or cancelled as indicated by the event
 active + recurrence end reached -> completed
-proposal/update past expires_at -> expired
+proposal/update with non-null expires_at past expiry -> expired
 lost or inconsistent local event/link state -> recovery_required
 ```
 
@@ -726,6 +728,7 @@ lost or inconsistent local event/link state -> recovery_required
 - Every lifecycle event must include `payment_request_id`.
 - Every event-like message must include `event_id`.
 - Every payment attempt and proof must include `payment_request_id`, `payment_reference`, and `payment_endpoint_identifier`.
+- All non-null timestamps must be RFC3339 UTC timestamps using the `Z` suffix.
 - Private Payment Request messages must be versioned JSON envelopes.
 - Private Payment Request messages must preserve event order.
 - Private Payment Request messages must fit within `pubky-noise` message size unless a future indirection mechanism is specified.
@@ -736,16 +739,15 @@ lost or inconsistent local event/link state -> recovery_required
 ## Open questions for v0.3
 
 1. What canonical JSON and hash algorithm should be used for `accepted_event_hash`?
-2. What exact timestamp format should be required? RFC3339 UTC only?
-3. How should month-end recurrence behave?
-4. Are grace periods part of the Payment Request object or runtime policy?
-5. Are retry windows part of the Payment Request object or runtime policy?
-6. Should `paykit.payment_attempt` be required, optional, or removed?
-7. What is the proof envelope shape for `paykit.payment_proof`?
-8. Should proof validation be part of Paykit Payment Endpoint specs?
-9. Can either party unilaterally pause a recurring Payment Request, or only the payer?
-10. Can either party unilaterally update terms, or must all updates be proposal + acceptance?
-11. How should implementations handle conflicting simultaneous events?
-12. What local runtime DB indexes are minimally required?
-13. What protocol-level resync message is needed if local event history is lost?
-14. How should future allowance/pull-style authorization build on recurring Payment Requests?
+2. How should month-end recurrence behave?
+3. Are grace periods part of the Payment Request object or runtime policy?
+4. Are retry windows part of the Payment Request object or runtime policy?
+5. Should `paykit.payment_attempt` be required, optional, or removed?
+6. What is the proof envelope shape for `paykit.payment_proof`?
+7. Should proof validation be part of Paykit Payment Endpoint specs?
+8. Can either party unilaterally pause a recurring Payment Request, or only the payer?
+9. Can either party unilaterally update terms, or must all updates be proposal + acceptance?
+10. How should implementations handle conflicting simultaneous events?
+11. What local runtime DB indexes are minimally required?
+12. What protocol-level resync message is needed if local event history is lost?
+13. How should future allowance/pull-style authorization build on recurring Payment Requests?
