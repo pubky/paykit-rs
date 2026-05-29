@@ -6,8 +6,8 @@ use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, Ephemer
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
 mod encrypted_link;
-mod private_payment_envelopes;
-mod public_payment_endpoints;
+mod payment_endpoint;
+mod private_payment_envelope;
 mod receipt_access;
 
 static SHARED_POSTGRES: OnceCell<EmbeddedPostgres> = OnceCell::const_new();
