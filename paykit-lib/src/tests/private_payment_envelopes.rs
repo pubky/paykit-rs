@@ -1,5 +1,7 @@
 use super::*;
 
+const TEST_RECEIPT_ACCESS_JSON: &str = r#"{"version":1,"kind":"paykit.receipt_access","reference":"550e8400-e29b-41d4-a716-446655440000"}"#;
+
 #[tokio::test]
 async fn private_payment_envelope_empty_returns_empty() {
     let mut setup = PrivateTestSetup::new().await;

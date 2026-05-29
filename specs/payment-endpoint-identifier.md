@@ -23,7 +23,7 @@ each other without side-channel coordination.
 
 This is a *recommended* convention, not a mandatory one. Paykit's routing
 layer does not enforce identifier shape beyond the structural checks performed
-by [`PaymentEndpointIdentifier`](../paykit-lib/src/lib.rs) (ASCII alphanumeric, `-`, `_`, `.`;
+by [`PaymentEndpointIdentifier`](../paykit-lib/src/payment_endpoint.rs) (ASCII alphanumeric, `-`, `_`, `.`;
 max 64 characters; no path traversal; the value `private` is reserved).
 
 Identifiers that follow this specification are interoperable with Paykit
@@ -226,7 +226,7 @@ of a format emerges on the same rail, prefer a new Endpoint Format segment
 ## 9. Relation to `paykit-lib`
 
 In the reference implementation, a Payment Endpoint Identifier is stored
-as a [`PaymentEndpointIdentifier`](../paykit-lib/src/lib.rs). The `PaymentEndpointIdentifier` constructor
+as a [`PaymentEndpointIdentifier`](../paykit-lib/src/payment_endpoint.rs). The `PaymentEndpointIdentifier` constructor
 performs structural validation (character set, length, reserved values,
 path-traversal rejection) but does not enforce the three-segment shape
 defined here. Callers that want to verify conformance to this

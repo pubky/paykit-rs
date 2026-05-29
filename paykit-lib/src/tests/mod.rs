@@ -235,15 +235,13 @@ impl PrivateTestSetup {
     }
 }
 
-// ── Private Payment Envelopes tests ──────────────────────────────────────────
+// Shared helpers for integration-style tests under this module.
 
 fn private_payment_envelope(
     payment_endpoints: &HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
 ) -> PrivatePaymentEnvelope {
     PrivatePaymentEnvelope::new(PaymentReference::new_v4(), payment_endpoints.clone())
 }
-
-const TEST_RECEIPT_ACCESS_JSON: &str = r#"{"version":1,"kind":"paykit.receipt_access","reference":"550e8400-e29b-41d4-a716-446655440000"}"#;
 
 async fn send_raw_private_message(link: &mut EncryptedLink, json: &str) {
     assert!(
