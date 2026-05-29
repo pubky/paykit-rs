@@ -7,16 +7,16 @@
 ## Bounded Contexts
 
 ### Paykit
-- **Definition**: The whole Paykit system/product, including Paykit Protocol, Paykit Library, future Paykit Daemon work, private payments, receipts, and related components.
+- **Definition**: The whole Paykit system/product, including Paykit Protocol, Paykit Library, future Paykit Daemon work, private payments, receipts, Payment Requests, and related components.
 - **NOT**: Only the protocol layer or only the Rust library.
 - **Synonyms to AVOID**: Paykit SDK
-- **Related terms**: Paykit Protocol, Paykit Library, Paykit Daemon
+- **Related terms**: Paykit Protocol, Paykit Library, Paykit Daemon, Payment Request
 
 ### Paykit Protocol
-- **Definition**: The domain rules, data model, and flows for payment discovery and exchange through Pubky Routing, including Payment Lists, Private Payment Envelopes, Payment Endpoint Identifiers, Payment References, Receipts, and Receipt Access.
+- **Definition**: The domain rules, data model, and flows for payment discovery and exchange through Pubky Routing, including Payment Lists, Private Payment Envelopes, Payment Endpoint Identifiers, Payment References, Payment Requests, Payment Proofs, Receipts, and Receipt Access.
 - **NOT**: A specific Rust implementation or daemon runtime.
 - **Synonyms to AVOID**: routing network protocol, Paykit SDK protocol
-- **Related terms**: Payment List, Private Payment Envelope, Payment Endpoint Identifier, Pubky Routing
+- **Related terms**: Payment List, Private Payment Envelope, Payment Endpoint Identifier, Payment Request, Pubky Routing
 
 ### Paykit Library
 - **Definition**: The canonical product/component name for the Rust library that implements and exposes Paykit Protocol functionality to applications.
@@ -107,7 +107,7 @@
 - **Related terms**: Encrypted Link, Private Message Kind, Private Payment Envelope, Receipt Access
 
 ### Private Message Kind
-- **Definition**: The kind discriminator for private Paykit messages, e.g. `paykit.private_payment_envelope` or `paykit.receipt_access`.
+- **Definition**: The kind discriminator for private Paykit messages, e.g. `paykit.private_payment_envelope`, `paykit.receipt_access`, or `paykit.payment_request`.
 - **NOT**: The Private Application Message body or the Rust enum/type that may represent it in an implementation.
 - **Synonyms to AVOID**: private message type when naming the protocol concept
 - **Related terms**: Private Application Message, Private Payment Envelope, Receipt Access
@@ -122,7 +122,13 @@
 - **Definition**: A private Paykit message where every valid message matters and receivers must process messages in send order.
 - **NOT**: A Latest-State Message where newer messages supersede older messages of the same kind.
 - **Synonyms to AVOID**: event-like message when naming the protocol concept
-- **Related terms**: Private Application Message, Private Message Kind, Latest-State Message, Receipt Access
+- **Related terms**: Private Application Message, Private Message Kind, Latest-State Message, Receipt Access, Event ID
+
+### Event ID
+- **Definition**: A stable UUID-v4 identifier for one Event Message, used for idempotent storage, replay dedupe, local indexing, and recovery.
+- **NOT**: A Payment Request ID, Payment Reference, or relationship identifier.
+- **Synonyms to AVOID**: event reference, message reference when naming the protocol identifier
+- **Related terms**: Event Message, Payment Request, Payment Request ID
 
 ### Private Payment Envelope
 - **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete Payment List of a Linked Peer. Latest-State Message semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
@@ -131,10 +137,10 @@
 - **Related terms**: Linked Peer, Private Application Message, Latest-State Message, Payment Endpoint, Payment Reference
 
 ### Payment Reference
-- **Definition**: A per-payment or per-request correlation identifier. In private payment flows, the Private Payment Envelope carries the Payment Reference because the envelope represents the latest private payment disclosure for that payment/request.
-- **NOT**: A stable relationship identifier for a known peer.
-- **Synonyms to AVOID**: peer reference, relationship reference
-- **Related terms**: Private Payment Envelope, Receipt
+- **Definition**: A per-payment-attempt or one-off payment correlation identifier. In Payment Request flows, a new Payment Reference is created for each concrete payment attempt. In private payment flows, the Private Payment Envelope carries the Payment Reference for the concrete payment interaction that needs receiving details.
+- **NOT**: A stable relationship identifier, Payment Request ID, or billing period identifier.
+- **Synonyms to AVOID**: peer reference, relationship reference, request id when referring to a Payment Request
+- **Related terms**: Private Payment Envelope, Payment Request, Payment Request ID, Payment Proof, Receipt
 
 ### Receipt
 - **Definition**: A Paykit receipt for a payment; Paykit receipts are always encrypted.
@@ -196,6 +202,62 @@
 - **Synonyms to AVOID**: receiver when it obscures payment role
 - **Related terms**: Payer, Payment List, Payment Endpoint
 
+## Payment Requests
+
+### Payment Request
+- **Definition**: A private Paykit protocol object where one Linked Peer asks the other for a payment. A Payment Request may be one-time or recurring.
+- **NOT**: A Payment Endpoint, Payment List, payment execution, or public invoice URL.
+- **Synonyms to AVOID**: SubscriptionAgreement, subscription proposal when naming the base protocol object
+- **Related terms**: Recurring Payment Request, Payment Request ID, Payment Reference, Payment Proof, Linked Peer
+
+### Recurring Payment Request
+- **Definition**: A Payment Request with non-null Recurrence that can lead to repeated payer-controlled payment attempts after acceptance.
+- **NOT**: A separate protocol family from Payment Request, or a payee-controlled pull authorization.
+- **Synonyms to AVOID**: subscription when naming the protocol object, push subscription
+- **Related terms**: Payment Request, Subscription, Recurrence, Billing Period
+
+### Subscription
+- **Definition**: Product shorthand for an accepted Recurring Payment Request.
+- **NOT**: The base protocol family or a separate message namespace.
+- **Synonyms to AVOID**: subscription agreement, subscription protocol when Payment Request is the intended protocol concept
+- **Related terms**: Recurring Payment Request, Payment Request
+
+### Payment Request ID
+- **Definition**: A stable UUID-v4 identifier for the lifetime of one Payment Request. All lifecycle Event Messages for the same request share the same Payment Request ID.
+- **NOT**: A Payment Reference, Event ID, Billing Period, or peer relationship identifier.
+- **Synonyms to AVOID**: subscription_id, agreement id, request reference
+- **Related terms**: Payment Request, Event ID, Payment Reference
+
+### Recurrence
+- **Definition**: The schedule object on a Payment Request that describes repeated payment eligibility using interval count, unit, starts_at, anchor, and optional ends_at.
+- **NOT**: A cron expression, local scheduler implementation, or payment retry policy.
+- **Synonyms to AVOID**: schedule when naming the protocol object
+- **Related terms**: Recurring Payment Request, Billing Period, Proposal Expiry
+
+### Billing Period
+- **Definition**: The concrete time interval a recurring payment attempt or Payment Proof applies to.
+- **NOT**: A Payment Request ID, Payment Reference, or Recurrence rule.
+- **Synonyms to AVOID**: billing cycle when naming the protocol field
+- **Related terms**: Recurring Payment Request, Recurrence, Payment Proof, Payment Reference
+
+### Proposal Expiry
+- **Definition**: The `expires_at` value on a Payment Request proposal or update that defines when the proposal stops being actionable. A null value means no protocol-level expiry.
+- **NOT**: The recurrence end date, billing period end, or receipt expiry.
+- **Synonyms to AVOID**: request expiry when it is ambiguous with recurrence end
+- **Related terms**: Payment Request, Recurrence
+
+### Payment Proof
+- **Definition**: Method-specific evidence for one concrete payment attempt, correlated by Payment Request ID and Payment Reference.
+- **NOT**: A Paykit Receipt, Receipt Access, or proof that Paykit itself validates generically.
+- **Synonyms to AVOID**: PaymentReceipt, payment receipt when referring to method-specific proof
+- **Related terms**: Payment Request, Payment Reference, Billing Period, Receipt, Receipt Access
+
+### Payment Endpoint Refresh Request
+- **Definition**: A possible future Event Message asking a counterparty to publish or send refreshed Payment Endpoint details before payment execution.
+- **NOT**: A payment attempt, Payment Proof, or requirement in current Payment Request v0.2.
+- **Synonyms to AVOID**: payment attempt when the sender only needs fresher receiving details
+- **Related terms**: Payment Endpoint, Payment List, Private Payment Envelope, Payment Request
+
 ## Forbidden Lexicon
 
 These terms must not be used for new Paykit domain/protocol/component names:
@@ -210,6 +272,11 @@ These terms must not be used for new Paykit domain/protocol/component names:
 - **Private Payment List** for the whole private message → use **Private Payment Envelope**. Use **Payment List** when referring only to the endpoint collection carried inside the envelope.
 - **Private Payment Method List** → use **Payment List** or **Private Payment Envelope**, depending on whether you mean the endpoint collection or the whole private message.
 - **Payment Endpoint** for only address/invoice/IBAN/etc. data → use **Payment Endpoint Payload**.
+- **SubscriptionAgreement** → use **Payment Request** or **Recurring Payment Request**, depending on whether recurrence is present.
+- **subscription_id** → use **Payment Request ID** for the long-lived request identifier.
+- **payment_receipt** / **PaymentReceipt** for method-specific proof → use **Payment Proof**.
+- **accepted_methods** → use **accepted Payment Endpoint Identifiers** or the concrete field `accepted_payment_endpoint_identifiers`.
+- **payment_attempt** as a protocol message → use local payment attempt state. Use **Payment Endpoint Refresh Request** only when asking for fresher receiving details.
 
 ## Component Model
 
@@ -229,8 +296,16 @@ Protocol concepts:
 - Private Message Kind
 - Latest-State Message
 - Event Message
+- Event ID
 - Private Payment Envelope
 - Payment Reference
+- Payment Request
+- Recurring Payment Request
+- Payment Request ID
+- Recurrence
+- Billing Period
+- Proposal Expiry
+- Payment Proof
 - Receipt
 - Receipt Decryption Key
 - Receipt Location
@@ -240,6 +315,7 @@ Protocol concepts:
 
 Future/planned:
 - Paykit Daemon
+- Payment Endpoint Refresh Request
 
 Implementation/legacy details:
 - Paykit FFI
