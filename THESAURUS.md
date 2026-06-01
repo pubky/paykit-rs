@@ -119,7 +119,7 @@
 - **Related terms**: Private Application Message, Private Message Kind, Event Message, Private Payment Envelope
 
 ### Event Message
-- **Definition**: A private Paykit message where every valid message matters and receivers must process messages in send order.
+- **Definition**: One FIFO private Paykit message where every valid message matters and receivers must process messages in send order, such as Receipt Access or Payment Request lifecycle messages like request, acceptance, rejection, cancellation, and proof.
 - **NOT**: A Latest-State Message where newer messages supersede older messages of the same kind.
 - **Synonyms to AVOID**: event-like message when naming the protocol concept
 - **Related terms**: Private Application Message, Private Message Kind, Latest-State Message, Receipt Access, Event ID
