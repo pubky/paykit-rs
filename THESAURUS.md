@@ -137,8 +137,8 @@
 - **Related terms**: Linked Peer, Private Application Message, Latest-State Message, Payment Endpoint, Payment Reference
 
 ### Payment Reference
-- **Definition**: A per-payment-execution or one-off payment correlation identifier. In Payment Request flows, a new Payment Reference is created for each concrete payment execution. In private payment flows, the Private Payment Envelope carries the Payment Reference for the concrete payment interaction that needs receiving details.
-- **NOT**: A stable relationship identifier, Payment Request ID, or billing period identifier.
+- **Definition**: A per-payment-execution or one-off payment correlation identifier visible to the payee. In Payment Request flows, a Payment Reference is created for each concrete payment execution that needs payee-side correlation. In private payment flows, the Private Payment Envelope carries the Payment Reference for the concrete payment interaction that needs receiving details.
+- **NOT**: A stable relationship identifier, Payment Request ID, billing period identifier, or identifier for every local failed payment attempt.
 - **Synonyms to AVOID**: peer reference, relationship reference, request id when referring to a Payment Request
 - **Related terms**: Private Payment Envelope, Payment Request, Payment Request ID, Payment Proof, Receipt
 
