@@ -16,7 +16,7 @@ This spec defines:
 
 - Payment Request message envelopes
 - sender and receiver role rules
-- identifiers used to correlate messages
+- identifiers and references used to correlate messages
 - request terms
 - one-time and recurring request shape
 - acceptance, rejection, cancellation, and proof messages
@@ -95,7 +95,7 @@ Rules:
 - Messages MUST fit within the current `pubky-noise` message size unless a future indirection mechanism is specified.
 - Message-specific fields such as `payment_reference` are added only by message kinds that need them.
 
-## Identifiers
+## Identifiers and references
 
 ### Payment Request ID
 
@@ -121,15 +121,17 @@ Rules:
 
 ### Payment Reference
 
-`payment_reference` identifies one concrete payment execution for payee-side correlation with Payment Proofs and related artifacts.
+`payment_reference` is a payee-provided payment correlation value. It lets the payee connect an incoming payment and Payment Proof to external state, such as an invoice, order, account, or note.
 
 Rules:
 
-- It MUST be a UUID-v4.
-- It is created for a payment execution that should be visible to the payee, not for every local failed attempt.
-- It is not created per Payment Request or per billing period.
-- Multiple payment executions MAY exist for the same Payment Request and billing period.
-- Payment-method-level retries that are part of the same intended payment SHOULD reuse the same Payment Reference unless the payment-method-specific layer needs a different one.
+- It MUST be a non-empty string.
+- It is not required to be a UUID.
+- It is set by the payee in the Payment Request terms.
+- The payer MUST copy it unchanged into Payment Proof messages for that request.
+- The payer SHOULD include it in the payment-method-specific execution as a memo, reference, or remittance value when the selected payment method supports one.
+- For recurring requests, the same `payment_reference` applies to every payment for the request. The `billing_period` distinguishes the recurring period being paid.
+- Per-period Payment References or templates are out of scope for v0.2.
 
 ## Payment Request terms
 
@@ -143,6 +145,7 @@ The `payment_request_id` is carried by the message envelope and is not repeated 
     "value": "10.00",
     "asset": "USD"
   },
+  "payment_reference": "invoice-2026-0001",
   "expires_at": "2026-06-01T00:00:00Z",
   "recurrence": null,
   "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
@@ -156,6 +159,7 @@ Rules:
 - `amount.value` MUST be a decimal string.
 - `amount.asset` MUST be a currency or asset code.
 - The exact asset registry is out of scope for v0.2.
+- `payment_reference` is required and MUST be a non-empty string.
 - `expires_at` is required and MUST be either `null` or an RFC3339 UTC timestamp using the `Z` suffix.
 - `recurrence` MUST be `null` for one-time requests.
 - `recurrence` MUST be an object for recurring requests.
@@ -205,6 +209,7 @@ Sent by the payee to the payer.
       "value": "10.00",
       "asset": "USD"
     },
+    "payment_reference": "invoice-2026-0001",
     "expires_at": "2026-06-01T00:00:00Z",
     "recurrence": null,
     "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
@@ -306,7 +311,7 @@ Sent by the payer to the payee.
   "kind": "paykit.payment_proof",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d105",
   "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
-  "payment_reference": "c91de85f-2e20-4a40-8ac1-a7dbb3a9ef71",
+  "payment_reference": "invoice-2026-0001",
   "billing_period": null,
   "payment_endpoint_identifier": "btc-lightning-bolt11",
   "proof": {
@@ -321,7 +326,7 @@ Validation rules:
 - Sender MUST be the payer.
 - The request MUST be known and accepted.
 - The request MUST NOT be cancelled or expired.
-- `payment_reference` MUST be a UUID-v4.
+- `payment_reference` MUST equal the accepted request's `payment_reference`.
 - `billing_period` MUST be `null` for one-time requests.
 - `billing_period` MUST be present for recurring requests.
 - For recurring requests, `billing_period` MUST identify an interval derived from the accepted recurrence.
@@ -397,13 +402,13 @@ V0.2 does not define update messages or replacement links.
 
 When executing a payment, the payer chooses one of the accepted Payment Endpoint Identifiers and fetches current Payment Endpoint details.
 
-For public endpoints, the payer may use Pubky Routing public storage.
+Payment Request v0.2 does not require public Payment Endpoint lookup for execution. Implementations SHOULD prefer private/current endpoint details shared over the Encrypted Link.
 
-For private endpoints, the payee may have shared a Private Payment Envelope.
+Implementations MAY allow public reusable endpoint details by local policy, but Paykit does not treat public endpoint publication as the normal private Payment Request flow.
 
-The payer does not need to wait for a new Private Payment Envelope after acceptance. It can use current public endpoint details, or a current private envelope if it already has usable details. If no usable details are available, the payer cannot execute yet.
+The `payment_reference` comes from the accepted Payment Request, not from the selected Payment Endpoint publication or Private Payment Envelope.
 
-The Payment Reference carried by an existing Private Payment Envelope is independent from the `payment_reference` used in a Payment Proof unless a future protocol version defines a stronger relationship. Payment Request payment execution SHOULD create its own Payment Reference for the proof.
+Payment-method-specific code is responsible for deciding whether selected endpoint details are reusable or payment-specific. If the selected endpoint details are single-use, expired, already consumed, or otherwise stale, the payer MUST NOT execute until fresh usable details are available.
 
 ## Event durability
 
@@ -433,3 +438,4 @@ If Encrypted Link state is lost, a new handshake may be needed to restore privat
 4. Should future versions define payer-requested term changes?
 5. Should future versions define protocol-level resync messages?
 6. Should future versions define grace periods or retry windows as protocol fields?
+7. Should recurring requests support per-period Payment Reference templates or overrides?

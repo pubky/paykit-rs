@@ -131,15 +131,15 @@
 - **Related terms**: Event Message, Payment Request, Payment Request ID
 
 ### Private Payment Envelope
-- **Definition**: a versioned encrypted Paykit message carrying a specific Payment Reference and a complete Payment List of a Linked Peer. Latest-State Message semantics apply; a newer Private Payment Envelope supersedes older envelopes, even when they have different Payment References.
-- **NOT**: A Payment List with addition fields.
+- **Definition**: A versioned encrypted Paykit message carrying a complete Payment List of a Linked Peer. Latest-State Message semantics apply; a newer Private Payment Envelope supersedes older envelopes. Current non-request private payment flows may also carry a Payment Reference, but Payment Request v0.2 does not derive its proof reference from the envelope.
+- **NOT**: A Payment Request, Payment Proof, or the source of a Payment Request's Payment Reference.
 - **Synonyms to AVOID**: Private Payment List, Private Payment Method List, private payments payload
 - **Related terms**: Linked Peer, Private Application Message, Latest-State Message, Payment Endpoint, Payment Reference
 
 ### Payment Reference
-- **Definition**: A per-payment-execution or one-off payment correlation identifier visible to the payee. In Payment Request flows, a Payment Reference is created for each concrete payment execution that needs payee-side correlation. In private payment flows, the Private Payment Envelope carries the Payment Reference for the concrete payment interaction that needs receiving details.
-- **NOT**: A stable relationship identifier, Payment Request ID, billing period identifier, or identifier for every local failed payment attempt.
-- **Synonyms to AVOID**: peer reference, relationship reference, request id when referring to a Payment Request
+- **Definition**: A payee-provided payment correlation value visible to the payee, used to connect an incoming payment and Payment Proof to external state such as an invoice, order, account, or note. In Payment Request flows, the payee sets the Payment Reference in the request and the payer copies it into Payment Proof messages. Current non-request private payment flows may carry a Payment Reference in a Private Payment Envelope.
+- **NOT**: A stable relationship identifier, Payment Request ID, Event ID, billing period identifier, endpoint-publication identifier, or necessarily a UUID.
+- **Synonyms to AVOID**: peer reference, relationship reference, request id when referring to a Payment Request, memo when naming the cross-rail Paykit concept
 - **Related terms**: Private Payment Envelope, Payment Request, Payment Request ID, Payment Proof, Receipt
 
 ### Receipt
@@ -247,7 +247,7 @@
 - **Related terms**: Payment Request, Recurrence
 
 ### Payment Proof
-- **Definition**: Method-specific evidence for one concrete payment execution, correlated by Payment Request ID and Payment Reference.
+- **Definition**: Method-specific evidence for one concrete payment execution, correlated by Payment Request ID, Payment Reference, and Billing Period when recurring.
 - **NOT**: A Paykit Receipt, Receipt Access, or proof that Paykit itself validates generically.
 - **Synonyms to AVOID**: PaymentReceipt, payment receipt when referring to method-specific proof
 - **Related terms**: Payment Request, Payment Reference, Billing Period, Receipt, Receipt Access
