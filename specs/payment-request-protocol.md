@@ -51,6 +51,7 @@ In v0.2, Payment Requests are payee-initiated:
 - `paykit.payment_request_rejection` MUST be sent by the payer.
 - `paykit.payment_proof` MUST be sent by the payer.
 - `paykit.payment_request_cancellation` MAY be sent by either payer or payee.
+- Existing `paykit.receipt_access` messages MAY be sent by the payee to share an optional Paykit Receipt after payment.
 
 The Encrypted Link identifies the local party and counterparty. Payment Request messages do not need to embed both Pubky public keys.
 
@@ -58,9 +59,17 @@ The Encrypted Link identifies the local party and counterparty. Payment Request 
 
 All Payment Request protocol messages are `pubky-noise` Private Application Messages sent over an established Encrypted Link.
 
+An Event Message is one lifecycle message, such as a request, acceptance, rejection, cancellation, or proof. Event Messages are FIFO messages, not Latest-State Messages.
+
 Payment Request messages are Event Messages. Receivers MUST preserve and process all valid recognized Payment Request events in send order.
 
 Typed getters for one recognized Event Message kind MUST NOT discard unrelated recognized Event Message kinds.
+
+Paykit message kinds use logical lanes over the same Encrypted Link:
+
+- Private Payment Envelopes use Latest-State Message semantics.
+- Payment Request protocol messages use Event Message semantics.
+- Receipt Access uses Event Message semantics.
 
 ## Common envelope
 
@@ -70,8 +79,8 @@ Every Payment Request protocol message uses a versioned JSON envelope:
 {
   "version": 1,
   "kind": "paykit.payment_request",
-  "event_id": "650e8400-e29b-41d4-a716-446655440000",
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000"
+  "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+  "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33"
 }
 ```
 
@@ -84,6 +93,7 @@ Rules:
 - A retried resend of the same event MUST reuse the same `event_id` and same payload.
 - Reusing the same `event_id` with different payload bytes is invalid.
 - Messages MUST fit within the current `pubky-noise` message size unless a future indirection mechanism is specified.
+- Message-specific fields such as `payment_reference` are added only by message kinds that need them.
 
 ## Identifiers
 
@@ -107,17 +117,19 @@ Rules:
 - It is used for idempotent storage and replay dedupe.
 - It is stable across retries of the same event.
 - Each distinct lifecycle message uses a distinct `event_id`.
+- In v0.2 it is a UUID, not a hash of the event payload. Hash-based IDs would require canonical serialization rules.
 
 ### Payment Reference
 
-`payment_reference` identifies one concrete payment execution for correlation with Payment Proofs and related artifacts.
+`payment_reference` identifies one concrete payment execution for payee-side correlation with Payment Proofs and related artifacts.
 
 Rules:
 
 - It MUST be a UUID-v4.
-- It is created per payment execution, not per Payment Request and not per billing period.
+- It is created for a payment execution that should be visible to the payee, not for every local failed attempt.
+- It is not created per Payment Request or per billing period.
 - Multiple payment executions MAY exist for the same Payment Request and billing period.
-- Retries SHOULD use new Payment References unless a payment-method-specific layer explicitly treats them as the same execution.
+- Payment-method-level retries that are part of the same intended payment SHOULD reuse the same Payment Reference unless the payment-method-specific layer needs a different one.
 
 ## Payment Request terms
 
@@ -186,8 +198,8 @@ Sent by the payee to the payer.
 {
   "version": 1,
   "kind": "paykit.payment_request",
-  "event_id": "650e8400-e29b-41d4-a716-446655440000",
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+  "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
   "request": {
     "amount": {
       "value": "10.00",
@@ -220,8 +232,8 @@ Sent by the payer to the payee.
 {
   "version": 1,
   "kind": "paykit.payment_request_acceptance",
-  "event_id": "650e8400-e29b-41d4-a716-446655440001",
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000"
+  "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+  "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33"
 }
 ```
 
@@ -243,8 +255,8 @@ Sent by the payer to the payee.
 {
   "version": 1,
   "kind": "paykit.payment_request_rejection",
-  "event_id": "650e8400-e29b-41d4-a716-446655440002",
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+  "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
   "reason": "user_rejected"
 }
 ```
@@ -267,8 +279,8 @@ Sent by either payer or payee.
 {
   "version": 1,
   "kind": "paykit.payment_request_cancellation",
-  "event_id": "650e8400-e29b-41d4-a716-446655440003",
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
+  "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
   "reason": "user_requested"
 }
 ```
@@ -292,9 +304,9 @@ Sent by the payer to the payee.
 {
   "version": 1,
   "kind": "paykit.payment_proof",
-  "event_id": "650e8400-e29b-41d4-a716-446655440004",
-  "payment_request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "payment_reference": "550e8400-e29b-41d4-a716-446655440001",
+  "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d105",
+  "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+  "payment_reference": "c91de85f-2e20-4a40-8ac1-a7dbb3a9ef71",
   "billing_period": null,
   "payment_endpoint_identifier": "btc-lightning-bolt11",
   "proof": {
@@ -359,6 +371,15 @@ accepted one-time request + payment_proof -> completed
 proposal with non-null expires_at past expiry -> expired
 ```
 
+Terminal states:
+
+- `rejected`
+- `cancelled`
+- `expired`
+- `completed` for one-time requests
+
+For recurring requests, a Payment Proof completes one billing period, not the whole request.
+
 Recurring request scheduling state is local runtime state, not Paykit protocol state.
 
 ## Changing terms
@@ -379,6 +400,8 @@ When executing a payment, the payer chooses one of the accepted Payment Endpoint
 For public endpoints, the payer may use Pubky Routing public storage.
 
 For private endpoints, the payee may have shared a Private Payment Envelope.
+
+The payer does not need to wait for a new Private Payment Envelope after acceptance. It can use current public endpoint details, or a current private envelope if it already has usable details. If no usable details are available, the payer cannot execute yet.
 
 The Payment Reference carried by an existing Private Payment Envelope is independent from the `payment_reference` used in a Payment Proof unless a future protocol version defines a stronger relationship. Payment Request payment execution SHOULD create its own Payment Reference for the proof.
 
