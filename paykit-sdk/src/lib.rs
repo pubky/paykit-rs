@@ -32,6 +32,11 @@ pub use config::{
     UnknownMessageRetentionPolicy,
 };
 #[doc(inline)]
+pub use endpoints::{
+    load_public_endpoint_records, save_public_endpoint_record, EndpointPublicationStatus,
+    EndpointSyncChange, EndpointSyncReport,
+};
+#[doc(inline)]
 pub use error::PaykitSdkError;
 #[doc(inline)]
 pub use identity::{
@@ -53,8 +58,8 @@ pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
 #[doc(inline)]
 pub use storage::{
     EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
-    NewPrivateStreamItem, PrivateStreamItemRecord, StorageAdapter, StorageState,
-    StorageTransaction,
+    NewPrivateStreamItem, PrivateStreamItemRecord, PublicEndpointRecord, StorageAdapter,
+    StorageState, StorageTransaction,
 };
 
 /// Common result alias for Paykit SDK operations.

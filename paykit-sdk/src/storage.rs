@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    endpoints::EndpointPublicationStatus,
     identity::{IdentityState, PubkyPublicKey},
     linked_peers::LinkedPeerState,
     private_stream::PrivateStreamParseStatus,
@@ -52,6 +53,12 @@ pub trait StorageTransaction {
     /// Save one Linked Peer record.
     fn save_linked_peer(&mut self, record: LinkedPeerRecord);
 
+    /// List SDK-managed public Payment Endpoint records.
+    fn public_endpoint_records(&self) -> Vec<PublicEndpointRecord>;
+
+    /// Save one SDK-managed public Payment Endpoint record.
+    fn save_public_endpoint_record(&mut self, record: PublicEndpointRecord);
+
     /// Load one Encrypted Link state record.
     fn encrypted_link_state(
         &self,
@@ -90,6 +97,21 @@ pub struct LinkedPeerRecord {
     pub last_private_receive_at: Option<DateTime<Utc>>,
     /// Consecutive failure count for recovery/retry policy.
     pub failure_count: u32,
+}
+
+/// Durable SDK-managed public Payment Endpoint publication record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicEndpointRecord {
+    /// Payment Endpoint Identifier.
+    pub identifier: String,
+    /// Last payload the SDK tried to publish.
+    pub payload: Option<String>,
+    /// Current publication status.
+    pub status: EndpointPublicationStatus,
+    /// Last status update time.
+    pub updated_at: DateTime<Utc>,
+    /// Last sync error, when available.
+    pub last_error: Option<String>,
 }
 
 /// Durable Encrypted Link snapshot state.
@@ -196,6 +218,8 @@ pub struct StorageState {
     pub identity_state: Option<IdentityState>,
     /// Linked Peer records by counterparty.
     pub linked_peers: HashMap<PubkyPublicKey, LinkedPeerRecord>,
+    /// SDK-managed public endpoint records by identifier.
+    pub public_endpoint_records: HashMap<String, PublicEndpointRecord>,
     /// Encrypted Link state records by counterparty.
     pub encrypted_link_states: HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
     /// Append-only private stream items.
@@ -279,6 +303,20 @@ impl StorageTransaction for InMemoryStorageTransaction {
             .insert(record.counterparty.clone(), record);
     }
 
+    fn public_endpoint_records(&self) -> Vec<PublicEndpointRecord> {
+        self.state
+            .public_endpoint_records
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn save_public_endpoint_record(&mut self, record: PublicEndpointRecord) {
+        self.state
+            .public_endpoint_records
+            .insert(record.identifier.clone(), record);
+    }
+
     fn encrypted_link_state(
         &self,
         counterparty: &PubkyPublicKey,
@@ -341,6 +379,16 @@ mod tests {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
     }
 
+    fn public_endpoint_record(identifier: &str) -> PublicEndpointRecord {
+        PublicEndpointRecord {
+            identifier: identifier.into(),
+            payload: Some("payload".into()),
+            status: EndpointPublicationStatus::Published,
+            updated_at: timestamp(),
+            last_error: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_transaction_commits_records() {
         let storage = InMemoryStorage::new();
@@ -357,6 +405,7 @@ mod tests {
                         last_private_receive_at: Some(timestamp()),
                         failure_count: 0,
                     });
+                    tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
 
                     let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem {
                         counterparty: counterparty.clone(),
@@ -391,6 +440,7 @@ mod tests {
             snapshot.linked_peers[&counterparty].state,
             LinkedPeerState::Linked
         );
+        assert_eq!(snapshot.public_endpoint_records.len(), 1);
         assert_eq!(snapshot.private_stream_items.len(), 1);
         assert_eq!(snapshot.event_dedup_records.len(), 1);
         assert_eq!(snapshot.next_private_stream_item_id, 1);

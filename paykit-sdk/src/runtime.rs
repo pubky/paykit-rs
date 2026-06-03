@@ -2,12 +2,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::PaykitSdkConfig,
+    config::{EndpointManagementScope, PaykitSdkConfig},
+    endpoints::{
+        failed_record, normalize_receiving_details, published_record, removed_record,
+        EndpointPublicationStatus, EndpointSyncChange, EndpointSyncReport,
+    },
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
     linked_peers::mark_recovery_required,
     private_stream::{persist_private_stream_batch, PrivateStreamIntakeReport},
     storage::{EncryptedLinkStateRecord, StorageAdapter},
-    PaykitSdkError, PaymentAdapter, PubkyPublicKey, PubkySessionProvider, Result,
+    PaykitSdkError, PaymentAdapter, PubkyPublicKey, PubkySessionProvider, ReceivingDetailScope,
+    Result,
 };
 
 /// Clock abstraction used by SDK workflows and tests.
@@ -122,6 +127,152 @@ where
     /// Access the Pubky session provider.
     pub fn pubky_session_provider(&self) -> &K {
         &self.pubky
+    }
+
+    /// Publish current public receiving details and remove stale SDK-managed endpoints.
+    pub async fn sync_public_endpoints(&self) -> Result<EndpointSyncReport> {
+        let session_access =
+            self.pubky
+                .load_session_access()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky session available".into(),
+                    source: None,
+                })?;
+        let details = self
+            .payment
+            .current_receiving_details(ReceivingDetailScope::Public)
+            .await?;
+        let desired = normalize_receiving_details(details)?;
+        let now = self.clock.now();
+        let mut report = EndpointSyncReport::default();
+
+        for (identifier, payload) in &desired {
+            match paykit_lib::set_payment_endpoint(
+                &session_access.session,
+                identifier.clone(),
+                payload.clone(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    self.storage
+                        .transaction({
+                            let record = published_record(identifier, payload, now);
+                            move |tx| {
+                                tx.save_public_endpoint_record(record);
+                                Ok(())
+                            }
+                        })
+                        .await?;
+                    report.published.push(EndpointSyncChange {
+                        identifier: identifier.as_str().to_owned(),
+                        status: EndpointPublicationStatus::Published,
+                        error: None,
+                    });
+                }
+                Err(err) => {
+                    let error = err.to_string();
+                    self.storage
+                        .transaction({
+                            let record = failed_record(
+                                identifier.as_str().to_owned(),
+                                Some(payload.as_str().to_owned()),
+                                error.clone(),
+                                now,
+                            );
+                            move |tx| {
+                                tx.save_public_endpoint_record(record);
+                                Ok(())
+                            }
+                        })
+                        .await?;
+                    report.failed.push(EndpointSyncChange {
+                        identifier: identifier.as_str().to_owned(),
+                        status: EndpointPublicationStatus::Failed,
+                        error: Some(error),
+                    });
+                }
+            }
+        }
+
+        let removal_candidates = match self.config.endpoint_management_scope {
+            EndpointManagementScope::ManagedOnly => self
+                .storage
+                .transaction(|tx| Ok(tx.public_endpoint_records()))
+                .await?
+                .into_iter()
+                .filter(|record| {
+                    record.status != EndpointPublicationStatus::Removed
+                        && !desired
+                            .keys()
+                            .any(|identifier| identifier.as_str() == record.identifier)
+                })
+                .map(|record| (record.identifier, record.payload))
+                .collect::<Vec<_>>(),
+            EndpointManagementScope::FullPaykitNamespace => {
+                let local_public_key = session_access.session.info().public_key().clone();
+                let current = paykit_lib::get_payment_list(
+                    &session_access.outbox_client.public_storage(),
+                    &local_public_key,
+                )
+                .await?;
+                current
+                    .payment_endpoints
+                    .into_iter()
+                    .filter(|(identifier, _)| !desired.contains_key(identifier))
+                    .map(|(identifier, payload)| {
+                        (identifier.as_str().to_owned(), Some(payload.into_inner()))
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        for (identifier_text, previous_payload) in removal_candidates {
+            let identifier = paykit_lib::PaymentEndpointIdentifier::new(&identifier_text)?;
+            match paykit_lib::remove_payment_endpoint(&session_access.session, identifier).await {
+                Ok(()) => {
+                    self.storage
+                        .transaction({
+                            let record = removed_record(identifier_text.clone(), now);
+                            move |tx| {
+                                tx.save_public_endpoint_record(record);
+                                Ok(())
+                            }
+                        })
+                        .await?;
+                    report.removed.push(EndpointSyncChange {
+                        identifier: identifier_text,
+                        status: EndpointPublicationStatus::Removed,
+                        error: None,
+                    });
+                }
+                Err(err) => {
+                    let error = err.to_string();
+                    self.storage
+                        .transaction({
+                            let record = failed_record(
+                                identifier_text.clone(),
+                                previous_payload,
+                                error.clone(),
+                                now,
+                            );
+                            move |tx| {
+                                tx.save_public_endpoint_record(record);
+                                Ok(())
+                            }
+                        })
+                        .await?;
+                    report.failed.push(EndpointSyncChange {
+                        identifier: identifier_text,
+                        status: EndpointPublicationStatus::Failed,
+                        error: Some(error),
+                    });
+                }
+            }
+        }
+
+        Ok(report)
     }
 
     /// Receive and durably persist currently available private messages.
@@ -317,6 +468,23 @@ mod tests {
         let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
 
         let result = sdk.receive_private_messages(counterparty).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_sync_public_endpoints_requires_pubky_session() {
+        let storage = InMemoryStorage::new();
+        let pubky = TestPubkySessionProvider { session: None };
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            pubky,
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.sync_public_endpoints().await;
 
         assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     }
