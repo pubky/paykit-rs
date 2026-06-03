@@ -3121,6 +3121,7 @@ dependencies = [
  "paykit-lib",
  "pubky",
  "rustls-platform-verifier",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

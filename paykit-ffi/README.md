@@ -42,7 +42,7 @@ UniFFI bindings for [paykit-lib](../paykit-lib/), exposing Paykit's payment rout
 | `paykit_sign_out()` | End the current session (server + local). Restores session on failure. |
 | `paykit_force_sign_out()` | Discard local session without contacting the server. |
 
-### Private Payment Envelopes and Receipts
+### Private Payment Lists and Receipts
 
 Private Paykit APIs require an active session and an established Encrypted Link handle. Persist session secrets and serialized link/handshake snapshots in app-managed secure storage if the app needs restart recovery.
 
@@ -50,18 +50,29 @@ Private Paykit APIs require an active session and an established Encrypted Link 
 |---|---|
 | `paykit_default_max_send_retries()` | Return the library default for Private Application Message send retries. |
 | `paykit_default_max_recovery_attempts()` | Return the library default for Encrypted Link Handshake recovery attempts. |
-| `paykit_generate_payment_reference()` | Generate a UUID-v4 Payment Reference for Private Payment Envelope and Receipt correlation. |
 | `paykit_initiate_encrypted_link(secret_key_hex, receiver_public_key)` | Start an Encrypted Link Handshake as the initiator. Returns a handshake handle. |
 | `paykit_accept_encrypted_link(secret_key_hex, sender_public_key)` | Start an Encrypted Link Handshake as the responder. Returns a handshake handle. |
 | `paykit_advance_handshake(handshake_id)` | Advance a handshake. Returns `pending` with the same handle or `complete` with a link handle. |
 | `paykit_set_encrypted_link_handshake_max_recovery_attempts(handshake_id, max)` | Override handshake recovery attempts. |
 | `paykit_set_encrypted_link_max_send_retries(link_id, max)` | Override Private Application Message send retries for an Encrypted Link. |
-| `paykit_set_private_payment_envelope(link_id, envelope)` | Send the complete Private Payment Envelope. |
-| `paykit_get_private_payment_envelope(link_id)` | Receive the newest queued Private Payment Envelope, or `nil`/`null`. |
-| `paykit_issue_receipt(link_id, draft)` | Store an encrypted Receipt and send Receipt Access over the Encrypted Link. |
-| `paykit_get_receipt_access(link_id)` | Receive all currently available Receipt Access descriptors in FIFO order. |
-| `paykit_receipt_location(reference)` | Return the canonical homeserver Receipt Location for a Payment Reference. |
-| `paykit_decrypt_receipt(encrypted_json, key, location)` | Decrypt an encrypted Receipt fetched by the app from `location`. |
+| `paykit_set_private_payment_list(link_id, list)` | Send the complete Private Payment List. |
+| `paykit_parse_private_payment_list_json(json)` | Parse a Private Payment List JSON message. |
+| `paykit_receive_private_application_messages(link_id)` | Receive the current raw Private Application Message batch in send order. |
+| `paykit_parse_payment_request_event_message(message)` | Parse a raw Private Application Message as a Payment Request event. |
+| `paykit_serialize_payment_request_event(event)` | Serialize a Payment Request event to canonical JSON. |
+| `paykit_validate_payment_proof_for_request(proof, request)` | Validate stateless proof/request correlation fields. |
+| `paykit_send_payment_request(link_id, event)` | Send a Payment Request proposal event. |
+| `paykit_send_payment_request_acceptance(link_id, event)` | Send a Payment Request acceptance event. |
+| `paykit_send_payment_request_rejection(link_id, event)` | Send a Payment Request rejection event. |
+| `paykit_send_payment_request_cancellation(link_id, event)` | Send a Payment Request cancellation event. |
+| `paykit_send_payment_proof(link_id, event)` | Send a Payment Proof event. |
+| `paykit_prepare_receipt(link_id, draft)` | Prepare a plaintext Receipt, Encrypted Receipt, and matching Receipt Access descriptor. |
+| `paykit_store_prepared_receipt(prepared)` | Store a prepared Encrypted Receipt at its Receipt Location. |
+| `paykit_send_receipt_access(link_id, access)` | Send a prepared Receipt Access descriptor over the Encrypted Link. |
+| `paykit_parse_receipt_access_event_message(message)` | Parse a raw Private Application Message as a Receipt Access event. |
+| `paykit_parse_receipt_access_json(json)` | Parse a Receipt Access JSON message. |
+| `paykit_receipt_location(receipt_id)` | Return the canonical homeserver Receipt Location path for a Receipt ID. |
+| `paykit_decrypt_receipt(encrypted_json, key, location)` | Decrypt an Encrypted Receipt fetched by the app from `location`. |
 | `paykit_serialize_encrypted_link_handshake(handshake_id)` | Serialize a pending handshake snapshot as hex for durable storage. |
 | `paykit_restore_encrypted_link_handshake(secret_key_hex, snapshot_hex)` | Restore a pending handshake from a snapshot. |
 | `paykit_encrypted_link_handshake_snapshot_recipient(snapshot_hex)` | Inspect the counterparty in an Encrypted Link Handshake snapshot. |
@@ -71,17 +82,23 @@ Private Paykit APIs require an active session and an established Encrypted Link 
 | `paykit_close_encrypted_link(link_id)` | Close an established Encrypted Link and remove the FFI handle. |
 | `paykit_drop_encrypted_link_handshake(handshake_id)` | Drop a pending handshake handle. |
 
-#### Receipt records and key handling
+#### Private Application Message and receipt handling
 
-- `FfiReceiptDraft` is caller-provided receipt data: `reference`, optional `payment_endpoint_identifier`, optional `amount`, optional `currency`, and Receipt Metadata fields.
-- `FfiReceipt` is decrypted receipt plaintext: `reference`, `recipient_public_key`, optional `payment_endpoint_identifier`, and Receipt Metadata fields.
-- `FfiIssuedReceipt` contains the issuer-side result after storing and sending Receipt Access: `reference`, Receipt Location, and raw Receipt Decryption Key material.
-- `FfiReceiptAccess` contains the counterparty-side Receipt Access descriptor: `version`, `reference`, Receipt Location, raw Receipt Decryption Key material, and `algorithm`. Current valid Receipt Access messages use version `1` and algorithm `XChaCha20Poly1305`.
-- `FfiIssuedReceipt` and `FfiReceiptAccess` contain raw Receipt Decryption Key material in their `key` field. Treat it as secret: do not log it, include it in telemetry, or store it outside platform secure storage.
-- Receipt Access uses Event Message semantics: `paykit_get_receipt_access` returns every currently available Receipt Access message in send order. Private Payment Envelopes use Latest-State Message semantics: `paykit_get_private_payment_envelope` returns the newest queued envelope.
-- `paykit_decrypt_receipt` authenticates the Receipt Location as AEAD associated data and rejects plaintext whose reference does not match the canonical location.
-- Receipt fetching is intentionally app-managed in the current FFI surface: use the Receipt Location from `FfiReceiptAccess` to fetch the encrypted JSON, then pass it to `paykit_decrypt_receipt` with the matching `key` and `location`.
-- Encrypted Link snapshots preserve Noise counters but do not make already-dispatched, not-yet-consumed Receipt Access records durable by themselves. Apps that treat Receipt Access as irreversible Event Message data should persist/reconcile their own app-level state alongside serialized Encrypted Link snapshots.
+- `FfiPrivateApplicationMessage` is one received Private Application Message with optional parsed `version`, optional parsed `kind`, and raw JSON payload. Platform SDK/runtime code should persist the raw JSON and route messages with recognized `kind` values.
+- Payment Request bindings expose the same stateless protocol tools as `paykit-lib`: typed records, send helpers, raw event parsing, canonical event serialization, and proof/request correlation validation. They do not derive lifecycle state, enforce roles, schedule recurring payments, or validate method-specific proofs.
+- `FfiPaymentRequestEventMessage` preserves `kind`, optional parsed IDs, `raw_json`, parsed event data when valid, and `validation_error` when a recognized event is malformed.
+- `FfiReceiptDraft` is caller input for `paykit_prepare_receipt`: optional `receipt_id`, `payment_reference`, optional `payment_request_id` and `billing_period` for Payment Request correlation, optional `payment_endpoint_identifier`, optional `amount` (`value` plus `asset`), and `metadata_json`, which must serialize to a JSON object.
+- `FfiReceipt` is decrypted receipt plaintext: `receipt_id`, `payment_reference`, optional `payment_request_id` and `billing_period`, `recipient_public_key`, optional `payment_endpoint_identifier`, optional `amount` (`value` plus `asset`), and `metadata_json`, which serializes the Receipt Metadata JSON object.
+- `FfiReceiptAccess` is the private descriptor sent to the counterparty: `event_id`, `receipt_id`, `payment_reference`, optional `payment_request_id` and `billing_period`, `location`, and secret `key`.
+- `FfiReceiptAccessEventMessage` preserves `kind`, optional parsed IDs, `raw_json`, parsed Receipt Access data when valid, and `validation_error` when a recognized event is malformed.
+- `FfiPreparedReceipt` contains `receipt`, `encrypted_receipt`, and `access`; persist it, or equivalent issuance state, before storing/sending if crash-safe receipt issuance matters.
+- Receipt Access messages contain raw Receipt Decryption Key material in their JSON `key` field. Treat it as secret: do not log it, include it in telemetry, or store it outside platform secure storage.
+- Receipt Access and Payment Request messages use Event Message semantics and must be preserved in send order by the SDK/runtime. Private Payment Lists use Latest-State Message semantics at the SDK/runtime layer.
+- Receipt Location is a path on the issuer's homeserver, not a complete Pubky resource by itself. Pair it with the Receipt Access sender/issuer context when retrieving.
+- `paykit_decrypt_receipt` authenticates the Receipt Location path as AEAD associated data and rejects plaintext whose Receipt ID does not match the canonical location.
+- Receipt fetching is intentionally app-managed in the current FFI surface: use the Receipt Location path and key from a Receipt Access message to fetch the encrypted JSON, then pass it to `paykit_decrypt_receipt`.
+- Encrypted Link snapshots preserve Noise counters and key material. Snapshot bytes must be treated as secret. Apps that treat Event Message data as irreversible should persist/reconcile their own app-level state before storing an advanced Encrypted Link snapshot.
+- Generated Swift/Kotlin bindings use platform casing, such as `metadataJson`, `encryptedReceipt`, and `paymentReference`; `metadataJson` is still a JSON object string, not a native metadata map.
 
 ## Building the Bindings
 
@@ -187,7 +204,7 @@ let secret = paykitExportSession()
 saveToKeychain("paykit_session", secret)
 
 // Normal operations
-paykitSetPaymentEndpoint("lightning", lnurlJson)
+paykitSetPaymentEndpoint("btc-lightning-bolt11", bolt11Payload)
 paykitGetPaymentList(contactPk)
 ```
 
