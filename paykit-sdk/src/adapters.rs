@@ -22,11 +22,11 @@ pub trait PaymentAdapter: Send + Sync {
         scope: ReceivingDetailScope,
     ) -> Result<Vec<ReceivingDetail>>;
 
-    /// Check whether the app/payment backend can pay an endpoint.
-    async fn is_endpoint_payable(
+    /// Rank and evaluate candidate endpoints for a payment.
+    async fn select_payment_endpoint(
         &self,
-        endpoint: &PaymentEndpointCandidate,
-    ) -> Result<EndpointCompatibility>;
+        request: &PaymentEndpointSelectionRequest,
+    ) -> Result<PaymentEndpointSelection>;
 
     /// Build a payment target from a compatible endpoint.
     async fn build_payment_target(
@@ -120,10 +120,61 @@ pub struct ReceivingDetail {
 pub struct PaymentEndpointCandidate {
     /// Counterparty that published the endpoint.
     pub counterparty: PubkyPublicKey,
+    /// Where the endpoint was discovered.
+    pub source: PaymentEndpointSource,
     /// Paykit endpoint identifier.
     pub identifier: String,
     /// Serialized endpoint payload.
     pub payload: String,
+}
+
+/// Source of a discovered Payment Endpoint candidate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PaymentEndpointSource {
+    /// Endpoint came from a counterparty-specific Private Payment List.
+    PrivatePaymentList,
+    /// Endpoint came from a public Payment Endpoint.
+    PublicPaymentEndpoint,
+}
+
+/// Optional amount context for endpoint selection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentAmountContext {
+    /// Decimal amount text.
+    pub value: String,
+    /// Asset code or unit.
+    pub asset: String,
+}
+
+/// Request passed to the payment adapter for endpoint selection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentEndpointSelectionRequest {
+    /// Counterparty being paid.
+    pub counterparty: PubkyPublicKey,
+    /// Optional amount context.
+    pub amount: Option<PaymentAmountContext>,
+    /// Candidate endpoints in SDK preference order.
+    pub candidates: Vec<PaymentEndpointCandidate>,
+}
+
+/// Adapter evaluation for one candidate endpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentEndpointEvaluation {
+    /// Candidate being evaluated.
+    pub candidate: PaymentEndpointCandidate,
+    /// Compatibility status.
+    pub compatibility: EndpointCompatibility,
+    /// Adapter priority, where lower values are preferred.
+    pub priority: Option<u32>,
+}
+
+/// Adapter endpoint selection result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentEndpointSelection {
+    /// Selected payable candidate, when one is available.
+    pub selected: Option<PaymentEndpointCandidate>,
+    /// Evaluations for candidates considered by the adapter.
+    pub evaluations: Vec<PaymentEndpointEvaluation>,
 }
 
 /// Compatibility result for one endpoint.
@@ -135,6 +186,8 @@ pub enum EndpointCompatibility {
     Unsupported { reason: Option<String> },
     /// The endpoint is recognized but stale/unusable.
     Stale { reason: Option<String> },
+    /// The endpoint cannot be used for the requested amount.
+    AmountIncompatible { reason: Option<String> },
 }
 
 /// Payment target produced by an adapter.

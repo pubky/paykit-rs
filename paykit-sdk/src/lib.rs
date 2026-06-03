@@ -22,14 +22,20 @@ pub mod telemetry;
 #[doc(inline)]
 pub use adapters::{
     ContactRecord, EndpointCompatibility, EndpointReservationAdapter, PaymentAdapter,
-    PaymentEndpointCandidate, PaymentExecutionResult, PaymentRequestExecution, PaymentTarget,
-    ProfileRecord, ProfileUpdate, PubkySessionProvider, ReceivingDetail, ReceivingDetailScope,
-    ReservedReceivingDetail, SchedulerAdapter,
+    PaymentAmountContext, PaymentEndpointCandidate, PaymentEndpointEvaluation,
+    PaymentEndpointSelection, PaymentEndpointSelectionRequest, PaymentEndpointSource,
+    PaymentExecutionResult, PaymentRequestExecution, PaymentTarget, ProfileRecord, ProfileUpdate,
+    PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, ReservedReceivingDetail,
+    SchedulerAdapter,
 };
 #[doc(inline)]
 pub use config::{
     EndpointManagementScope, PaykitSdkConfig, PrivateSharingPolicy, PublicFallbackPolicy,
     UnknownMessageRetentionPolicy,
+};
+#[doc(inline)]
+pub use contacts::{
+    ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
 };
 #[doc(inline)]
 pub use endpoints::{

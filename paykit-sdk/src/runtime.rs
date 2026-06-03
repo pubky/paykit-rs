@@ -2,7 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{EndpointManagementScope, PaykitSdkConfig},
+    config::{EndpointManagementScope, PaykitSdkConfig, PublicFallbackPolicy},
+    contacts::{
+        ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
+    },
     endpoints::{
         failed_record, normalize_receiving_details, published_record, removed_record,
         EndpointPublicationStatus, EndpointSyncChange, EndpointSyncReport,
@@ -12,8 +15,9 @@ use crate::{
     private_lists::current_private_payment_list as load_current_private_payment_list,
     private_stream::{persist_private_stream_batch, PrivateStreamIntakeReport},
     storage::{EncryptedLinkStateRecord, StorageAdapter},
-    PaykitSdkError, PaymentAdapter, PubkyPublicKey, PubkySessionProvider, ReceivingDetailScope,
-    Result,
+    PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointEvaluation,
+    PaymentEndpointSelection, PaymentEndpointSelectionRequest, PaymentEndpointSource,
+    PrivatePaymentListView, PubkyPublicKey, PubkySessionProvider, ReceivingDetailScope, Result,
 };
 
 /// Clock abstraction used by SDK workflows and tests.
@@ -136,6 +140,68 @@ where
         counterparty: &PubkyPublicKey,
     ) -> Result<Option<crate::PrivatePaymentListView>> {
         load_current_private_payment_list(&self.storage, counterparty).await
+    }
+
+    /// Resolve a payable endpoint for one counterparty.
+    pub async fn resolve_contact_payment(
+        &self,
+        request: ContactPaymentResolutionRequest,
+    ) -> Result<ContactPaymentResolution> {
+        let mut evaluations = Vec::new();
+        let private_view =
+            load_current_private_payment_list(&self.storage, &request.counterparty).await?;
+        let private_candidates = private_candidates(&request.counterparty, private_view.as_ref());
+
+        if !private_candidates.is_empty() {
+            let selection = self
+                .payment
+                .select_payment_endpoint(&PaymentEndpointSelectionRequest {
+                    counterparty: request.counterparty.clone(),
+                    amount: request.amount.clone(),
+                    candidates: private_candidates.clone(),
+                })
+                .await?;
+            let selected = selected_from_batch(&selection, &private_candidates)?;
+            evaluations.extend(selection.evaluations);
+            if let Some(selected) = selected {
+                return Ok(payable_resolution(selected, evaluations, false));
+            }
+        }
+
+        if self.config.public_fallback == PublicFallbackPolicy::Disabled {
+            return Ok(unresolved_resolution(
+                !private_candidates.is_empty(),
+                evaluations,
+                false,
+            ));
+        }
+
+        let public_candidates = self
+            .public_payment_candidates(&request.counterparty)
+            .await?;
+        if public_candidates.is_empty() {
+            return Ok(unresolved_resolution(
+                !private_candidates.is_empty(),
+                evaluations,
+                false,
+            ));
+        }
+
+        let selection = self
+            .payment
+            .select_payment_endpoint(&PaymentEndpointSelectionRequest {
+                counterparty: request.counterparty,
+                amount: request.amount,
+                candidates: public_candidates.clone(),
+            })
+            .await?;
+        let selected = selected_from_batch(&selection, &public_candidates)?;
+        evaluations.extend(selection.evaluations);
+        if let Some(selected) = selected {
+            return Ok(payable_resolution(selected, evaluations, true));
+        }
+
+        Ok(unresolved_resolution(true, evaluations, true))
     }
 
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
@@ -362,6 +428,104 @@ where
         )
         .await
     }
+
+    async fn public_payment_candidates(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        let session_access =
+            self.pubky
+                .load_session_access()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky session available for public Payment Endpoint lookup".into(),
+                    source: None,
+                })?;
+        let payment_list = paykit_lib::get_payment_list(
+            &session_access.outbox_client.public_storage(),
+            &counterparty.to_public_key()?,
+        )
+        .await?;
+        let mut endpoints = payment_list
+            .payment_endpoints
+            .into_iter()
+            .map(|(identifier, payload)| PaymentEndpointCandidate {
+                counterparty: counterparty.clone(),
+                source: PaymentEndpointSource::PublicPaymentEndpoint,
+                identifier: identifier.as_str().to_owned(),
+                payload: payload.into_inner(),
+            })
+            .collect::<Vec<_>>();
+        endpoints.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+        Ok(endpoints)
+    }
+}
+
+fn private_candidates(
+    counterparty: &PubkyPublicKey,
+    view: Option<&PrivatePaymentListView>,
+) -> Vec<PaymentEndpointCandidate> {
+    let Some(view) = view else {
+        return Vec::new();
+    };
+    let mut candidates = view
+        .payment_endpoints
+        .iter()
+        .map(|(identifier, payload)| PaymentEndpointCandidate {
+            counterparty: counterparty.clone(),
+            source: PaymentEndpointSource::PrivatePaymentList,
+            identifier: identifier.clone(),
+            payload: payload.clone(),
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+    candidates
+}
+
+fn payable_resolution(
+    selected: PaymentEndpointCandidate,
+    evaluations: Vec<PaymentEndpointEvaluation>,
+    used_public_fallback: bool,
+) -> ContactPaymentResolution {
+    ContactPaymentResolution {
+        status: ContactPaymentResolutionStatus::Payable,
+        selected_endpoint: Some(selected),
+        evaluations,
+        used_public_fallback,
+    }
+}
+
+fn unresolved_resolution(
+    had_candidates: bool,
+    evaluations: Vec<PaymentEndpointEvaluation>,
+    used_public_fallback: bool,
+) -> ContactPaymentResolution {
+    ContactPaymentResolution {
+        status: if had_candidates {
+            ContactPaymentResolutionStatus::UnsupportedEndpoint
+        } else {
+            ContactPaymentResolutionStatus::NoEndpoint
+        },
+        selected_endpoint: None,
+        evaluations,
+        used_public_fallback,
+    }
+}
+
+fn selected_from_batch(
+    selection: &PaymentEndpointSelection,
+    candidates: &[PaymentEndpointCandidate],
+) -> Result<Option<PaymentEndpointCandidate>> {
+    let Some(selected) = selection.selected.as_ref() else {
+        return Ok(None);
+    };
+    if candidates.contains(selected) {
+        Ok(Some(selected.clone()))
+    } else {
+        Err(PaykitSdkError::Protocol(
+            "PaymentAdapter selected an endpoint that was not in the candidate batch".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -372,12 +536,16 @@ mod tests {
     use super::*;
     use crate::{
         adapters::{
-            EndpointCompatibility, PaymentEndpointCandidate, PaymentExecutionResult,
-            PaymentRequestExecution, PaymentTarget, ReceivingDetail, ReceivingDetailScope,
+            EndpointCompatibility, PaymentEndpointCandidate, PaymentEndpointEvaluation,
+            PaymentEndpointSelection, PaymentEndpointSelectionRequest, PaymentEndpointSource,
+            PaymentExecutionResult, PaymentRequestExecution, PaymentTarget, ReceivingDetail,
+            ReceivingDetailScope,
         },
+        private_stream::persist_private_stream_batch,
         storage::InMemoryStorage,
         PubkySessionAccess,
     };
+    use paykit_lib::PrivateApplicationMessage;
 
     #[derive(Clone)]
     struct FixedClock;
@@ -414,11 +582,23 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn is_endpoint_payable(
+        async fn select_payment_endpoint(
             &self,
-            _endpoint: &PaymentEndpointCandidate,
-        ) -> Result<EndpointCompatibility> {
-            Ok(EndpointCompatibility::Unsupported { reason: None })
+            request: &PaymentEndpointSelectionRequest,
+        ) -> Result<PaymentEndpointSelection> {
+            Ok(PaymentEndpointSelection {
+                selected: request.candidates.first().cloned(),
+                evaluations: request
+                    .candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, candidate)| PaymentEndpointEvaluation {
+                        candidate: candidate.clone(),
+                        compatibility: EndpointCompatibility::Payable,
+                        priority: Some(index as u32),
+                    })
+                    .collect(),
+            })
         }
 
         async fn build_payment_target(
@@ -496,5 +676,56 @@ mod tests {
         let result = sdk.sync_public_endpoints().await;
 
         assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    }
+
+    fn private_list_message(payload: &str) -> PrivateApplicationMessage {
+        PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some("paykit.private_payment_list".into()),
+            raw_json: format!(
+                r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"btc-lightning-bolt11":"{payload}"}}}}"#
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_contact_payment_uses_private_list() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![private_list_message("ln-private")],
+            None,
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        let pubky = TestPubkySessionProvider { session: None };
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            pubky,
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let resolution = sdk
+            .resolve_contact_payment(ContactPaymentResolutionRequest {
+                counterparty,
+                amount: Some(crate::PaymentAmountContext {
+                    value: "10.00".into(),
+                    asset: "usd".into(),
+                }),
+            })
+            .await
+            .unwrap();
+
+        let selected = resolution.selected_endpoint.unwrap();
+        assert_eq!(resolution.status, ContactPaymentResolutionStatus::Payable);
+        assert_eq!(selected.source, PaymentEndpointSource::PrivatePaymentList);
+        assert_eq!(selected.identifier, "btc-lightning-bolt11");
+        assert_eq!(selected.payload, "ln-private");
+        assert!(!resolution.used_public_fallback);
     }
 }

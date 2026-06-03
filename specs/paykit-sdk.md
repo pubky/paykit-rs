@@ -291,10 +291,10 @@ pub trait PaymentAdapter {
         scope: ReceivingDetailScope,
     ) -> Result<Vec<ReceivingDetail>>;
 
-    async fn is_endpoint_payable(
+    async fn select_payment_endpoint(
         &self,
-        endpoint: &PaymentEndpointCandidate,
-    ) -> Result<EndpointCompatibility>;
+        request: &PaymentEndpointSelectionRequest,
+    ) -> Result<PaymentEndpointSelection>;
 
     async fn build_payment_target(
         &self,
@@ -307,6 +307,10 @@ pub trait PaymentAdapter {
     ) -> Result<PaymentExecutionResult>;
 }
 ```
+
+Endpoint selection requests include all discovered candidates, each candidate's
+source, and optional amount context. The adapter returns evaluations and may
+select one candidate from that batch.
 
 The adapter owns payment-method-specific details:
 
@@ -685,9 +689,10 @@ Flow:
 1. Load contact/profile display metadata if configured.
 2. Check Linked Peer and cached private Payment List.
 3. If private state is stale and recovery is possible, run bounded recovery.
-4. If private endpoints are available, ask `PaymentAdapter` for compatibility.
+4. If private endpoints are available, pass them to `PaymentAdapter` as one
+   batch with amount context when known.
 5. If no private endpoint is payable and public fallback is allowed, fetch
-   public Payment List and check compatibility.
+   public Payment List and pass those candidates as a second batch.
 6. Return a structured result:
    - `Payable`
    - `NoEndpoint`
