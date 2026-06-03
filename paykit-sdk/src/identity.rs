@@ -1,23 +1,37 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use paykit_lib::PublicKey;
 use serde::{Deserialize, Serialize};
 
 /// Pubky public key string used by SDK records.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct PubkyPublicKey(String);
 
 impl PubkyPublicKey {
-    /// Create a public key wrapper from a non-empty string.
+    /// Create a public key wrapper from canonical z-base32 text.
     pub fn new(value: impl Into<String>) -> crate::Result<Self> {
         let value = value.into();
-        if value.is_empty() {
-            return Err(crate::PaykitSdkError::Identity {
-                context: "Pubky public key must not be empty".into(),
-                source: None,
-            });
-        }
-        Ok(Self(value))
+        let public_key =
+            PublicKey::try_from_z32(&value).map_err(|err| crate::PaykitSdkError::Identity {
+                context: "invalid Pubky public key".into(),
+                source: Some(err.into()),
+            })?;
+        Ok(Self::from_public_key(&public_key))
+    }
+
+    /// Create a wrapper from a parsed Pubky public key.
+    pub fn from_public_key(public_key: &PublicKey) -> Self {
+        Self(public_key.z32())
+    }
+
+    /// Parse this wrapper back into a Pubky public key.
+    pub fn to_public_key(&self) -> crate::Result<PublicKey> {
+        PublicKey::try_from_z32(&self.0).map_err(|err| crate::PaykitSdkError::Identity {
+            context: "invalid Pubky public key".into(),
+            source: Some(err.into()),
+        })
     }
 
     /// Access the inner public key string.
@@ -35,6 +49,20 @@ impl std::fmt::Display for PubkyPublicKey {
 impl AsRef<str> for PubkyPublicKey {
     fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for PubkyPublicKey {
+    type Error = crate::PaykitSdkError;
+
+    fn try_from(value: String) -> crate::Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<PubkyPublicKey> for String {
+    fn from(value: PubkyPublicKey) -> Self {
+        value.0
     }
 }
 
@@ -96,7 +124,9 @@ pub struct PubkySessionAccess {
 impl PubkySessionAccess {
     /// Return the local Pubky public key.
     pub fn public_key(&self) -> crate::Result<PubkyPublicKey> {
-        PubkyPublicKey::new(self.session.info().public_key().to_string())
+        Ok(PubkyPublicKey::from_public_key(
+            self.session.info().public_key(),
+        ))
     }
 
     /// Return the Paykit capability implied by this access.
@@ -169,5 +199,28 @@ mod tests {
         let key = PubkyLocalSecretKey::new([7; 32]);
 
         assert_eq!(format!("{key:?}"), "PubkyLocalSecretKey(<redacted>)");
+    }
+
+    #[test]
+    fn test_pubky_public_key_validates_and_round_trips_z32() {
+        let public_key = pubky::Keypair::random().public_key();
+        let wrapped = PubkyPublicKey::new(public_key.z32()).unwrap();
+
+        assert_eq!(wrapped.to_public_key().unwrap(), public_key);
+        assert_eq!(wrapped.as_str(), public_key.z32());
+    }
+
+    #[test]
+    fn test_pubky_public_key_rejects_invalid_text() {
+        let result = PubkyPublicKey::new("pk-peer");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pubky_public_key_deserialization_validates() {
+        let result = serde_json::from_str::<PubkyPublicKey>(r#""pk-peer""#);
+
+        assert!(result.is_err());
     }
 }

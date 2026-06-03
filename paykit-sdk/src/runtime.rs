@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::PaykitSdkConfig,
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
-    storage::StorageAdapter,
-    PaymentAdapter, PubkySessionProvider, Result,
+    linked_peers::mark_recovery_required,
+    private_stream::{persist_private_stream_batch, PrivateStreamIntakeReport},
+    storage::{EncryptedLinkStateRecord, StorageAdapter},
+    PaykitSdkError, PaymentAdapter, PubkyPublicKey, PubkySessionProvider, Result,
 };
 
 /// Clock abstraction used by SDK workflows and tests.
@@ -121,6 +123,85 @@ where
     pub fn pubky_session_provider(&self) -> &K {
         &self.pubky
     }
+
+    /// Receive and durably persist currently available private messages.
+    ///
+    /// This requires a stored Encrypted Link snapshot for the counterparty.
+    /// Handshake establishment and recovery are separate workflows.
+    pub async fn receive_private_messages(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<PrivateStreamIntakeReport> {
+        let session_access =
+            self.pubky
+                .load_session_access()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky session available".into(),
+                    source: None,
+                })?;
+        let secret_key = *session_access
+            .local_secret_key
+            .as_ref()
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
+                source: None,
+            })?
+            .as_bytes();
+        let remote_public_key = counterparty.to_public_key()?;
+
+        let stored_link_state = self
+            .storage
+            .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
+            .await?
+            .ok_or_else(|| {
+                PaykitSdkError::RecoveryRequired(format!(
+                    "no Encrypted Link state for counterparty {counterparty}"
+                ))
+            })?;
+        let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
+            let now = self.clock.now();
+            mark_recovery_required(&self.storage, counterparty.clone(), now).await?;
+            return Err(PaykitSdkError::RecoveryRequired(format!(
+                "no active Encrypted Link snapshot for counterparty {counterparty}"
+            )));
+        };
+        let snapshot = match paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                let now = self.clock.now();
+                mark_recovery_required(&self.storage, counterparty.clone(), now).await?;
+                return Err(err.into());
+            }
+        };
+
+        let mut link = paykit_lib::restore_encrypted_link(
+            session_access.session,
+            secret_key,
+            &remote_public_key,
+            session_access.outbox_client,
+            snapshot,
+        )
+        .await?;
+        let messages = link.receive_private_application_messages().await?;
+        let now = self.clock.now();
+        let next_link_state = EncryptedLinkStateRecord {
+            counterparty: counterparty.clone(),
+            link_snapshot: Some(link.serialize()),
+            handshake_snapshot: stored_link_state.handshake_snapshot,
+            generation: stored_link_state.generation.saturating_add(1),
+            checkpointed_at: now,
+        };
+
+        persist_private_stream_batch(
+            &self.storage,
+            counterparty,
+            messages,
+            Some(next_link_state),
+            now,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +301,23 @@ mod tests {
         assert_eq!(stored.capability, PubkyIdentityCapability::SignedOut);
         assert!(!stored.local_secret_available);
         assert_eq!(stored.initialized_at, FixedClock.now());
+    }
+
+    #[tokio::test]
+    async fn test_receive_private_messages_requires_pubky_session() {
+        let storage = InMemoryStorage::new();
+        let pubky = TestPubkySessionProvider { session: None };
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            pubky,
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+
+        let result = sdk.receive_private_messages(counterparty).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     }
 }

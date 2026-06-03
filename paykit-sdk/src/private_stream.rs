@@ -247,7 +247,7 @@ mod tests {
     use crate::{storage::InMemoryStorage, EncryptedLinkStateRecord, PrivateStreamParseStatus};
 
     fn counterparty() -> PubkyPublicKey {
-        PubkyPublicKey::new("pk-peer").unwrap()
+        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
     }
 
     fn timestamp() -> DateTime<Utc> {

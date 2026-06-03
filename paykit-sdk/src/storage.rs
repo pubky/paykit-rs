@@ -338,7 +338,7 @@ mod tests {
     }
 
     fn counterparty() -> PubkyPublicKey {
-        PubkyPublicKey::new("pk-peer").unwrap()
+        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
     }
 
     #[tokio::test]
