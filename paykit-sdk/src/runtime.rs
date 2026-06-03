@@ -9,6 +9,7 @@ use crate::{
     },
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
     linked_peers::mark_recovery_required,
+    private_lists::current_private_payment_list as load_current_private_payment_list,
     private_stream::{persist_private_stream_batch, PrivateStreamIntakeReport},
     storage::{EncryptedLinkStateRecord, StorageAdapter},
     PaykitSdkError, PaymentAdapter, PubkyPublicKey, PubkySessionProvider, ReceivingDetailScope,
@@ -127,6 +128,14 @@ where
     /// Access the Pubky session provider.
     pub fn pubky_session_provider(&self) -> &K {
         &self.pubky
+    }
+
+    /// Return the latest valid Private Payment List view for a counterparty.
+    pub async fn current_private_payment_list(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Option<crate::PrivatePaymentListView>> {
+        load_current_private_payment_list(&self.storage, counterparty).await
     }
 
     /// Publish current public receiving details and remove stale SDK-managed endpoints.

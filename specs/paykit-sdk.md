@@ -438,7 +438,6 @@ Conflicting reused Event IDs must fail closed for the affected derived state.
 Latest-state view per counterparty:
 
 - latest valid stream item id
-- latest payload hash
 - current Payment Endpoint map
 - stale/recovery status
 - last refresh time

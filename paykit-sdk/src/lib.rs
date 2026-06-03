@@ -49,6 +49,10 @@ pub use linked_peers::{
     save_linked_peer_state, LinkedPeerState,
 };
 #[doc(inline)]
+pub use private_lists::{
+    current_private_payment_list, derive_private_payment_list_view, PrivatePaymentListView,
+};
+#[doc(inline)]
 pub use private_stream::{
     persist_private_stream_batch, EventIdConflict, PrivateStreamIntakeReport,
     PrivateStreamParseStatus,

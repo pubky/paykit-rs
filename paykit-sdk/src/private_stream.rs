@@ -234,7 +234,7 @@ fn update_event_dedupe(
     tx.save_event_dedup_record(record);
 }
 
-fn payload_hash(raw_json: &str) -> String {
+pub(crate) fn payload_hash(raw_json: &str) -> String {
     let digest = Sha256::digest(raw_json.as_bytes());
     format!("sha256:{digest:x}")
 }
