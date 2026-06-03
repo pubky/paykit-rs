@@ -4,7 +4,7 @@ use crate::{PaykitError, PublicKey, Result};
 
 use super::{
     paths::compute_private_payment_paths,
-    private_application_message::{self, PrivateApplicationMessage, PrivateMessageKind},
+    private_application_message::{self, PrivateApplicationMessage},
     EncryptedLinkSnapshot,
 };
 
@@ -165,19 +165,6 @@ impl EncryptedLink {
     pub(crate) async fn send_payment_proof_message(&mut self, plaintext: &[u8]) -> Result<()> {
         self.send_private_application_message(plaintext, "Payment Proof")
             .await
-    }
-
-    pub(crate) async fn receive_receipt_access_messages(
-        &mut self,
-    ) -> Result<(usize, Vec<String>, usize)> {
-        let messages = self.receive_private_application_messages().await?;
-        let received = messages.len();
-        let receipt_messages = messages
-            .into_iter()
-            .filter(|message| message.known_kind() == Some(PrivateMessageKind::ReceiptAccess))
-            .map(|message| message.raw_json)
-            .collect();
-        Ok((received, receipt_messages, 0))
     }
 
     #[cfg(test)]

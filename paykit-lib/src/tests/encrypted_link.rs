@@ -196,11 +196,11 @@ async fn test_handshake_snapshot_deserialize_rejects_garbage() {
 }
 
 #[tokio::test]
-async fn test_handshake_snapshot_deserialize_rejects_legacy_rc3_length() {
+async fn test_handshake_snapshot_deserialize_rejects_wrong_length() {
     let result = EncryptedLinkHandshakeSnapshot::deserialize(&[0u8; 189]);
     assert!(
         matches!(result, Err(PaykitError::InvalidData { .. })),
-        "legacy 189-byte snapshots should fail under the 197-byte format"
+        "snapshots with the wrong serialized length should fail"
     );
 }
 
@@ -458,11 +458,11 @@ async fn test_encrypted_link_snapshot_deserialize_rejects_garbage() {
 }
 
 #[tokio::test]
-async fn test_encrypted_link_snapshot_deserialize_rejects_legacy_rc3_length() {
+async fn test_encrypted_link_snapshot_deserialize_rejects_wrong_length() {
     let result = EncryptedLinkSnapshot::deserialize(&[0u8; 189]);
     assert!(
         matches!(result, Err(PaykitError::InvalidData { .. })),
-        "legacy 189-byte snapshots should fail under the 197-byte format"
+        "snapshots with the wrong serialized length should fail"
     );
 }
 

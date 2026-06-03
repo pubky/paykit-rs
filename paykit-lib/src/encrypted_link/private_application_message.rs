@@ -67,10 +67,10 @@ impl std::fmt::Display for PrivateMessageKind {
     }
 }
 
-/// One private Paykit application message received from an Encrypted Link.
+/// One Private Application Message received from an Encrypted Link.
 ///
-/// This is the low-level receive item for the private message stream. It keeps
-/// the raw JSON so callers can route and persist messages themselves.
+/// This is the low-level receive item for the Private Application Message stream.
+/// It keeps the raw JSON so callers can route and persist messages themselves.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PrivateApplicationMessage {
     /// Private Application Message version from the JSON `version` field, when
@@ -100,7 +100,7 @@ impl PrivateApplicationMessage {
     pub(super) fn from_plaintext(plaintext: String) -> Result<Self> {
         let value: serde_json::Value =
             serde_json::from_str(&plaintext).map_err(|err| PaykitError::InvalidData {
-                context: format!("failed to parse private message JSON: {err}"),
+                context: format!("failed to parse Private Application Message JSON: {err}"),
                 source: Some(err.into()),
             })?;
         let version = value
@@ -140,7 +140,7 @@ fn decode_private_application_message(
     // payload content.
     let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     let plaintext = std::str::from_utf8(&raw[..end]).map_err(|err| PaykitError::InvalidData {
-        context: format!("private message plaintext is not valid UTF-8: {err}"),
+        context: format!("Private Application Message plaintext is not valid UTF-8: {err}"),
         source: Some(err.into()),
     })?;
 
@@ -159,7 +159,7 @@ pub(super) async fn receive_private_application_messages(
             .receive_message()
             .await
             .map_err(|err| PaykitError::Transport {
-                context: format!("failed to receive private messages: {err:?}"),
+                context: format!("failed to receive Private Application Messages: {err:?}"),
                 source: anyhow::anyhow!("pubky-noise receive_message failed: {err:?}"),
             })?;
 
@@ -228,7 +228,7 @@ pub(super) async fn send_private_application_message(
     for attempt in 1..=max_attempts {
         match encryptor.send_message(plaintext).await {
             Ok(()) => {
-                debug!(context, "private message sent successfully");
+                debug!(context, "Private Application Message sent successfully");
                 return Ok(());
             }
             Err(err) if is_retryable_private_send_error(&err) => {
@@ -297,8 +297,8 @@ mod tests {
     #[test]
     fn test_private_application_message_size_validation_rejects_oversized_payload() {
         let payload = vec![b'x'; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN + 1];
-        let err = validate_private_application_message_size(&payload, "Private Payment List")
-            .unwrap_err();
+        let err =
+            validate_private_application_message_size(&payload, "Payment Request").unwrap_err();
         assert!(
             matches!(err, PaykitError::Validation(ref msg) if msg.contains("exceeds")),
             "expected oversize validation error, got: {err}"
@@ -307,13 +307,13 @@ mod tests {
 
     #[test]
     fn test_private_application_message_keeps_malformed_header() {
-        let raw = r#"{"version":"bad","kind":"paykit.private_payment_list"}"#;
+        let raw = r#"{"version":"bad","kind":"paykit.payment_request","event_id":"not-a-uuid"}"#;
         let message = PrivateApplicationMessage::from_plaintext(raw.to_string()).unwrap();
 
         assert_eq!(message.version, None);
         assert_eq!(
             message.known_kind(),
-            Some(PrivateMessageKind::PrivatePaymentList)
+            Some(PrivateMessageKind::PaymentRequest)
         );
         assert_eq!(message.raw_json, raw);
     }
@@ -334,7 +334,7 @@ mod tests {
         let raw = r#"{"version":1,"kind":"paykit.receipt_access"}"#;
         let message = PrivateApplicationMessage {
             version: Some(1),
-            kind: Some("paykit.private_payment_list".to_string()),
+            kind: Some("paykit.payment_request".to_string()),
             raw_json: raw.to_string(),
         };
 
