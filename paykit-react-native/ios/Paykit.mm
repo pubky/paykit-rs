@@ -58,9 +58,6 @@ RCT_EXTERN_METHOD(defaultMaxSendRetries:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(defaultMaxRecoveryAttempts:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(generatePaymentReference:(RCTPromiseResolveBlock)resolve
-                  withRejecter:(RCTPromiseRejectBlock)reject)
-
 RCT_EXTERN_METHOD(initiateEncryptedLink:(NSString *)secretKeyHex
                   receiverPublicKey:(NSString *)receiverPublicKey
                   withResolver:(RCTPromiseResolveBlock)resolve
@@ -85,25 +82,80 @@ RCT_EXTERN_METHOD(setEncryptedLinkMaxSendRetries:(NSString *)linkId
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(setPrivatePaymentEnvelope:(NSString *)linkId
+RCT_EXTERN_METHOD(setPrivatePaymentList:(NSString *)linkId
                   payloadJson:(NSString *)payloadJson
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(getPrivatePaymentEnvelope:(NSString *)linkId
+RCT_EXTERN_METHOD(receivePrivateApplicationMessages:(NSString *)linkId
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(issueReceipt:(NSString *)linkId
+RCT_EXTERN_METHOD(parsePrivatePaymentListJson:(NSString *)json
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(parsePaymentRequestEventMessage:(NSString *)messageJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(serializePaymentRequestEvent:(NSString *)eventJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(validatePaymentProofForRequest:(NSString *)proofJson
+                  requestJson:(NSString *)requestJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(sendPaymentRequest:(NSString *)linkId
+                  eventJson:(NSString *)eventJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(sendPaymentRequestAcceptance:(NSString *)linkId
+                  eventJson:(NSString *)eventJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(sendPaymentRequestRejection:(NSString *)linkId
+                  eventJson:(NSString *)eventJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(sendPaymentRequestCancellation:(NSString *)linkId
+                  eventJson:(NSString *)eventJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(sendPaymentProof:(NSString *)linkId
+                  eventJson:(NSString *)eventJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(prepareReceipt:(NSString *)linkId
                   draftJson:(NSString *)draftJson
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(getReceiptAccess:(NSString *)linkId
+RCT_EXTERN_METHOD(storePreparedReceipt:(NSString *)preparedJson
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(receiptLocation:(NSString *)reference
+RCT_EXTERN_METHOD(sendReceiptAccess:(NSString *)linkId
+                  accessJson:(NSString *)accessJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(parseReceiptAccessEventMessage:(NSString *)messageJson
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(parseReceiptAccessJson:(NSString *)json
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(receiptLocation:(NSString *)receiptId
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 

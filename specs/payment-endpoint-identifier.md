@@ -11,8 +11,8 @@
 
 This document specifies a naming convention for *Payment Endpoint Identifiers*
 in Paykit: short, structured strings that name an unambiguous way for a payee
-to receive value. It also defines the shape of the JSON payload that
-accompanies each identifier.
+to receive value. It also describes the recommended interoperable payload
+convention for the receiving details that accompany each identifier.
 
 The intent is to give implementers and downstream bindings (Swift, Kotlin,
 React Native) a single, consistent vocabulary to exchange, so that a payer
@@ -43,24 +43,26 @@ only when, they appear in all capitals.
 
 ## 3. Terminology
 
-- **Payment Endpoint Identifier** (or *identifier*): the three-segment string
-  that names a Payment Endpoint type, e.g. `btc-bitcoin-p2tr`. In the
+- **Payment Endpoint Identifier** (or *identifier*): the string that names a
+  Payment Endpoint type. Identifiers that follow this recommended convention
+  use three segments, e.g. `btc-bitcoin-p2tr`. In the
   Paykit library this is represented by the `PaymentEndpointIdentifier` type.
-- **Payment Endpoint Payload**: the JSON object stored alongside the
+- **Payment Endpoint Payload**: the UTF-8 payload stored alongside the
   identifier, describing the specific payee handle for a Payment Endpoint of
-  that type.
+  that type. Paykit stores and transports this payload opaquely.
 - **Asset**, **Rail**, **Endpoint Format**: the three positional segments of a
-  Payment Endpoint Identifier, defined in Section 5.
+  Payment Endpoint Identifier that follows this recommended convention, defined
+  in Section 5.
 - **Segment**: one positional component of an identifier, delimited by `-`.
 
 Paykit's higher-level terms (*Payment Method*, *Payment Endpoint*,
-*Payment List*) are defined in the top-level [README](../README.md);
+*Payment List*) are defined in the top-level [THESAURUS](../THESAURUS.md);
 this specification does not redefine them.
 
 ## 4. Grammar
 
-An identifier is a three-segment string of the form
-`{asset}-{rail}-{endpoint_format}`.
+A Payment Endpoint Identifier following this recommended convention is a
+three-segment string of the form `{asset}-{rail}-{endpoint_format}`.
 
 ```abnf
 identifier      = asset "-" rail "-" endpoint-format
@@ -147,19 +149,25 @@ gbp-fps-sortcode
 
 ## 7. Payload
 
-Each identifier is paired with a *payload* object that carries the actual
-receiving details. A payload MUST be a JSON object; bare strings, numbers, and
-arrays are not valid payloads.
+Each identifier is paired with a *Payment Endpoint Payload* that carries the
+actual receiving details. At the Paykit layer, this payload is opaque UTF-8
+text. Paykit stores, publishes, and transports it without interpreting its
+internal structure.
 
-### 7.1 Required fields
+For interoperability between clients that share this identifier convention, the
+recommended payload convention is a JSON object encoded as UTF-8. Endpoint
+Format-specific code MAY require that convention for a given identifier, but
+the low-level Paykit library does not reject non-JSON payload strings.
 
-- `value` *(string, required)*: the primary handle on the rail. This is the
+### 7.1 Recommended JSON fields
+
+- `value` *(string, recommended)*: the primary handle on the rail. This is the
   address, invoice, offer, IBAN, tag, or equivalent identifier that a payer
   needs in order to initiate a transfer.
 
 ### 7.2 Recommended field names
 
-Beyond `value`, a payload MAY contain any fields the Endpoint Format
+Beyond `value`, a JSON payload MAY contain any fields the Endpoint Format
 requires. Additional fields MAY be of any JSON type (string, number,
 boolean, array, or object), chosen to fit the data being represented.
 Unknown fields MUST be ignored by receivers that do not recognise them.
@@ -176,7 +184,8 @@ apply, to keep naming consistent across Payment Endpoint Payloads:
   `beneficiary_name`, `memo`): named descriptively, in lowercase with
   underscores separating words.
 
-Authors defining a new Endpoint Format MAY introduce further fields as needed.
+Authors defining a new Endpoint Format MAY introduce further fields or may use a
+non-JSON payload shape when that is the native representation for the rail.
 Consistency with existing patterns is encouraged but not enforced.
 
 ### 7.3 What does not belong in the payload
@@ -232,6 +241,10 @@ path-traversal rejection) but does not enforce the three-segment shape
 defined here. Callers that want to verify conformance to this
 specification SHOULD apply an additional check on top of `PaymentEndpointIdentifier::new`.
 
+Payment Endpoint Payloads are stored as [`PaymentEndpointPayload`](../paykit-lib/src/payment_endpoint.rs)
+UTF-8 strings. The reference implementation does not parse or validate payloads
+as JSON at the Paykit layer.
+
 The reserved identifier `private` is used internally by Paykit for private
 Paykit storage paths; it is rejected at `PaymentEndpointIdentifier`
 construction and therefore cannot appear as a conforming identifier under this
@@ -250,7 +263,7 @@ specification either.
   names, recovery-style invoices). Public Payment Lists are visible to any
   party that knows the payee's public key; authors MUST consider this when
   deciding which Payment Endpoints to publish publicly versus exchange privately. See
-  the Private Payment Envelope sections of the [README](../README.md) and
+  the Private Payment List sections of the [README](../README.md) and
   [paykit-lib README](../paykit-lib/README.md) for the current Encrypted Link
   flow.
 - Byte-for-byte comparison (Section 4, rule 4) is a security property as

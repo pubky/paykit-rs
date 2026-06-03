@@ -100,25 +100,24 @@ async fn test_handshake_restore_and_complete() {
 
     let mut payment_endpoints = HashMap::new();
     payment_endpoints.insert(
-        PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap(),
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         PaymentEndpointPayload::new("lnrestored..."),
     );
-    set_private_payment_envelope(
+    set_private_payment_list(
         &mut initiator_link,
-        &private_payment_envelope(&payment_endpoints),
+        &private_payment_list(&payment_endpoints),
     )
     .await
     .unwrap();
 
-    let received = get_private_payment_envelope(&mut responder_link)
+    let received = receive_latest_private_payment_list_for_test(&mut responder_link)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(received.payment_endpoints.len(), 1);
     assert_eq!(
         received
             .payment_endpoints
-            .get(&PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap()),
+            .get(&PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()),
         Some(&PaymentEndpointPayload::new("lnrestored..."))
     );
 
@@ -197,11 +196,11 @@ async fn test_handshake_snapshot_deserialize_rejects_garbage() {
 }
 
 #[tokio::test]
-async fn test_handshake_snapshot_deserialize_rejects_legacy_rc3_length() {
+async fn test_handshake_snapshot_deserialize_rejects_wrong_length() {
     let result = EncryptedLinkHandshakeSnapshot::deserialize(&[0u8; 189]);
     assert!(
         matches!(result, Err(PaykitError::InvalidData { .. })),
-        "legacy 189-byte snapshots should fail under the 197-byte format"
+        "snapshots with the wrong serialized length should fail"
     );
 }
 
@@ -236,12 +235,12 @@ async fn test_encrypted_link_snapshot_serialize_roundtrip() {
     // Send a message to advance nonces beyond zero.
     let mut payment_endpoints = HashMap::new();
     payment_endpoints.insert(
-        PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap(),
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         PaymentEndpointPayload::new("ln..."),
     );
-    set_private_payment_envelope(
+    set_private_payment_list(
         &mut setup.sender_link,
-        &private_payment_envelope(&payment_endpoints),
+        &private_payment_list(&payment_endpoints),
     )
     .await
     .unwrap();
@@ -277,20 +276,19 @@ async fn test_encrypted_link_restore_and_continue() {
     // Send a message before snapshotting.
     let mut payment_endpoints_v1 = HashMap::new();
     payment_endpoints_v1.insert(
-        PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap(),
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         PaymentEndpointPayload::new("lnv1..."),
     );
-    set_private_payment_envelope(
+    set_private_payment_list(
         &mut setup.sender_link,
-        &private_payment_envelope(&payment_endpoints_v1),
+        &private_payment_list(&payment_endpoints_v1),
     )
     .await
     .unwrap();
 
     // Consume the message on the receiver side.
-    let received_v1 = get_private_payment_envelope(&mut setup.receiver_link)
+    let received_v1 = receive_latest_private_payment_list_for_test(&mut setup.receiver_link)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(received_v1.payment_endpoints.len(), 1);
 
@@ -322,32 +320,88 @@ async fn test_encrypted_link_restore_and_continue() {
     // Send a new message from the restored sender.
     let mut payment_endpoints_v2 = HashMap::new();
     payment_endpoints_v2.insert(
-        PaymentEndpointIdentifier::new("bitcoin-p2tr").unwrap(),
+        PaymentEndpointIdentifier::new("btc-bitcoin-p2tr").unwrap(),
         PaymentEndpointPayload::new("bc1pv2..."),
     );
-    set_private_payment_envelope(
+    set_private_payment_list(
         &mut restored_sender,
-        &private_payment_envelope(&payment_endpoints_v2),
+        &private_payment_list(&payment_endpoints_v2),
     )
     .await
     .unwrap();
 
     // Receive on the restored receiver.
-    let received_v2 = get_private_payment_envelope(&mut restored_receiver)
+    let received_v2 = receive_latest_private_payment_list_for_test(&mut restored_receiver)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(received_v2.payment_endpoints.len(), 1);
     assert_eq!(
         received_v2
             .payment_endpoints
-            .get(&PaymentEndpointIdentifier::new("bitcoin-p2tr").unwrap()),
+            .get(&PaymentEndpointIdentifier::new("btc-bitcoin-p2tr").unwrap()),
         Some(&PaymentEndpointPayload::new("bc1pv2...")),
     );
 
     // Clean up.
     close_encrypted_link(restored_sender).await.unwrap();
     close_encrypted_link(restored_receiver).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_receive_private_application_messages_returns_full_stream() {
+    let mut setup = PrivateTestSetup::new().await;
+
+    let mut payment_endpoints = HashMap::new();
+    payment_endpoints.insert(
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+        PaymentEndpointPayload::new("ln..."),
+    );
+    set_private_payment_list(
+        &mut setup.sender_link,
+        &private_payment_list(&payment_endpoints),
+    )
+    .await
+    .unwrap();
+
+    let unknown_json =
+        r#"{"version":1,"kind":"paykit.test_unknown","payload":{"note":"preserve me"}}"#;
+    let receipt_access_json =
+        r#"{"version":1,"kind":"paykit.receipt_access","payload":"raw-only"}"#;
+
+    send_raw_private_application_message(&mut setup.sender_link, unknown_json).await;
+    send_raw_private_application_message(&mut setup.sender_link, receipt_access_json).await;
+
+    let messages = setup
+        .receiver_link
+        .receive_private_application_messages()
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.kind.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("paykit.private_payment_list"),
+            Some("paykit.test_unknown"),
+            Some("paykit.receipt_access")
+        ]
+    );
+    assert_eq!(messages[1].raw_json, unknown_json);
+    assert_eq!(messages[2].raw_json, receipt_access_json);
+
+    let empty = setup
+        .receiver_link
+        .receive_private_application_messages()
+        .await
+        .unwrap();
+    assert!(empty.is_empty());
+
+    close_encrypted_link(setup.receiver_link).await.unwrap();
+    close_encrypted_link(setup.sender_link).await.unwrap();
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
 }
@@ -404,11 +458,11 @@ async fn test_encrypted_link_snapshot_deserialize_rejects_garbage() {
 }
 
 #[tokio::test]
-async fn test_encrypted_link_snapshot_deserialize_rejects_legacy_rc3_length() {
+async fn test_encrypted_link_snapshot_deserialize_rejects_wrong_length() {
     let result = EncryptedLinkSnapshot::deserialize(&[0u8; 189]);
     assert!(
         matches!(result, Err(PaykitError::InvalidData { .. })),
-        "legacy 189-byte snapshots should fail under the 197-byte format"
+        "snapshots with the wrong serialized length should fail"
     );
 }
 

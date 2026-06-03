@@ -102,6 +102,16 @@ public object NoPointer
 
 
 @kotlinx.serialization.Serializable
+public data class FfiBillingPeriod (
+    val `startsAt`: kotlin.String,
+    val `endsAt`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
 public data class FfiHandshakeProgress (
     val `status`: kotlin.String,
     val `handleId`: kotlin.String
@@ -112,13 +122,9 @@ public data class FfiHandshakeProgress (
 
 
 @kotlinx.serialization.Serializable
-public data class FfiIssuedReceipt (
-    val `reference`: kotlin.String,
-    val `location`: kotlin.String,
-    /**
-     * Sensitive raw Receipt Decryption Key material. Do not log.
-     */
-    val `key`: kotlin.String
+public data class FfiPaymentAmount (
+    val `value`: kotlin.String,
+    val `asset`: kotlin.String
 ) {
     public companion object
 }
@@ -136,8 +142,128 @@ public data class FfiPaymentEndpoint (
 
 
 @kotlinx.serialization.Serializable
-public data class FfiPrivatePaymentEnvelope (
-    val `reference`: kotlin.String,
+public data class FfiPaymentProof (
+    val `eventId`: kotlin.String,
+    val `paymentRequestId`: kotlin.String,
+    val `paymentReference`: kotlin.String,
+    val `billingPeriod`: FfiBillingPeriod?,
+    val `paymentEndpointIdentifier`: kotlin.String,
+    val `proofJson`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiPaymentRequest (
+    val `eventId`: kotlin.String,
+    val `paymentRequestId`: kotlin.String,
+    val `request`: FfiPaymentRequestTerms
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiPaymentRequestAcceptance (
+    val `eventId`: kotlin.String,
+    val `paymentRequestId`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiPaymentRequestCancellation (
+    val `eventId`: kotlin.String,
+    val `paymentRequestId`: kotlin.String,
+    val `reason`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiPaymentRequestEvent (
+    val `eventType`: kotlin.String,
+    val `request`: FfiPaymentRequest?,
+    val `acceptance`: FfiPaymentRequestAcceptance?,
+    val `rejection`: FfiPaymentRequestRejection?,
+    val `cancellation`: FfiPaymentRequestCancellation?,
+    val `proof`: FfiPaymentProof?
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiPaymentRequestEventMessage (
+    val `kind`: kotlin.String,
+    val `eventId`: kotlin.String?,
+    val `paymentRequestId`: kotlin.String?,
+    val `rawJson`: kotlin.String,
+    val `event`: FfiPaymentRequestEvent?,
+    val `validationError`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiPaymentRequestRejection (
+    val `eventId`: kotlin.String,
+    val `paymentRequestId`: kotlin.String,
+    val `reason`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiPaymentRequestTerms (
+    val `amount`: FfiPaymentAmount,
+    val `paymentReference`: kotlin.String,
+    val `proposalExpiresAt`: kotlin.String?,
+    val `recurrence`: FfiRecurrence?,
+    val `acceptedPaymentEndpointIdentifiers`: List<kotlin.String>,
+    val `metadataJson`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiPreparedReceipt (
+    val `receipt`: FfiReceipt,
+    val `encryptedReceipt`: kotlin.String,
+    val `access`: FfiReceiptAccess
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiPrivateApplicationMessage (
+    val `version`: kotlin.UInt?,
+    val `kind`: kotlin.String?,
+    val `rawJson`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiPrivatePaymentList (
     val `paymentEndpoints`: List<FfiPaymentEndpoint>
 ) {
     public companion object
@@ -147,12 +273,14 @@ public data class FfiPrivatePaymentEnvelope (
 
 @kotlinx.serialization.Serializable
 public data class FfiReceipt (
-    val `reference`: kotlin.String,
+    val `receiptId`: kotlin.String,
+    val `paymentReference`: kotlin.String,
+    val `paymentRequestId`: kotlin.String?,
+    val `billingPeriod`: FfiBillingPeriod?,
     val `recipientPublicKey`: kotlin.String,
     val `paymentEndpointIdentifier`: kotlin.String?,
-    val `amount`: kotlin.String?,
-    val `currency`: kotlin.String?,
-    val `metadata`: List<FfiReceiptMetadataField>
+    val `amount`: FfiPaymentAmount?,
+    val `metadataJson`: kotlin.String
 ) {
     public companion object
 }
@@ -161,14 +289,27 @@ public data class FfiReceipt (
 
 @kotlinx.serialization.Serializable
 public data class FfiReceiptAccess (
-    val `version`: kotlin.UInt,
-    val `reference`: kotlin.String,
+    val `eventId`: kotlin.String,
+    val `receiptId`: kotlin.String,
+    val `paymentReference`: kotlin.String,
+    val `paymentRequestId`: kotlin.String?,
+    val `billingPeriod`: FfiBillingPeriod?,
     val `location`: kotlin.String,
-    /**
-     * Sensitive raw Receipt Decryption Key material. Do not log.
-     */
-    val `key`: kotlin.String,
-    val `algorithm`: kotlin.String
+    val `key`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+@kotlinx.serialization.Serializable
+public data class FfiReceiptAccessEventMessage (
+    val `kind`: kotlin.String,
+    val `eventId`: kotlin.String?,
+    val `receiptId`: kotlin.String?,
+    val `rawJson`: kotlin.String,
+    val `access`: FfiReceiptAccess?,
+    val `validationError`: kotlin.String?
 ) {
     public companion object
 }
@@ -177,11 +318,13 @@ public data class FfiReceiptAccess (
 
 @kotlinx.serialization.Serializable
 public data class FfiReceiptDraft (
-    val `reference`: kotlin.String,
+    val `receiptId`: kotlin.String?,
+    val `paymentReference`: kotlin.String,
+    val `paymentRequestId`: kotlin.String?,
+    val `billingPeriod`: FfiBillingPeriod?,
     val `paymentEndpointIdentifier`: kotlin.String?,
-    val `amount`: kotlin.String?,
-    val `currency`: kotlin.String?,
-    val `metadata`: List<FfiReceiptMetadataField>
+    val `amount`: FfiPaymentAmount?,
+    val `metadataJson`: kotlin.String
 ) {
     public companion object
 }
@@ -189,9 +332,12 @@ public data class FfiReceiptDraft (
 
 
 @kotlinx.serialization.Serializable
-public data class FfiReceiptMetadataField (
-    val `key`: kotlin.String,
-    val `value`: kotlin.String
+public data class FfiRecurrence (
+    val `every`: kotlin.UInt,
+    val `unit`: kotlin.String,
+    val `startsAt`: kotlin.String,
+    val `anchor`: kotlin.String,
+    val `endsAt`: kotlin.String?
 ) {
     public companion object
 }

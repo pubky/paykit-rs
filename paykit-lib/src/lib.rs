@@ -3,31 +3,51 @@
 
 mod encrypted_link;
 mod error;
+mod event;
+mod payment_amount;
 mod payment_endpoint;
 mod payment_reference;
-mod private_payment_envelope;
+mod payment_request;
+mod private_payment_list;
 mod pubky_routing;
 mod receipt;
+mod shared_wire;
+mod validation;
 
 #[doc(inline)]
 pub use encrypted_link::{
     accept_encrypted_link, advance_handshake, close_encrypted_link, initiate_encrypted_link,
     restore_encrypted_link, restore_encrypted_link_from_config, restore_encrypted_link_handshake,
     restore_encrypted_link_handshake_from_config, EncryptedLink, EncryptedLinkHandshake,
-    EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot, HandshakeProgress, PrivateMessageKind,
-    DEFAULT_MAX_RECOVERY_ATTEMPTS, DEFAULT_MAX_SEND_RETRIES,
+    EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot, HandshakeProgress,
+    PrivateApplicationMessage, PrivateMessageKind, DEFAULT_MAX_RECOVERY_ATTEMPTS,
+    DEFAULT_MAX_SEND_RETRIES,
 };
 #[doc(inline)]
 pub use error::PaykitError;
+#[doc(inline)]
+pub use event::EventId;
+#[doc(inline)]
+pub use payment_amount::PaymentAmount;
 #[doc(inline)]
 pub use payment_endpoint::{
     get_payment_endpoint, get_payment_list, remove_payment_endpoint, set_payment_endpoint,
     PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList,
 };
 #[doc(inline)]
-pub use payment_reference::PaymentReference;
-pub use private_payment_envelope::{
-    get_private_payment_envelope, set_private_payment_envelope, PrivatePaymentEnvelope,
+pub use payment_reference::{PaymentReference, PAYMENT_REFERENCE_MAX_LEN};
+#[doc(inline)]
+pub use payment_request::{
+    parse_payment_request_event_message, send_payment_proof, send_payment_request,
+    send_payment_request_acceptance, send_payment_request_cancellation,
+    send_payment_request_rejection, serialize_payment_request_event, BillingPeriod, PaymentProof,
+    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
+    PaymentRequestEventMessage, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
+    Recurrence, RecurrenceUnit,
+};
+#[doc(inline)]
+pub use private_payment_list::{
+    parse_private_payment_list_json, set_private_payment_list, PrivatePaymentList,
 };
 #[doc(inline)]
 pub use pubky::PublicKey;
@@ -36,8 +56,9 @@ pub use pubky_noise;
 pub use pubky_routing::{PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX};
 #[doc(inline)]
 pub use receipt::{
-    decrypt_receipt, get_receipt_access, issue_receipt, IssuedReceipt, Receipt, ReceiptAccess,
-    ReceiptDecryptionKey, ReceiptDraft,
+    decrypt_receipt, parse_receipt_access_event_message, parse_receipt_access_json,
+    prepare_receipt, send_receipt_access, store_prepared_receipt, PreparedReceipt, Receipt,
+    ReceiptAccess, ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptDraft, ReceiptId,
 };
 
 /// Common result alias for Paykit operations.

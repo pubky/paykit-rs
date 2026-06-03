@@ -1,190 +1,199 @@
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::{
-    error::map_error, EncryptedLink, PaykitError, PaymentReference, PrivateMessageKind, Result,
-    PAYKIT_PATH_PREFIX,
+    error::map_error, EncryptedLink, PaykitError, PrivateMessageKind, Result,
+    PAYKIT_PRIVATE_PATH_PREFIX,
 };
 
 use super::{
-    wire::{parse_receipt_access_json, serialize_receipt_access_json},
-    IssuedReceipt, Receipt, ReceiptAccess, ReceiptDecryptionKey, ReceiptDraft,
+    wire::serialize_receipt_access_json, PreparedReceipt, Receipt, ReceiptAccess,
+    ReceiptDecryptionKey, ReceiptDraft, ReceiptId,
 };
 
 impl ReceiptAccess {
-    /// Return the canonical homeserver storage location for a Payment Reference.
-    pub fn location_for(reference: &PaymentReference) -> String {
-        format!(
-            "{}private/receipts/{}",
-            PAYKIT_PATH_PREFIX,
-            reference.as_str()
-        )
+    /// Return the canonical Receipt Location path for a Receipt ID.
+    pub fn location_for(receipt_id: &ReceiptId) -> String {
+        format!("{PAYKIT_PRIVATE_PATH_PREFIX}/receipts/{receipt_id}")
     }
 
     /// Validate that this access descriptor points at the canonical location for
-    /// its Payment Reference.
+    /// its Receipt ID.
+    ///
+    /// This public validator is for caller-supplied values and returns
+    /// [`PaykitError::Validation`] on mismatch. Wire parsing maps the same
+    /// mismatch to [`PaykitError::InvalidData`] because incoming private message
+    /// payloads are external data.
     pub fn validate_location(&self) -> Result<()> {
-        let expected_location = Self::location_for(&self.reference);
-        if self.location != expected_location {
+        if !self.has_canonical_location() {
+            return Err(PaykitError::Validation(
+                "Receipt Access location does not match Receipt ID".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate caller-supplied Receipt Access before sending or storing.
+    pub fn validate(&self) -> Result<()> {
+        if self.version != 1 {
+            return Err(PaykitError::Validation(
+                "Receipt Access version must be 1".into(),
+            ));
+        }
+        if self.kind != PrivateMessageKind::ReceiptAccess {
+            return Err(PaykitError::Validation(
+                "Receipt Access kind must be paykit.receipt_access".into(),
+            ));
+        }
+        self.validate_request_context()?;
+        self.validate_location()
+    }
+
+    pub(crate) fn validate_wire_location(&self) -> Result<()> {
+        if !self.has_canonical_location() {
             return Err(PaykitError::InvalidData {
-                context: "Receipt Access location does not match Payment Reference".into(),
+                context: "Receipt Access location does not match Receipt ID".into(),
                 source: None,
             });
         }
         Ok(())
     }
+
+    fn has_canonical_location(&self) -> bool {
+        let expected_location = Self::location_for(&self.receipt_id);
+        self.location == expected_location
+    }
 }
 
-/// Issues, stores, and shares an encrypted payment receipt with the counterparty
-/// over an Encrypted Link.
+/// Prepare a plaintext Receipt, Encrypted Receipt, and Receipt Access
+/// descriptor without touching the network.
 ///
-/// The encrypted receipt is written to the caller's homeserver at a deterministic
-/// Receipt Location derived from `draft.reference`. A fresh symmetric
-/// [`ReceiptDecryptionKey`] is generated for each call. The corresponding
-/// [`ReceiptAccess`] descriptor is then sent over the existing Noise channel so
-/// the counterparty can fetch and decrypt the stored receipt with
-/// [`decrypt_receipt`](crate::decrypt_receipt).
-///
-/// Receipt Access messages are Event Messages: every valid access descriptor matters.
-/// Reissuing the same [`PaymentReference`] stores a new encrypted receipt at the
-/// same location with a new key, so older access descriptors for that reference
-/// may no longer decrypt after a later successful reissue.
-///
-/// # Identity binding
-///
-/// `session` is used for homeserver storage, while `link` is used to send the
-/// Receipt Access message. Paykit does not currently verify that `session`
-/// belongs to the same local identity that established `link`; callers must pass
-/// the matching session or they may persist the receipt under the wrong identity
-/// while sending access over a different Encrypted Link.
-///
-/// # Durability and ordering
-///
-/// This function stores the encrypted receipt first and sends access second. If
-/// the process crashes, or the Noise send fails after storage succeeds, the
-/// encrypted receipt may remain on the homeserver without the counterparty ever
-/// receiving access. Callers that need stronger delivery guarantees should keep
-/// their own durable issuance state and retry or reconcile at the application
-/// layer.
-///
-/// # Secrets
-///
-/// The returned [`IssuedReceipt::key`] is sensitive decryption material. Paykit
-/// redacts it from `Debug` and `Display`, but callers must not log or persist the
-/// raw [`ReceiptDecryptionKey::as_str`] value outside secure storage.
-///
-/// # Errors
-/// - Returns [`PaykitError::InvalidData`] if receipt serialization or encryption
-///   fails.
-/// - Returns [`PaykitError::Transport`] if storing the encrypted receipt fails or
-///   the Receipt Access Noise message cannot be sent after configured retries.
-#[instrument(skip(session, link, draft))]
-pub async fn issue_receipt(
-    session: &pubky::PubkySession,
-    link: &mut EncryptedLink,
-    draft: ReceiptDraft,
-) -> Result<IssuedReceipt> {
-    debug!("issuing encrypted receipt");
-    let reference = draft.reference;
-    let location = ReceiptAccess::location_for(&reference);
+/// The returned [`PreparedReceipt`] contains the Receipt Decryption Key and
+/// must be handled as sensitive data.
+#[instrument(skip(link, draft))]
+pub fn prepare_receipt(link: &EncryptedLink, draft: ReceiptDraft) -> Result<PreparedReceipt> {
+    debug!("preparing encrypted receipt");
+    draft.validate_request_context()?;
+    let receipt_id = draft.receipt_id.unwrap_or_else(ReceiptId::new_v4);
+    if let Some(amount) = &draft.amount {
+        amount.validate_with_label("Receipt amount")?;
+    }
+    let payment_reference = draft.payment_reference;
+    let payment_request_id = draft.payment_request_id;
+    let billing_period = draft.billing_period;
+    let location = ReceiptAccess::location_for(&receipt_id);
     let key = ReceiptDecryptionKey::generate();
     let receipt = Receipt {
-        reference: reference.clone(),
+        receipt_id: receipt_id.clone(),
+        payment_reference: payment_reference.clone(),
+        payment_request_id: payment_request_id.clone(),
+        billing_period: billing_period.clone(),
         recipient_public_key: link.recipient().clone(),
         payment_endpoint_identifier: draft.payment_endpoint_identifier,
         amount: draft.amount,
-        currency: draft.currency,
         metadata: draft.metadata,
     };
-    let encrypted = receipt
+    let encrypted_receipt = receipt
         .encrypt(&key)
-        .map_err(|err| map_error("issue_receipt", err))?;
-
-    session
-        .storage()
-        .put(location.clone(), encrypted)
-        .await
-        .map_err(|err| PaykitError::Transport {
-            context: format!("failed to store encrypted receipt at {location}"),
-            source: err.into(),
-        })?;
-
+        .map_err(|err| map_error("prepare_receipt", err))?;
     let access = ReceiptAccess {
         version: 1,
         kind: PrivateMessageKind::ReceiptAccess,
-        reference: reference.clone(),
-        location: location.clone(),
-        key: key.clone(),
-        algorithm: "XChaCha20Poly1305".to_string(),
-    };
-    let json =
-        serialize_receipt_access_json(&access).map_err(|err| map_error("issue_receipt", err))?;
-    link.send_receipt_access_message(json.as_bytes())
-        .await
-        .map_err(|err| map_error("issue_receipt", err))?;
-
-    Ok(IssuedReceipt {
-        reference,
+        event_id: crate::EventId::new_v4(),
+        receipt_id,
+        payment_reference,
+        payment_request_id,
+        billing_period,
         location,
         key,
+    };
+
+    Ok(PreparedReceipt {
+        receipt,
+        encrypted_receipt,
+        access,
     })
 }
 
-/// Receives all currently available Receipt Access descriptors from the Encrypted Link.
+/// Store a prepared Encrypted Receipt at its Receipt Location.
 ///
-/// Unlike [`crate::get_private_payment_envelope`], Receipt Access uses Event Message
-/// semantics. Every currently available Receipt Access message is returned in
-/// send order in a single vector; older Receipt Access messages are not collapsed
-/// when newer ones arrive.
-/// Returns an empty vector when no Receipt Access messages are currently available.
-///
-/// Messages for other supported private app kinds remain buffered on the
-/// [`EncryptedLink`] for their own typed receiver. Malformed unrelated app
-/// messages are ignored by the shared dispatcher. Syntactically valid messages
-/// with unsupported `kind` values are logged and dropped by the shared
-/// dispatcher rather than buffered indefinitely. Malformed Receipt Access
-/// messages are dropped with diagnostics while later valid Receipt Access
-/// messages in the same batch are still returned.
-///
-/// Each selected Receipt Access location must match the canonical Paykit
-/// Receipt Location for its [`PaymentReference`].
-///
-/// The returned [`ReceiptAccess::key`] values are sensitive. Their formatting is
-/// redacted, but callers must still avoid logging raw key material from
-/// [`ReceiptDecryptionKey::as_str`].
-#[instrument(skip(link))]
-pub async fn get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptAccess>> {
-    debug!("receiving Receipt Access messages");
+/// This only performs the homeserver write; send the access descriptor with
+/// [`send_receipt_access`].
+#[instrument(skip(session, prepared))]
+pub async fn store_prepared_receipt(
+    session: &pubky::PubkySession,
+    prepared: &PreparedReceipt,
+) -> Result<()> {
+    debug!("storing prepared encrypted receipt");
+    validate_prepared_receipt(prepared)?;
 
-    let (received, raw_messages, pending) = link.receive_receipt_access_messages().await?;
-    if raw_messages.is_empty() {
-        debug!(received, "no Receipt Access messages available");
-        return Ok(Vec::new());
+    session
+        .storage()
+        .put(
+            prepared.access.location.clone(),
+            prepared.encrypted_receipt.clone(),
+        )
+        .await
+        .map_err(|err| PaykitError::Transport {
+            context: format!(
+                "failed to store encrypted receipt at {}",
+                prepared.access.location
+            ),
+            source: err.into(),
+        })?;
+
+    Ok(())
+}
+
+pub(super) fn validate_prepared_receipt(prepared: &PreparedReceipt) -> Result<()> {
+    prepared.access.validate()?;
+    if prepared.receipt.receipt_id != prepared.access.receipt_id {
+        return Err(PaykitError::Validation(
+            "Prepared Receipt plaintext Receipt ID does not match Receipt Access".into(),
+        ));
+    }
+    if prepared.receipt.payment_reference != prepared.access.payment_reference {
+        return Err(PaykitError::Validation(
+            "Prepared Receipt plaintext Payment Reference does not match Receipt Access".into(),
+        ));
+    }
+    if prepared.receipt.payment_request_id != prepared.access.payment_request_id {
+        return Err(PaykitError::Validation(
+            "Prepared Receipt plaintext Payment Request ID does not match Receipt Access".into(),
+        ));
+    }
+    if prepared.receipt.billing_period != prepared.access.billing_period {
+        return Err(PaykitError::Validation(
+            "Prepared Receipt plaintext Billing Period does not match Receipt Access".into(),
+        ));
+    }
+    let decrypted = Receipt::decrypt(
+        &prepared.encrypted_receipt,
+        &prepared.access.key,
+        &prepared.access.location,
+    )
+    .map_err(|err| {
+        PaykitError::Validation(format!(
+            "Prepared Receipt encrypted payload does not decrypt with Receipt Access: {err}"
+        ))
+    })?;
+
+    if decrypted != prepared.receipt {
+        return Err(PaykitError::Validation(
+            "Prepared Receipt encrypted payload does not match plaintext Receipt".into(),
+        ));
     }
 
-    let mut access = Vec::new();
-    let mut malformed = 0usize;
-    for raw in &raw_messages {
-        match parse_receipt_access_json(raw) {
-            Ok(parsed) => access.push(parsed),
-            Err(err) => {
-                malformed += 1;
-                warn!(
-                    error = ?err,
-                    "dropping malformed Receipt Access message while preserving later valid messages"
-                );
-            }
-        }
-    }
-    if malformed > 0 {
-        warn!(
-            malformed,
-            selected = raw_messages.len(),
-            "ignored malformed Receipt Access messages while preserving valid messages"
-        );
-    }
-    debug!(
-        count = access.len(),
-        received, pending, "Receipt Access messages received"
-    );
-    Ok(access)
+    Ok(())
+}
+
+/// Send a prepared Receipt Access descriptor over an Encrypted Link.
+#[instrument(skip(link, access))]
+pub async fn send_receipt_access(link: &mut EncryptedLink, access: &ReceiptAccess) -> Result<()> {
+    debug!("sending Receipt Access message");
+    access.validate()?;
+    let json = serialize_receipt_access_json(access)
+        .map_err(|err| map_error("send_receipt_access", err))?;
+    link.send_receipt_access_message(json.as_bytes())
+        .await
+        .map_err(|err| map_error("send_receipt_access", err))
 }

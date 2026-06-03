@@ -14,7 +14,7 @@ Payment Requests are Paykit communication objects. They coordinate request, acce
 
 This spec defines:
 
-- Payment Request message envelopes
+- Payment Request message fields
 - sender and receiver role rules
 - identifiers and references used to correlate messages
 - request terms
@@ -53,7 +53,7 @@ In v0.2, Payment Requests are payee-initiated:
 - `paykit.payment_request_cancellation` MAY be sent by either payer or payee.
 - Existing `paykit.receipt_access` messages MAY be sent by the payee to share an optional Paykit Receipt after payment.
 
-The Encrypted Link identifies the local party and counterparty. Payment Request messages do not need to embed both Pubky public keys.
+The Encrypted Link identifies the local party and counterparty. Payment Request messages do not need to embed both Pubky public keys. Stateless Paykit libraries cannot infer or enforce payer/payee role intent from a message alone; integrating applications, wallets, or future higher-level Paykit components MUST send each message kind only from the allowed role.
 
 ## Message transport
 
@@ -63,17 +63,29 @@ An Event Message is one lifecycle message, such as a request, acceptance, reject
 
 Payment Request messages are Event Messages. Receivers MUST preserve and process all valid recognized Payment Request events in send order.
 
-Typed getters for one recognized Event Message kind MUST NOT discard unrelated recognized Event Message kinds.
+Implementations that derive Payment Request state SHOULD consume a unified ordered stream of private messages or Payment Request protocol events. Low-level Paykit Library receive APIs should expose the ordered private message stream plus stateless parsers; per-kind convenience getters belong in higher-level SDK/runtime code that can preserve unrelated recognized Event Message kinds in a persisted event log or queue.
 
 Paykit message kinds use logical lanes over the same Encrypted Link:
 
-- Private Payment Envelopes use Latest-State Message semantics.
+- Private Payment Lists use Latest-State Message semantics.
 - Payment Request protocol messages use Event Message semantics.
 - Receipt Access uses Event Message semantics.
 
-## Common envelope
+Recognized Event Messages carry an `event_id` for idempotent local storage and
+replay dedupe.
 
-Every Payment Request protocol message uses a versioned JSON envelope:
+Private Paykit message shapes build on each other:
+
+- Private Application Message: `version` + `kind`.
+- Latest-State Message: Private Application Message where the newest valid
+  message supersedes older messages of the same kind. Malformed newer messages
+  do not supersede the latest valid state.
+- Event Message: Private Application Message + `event_id`, where every valid message matters.
+- Payment Request Event Message: Event Message + `payment_request_id`.
+
+## Common Message Fields
+
+Every Payment Request protocol message uses common versioned JSON fields:
 
 ```json
 {
@@ -94,6 +106,9 @@ Rules:
 - Reusing the same `event_id` with different payload bytes is invalid.
 - Messages MUST fit within the current `pubky-noise` message size unless a future indirection mechanism is specified.
 - Message-specific fields such as `payment_reference` are added only by message kinds that need them.
+- Payment Request v0.2 messages use closed-world JSON objects: unknown fields
+  are invalid unless a field is explicitly defined as an open JSON object, such
+  as `metadata` or `proof`.
 
 ## Identifiers and references
 
@@ -126,10 +141,13 @@ Rules:
 Rules:
 
 - It MUST be a non-empty string.
+- It MUST NOT exceed 256 characters.
+- It MUST NOT contain control characters.
 - It is not required to be a UUID.
 - It is set by the payee in the Payment Request terms.
 - The payer MUST copy it unchanged into Payment Proof messages for that request.
 - The payer SHOULD include it in the payment-method-specific execution as a memo, reference, or remittance value when the selected payment method supports one.
+- Payment-method-specific code MAY transform or omit the Payment Reference when a rail cannot safely carry it unchanged, but the Paykit Payment Proof MUST still copy the protocol `payment_reference` unchanged.
 - For recurring requests, the same `payment_reference` applies to every payment for the request. The `billing_period` distinguishes the recurring period being paid.
 - Per-period Payment References or templates are out of scope for v0.2.
 
@@ -137,16 +155,16 @@ Rules:
 
 The `request` payload describes the terms of a one-time or recurring request.
 
-The `payment_request_id` is carried by the message envelope and is not repeated inside `request`.
+The `payment_request_id` is carried by the top-level message and is not repeated inside `request`.
 
 ```json
 {
   "amount": {
-    "value": "10.00",
-    "asset": "USD"
+    "value": "0.001",
+    "asset": "btc"
   },
   "payment_reference": "invoice-2026-0001",
-  "expires_at": "2026-06-01T00:00:00Z",
+  "proposal_expires_at": "2026-06-01T00:00:00Z",
   "recurrence": null,
   "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
   "metadata": {}
@@ -156,11 +174,24 @@ The `payment_request_id` is carried by the message envelope and is not repeated 
 Rules:
 
 - `amount` is required.
-- `amount.value` MUST be a decimal string.
-- `amount.asset` MUST be a currency or asset code.
-- The exact asset registry is out of scope for v0.2.
-- `payment_reference` is required and MUST be a non-empty string.
-- `expires_at` is required and MUST be either `null` or an RFC3339 UTC timestamp using the `Z` suffix.
+- `amount.value` MUST be a decimal string using ASCII digits with at most one
+  `.` and at least one digit. Signs, exponent notation, grouping separators,
+  scale limits, and zero/non-zero meaning are out of scope for v0.2.
+- `amount.asset` MUST be a non-empty asset code or unit string and MUST NOT contain control characters.
+- The exact asset registry and normalization rules are out of scope for v0.2.
+- `amount.asset` is case-sensitive. When using the recommended Payment Endpoint
+  Identifier convention, it SHOULD use the same lowercase asset string as the
+  accepted endpoint identifier asset segment.
+- Paykit v0.2 does not define FX, conversion, display-currency, or cross-asset
+  payment semantics. When using the recommended Payment Endpoint Identifier
+  convention, implementations SHOULD choose accepted endpoints whose asset
+  segment matches `amount.asset`.
+- `payment_reference` is required and MUST follow Payment Reference rules.
+- `proposal_expires_at` is required and MUST be either `null` or an RFC3339 UTC timestamp using the `Z` suffix.
+- `proposal_expires_at` is a proposal actionability deadline evaluated against
+  the implementation's trusted local time when deciding whether to accept or
+  display the proposal as actionable. It is not an Event Message and cannot be
+  derived deterministically from event order alone.
 - `recurrence` MUST be `null` for one-time requests.
 - `recurrence` MUST be an object for recurring requests.
 - `accepted_payment_endpoint_identifiers` MUST be a non-empty array of valid Payment Endpoint Identifiers.
@@ -188,7 +219,11 @@ Rules:
 - `starts_at` MUST be an RFC3339 UTC timestamp using the `Z` suffix.
 - `anchor` MUST be an RFC3339 UTC timestamp using the `Z` suffix.
 - `ends_at` MUST be `null` or an RFC3339 UTC timestamp using the `Z` suffix.
-- Monthly and yearly recurrence MUST clamp to the last day of the target month when the anchor day does not exist, then return to the original anchor day when possible.
+- Recurrence describes the requested schedule. Payment Request v0.2 does not
+  define canonical calendar expansion or reusable recurrence math for SDKs.
+- Implementations that materialize monthly or yearly recurrence periods SHOULD
+  clamp to the last day of the target month when the anchor day does not exist,
+  then return to the original anchor day when possible.
 
 Paykit defines recurrence terms for communication. Paykit does not run the scheduler.
 
@@ -206,11 +241,11 @@ Sent by the payee to the payer.
   "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
   "request": {
     "amount": {
-      "value": "10.00",
-      "asset": "USD"
+      "value": "0.001",
+      "asset": "btc"
     },
     "payment_reference": "invoice-2026-0001",
-    "expires_at": "2026-06-01T00:00:00Z",
+    "proposal_expires_at": "2026-06-01T00:00:00Z",
     "recurrence": null,
     "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
     "metadata": {}
@@ -224,8 +259,12 @@ Validation rules:
 - Receiver MUST be the payer.
 - `request` MUST be present and valid.
 - The first valid `paykit.payment_request` for a `payment_request_id` defines immutable terms.
-- A conflicting later `paykit.payment_request` with the same `payment_request_id` is invalid.
-- If `expires_at` is non-null and in the past, the proposal is expired and MUST NOT be accepted.
+- A later `paykit.payment_request` with the same `payment_request_id` and a
+  different `event_id` is invalid, even if the terms are byte-identical.
+  Retries of the original proposal MUST reuse the same `event_id` and payload.
+- If `proposal_expires_at` is non-null and in the past according to the payer's
+  trusted local time at the acceptance decision, the proposal is expired and
+  MUST NOT be accepted.
 
 ## paykit.payment_request_acceptance
 
@@ -247,7 +286,10 @@ Validation rules:
 - Sender MUST be the payer.
 - The request MUST be known.
 - The request MUST be in the proposed state.
-- The request MUST NOT be expired.
+- The proposal MUST NOT be expired according to the payer's trusted local time
+  at the acceptance decision. Payees that receive an acceptance after local
+  expiry MAY reject or flag it according to local policy; deterministic replay
+  requires the SDK/runtime to persist its local decision or processing time.
 - Acceptance is explicit. Paying without this message is not protocol-level acceptance in v0.2.
 
 ## paykit.payment_request_rejection
@@ -271,7 +313,7 @@ Validation rules:
 - Sender MUST be the payer.
 - The request MUST be known.
 - The request MUST be in the proposed state.
-- `reason` is optional. If present, it MUST be a string.
+- `reason` is optional and SHOULD be omitted when absent. If present, it MUST be a string; `null` is invalid.
 - Rejection is terminal for that `payment_request_id`. Later acceptance or proof messages for the same request are invalid.
 
 ## paykit.payment_request_cancellation
@@ -296,14 +338,20 @@ Validation rules:
 - The request MUST be known.
 - The request MUST be non-terminal.
 - Cancellation is unilateral. No counterparty confirmation is required.
-- After cancellation, payer runtimes MUST NOT start new payment execution for the request.
-- `reason` is optional. If present, it MUST be a string.
+- After cancellation, payer implementations MUST NOT start new payment execution for the request.
+- `reason` is optional and SHOULD be omitted when absent. If present, it MUST be a string; `null` is invalid.
 
 ## paykit.payment_proof
 
 Carries method-specific evidence for one payment execution.
 
 Sent by the payer to the payee.
+
+The requested Payment Amount is inherited from the immutable Payment Request
+terms. `paykit.payment_proof` does not repeat a generic paid amount. The `proof`
+field is an opaque method-specific JSON object; Paykit v0.2 does not require
+generic fields such as `type`. Rail- or processor-specific settlement details
+may be included inside `proof` when needed.
 
 ```json
 {
@@ -325,15 +373,21 @@ Validation rules:
 
 - Sender MUST be the payer.
 - The request MUST be known and accepted.
-- The request MUST NOT be cancelled or expired.
+- The request MUST NOT be cancelled, rejected, or already settled according to local wallet/payment-processor state.
 - `payment_reference` MUST equal the accepted request's `payment_reference`.
 - `billing_period` MUST be `null` for one-time requests.
 - `billing_period` MUST be present for recurring requests.
-- For recurring requests, `billing_period` MUST identify an interval derived from the accepted recurrence.
+- For recurring requests, `billing_period` identifies the claimed interval being
+  paid. Paykit v0.2 validates its shape but does not define canonical recurrence
+  math for proving it was derived from the accepted recurrence. Integrating
+  applications, wallets, or future higher-level Paykit components that execute
+  or index recurring payments SHOULD enforce recurrence eligibility according
+  to their local scheduling policy.
 - `payment_endpoint_identifier` MUST be one of the request's `accepted_payment_endpoint_identifiers`.
-- `proof` MUST be a JSON object.
+- `proof` MUST be a JSON object. Its internal fields are method-specific and are
+  not interpreted by Paykit v0.2.
 
-Paykit validates the envelope and correlation fields. Payment-method-specific code validates whether the proof actually proves payment.
+Paykit validates the message shape and can validate stateless request/proof correlation fields against a known Payment Request. Integrating applications, wallets, or future higher-level Paykit components validate whether the request is known, accepted, proposal-expired before acceptance, rejected, cancelled, already processed, or whether a recurring Billing Period is eligible under the accepted recurrence. Payment-method-specific code validates whether the proof actually proves payment.
 
 ## Billing period
 
@@ -354,16 +408,15 @@ Rules:
 
 ## State derivation
 
-Wallets, SDKs, or runtimes derive local state from ordered Event Messages.
+Integrating applications, wallets, or future higher-level Paykit components derive local state from ordered Event Messages.
 
-The protocol defines these minimal shared lifecycle states:
+The protocol defines these minimal event-derived lifecycle states:
 
 - `proposed`
 - `accepted`
 - `rejected`
 - `cancelled`
-- `completed`
-- `expired`
+- `proof_submitted`
 
 State transitions:
 
@@ -372,20 +425,30 @@ payment_request -> proposed
 proposed + acceptance -> accepted
 proposed + rejection -> rejected
 proposed|accepted + cancellation -> cancelled
-accepted one-time request + payment_proof -> completed
-proposal with non-null expires_at past expiry -> expired
+accepted one-time request + payment_proof -> proof_submitted
 ```
 
 Terminal states:
 
 - `rejected`
 - `cancelled`
-- `expired`
-- `completed` for one-time requests
 
-For recurring requests, a Payment Proof completes one billing period, not the whole request.
+For one-time requests, `proof_submitted` means Paykit has received a Payment
+Proof event, not that payment settlement was independently verified. It is not a
+Paykit protocol-final state. Wallets, processors, SDKs, or apps decide whether a
+submitted proof settles the request, whether additional or corrective proofs are
+accepted, and when the local request can be treated as closed. For recurring
+requests, a Payment Proof reports one billing period, not completion of the
+whole request.
 
-Recurring request scheduling state is local runtime state, not Paykit protocol state.
+Implementations MAY expose `proposal_expired` as a local view state for a
+proposed request whose trusted local time is past `proposal_expires_at`.
+`proposal_expired` is not an Event Message and is not event-log-derived.
+SDKs that need deterministic audit or replay of expiry decisions should persist
+the local decision or processing timestamp used for the expiry check.
+
+Recurring request scheduling state and Billing Period recurrence eligibility are
+local application or wallet state, not Paykit protocol state in v0.2.
 
 ## Changing terms
 
@@ -406,33 +469,93 @@ Payment Request v0.2 does not require public Payment Endpoint lookup for executi
 
 Implementations MAY allow public reusable endpoint details by local policy, but Paykit does not treat public endpoint publication as the normal private Payment Request flow.
 
-The `payment_reference` comes from the accepted Payment Request, not from the selected Payment Endpoint publication or Private Payment Envelope.
+The `payment_reference` comes from the accepted Payment Request, not from the selected Payment Endpoint publication or Private Payment List.
+
+Paykit v0.2 does not define FX, conversion, or cross-asset payment semantics. Implementations SHOULD choose endpoints whose Payment Endpoint Identifier asset segment matches `amount.asset` when using the recommended identifier convention. If an implementation accepts a different asset through local wallet or payment-processor policy, conversion and settlement semantics are outside Paykit.
 
 Payment-method-specific code is responsible for deciding whether selected endpoint details are reusable or payment-specific. If the selected endpoint details are single-use, expired, already consumed, or otherwise stale, the payer MUST NOT execute until fresh usable details are available.
+
+## Receipts for Payment Requests
+
+Paykit Receipts may be issued for payments made through Payment Requests.
+
+When a Receipt corresponds to a Payment Request, the Receipt and Receipt Access
+descriptor SHOULD carry `payment_request_id` so receivers can index it without
+relying on metadata conventions.
+
+When a Receipt corresponds to a recurring Payment Request payment, the Receipt
+and Receipt Access descriptor SHOULD also carry the same `billing_period` used
+by the related Payment Proof. This distinguishes individual recurring payments
+when the same Payment Reference is reused across periods.
+
+Receipts that are not tied to a Payment Request omit `payment_request_id` and
+`billing_period`. A `billing_period` without `payment_request_id` is invalid.
+
+## Receipt Access Event Messages
+
+`paykit.receipt_access` is an Event Message sent over an Encrypted Link by the
+issuer of an Encrypted Receipt. It lets the receiver locate the Encrypted
+Receipt on the issuer's homeserver and decrypt it locally.
+
+Receipt Access carries:
+
+- `event_id`: an Event ID for idempotent processing
+- `receipt_id`: the Receipt ID of the Encrypted Receipt
+- `payment_reference`: the Payment Reference for the receipted payment
+- `payment_request_id`: optional Payment Request correlation
+- `billing_period`: optional recurring Payment Request correlation
+- `location`: the Receipt Location path on the issuer's homeserver
+- `key`: the Receipt Decryption Key
+
+The receipt encryption algorithm is carried by the Encrypted Receipt stored at
+the Receipt Location, not by Receipt Access.
+
+Rules:
+
+- Receipt Access uses FIFO Event Message semantics. Receivers SHOULD persist
+  every valid Receipt Access event in send order before triggering receipt
+  retrieval, decryption, indexing, or other side effects.
+- A retried resend of the same Receipt Access event MUST reuse the same
+  `event_id` and same payload.
+- Reusing the same `event_id` with different payload bytes is invalid.
+- A repeated `receipt_id` with a different `event_id` is not automatically
+  invalid. Receivers SHOULD reconcile it by Receipt ID and local receipt state.
+  If the repeated descriptor conflicts with an already fetched/decrypted
+  receipt, the SDK/runtime should fail closed or require local review.
+- `location` is a path, not a complete Pubky resource. Receivers MUST interpret
+  it together with the Receipt Access sender/issuer context when fetching the
+  Encrypted Receipt.
+- When `payment_request_id` is absent, `billing_period` MUST be absent.
+- When `billing_period` is present, it SHOULD match the Billing Period used by
+  the related Payment Proof.
 
 ## Event durability
 
 Receivers SHOULD persist valid Event Messages before triggering irreversible side effects.
 
-Runtimes that trigger payment execution MUST persist valid events idempotently before side effects.
+Implementations that trigger payment execution MUST persist valid events idempotently before side effects.
 
-At minimum, runtimes SHOULD persist:
+At minimum, implementations SHOULD persist:
 
 - `event_id`
-- `payment_request_id`
+- `payment_request_id`, when applicable
 - `kind`
 - raw or canonical message payload
 - validation result
 
-If local derived state is lost but durable events remain, the runtime can rebuild local state from events.
+If local derived state is lost but durable events remain, the implementation can rebuild local state from events.
 
-If local event history is missing or inconsistent, the runtime should fail closed for automatic payment execution and require user or counterparty resync. This is local safety behavior, not Paykit protocol state.
+If local event history is missing or inconsistent, the implementation should fail closed for automatic payment execution and require user or counterparty resync. This is local safety behavior, not Paykit protocol state.
 
 If Encrypted Link state is lost, a new handshake may be needed to restore private communication. A new handshake does not recover missing local Payment Request history.
 
+If an implementation persists Encrypted Link snapshots, it MUST treat the snapshot as the local read checkpoint. It MUST persist received Event Messages and dedupe state before replacing the stored snapshot with a snapshot whose read counter has advanced past those messages. A crash after event persistence but before snapshot persistence may replay messages; receivers MUST dedupe replayed Event Messages by `event_id`.
+
+Paykit libraries may parse, order, and structurally validate messages, and should expose either raw or canonical payloads from ordered receive APIs. Durable idempotency is the caller's responsibility. Implementations MUST use persisted history to dedupe repeated `event_id`s, reject conflicting reused `event_id`s, and reject later `paykit.payment_request` events that reuse an existing `payment_request_id` with a different `event_id`.
+
 ## Open questions
 
-1. Should Payment Proof payloads be opaque JSON objects or method-specific typed envelopes?
+1. Should Payment Proof payloads be opaque JSON objects or method-specific typed payloads?
 2. Should Payment Proofs be allowed after cancellation if the payment execution happened before cancellation was received?
 3. Should future versions model update or replacement links between Payment Requests?
 4. Should future versions define payer-requested term changes?

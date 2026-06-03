@@ -45,7 +45,7 @@ async fn endpoint_round_trip_and_update() {
 #[tokio::test]
 async fn missing_endpoint_returns_none() {
     let setup = TestSetup::new().await;
-    let method = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
+    let method = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
 
     let missing = get_payment_endpoint(&setup.public_storage, &setup.public_key, &method)
         .await
@@ -59,8 +59,8 @@ async fn missing_endpoint_returns_none() {
 async fn list_reflects_additions_and_removals() {
     let setup = TestSetup::new().await;
 
-    let onchain = PaymentEndpointIdentifier::new("bitcoin-p2tr").unwrap();
-    let lightning = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
+    let onchain = PaymentEndpointIdentifier::new("btc-bitcoin-p2tr").unwrap();
+    let lightning = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
     let onchain_data = PaymentEndpointPayload::new("bc1p...");
     let lightning_data = PaymentEndpointPayload::new("ln...");
 

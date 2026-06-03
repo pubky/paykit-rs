@@ -3,7 +3,7 @@
 import PackageDescription
 
 let tag = "v0.1.0-rc12"
-let checksum = "1d97fa5e616fbc9ab3ed100c3bbae7b7c55ebdb785152b046c92d33fa514748d"
+let checksum = "7842ab71568ac44aef5f40dc410600c1902cf4d9e42d10aca4ca0ae0f2f03a81"
 let url = "https://github.com/pubky/paykit-rs/releases/download/\(tag)/Paykit.xcframework.zip"
 
 let package = Package(

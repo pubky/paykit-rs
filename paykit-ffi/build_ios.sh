@@ -43,6 +43,9 @@ else
     echo "Warning: modulemap file not found"
 fi
 
+echo "Normalizing generated Swift and header whitespace..."
+find ./bindings/ios -type f \( -name "*.swift" -o -name "*.h" -o -name "*.modulemap" \) -exec perl -0pi -e 's/[ \t]+(?=\n)//g; s/[ \t]+\z//; s/\n+\z/\n/; $_ .= "\n" unless /\n\z/' {} \;
+
 echo "Cleaning up existing XCFramework..."
 rm -rf "bindings/ios/Paykit.xcframework"
 rm -rf "bindings/ios/Headers"
@@ -72,7 +75,11 @@ rm -rf "bindings/ios/ios-arm64-sim"
 
 echo "Creating XCFramework zip file..."
 rm -f ./bindings/ios/Paykit.xcframework.zip
-ditto -c -k --sequesterRsrc --keepParent ./bindings/ios/Paykit.xcframework ./bindings/ios/Paykit.xcframework.zip || { echo "Failed to create zip file"; exit 1; }
+find ./bindings/ios/Paykit.xcframework -exec touch -t 198001010000 {} \;
+(
+    cd ./bindings/ios
+    find Paykit.xcframework -type f -print | LC_ALL=C sort | zip -X -q Paykit.xcframework.zip -@
+) || { echo "Failed to create zip file"; exit 1; }
 
 echo "Computing checksum..."
 CHECKSUM=$(swift package compute-checksum ./bindings/ios/Paykit.xcframework.zip) || { echo "Failed to compute checksum"; exit 1; }

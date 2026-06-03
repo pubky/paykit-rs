@@ -23,8 +23,8 @@ use crate::{error::map_error, pubky_routing, PaykitError, PublicKey, Result};
 /// # Examples
 /// ```
 /// # use paykit_lib::PaymentEndpointIdentifier;
-/// let m = PaymentEndpointIdentifier::new("lightning").unwrap();
-/// assert_eq!(m.as_str(), "lightning");
+/// let id = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+/// assert_eq!(id.as_str(), "btc-lightning-bolt11");
 ///
 /// // Path traversal is rejected:
 /// assert!(PaymentEndpointIdentifier::new("../etc/passwd").is_err());
@@ -61,7 +61,7 @@ impl PaymentEndpointIdentifier {
 
         if id == PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE {
             return Err(PaykitError::Validation(format!(
-                "PaymentEndpointIdentifier '{PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE}' is reserved for Private Payment Envelopes"
+                "PaymentEndpointIdentifier '{PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE}' is reserved for Private Payment Lists"
             )));
         }
 
@@ -154,7 +154,7 @@ pub struct PaymentList {
 /// ```
 /// # use paykit_lib::{set_payment_endpoint, PaymentEndpointIdentifier, PaymentEndpointPayload};
 /// # async fn demo(session: &pubky::PubkySession) -> paykit_lib::Result<()> {
-/// let identifier = PaymentEndpointIdentifier::new("bitcoin-bolt11")?;
+/// let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
 /// let payload = PaymentEndpointPayload::new("ln...");
 /// set_payment_endpoint(session, identifier, payload).await?;
 /// # Ok(())
@@ -239,7 +239,7 @@ pub async fn get_payment_list(
 /// ```
 /// # use paykit_lib::{get_payment_endpoint, PaymentEndpointIdentifier, PublicKey};
 /// # async fn inspect(storage: &pubky::PublicStorage, pk: &PublicKey) -> paykit_lib::Result<()> {
-/// let lightning = PaymentEndpointIdentifier::new("lightning")?;
+/// let lightning = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
 /// if let Some(endpoint) = get_payment_endpoint(storage, pk, &lightning).await? {
 ///     println!("lightning endpoint: {}", endpoint.as_str());
 /// } else {
@@ -270,7 +270,11 @@ mod validation_tests {
 
     #[test]
     fn test_payment_endpoint_identifier_valid_simple_names() {
-        for name in ["bitcoin-bolt11", "bitcoin-bolt12", "bitcoin-p2tr"] {
+        for name in [
+            "btc-lightning-bolt11",
+            "btc-lightning-bolt12",
+            "btc-bitcoin-p2tr",
+        ] {
             assert!(
                 PaymentEndpointIdentifier::new(name).is_ok(),
                 "expected '{name}' to be valid"

@@ -20,29 +20,9 @@ pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 /// repeatedly calling [`advance_handshake`] until it returns
 /// [`HandshakeProgress::Complete`].
 ///
-/// The caller controls the polling strategy — timing between retries, timeouts,
-/// back-off, etc. are all the caller's responsibility.
-///
-/// # Automatic recovery
-///
-/// If a homeserver write fails during the handshake (corrupting the internal
-/// Noise state), [`advance_handshake`] automatically restores from a
-/// pre-mutation snapshot and returns [`HandshakeProgress::Pending`] so the
-/// caller's polling loop retries transparently. The maximum number of
-/// consecutive recovery attempts is configurable via
-/// [`set_max_recovery_attempts`](Self::set_max_recovery_attempts) (default:
-/// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`]).
-///
-/// # Session resumption
-///
-/// An in-progress handshake can be snapshotted via [`snapshot`](Self::snapshot)
-/// (or serialized directly via [`serialize`](Self::serialize)) and later
-/// restored with [`restore_encrypted_link_handshake`] or
-/// [`restore_encrypted_link_handshake_from_config`].
-///
-/// Restored handshakes always reset recovery tuning to defaults:
-/// `recovery_attempts` starts at `0` and `max_recovery_attempts` is set to
-/// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`].
+/// The caller owns polling, timeouts, and backoff. Homeserver write failures are
+/// automatically recovered up to
+/// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`] unless overridden.
 pub struct EncryptedLinkHandshake {
     /// The Noise session manager in handshake mode.
     encryptor: pubky_noise::PubkyNoiseEncryptor,
@@ -61,8 +41,6 @@ impl EncryptedLinkHandshake {
     /// before [`advance_handshake`] gives up and returns
     /// [`PaykitError::Transport`].
     ///
-    /// The recovery-attempt counter resets to zero after every successful
-    /// handshake step.
     /// Default: [`DEFAULT_MAX_RECOVERY_ATTEMPTS`] (3).
     pub fn set_max_recovery_attempts(&mut self, max: u32) -> &mut Self {
         self.max_recovery_attempts = max;
@@ -71,9 +49,8 @@ impl EncryptedLinkHandshake {
 
     /// Capture the current handshake state as a serializable snapshot.
     ///
-    /// The snapshot contains everything needed to restore and continue the
-    /// handshake later via [`restore_encrypted_link_handshake`] or
-    /// [`restore_encrypted_link_handshake_from_config`].
+    /// Snapshot bytes include sensitive key material and must be stored as
+    /// secrets.
     pub fn snapshot(&self) -> EncryptedLinkHandshakeSnapshot {
         EncryptedLinkHandshakeSnapshot::from_state(
             self.encryptor.snapshot(),
@@ -114,32 +91,15 @@ pub enum HandshakeProgress {
     /// [`advance_handshake`] after a caller-chosen delay.
     Pending(EncryptedLinkHandshake),
 
-    /// Handshake completed successfully. The [`EncryptedLink`] is ready for use
-    /// with [`crate::set_private_payment_envelope`] and [`crate::get_private_payment_envelope`].
+    /// Handshake completed successfully. The [`EncryptedLink`] is ready to send
+    /// and receive Private Application Messages.
     Complete(EncryptedLink),
 }
 
 /// Initiates a Noise XX Encrypted Link Handshake with a counterparty
 /// (initiator role).
 ///
-/// Initializes the encryption stack and creates a handshake context. The actual
-/// handshake messages are exchanged by repeatedly calling [`advance_handshake`]
-/// until it returns [`HandshakeProgress::Complete`].
-///
-/// Ephemeral keys are managed internally by the Noise stack — callers only need
-/// to provide their static identity key and the counterparty public key.
-///
-/// # Parameters
-/// - `session` — authenticated Pubky session for writing handshake messages
-///   (consumed; caller should `.clone()` if needed elsewhere).
-/// - `sender_secret_key` — 32-byte Ed25519 secret key of the local party.
-/// - `receiver_pubkey` — public key of the counterparty.
-/// - `outbox_client` — HTTP client for reading from the remote homeserver
-///   (consumed; caller should `.clone()` if needed elsewhere).
-///
-/// # Errors
-/// Returns [`PaykitError::Transport`] if the encryption stack cannot be
-/// initialized or if the context creation fails.
+/// Call [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
 #[instrument(skip(session, sender_secret_key, outbox_client))]
 pub fn initiate_encrypted_link(
     session: pubky::PubkySession,
@@ -190,21 +150,7 @@ pub fn initiate_encrypted_link(
 /// Accepts a Noise XX Encrypted Link Handshake from a counterparty
 /// (responder role).
 ///
-/// Initializes the encryption stack and creates a handshake context for the
-/// responder side. The actual handshake messages are exchanged by repeatedly
-/// calling [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
-///
-/// # Parameters
-/// - `session` — authenticated Pubky session for writing handshake messages
-///   (consumed; caller should `.clone()` if needed elsewhere).
-/// - `receiver_secret_key` — 32-byte Ed25519 secret key of the local party.
-/// - `sender_pubkey` — public key of the counterparty (the initiator).
-/// - `outbox_client` — HTTP client for reading from the remote homeserver
-///   (consumed; caller should `.clone()` if needed elsewhere).
-///
-/// # Errors
-/// Returns [`PaykitError::Transport`] if the encryption stack cannot be
-/// initialized or if the context creation fails.
+/// Call [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
 #[instrument(skip(session, receiver_secret_key, outbox_client))]
 pub fn accept_encrypted_link(
     session: pubky::PubkySession,
@@ -254,66 +200,10 @@ pub fn accept_encrypted_link(
 
 /// Advances the handshake by one step.
 ///
-/// This function is **polling-safe**: calling it when the counterparty has not
+/// This is polling-safe: calling it when the counterparty has not
 /// written their next message yet returns [`HandshakeProgress::Pending`] without
-/// corrupting internal state. The caller can safely retry after a delay.
-///
-/// # Automatic recovery
-///
-/// If the homeserver write fails during a handshake step
-/// (`HomeserverWriteError`), the internal Noise state is irreversibly
-/// corrupted. This function automatically recovers by restoring from the
-/// pre-mutation snapshot captured at the start of the failed step and returns
-/// [`HandshakeProgress::Pending`] so the caller's polling loop retries
-/// transparently.
-///
-/// The maximum number of **consecutive** recovery attempts is configurable via
-/// [`EncryptedLinkHandshake::set_max_recovery_attempts`] (default:
-/// [`DEFAULT_MAX_RECOVERY_ATTEMPTS`]). The recovery-attempt counter resets to
-/// zero after every successful step. If the limit is exceeded, the function returns
-/// [`PaykitError::Transport`].
-///
-/// # Polling strategy
-///
-/// The caller controls the polling strategy. Common patterns:
-///
-/// **Fixed interval:**
-/// ```ignore
-/// loop {
-///     match advance_handshake(handshake).await? {
-///         HandshakeProgress::Pending(h) => {
-///             handshake = h;
-///             tokio::time::sleep(Duration::from_millis(100)).await;
-///         }
-///         HandshakeProgress::Complete(link) => break link,
-///     }
-/// }
-/// ```
-///
-/// **With timeout:**
-/// ```ignore
-/// let deadline = Instant::now() + Duration::from_secs(60);
-/// loop {
-///     if Instant::now() > deadline {
-///         return Err(/* timeout */);
-///     }
-///     match advance_handshake(handshake).await? {
-///         HandshakeProgress::Pending(h) => {
-///             handshake = h;
-///             tokio::time::sleep(Duration::from_millis(100)).await;
-///         }
-///         HandshakeProgress::Complete(link) => break link,
-///     }
-/// }
-/// ```
-///
-/// # Parameters
-/// - `handshake` — the in-progress handshake handle (consumed; returned inside
-///   [`HandshakeProgress::Pending`] if the handshake is not yet finished).
-///
-/// # Errors
-/// - Returns [`PaykitError::Transport`] if the handshake processing fails, if
-///   the context is in an invalid state, or if automatic recovery is exhausted.
+/// corrupting internal state. Homeserver write failures are automatically
+/// recovered from the pre-mutation snapshot until the recovery limit is reached.
 #[instrument(skip(handshake))]
 pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
     // Check whether the handshake has already finished.
@@ -413,38 +303,8 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
 
 /// Restores an [`EncryptedLinkHandshake`] from a previously saved snapshot.
 ///
-/// Use this to resume an in-progress handshake after an app restart. A fresh
-/// [`pubky_noise::PubkyNoiseConfig`] is built from the supplied session and key
-/// material, then replay restore reconstructs the handshake state from the
-/// persisted snapshot and homeserver data.
-///
-/// # Parameters
-/// - `session` — authenticated Pubky session for writing handshake messages
-///   (a fresh session after app restart).
-/// - `secret_key` — 32-byte Ed25519 secret key of the local party (same key
-///   used in the original [`initiate_encrypted_link`] or
-///   [`accept_encrypted_link`] call).
-/// - `remote_pubkey` — public key of the counterparty.
-/// - `outbox_client` — HTTP client for reading from the remote homeserver.
-/// - `snapshot` — saved in-progress handshake snapshot (from
-///   [`EncryptedLinkHandshake::snapshot`] or
-///   [`EncryptedLinkHandshakeSnapshot::deserialize`]).
-///
-/// The `remote_pubkey` must match `snapshot.recipient()`. A mismatch indicates
-/// inconsistent caller input and is rejected.
-///
-/// # Restore behavior
-///
-/// Restored handshakes always reset recovery tuning to defaults:
-/// - `recovery_attempts = 0`
-/// - `max_recovery_attempts = DEFAULT_MAX_RECOVERY_ATTEMPTS`
-///
-/// # Errors
-/// Returns [`PaykitError::Transport`] if the Noise configuration cannot be
-/// created or if the underlying `restore()` fails. Returns
-/// [`PaykitError::Validation`] when `remote_pubkey` does not match the
-/// recipient embedded in `snapshot`, or when the snapshot is not in handshake
-/// phase.
+/// Restored handshakes reset recovery tuning to defaults. `remote_pubkey` must
+/// match `snapshot.recipient()`.
 #[instrument(skip(session, secret_key, outbox_client, snapshot))]
 pub async fn restore_encrypted_link_handshake(
     session: pubky::PubkySession,
@@ -477,26 +337,8 @@ pub async fn restore_encrypted_link_handshake(
 /// Restores an [`EncryptedLinkHandshake`] from a previously saved snapshot
 /// using an existing Noise configuration.
 ///
-/// This is the in-process variant of [`restore_encrypted_link_handshake`] — use
-/// it when the original `Arc<PubkyNoiseConfig>` is still available.
-///
-/// # Parameters
-/// - `config` — shared Noise configuration matching the original handshake
-///   session.
-/// - `remote_pubkey` — public key of the counterparty.
-/// - `snapshot` — saved in-progress handshake snapshot.
-///
-/// # Restore behavior
-///
-/// Restored handshakes always reset recovery tuning to defaults:
-/// - `recovery_attempts = 0`
-/// - `max_recovery_attempts = DEFAULT_MAX_RECOVERY_ATTEMPTS`
-///
-/// # Errors
-/// Returns [`PaykitError::Transport`] if the underlying `restore()` fails.
-/// Returns [`PaykitError::Validation`] when `remote_pubkey` does not match the
-/// recipient embedded in `snapshot`, or when the snapshot is not in handshake
-/// phase.
+/// Restored handshakes reset recovery tuning to defaults. `remote_pubkey` must
+/// match `snapshot.recipient()`.
 #[instrument(skip(config, snapshot))]
 pub async fn restore_encrypted_link_handshake_from_config(
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
