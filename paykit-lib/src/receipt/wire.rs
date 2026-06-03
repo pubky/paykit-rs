@@ -2,26 +2,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
+    shared_wire::{BillingPeriodWire, PaymentAmountWire},
     BillingPeriod, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier,
     PaymentReference, PaymentRequestId, PrivateApplicationMessage, PrivateMessageKind, PublicKey,
     Result,
 };
 
 use super::{Receipt, ReceiptAccess, ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptId};
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AmountWire {
-    pub(super) value: String,
-    pub(super) asset: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct BillingPeriodWire {
-    pub(super) starts_at: String,
-    pub(super) ends_at: String,
-}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,7 +27,7 @@ pub(super) struct ReceiptWire {
     pub(super) billing_period: Option<BillingPeriodWire>,
     pub(super) recipient_public_key: String,
     pub(super) payment_endpoint_identifier: Option<String>,
-    pub(super) amount: Option<AmountWire>,
+    pub(super) amount: Option<PaymentAmountWire>,
     pub(super) metadata: JsonMap<String, JsonValue>,
 }
 
@@ -84,50 +71,6 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
-impl TryFrom<AmountWire> for PaymentAmount {
-    type Error = PaykitError;
-
-    fn try_from(wire: AmountWire) -> Result<Self> {
-        let amount = Self {
-            value: wire.value,
-            asset: wire.asset,
-        };
-        amount.validate_with_label("Receipt amount")?;
-        Ok(amount)
-    }
-}
-
-impl From<&PaymentAmount> for AmountWire {
-    fn from(amount: &PaymentAmount) -> Self {
-        Self {
-            value: amount.value.clone(),
-            asset: amount.asset.clone(),
-        }
-    }
-}
-
-impl TryFrom<BillingPeriodWire> for BillingPeriod {
-    type Error = PaykitError;
-
-    fn try_from(wire: BillingPeriodWire) -> Result<Self> {
-        let period = Self {
-            starts_at: wire.starts_at,
-            ends_at: wire.ends_at,
-        };
-        period.validate_with_label("Receipt Billing Period")?;
-        Ok(period)
-    }
-}
-
-impl From<&BillingPeriod> for BillingPeriodWire {
-    fn from(period: &BillingPeriod) -> Self {
-        Self {
-            starts_at: period.starts_at.clone(),
-            ends_at: period.ends_at.clone(),
-        }
-    }
-}
-
 impl From<&Receipt> for ReceiptWire {
     fn from(receipt: &Receipt) -> Self {
         Self {
@@ -145,7 +88,7 @@ impl From<&Receipt> for ReceiptWire {
                 .payment_endpoint_identifier
                 .as_ref()
                 .map(|identifier| identifier.as_str().to_string()),
-            amount: receipt.amount.as_ref().map(AmountWire::from),
+            amount: receipt.amount.as_ref().map(PaymentAmountWire::from),
             metadata: receipt.metadata.clone(),
         }
     }
@@ -183,14 +126,15 @@ impl TryFrom<ReceiptWire> for Receipt {
                 context: "Receipt contains invalid Payment Request ID".into(),
                 source: Some(err.into()),
             })?;
-        let billing_period = wire
-            .billing_period
-            .map(BillingPeriod::try_from)
-            .transpose()
-            .map_err(|err| PaykitError::InvalidData {
-                context: "Receipt contains invalid Billing Period".into(),
-                source: Some(err.into()),
-            })?;
+        let billing_period = wire.billing_period.map(BillingPeriod::from);
+        if let Some(period) = &billing_period {
+            period
+                .validate_with_label("Receipt Billing Period")
+                .map_err(|err| PaykitError::InvalidData {
+                    context: "Receipt contains invalid Billing Period".into(),
+                    source: Some(err.into()),
+                })?;
+        }
         let recipient_public_key = PublicKey::try_from(wire.recipient_public_key.as_str())
             .map_err(|err| PaykitError::InvalidData {
                 context: format!("Receipt contains invalid recipient public key: {err:?}"),
@@ -204,14 +148,15 @@ impl TryFrom<ReceiptWire> for Receipt {
                 context: "Receipt contains invalid Payment Endpoint Identifier".into(),
                 source: Some(err.into()),
             })?;
-        let amount = wire
-            .amount
-            .map(PaymentAmount::try_from)
-            .transpose()
-            .map_err(|err| PaykitError::InvalidData {
-                context: "Receipt contains invalid Payment Amount".into(),
-                source: Some(err.into()),
-            })?;
+        let amount = wire.amount.map(PaymentAmount::from);
+        if let Some(amount) = &amount {
+            amount
+                .validate_with_label("Receipt amount")
+                .map_err(|err| PaykitError::InvalidData {
+                    context: "Receipt contains invalid Payment Amount".into(),
+                    source: Some(err.into()),
+                })?;
+        }
         let receipt = Self {
             receipt_id,
             payment_reference,
@@ -287,14 +232,15 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
                 context: "Receipt Access contains invalid Payment Request ID".into(),
                 source: Some(err.into()),
             })?;
-        let billing_period = wire
-            .billing_period
-            .map(BillingPeriod::try_from)
-            .transpose()
-            .map_err(|err| PaykitError::InvalidData {
-                context: "Receipt Access contains invalid Billing Period".into(),
-                source: Some(err.into()),
-            })?;
+        let billing_period = wire.billing_period.map(BillingPeriod::from);
+        if let Some(period) = &billing_period {
+            period
+                .validate_with_label("Receipt Access Billing Period")
+                .map_err(|err| PaykitError::InvalidData {
+                    context: "Receipt Access contains invalid Billing Period".into(),
+                    source: Some(err.into()),
+                })?;
+        }
         let access = Self {
             version: 1,
             kind: PrivateMessageKind::ReceiptAccess,

@@ -11,6 +11,7 @@ mod payment_request;
 mod private_payment_list;
 mod pubky_routing;
 mod receipt;
+mod shared_wire;
 
 #[doc(inline)]
 pub use encrypted_link::{

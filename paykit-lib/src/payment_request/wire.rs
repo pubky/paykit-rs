@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
+    shared_wire::{BillingPeriodWire, PaymentAmountWire},
     EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
 };
@@ -34,13 +35,6 @@ impl<T> From<Option<T>> for RequiredNullable<T> {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AmountWire {
-    value: String,
-    asset: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecurrenceWire {
     every: u32,
     unit: String,
@@ -52,7 +46,7 @@ struct RecurrenceWire {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PaymentRequestTermsWire {
-    amount: AmountWire,
+    amount: PaymentAmountWire,
     payment_reference: String,
     proposal_expires_at: RequiredNullable<String>,
     recurrence: RequiredNullable<RecurrenceWire>,
@@ -86,13 +80,6 @@ struct BasicEventWire {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BillingPeriodWire {
-    starts_at: String,
-    ends_at: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PaymentProofWire {
     version: u8,
     kind: String,
@@ -114,10 +101,7 @@ impl TryFrom<PaymentRequestTermsWire> for PaymentRequestTerms {
             .map(PaymentEndpointIdentifier::new)
             .collect::<Result<Vec<_>>>()?;
         let terms = Self {
-            amount: PaymentAmount {
-                value: wire.amount.value,
-                asset: wire.amount.asset,
-            },
+            amount: PaymentAmount::from(wire.amount),
             payment_reference: PaymentReference::new(wire.payment_reference)?,
             proposal_expires_at: wire.proposal_expires_at.into_inner(),
             recurrence: wire
@@ -136,10 +120,7 @@ impl TryFrom<PaymentRequestTermsWire> for PaymentRequestTerms {
 impl From<&PaymentRequestTerms> for PaymentRequestTermsWire {
     fn from(terms: &PaymentRequestTerms) -> Self {
         Self {
-            amount: AmountWire {
-                value: terms.amount.value.clone(),
-                asset: terms.amount.asset.clone(),
-            },
+            amount: PaymentAmountWire::from(&terms.amount),
             payment_reference: terms.payment_reference.as_str().to_string(),
             proposal_expires_at: RequiredNullable::from(terms.proposal_expires_at.clone()),
             recurrence: RequiredNullable::from(terms.recurrence.as_ref().map(RecurrenceWire::from)),
@@ -193,28 +174,6 @@ where
         _ => Err(serde::de::Error::custom(
             "reason must be a string when present",
         )),
-    }
-}
-
-impl TryFrom<BillingPeriodWire> for BillingPeriod {
-    type Error = PaykitError;
-
-    fn try_from(wire: BillingPeriodWire) -> Result<Self> {
-        let period = Self {
-            starts_at: wire.starts_at,
-            ends_at: wire.ends_at,
-        };
-        period.validate()?;
-        Ok(period)
-    }
-}
-
-impl From<&BillingPeriod> for BillingPeriodWire {
-    fn from(period: &BillingPeriod) -> Self {
-        Self {
-            starts_at: period.starts_at.clone(),
-            ends_at: period.ends_at.clone(),
-        }
     }
 }
 
@@ -321,17 +280,17 @@ impl TryFrom<PaymentProofWire> for PaymentProof {
 
     fn try_from(wire: PaymentProofWire) -> Result<Self> {
         validate_version_kind(wire.version, &wire.kind, PrivateMessageKind::PaymentProof)?;
+        let billing_period = wire.billing_period.into_inner().map(BillingPeriod::from);
+        if let Some(period) = &billing_period {
+            period.validate()?;
+        }
         Ok(Self {
             version: 1,
             kind: PrivateMessageKind::PaymentProof,
             event_id: EventId::new(wire.event_id)?,
             payment_request_id: PaymentRequestId::new(wire.payment_request_id)?,
             payment_reference: PaymentReference::new(wire.payment_reference)?,
-            billing_period: wire
-                .billing_period
-                .into_inner()
-                .map(BillingPeriod::try_from)
-                .transpose()?,
+            billing_period,
             payment_endpoint_identifier: PaymentEndpointIdentifier::new(
                 wire.payment_endpoint_identifier,
             )?,
