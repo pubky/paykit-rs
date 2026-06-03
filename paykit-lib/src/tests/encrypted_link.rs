@@ -370,8 +370,8 @@ async fn test_receive_private_application_messages_returns_full_stream() {
     let receipt_access_json =
         r#"{"version":1,"kind":"paykit.receipt_access","payload":"raw-only"}"#;
 
-    send_raw_private_message(&mut setup.sender_link, unknown_json).await;
-    send_raw_private_message(&mut setup.sender_link, receipt_access_json).await;
+    send_raw_private_application_message(&mut setup.sender_link, unknown_json).await;
+    send_raw_private_application_message(&mut setup.sender_link, receipt_access_json).await;
 
     let messages = setup
         .receiver_link

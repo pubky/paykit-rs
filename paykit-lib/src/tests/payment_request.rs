@@ -9,6 +9,19 @@ fn object(value: JsonValue) -> JsonMap<String, JsonValue> {
     }
 }
 
+fn receipt_access_json(access: &ReceiptAccess) -> String {
+    json!({
+        "version": access.version,
+        "kind": "paykit.receipt_access",
+        "event_id": access.event_id.as_str(),
+        "receipt_id": access.receipt_id.as_str(),
+        "payment_reference": access.payment_reference.as_str(),
+        "location": &access.location,
+        "key": access.key.as_str(),
+    })
+    .to_string()
+}
+
 fn request_id() -> PaymentRequestId {
     PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap()
 }
@@ -322,15 +335,29 @@ fn payment_request_events_surface_conflicts_for_caller_dedupe() {
 #[tokio::test]
 async fn payment_request_events_share_ordered_stream_with_other_private_lanes() {
     let mut setup = PrivateTestSetup::new().await;
-    let receipt_access_json =
-        r#"{"version":1,"kind":"paykit.receipt_access","payload":"raw-only"}"#;
+    let receipt_id = ReceiptId::new("450e8400-e29b-41d4-a716-446655440000").unwrap();
+    let receipt_access = ReceiptAccess {
+        version: 1,
+        kind: PrivateMessageKind::ReceiptAccess,
+        event_id: EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d109").unwrap(),
+        receipt_id: receipt_id.clone(),
+        payment_reference: PaymentReference::new("receipt-reference").unwrap(),
+        payment_request_id: None,
+        billing_period: None,
+        location: ReceiptAccess::location_for(&receipt_id),
+        key: ReceiptDecryptionKey::generate(),
+    };
     let request = payment_request();
     let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
     let mut payment_endpoints = HashMap::new();
     payment_endpoints.insert(endpoint.clone(), PaymentEndpointPayload::new("lnbc1..."));
     let private_list = private_payment_list(&payment_endpoints);
 
-    send_raw_private_message(&mut setup.sender_link, receipt_access_json).await;
+    send_raw_private_application_message(
+        &mut setup.sender_link,
+        &receipt_access_json(&receipt_access),
+    )
+    .await;
     send_payment_request(&mut setup.sender_link, &request)
         .await
         .unwrap();
@@ -354,7 +381,7 @@ async fn payment_request_events_share_ordered_stream_with_other_private_lanes() 
             Some(PrivateMessageKind::PrivatePaymentList.as_str()),
         ]
     );
-    assert_eq!(messages[0].raw_json, receipt_access_json);
+    assert_eq!(messages[0].raw_json, receipt_access_json(&receipt_access));
     assert_eq!(
         messages[1].known_kind(),
         Some(PrivateMessageKind::PaymentRequest)

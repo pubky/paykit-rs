@@ -8,7 +8,7 @@ use crate::{PaykitError, Result};
 
 use super::{
     wire::{EncryptedReceiptWire, ReceiptWire},
-    Receipt, ReceiptAccess, ReceiptDecryptionKey,
+    Receipt, ReceiptAccess, ReceiptDecryptionKey, RECEIPT_ENCRYPTION_ALGORITHM,
 };
 
 impl Receipt {
@@ -16,13 +16,18 @@ impl Receipt {
         format!("paykit.receipt.v1:{location}")
     }
 
-    /// Encrypt this receipt for storage at its canonical location using `key`.
+    /// Encrypt this receipt for storage at its canonical Receipt Location path
+    /// using `key`.
     ///
-    /// The location is derived from the Payment Reference and authenticated as
-    /// AEAD associated data; callers must use that same canonical location when
+    /// The location path is derived from the Receipt ID and authenticated as
+    /// AEAD associated data; callers must use that same canonical path when
     /// decrypting.
     pub fn encrypt(&self, key: &ReceiptDecryptionKey) -> Result<String> {
-        let location = ReceiptAccess::location_for(&self.reference);
+        self.validate_request_context()?;
+        if let Some(amount) = &self.amount {
+            amount.validate_with_label("Receipt amount")?;
+        }
+        let location = ReceiptAccess::location_for(&self.receipt_id);
         let key_bytes = key.bytes()?;
         let cipher = XChaCha20Poly1305::new((&key_bytes).into());
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
@@ -47,7 +52,7 @@ impl Receipt {
         let wire = EncryptedReceiptWire {
             version: 1,
             kind: "paykit.receipt.encrypted".to_string(),
-            algorithm: "XChaCha20Poly1305".to_string(),
+            algorithm: RECEIPT_ENCRYPTION_ALGORITHM.to_string(),
             nonce: URL_SAFE_NO_PAD.encode(nonce),
             ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
         };
@@ -57,11 +62,11 @@ impl Receipt {
         })
     }
 
-    /// Decrypt an encrypted Receipt fetched from a homeserver.
+    /// Decrypt an Encrypted Receipt fetched from a homeserver.
     ///
     /// `key` and `location` normally come from a [`ReceiptAccess`] message. The
-    /// location is authenticated as AEAD associated data and the decrypted
-    /// Payment Reference must match the canonical location.
+    /// location path is authenticated as AEAD associated data and the decrypted
+    /// Receipt ID must match the canonical path.
     pub fn decrypt(
         encrypted_json: &str,
         key: &ReceiptDecryptionKey,
@@ -74,7 +79,7 @@ impl Receipt {
             })?;
         if wire.version != 1
             || wire.kind != "paykit.receipt.encrypted"
-            || wire.algorithm != "XChaCha20Poly1305"
+            || wire.algorithm != RECEIPT_ENCRYPTION_ALGORITHM
         {
             return Err(PaykitError::InvalidData {
                 context: format!(
@@ -126,9 +131,9 @@ impl Receipt {
                 source: Some(err.into()),
             })?;
         let receipt = Self::try_from(receipt_wire)?;
-        if ReceiptAccess::location_for(&receipt.reference) != location {
+        if ReceiptAccess::location_for(&receipt.receipt_id) != location {
             return Err(PaykitError::InvalidData {
-                context: "Receipt Payment Reference does not match Receipt Location".into(),
+                context: "Receipt ID does not match Receipt Location".into(),
                 source: None,
             });
         }
@@ -136,25 +141,21 @@ impl Receipt {
     }
 }
 
-/// Decrypts an encrypted Receipt fetched from a homeserver.
+/// Decrypts an Encrypted Receipt fetched from a homeserver.
 ///
-/// `encrypted_json` is the public receipt object stored by
-/// [`issue_receipt`](crate::issue_receipt).
-/// `key` and `location` normally come from a [`ReceiptAccess`] message received
-/// with [`get_receipt_access`](crate::get_receipt_access). The `location` is
-/// authenticated as additional data, so decrypting with a different location
-/// fails even when the key and ciphertext are otherwise correct.
+/// `encrypted_json` is the stored Encrypted Receipt JSON. `key` and `location`
+/// normally come from a [`ReceiptAccess`] message. The `location` path is
+/// authenticated as additional data, and the decrypted Receipt ID must match
+/// that path.
 ///
 /// Receipt Decryption Keys are sensitive. [`ReceiptDecryptionKey`] redacts its
-/// `Debug` and `Display` output, but callers must still avoid logging values
+/// `Debug` and `Display` output, but callers must still avoid logging raw values
 /// returned by [`ReceiptDecryptionKey::as_str`].
 ///
 /// # Errors
-/// - Returns [`PaykitError::InvalidData`] if the encrypted envelope is malformed,
-///   uses an unsupported version/kind/algorithm, has invalid base64url fields,
-///   fails authenticated decryption, decrypts to malformed receipt JSON, or
-///   decrypts to a receipt whose reference does not match the authenticated
-///   Receipt Location.
+/// Returns [`PaykitError::InvalidData`] if the encrypted receipt is malformed,
+/// fails authenticated decryption, or decrypts to receipt data that does not
+/// match the Receipt Location.
 pub fn decrypt_receipt(
     encrypted_json: &str,
     key: &ReceiptDecryptionKey,

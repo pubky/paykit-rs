@@ -54,8 +54,9 @@ pub use pubky_noise;
 pub use pubky_routing::{PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX};
 #[doc(inline)]
 pub use receipt::{
-    decrypt_receipt, get_receipt_access, issue_receipt, IssuedReceipt, Receipt, ReceiptAccess,
-    ReceiptDecryptionKey, ReceiptDraft,
+    decrypt_receipt, parse_receipt_access_event_message, parse_receipt_access_json,
+    prepare_receipt, send_receipt_access, store_prepared_receipt, PreparedReceipt, Receipt,
+    ReceiptAccess, ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptDraft, ReceiptId,
 };
 
 /// Common result alias for Paykit operations.

@@ -137,7 +137,7 @@ impl InProgressHandshakeSetup {
 /// Creates two users on the same ephemeral testnet, performs a full Noise XX
 /// handshake between them using the public `initiate_encrypted_link` /
 /// `accept_encrypted_link` / `advance_handshake` API, and produces ready-to-use
-/// [`EncryptedLink`] handles so private Paykit messages can be exchanged.
+/// [`EncryptedLink`] handles so Private Application Messages can be exchanged.
 struct PrivateTestSetup {
     _testnet: EphemeralTestnet,
     /// Sender's Encrypted Link (writes Private Payment Lists).
@@ -243,14 +243,14 @@ fn private_payment_list(
     PrivatePaymentList::new(payment_endpoints.clone())
 }
 
-async fn send_raw_private_message(link: &mut EncryptedLink, json: &str) {
+async fn send_raw_private_application_message(link: &mut EncryptedLink, json: &str) {
     assert!(
         json.len() <= pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN,
-        "test raw message exceeds pubky-noise message size"
+        "test Private Application Message exceeds pubky-noise message size"
     );
     link.send_private_application_message_for_test(json.as_bytes())
         .await
-        .expect("raw private message should send");
+        .expect("raw Private Application Message should send");
 }
 
 async fn receive_latest_private_payment_list_for_test(
@@ -258,11 +258,21 @@ async fn receive_latest_private_payment_list_for_test(
 ) -> Option<PrivatePaymentList> {
     link.receive_private_application_messages()
         .await
-        .expect("raw private stream receive should succeed")
+        .expect("Private Application Message stream receive should succeed")
         .into_iter()
         .filter(|message| message.known_kind() == Some(PrivateMessageKind::PrivatePaymentList))
         .filter_map(|message| parse_private_payment_list_json(&message.raw_json).ok())
         .next_back()
+}
+
+async fn receive_receipt_access_for_test(link: &mut EncryptedLink) -> Vec<ReceiptAccess> {
+    link.receive_private_application_messages()
+        .await
+        .expect("Private Application Message stream receive should succeed")
+        .iter()
+        .filter_map(parse_receipt_access_event_message)
+        .filter_map(|message| message.access.ok())
+        .collect()
 }
 
 async fn receive_payment_request_events_for_test(
@@ -270,7 +280,7 @@ async fn receive_payment_request_events_for_test(
 ) -> Vec<PaymentRequestEventMessage> {
     link.receive_private_application_messages()
         .await
-        .expect("raw private stream receive should succeed")
+        .expect("Private Application Message stream receive should succeed")
         .iter()
         .filter_map(parse_payment_request_event_message)
         .collect()

@@ -32,11 +32,6 @@ impl PaymentReference {
         Ok(Self(reference))
     }
 
-    /// Generate a fresh random UUID-v4 Payment Reference.
-    pub fn new_v4() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
-    }
-
     /// Access the inner reference string.
     pub fn as_str(&self) -> &str {
         &self.0
