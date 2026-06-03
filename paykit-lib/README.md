@@ -1,6 +1,6 @@
 # Paykit Library
 
-Stateless Rust crate that implements Paykit Library functionality on [Pubky](https://pubky.org/). It provides helpers for **public** Payment Endpoints (stored as plaintext files on the homeserver), Private Payment Envelopes, Encrypted Links, and Receipts, while delegating Pubky authentication and session management to callers.
+Stateless Rust crate that implements Paykit Library functionality on [Pubky](https://pubky.org/). It provides helpers for **public** Payment Endpoints (stored as plaintext files on the homeserver), Private Payment Lists, Payment Requests, Encrypted Links, and Receipts, while delegating Pubky authentication and session management to callers.
 
 Pubky is the only supported network/storage backend for this crate. The former generic transport traits and `pubky` feature flag have been removed; Pubky dependencies are unconditional.
 
@@ -23,7 +23,7 @@ use paykit_lib::{
 };
 
 // Create validated types.
-let identifier = PaymentEndpointIdentifier::new("bitcoin-bolt11")?;
+let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
 let payload = PaymentEndpointPayload::new("lnbc1...");
 
 // Store a Payment Endpoint using an authenticated PubkySession.
@@ -43,15 +43,15 @@ for (identifier, payload) in &payment_list.payment_endpoints {
 
 ### `PaymentEndpointIdentifier`
 
-Machine-readable identifier for a Payment Endpoint type (for example `"bitcoin-p2sh"` or `"bitcoin-bolt11"`).
+Machine-readable identifier for a Payment Endpoint type (for example `"btc-bitcoin-p2tr"` or `"btc-lightning-bolt11"`).
 `PaymentEndpointIdentifier` is validated at construction time to prevent path injection attacks.
 
 ```rust
 use paykit_lib::PaymentEndpointIdentifier;
 
 // Construction is fallible:
-let identifier = PaymentEndpointIdentifier::new("bitcoin-bolt11").unwrap();
-assert_eq!(identifier.as_str(), "bitcoin-bolt11");
+let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+assert_eq!(identifier.as_str(), "btc-lightning-bolt11");
 
 // Path traversal is rejected:
 assert!(PaymentEndpointIdentifier::new("../etc/passwd").is_err());
@@ -101,26 +101,31 @@ if payment_list.payment_endpoints.is_empty() {
 }
 ```
 
-Private Payment Envelopes use a versioned `PrivatePaymentEnvelope` value. The Payment Endpoints still use the same `HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>` layout, but the envelope also carries a UUID-v4 `PaymentReference` for correlation with later protocol artifacts such as receipts:
+Private Payment Lists use a versioned `PrivatePaymentList` value. The Payment Endpoints still use the same `HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>` layout. Payment-specific correlation belongs in Payment Requests, Payment Proofs, and Receipts, not in endpoint publication:
 
 ```rust,ignore
-use paykit_lib::{get_private_payment_envelope, PrivatePaymentEnvelope};
+use paykit_lib::{parse_private_payment_list_json, PrivateMessageKind};
 
-if let Some(envelope) = get_private_payment_envelope(&mut link).await? {
-    println!("reference={}", envelope.reference.as_str());
-    for (identifier, payload) in &envelope.payment_endpoints {
-        println!(
-            "identifier={} payload={}",
-            identifier.as_str(),
-            payload.as_str()
-        );
+let messages = link.receive_private_application_messages().await?;
+for message in messages {
+    if message.known_kind() == Some(PrivateMessageKind::PrivatePaymentList) {
+        let list = parse_private_payment_list_json(&message.raw_json)?;
+        for (identifier, payload) in &list.payment_endpoints {
+            println!(
+                "identifier={} payload={}",
+                identifier.as_str(),
+                payload.as_str()
+            );
+        }
     }
-} else {
-    println!("no Private Payment Envelope available yet");
 }
 ```
 
-Private Payment Envelopes use Latest-State Message semantics: if several envelopes are queued, `get_private_payment_envelope` returns the newest one and supersedes older envelopes. Receipt Access uses Event Message semantics: `get_receipt_access` returns all currently available Receipt Access descriptors in FIFO order.
+Private Payment Lists use Latest-State Message semantics at the SDK/runtime
+layer: if several list messages are queued, the latest valid list supersedes
+older list messages. Malformed newer list messages do not supersede the latest
+valid state. Receipt Access and Payment Request messages use Event Message
+semantics, so SDK/runtime code must preserve every valid message in send order.
 
 The `payment_endpoints` field is a `HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>`.
 
@@ -144,7 +149,7 @@ All public APIs return `paykit_lib::Result<T>`, which is an alias for `std::resu
 ## Pubky Sessions and I/O
 
 - **Public Payment Endpoints** use concrete Pubky SDK handles. Writes take `&pubky::PubkySession`; reads take `&pubky::PublicStorage`.
-- **Private Payment Envelopes** use `pubky-noise`'s `PubkyNoiseEncryptor` for Noise-encrypted messaging, which handles both encryption and homeserver I/O through Pubky. Private Payment Envelope functions accept an `EncryptedLink` established via an Encrypted Link Handshake.
+- **Private Payment Lists** use `pubky-noise`'s `PubkyNoiseEncryptor` for Noise-encrypted messaging, which handles both encryption and homeserver I/O through Pubky. Private Payment List functions accept an `EncryptedLink` established via an Encrypted Link Handshake.
 - Paykit stays stateless. Session creation, capability scoping, key rotation, account recovery, and client timeout configuration remain caller responsibilities.
 - Public payment paths are centralized by `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`). Private Paykit message paths use `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) as the base for pubky-noise path derivation.
 
@@ -175,15 +180,15 @@ use paykit_lib::{set_payment_endpoint, PaymentEndpointIdentifier, PaymentEndpoin
 async fn demo(session: &pubky::PubkySession) -> paykit_lib::Result<()> {
     // NOTE: parties need to agree on Payment Endpoint Identifiers to interoperate.
 
-    let identifier = PaymentEndpointIdentifier::new("bitcoin-bolt11")?;
+    let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
     let payload = PaymentEndpointPayload::new("ln...");
     set_payment_endpoint(session, identifier, payload).await?;
 
-    let identifier = PaymentEndpointIdentifier::new("bitcoin-p2wpkh")?;
+    let identifier = PaymentEndpointIdentifier::new("btc-bitcoin-p2wpkh")?;
     let payload = PaymentEndpointPayload::new("bc1...");
     set_payment_endpoint(session, identifier, payload).await?;
     // or
-    let identifier = PaymentEndpointIdentifier::new("bitcoin-p2tr")?;
+    let identifier = PaymentEndpointIdentifier::new("btc-bitcoin-p2tr")?;
     let payload = PaymentEndpointPayload::new("bc1...");
     set_payment_endpoint(session, identifier, payload).await?;
 
@@ -199,7 +204,7 @@ Remove a previously published Payment Endpoint Payload for a given Payment Endpo
 use paykit_lib::{remove_payment_endpoint, PaymentEndpointIdentifier};
 
 async fn demo(session: &pubky::PubkySession) -> paykit_lib::Result<()> {
-    let identifier = PaymentEndpointIdentifier::new("bitcoin-bolt11")?;
+    let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
     remove_payment_endpoint(session, identifier).await?;
     Ok(())
 }
@@ -239,7 +244,7 @@ Convenience resolver for a single Payment Endpoint Identifier. Returns `Ok(None)
 use paykit_lib::{get_payment_endpoint, PaymentEndpointIdentifier, PublicKey};
 
 async fn inspect(public_storage: &pubky::PublicStorage, pk: &PublicKey) -> paykit_lib::Result<()> {
-    let bolt11 = PaymentEndpointIdentifier::new("bitcoin-bolt11")?;
+    let bolt11 = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
     if let Some(endpoint) = get_payment_endpoint(public_storage, pk, &bolt11).await? {
         println!("bolt11 payload: {}", endpoint.as_str());
     } else {
@@ -259,9 +264,9 @@ If a payment execution fails with an error suggesting the endpoint has been cons
 2. Compare the newly retrieved `PaymentEndpointPayload` with the value used in the failed attempt.
 3. If the Payment Endpoint Payload differs, retry the payment with the updated value.
 
-### Private Payment Envelopes
+### Private Payment Lists
 
-Private Payment Envelopes are end-to-end encrypted via a Noise protocol handshake managed by `pubky-noise`. `PubkyNoiseEncryptor` handles encryption, file naming, and homeserver storage via `send_message`/`receive_message`.
+Private Payment Lists are end-to-end encrypted via a Noise protocol handshake managed by `pubky-noise`. `PubkyNoiseEncryptor` handles encryption, file naming, and homeserver storage via `send_message`/`receive_message`.
 
 Storage paths for private Paykit data are derived per-counterparty pair using `pubky_noise::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-noise` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private Paykit data.
 
@@ -285,7 +290,7 @@ Storage paths for private Paykit data are derived per-counterparty pair using `p
 - `EncryptedLinkHandshake::config() -> &Arc<PubkyNoiseConfig>`  
   Access the shared Noise configuration for in-process handshake restore.
 - `EncryptedLinkHandshakeSnapshot::serialize() -> Vec<u8>` / `EncryptedLinkHandshakeSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkHandshakeSnapshot>` / `EncryptedLinkHandshakeSnapshot::recipient() -> &PublicKey`  
-  Snapshot wire format helpers (same compact 197-byte `PubkyNoiseSessionState` format as link snapshots).
+  Snapshot wire format helpers (same compact 197-byte `PubkyNoiseSessionState` format used by link snapshots).
 - `restore_encrypted_link_handshake(session, secret_key, remote_pubkey, outbox_client, snapshot) -> Result<EncryptedLinkHandshake>`  
   Cross-restart restore for an in-progress handshake.
 - `restore_encrypted_link_handshake_from_config(config, remote_pubkey, snapshot) -> Result<EncryptedLinkHandshake>`  
@@ -295,37 +300,73 @@ After handshake restore, recovery tuning resets to defaults: `recovery_attempts 
 
 Snapshot bytes include sensitive key material and must be treated as secrets (store encrypted at rest; never log or expose them).
 
-#### Private Payment Envelope exchange
-- `set_private_payment_envelope(link: &mut EncryptedLink, envelope: &PrivatePaymentEnvelope) -> Result<()>`
-  Serializes the complete Private Payment Envelope to JSON, encrypts it, and sends it via the Encrypted Link. The caller is responsible for managing the Payment Endpoints in the Payment List and passing the full map each time in `envelope.payment_endpoints`. The envelope includes a UUID-v4 `PaymentReference`; `PaymentReference::new_v4()` generates a fresh canonical reference. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient homeserver write failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase homeserver write failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery. Deterministic state, counter, nonce, or encryption errors fail immediately.
-- `get_private_payment_envelope(link: &mut EncryptedLink) -> Result<Option<PrivatePaymentEnvelope>>`
-  Receives and decrypts currently available Private Application Messages from the counterparty and returns the latest Private Payment Envelope, if one is available. `Ok(None)` means no Private Payment Envelope is currently available; it is distinct from an envelope with an empty `payment_endpoints` map. Private Payment Envelopes use Latest-State Message semantics: queued older envelopes are superseded by the newest one. Other supported message kinds remain buffered for their own typed receivers. Syntactically valid messages with unsupported `kind` values are logged and dropped rather than buffered indefinitely. Malformed Private Application Messages are ignored with diagnostics so they do not prevent later valid messages from being processed.
+#### Private Payment List exchange
+- `set_private_payment_list(link: &mut EncryptedLink, list: &PrivatePaymentList) -> Result<()>`
+  Serializes the complete Private Payment List to JSON, encrypts it, and sends it via the Encrypted Link. The caller is responsible for managing the Payment Endpoints in the Payment List and passing the full map each time in `list.payment_endpoints`. The serialized JSON must fit within `PUBKY_NOISE_MSG_LEN` (1000 bytes). Transient homeserver write failures are retried automatically up to `EncryptedLink::set_max_send_retries` times (default: `DEFAULT_MAX_SEND_RETRIES`, 3). Transport-phase homeserver write failures do not corrupt the Noise state, so retries are safe without snapshot-based recovery. Deterministic state, counter, nonce, or encryption errors fail immediately.
+- `parse_private_payment_list_json(json: &str) -> Result<PrivatePaymentList>`
+  Stateless parser for callers or SDK layers that route messages from `EncryptedLink::receive_private_application_messages`.
 
-All Private Application Messages share one ordered encrypted stream. Private Payment Envelopes use Latest-State Message semantics and intentionally collapse older queued envelopes. Receipt Access uses Event Message semantics; `get_receipt_access` drains and returns all currently available Receipt Access messages in FIFO/send order. Unsupported syntactically valid Private Application Message kinds are logged and dropped by the shared dispatcher. The in-memory buffer for supported messages dispatched but not yet consumed by a typed helper is not crash-durable; callers that perform irreversible side effects after receiving Event Messages should persist their own app-level state alongside Encrypted Link snapshots/read counters.
+All Private Application Messages share one ordered encrypted stream. Use `EncryptedLink::receive_private_application_messages` when a caller or SDK must route private message kinds durably. The raw JSON is preserved even when parsed `version`/`kind` header fields are missing or malformed. Callers that perform irreversible side effects after receiving Event Messages should persist their own app-level handled/unhandled event state before persisting a snapshot whose read counter has advanced past those messages.
+
+Current v0.2 private Paykit wire messages are closed-world JSON objects: unknown fields are rejected unless a field is explicitly defined as an open JSON object, such as Payment Request `metadata`, Payment Proof `proof`, or Receipt Metadata.
+
+#### Payment Request exchange
+
+Payment Requests are payee-initiated private protocol objects exchanged over an Encrypted Link. Their lifecycle messages (`paykit.payment_request`, acceptance, rejection, cancellation, and proof) use Event Message semantics. Paykit serializes, encrypts, sends, receives, and structurally validates these messages, but does not execute payments, schedule recurring jobs, manage wallet state, validate sender-role intent, or validate payment-method-specific proofs.
+
+- `send_payment_request(link, event: &PaymentRequest) -> Result<()>`
+  Sends a `paykit.payment_request` proposal with immutable terms. Terms include `PaymentAmount`, a payee-provided `PaymentReference`, required nullable `proposal_expires_at` (`None`/`null` means no protocol-level proposal expiry before acceptance), optional `Recurrence`, accepted Payment Endpoint Identifiers, and optional metadata.
+- `serialize_payment_request_event(event: &PaymentRequestEvent) -> Result<String>`
+  Serializes a Payment Request event to the exact JSON payload callers can persist before sending for crash-safe retry/idempotency.
+- `parse_payment_request_event_message(message: &PrivateApplicationMessage) -> Option<PaymentRequestEventMessage>`
+  Stateless parser for Payment Request events from the raw Private Application Message stream. Recognized but malformed events are returned with a validation error so callers can persist the raw payload before advancing their durable checkpoint.
+- `send_payment_request_acceptance(link, event: &PaymentRequestAcceptance) -> Result<()>`
+  Sends an explicit payer acceptance for a proposed Payment Request.
+- `send_payment_request_rejection(link, event: &PaymentRequestRejection) -> Result<()>`
+  Sends a payer rejection with an optional reason.
+- `send_payment_request_cancellation(link, event: &PaymentRequestCancellation) -> Result<()>`
+  Sends a unilateral cancellation with an optional reason.
+- `send_payment_proof(link, event: &PaymentProof) -> Result<()>`
+  Sends method-specific proof data for one concrete payment execution. The requested amount is inherited from immutable Payment Request terms and is not repeated in the generic Payment Proof. The opaque `proof` object is method-specific and has no required generic discriminator in Paykit v0.2. The `payment_reference` must be copied from the accepted Payment Request; recurring proofs include a `BillingPeriod`.
+- `PaymentProof::validate_for_request(&request) -> Result<()>`
+  Validates stateless proof/request correlation fields: matching Payment Request ID and Payment Reference, one-time vs recurring Billing Period presence, Billing Period shape when present, and accepted Payment Endpoint Identifier. Caller-managed application or wallet state must still decide whether the request is known, accepted, proposal-expired before acceptance, rejected, cancelled, already processed or settled, whether the sender role is allowed for the message kind, or whether a recurring Billing Period is eligible under the request recurrence.
+
+Payment Request and Receipt Access messages use Event Message semantics. Use `EncryptedLink::receive_private_application_messages`, persist the returned raw stream messages, then parse/reroute them with stateless parsers such as `parse_payment_request_event_message`, `parse_receipt_access_event_message`, and `parse_private_payment_list_json`.
+
+Paykit Library is stateless and does not persist Event Message history. Callers that derive state or trigger side effects must persist the raw JSON payload, parsed `kind` when available, parse result, and parsed IDs when available from event wrappers such as `PaymentRequestEventMessage` or `ReceiptAccessEventMessage`, detect conflicting reused Event IDs or conflicting repeated `payment_request_id` terms, and apply lifecycle rules such as proof-after-rejection/cancellation before acting.
+
+Callers that persist Encrypted Link snapshots should treat the snapshot as the local read checkpoint. Persist received Event Messages and dedupe state before replacing the stored snapshot with a snapshot whose read counter has advanced past those messages. If events are persisted but the snapshot is not, replay is expected; Event Messages should be deduped by `event_id`, while Receipt Access can also be reconciled by Receipt ID and caller receipt state.
 
 #### Payment receipts
 
-Receipts are split into two persisted artifacts:
+Receipts involve three related objects:
 
-1. The encrypted Receipt is stored on the issuer's homeserver under `/pub/paykit/v0/private/receipts/{PaymentReference}`.
-2. A `ReceiptAccess` descriptor is sent to the counterparty over the existing Encrypted Link. It contains the `PaymentReference`, the Receipt Location, the encryption `algorithm`, and the symmetric Receipt Decryption Key.
+1. The plaintext `Receipt` is created and decrypted locally. It is not stored directly on the homeserver.
+2. The Encrypted Receipt is stored on the issuer's homeserver under `/pub/paykit/v0/private/receipts/{ReceiptId}`.
+3. A `ReceiptAccess` descriptor is sent to the counterparty over the existing Encrypted Link. It contains the Event ID, `ReceiptId`, `payment_reference`, optional `payment_request_id` and `billing_period`, Receipt Location, and symmetric Receipt Decryption Key.
 
-The Receipt is encrypted with `XChaCha20Poly1305`; the storage location is used as authenticated associated data, so fetching the right ciphertext but decrypting it against a different location fails.
+Receipt Location is a path on the issuer's homeserver, not a complete Pubky resource by itself. SDK/runtime code pairs it with the Receipt Access sender/issuer context when retrieving the Encrypted Receipt. The Receipt is encrypted with `XChaCha20Poly1305`; the storage location path is used as authenticated associated data, so fetching the right ciphertext but decrypting it against a different location fails.
 
-- `issue_receipt(session, link, draft: ReceiptDraft) -> Result<IssuedReceipt>`
-  Builds a canonical `Receipt` from the caller's `ReceiptDraft`, fills in the recipient public key from `link`, generates a fresh `ReceiptDecryptionKey`, stores the encrypted receipt on the issuer's homeserver, then sends a `ReceiptAccess` message over Noise. Reissuing the same `PaymentReference` overwrites the same Receipt Location with new ciphertext and a new key; older Receipt Access descriptors for that reference may stop decrypting after a later successful reissue.
-- `get_receipt_access(link: &mut EncryptedLink) -> Result<Vec<ReceiptAccess>>`
-  Receives all currently available queued Receipt Access messages. Receipt Access uses Event Message semantics: every Receipt Access message matters, and older Receipt Access descriptors are not collapsed when newer ones arrive. An empty vector means no Receipt Access messages are currently available. Calling `get_private_payment_envelope` will not discard Receipt Access messages; they remain buffered for `get_receipt_access`.
-- `ReceiptAccess::location_for(reference) -> String`
-  Returns Paykit's canonical Receipt Location for an encrypted Receipt.
+- `prepare_receipt(link, draft: ReceiptDraft) -> Result<PreparedReceipt>`
+  Builds a canonical local `Receipt` from the caller's `ReceiptDraft`, fills in the recipient public key from `link`, generates a fresh `ReceiptId` when the draft does not provide one, copies optional Payment Request ID and Billing Period correlation into the Receipt and Receipt Access descriptor, generates a fresh `ReceiptDecryptionKey`, encrypts the Receipt into an Encrypted Receipt, and returns the matching `ReceiptAccess` descriptor without storing or sending anything. Receipt Metadata is a caller-defined JSON object.
+- `store_prepared_receipt(session, prepared: &PreparedReceipt) -> Result<()>`
+  Stores the Encrypted Receipt from a prepared issuance at its Receipt Location.
+- `send_receipt_access(link, access: &ReceiptAccess) -> Result<()>`
+  Sends a prepared Receipt Access descriptor over Noise. This can be retried with the same descriptor if storage already succeeded.
+- `parse_receipt_access_event_message(message: &PrivateApplicationMessage) -> Option<ReceiptAccessEventMessage>`
+  Stateless parser for Receipt Access events from the raw Private Application Message stream. Recognized but malformed Receipt Access events are returned with a validation error so callers can persist the raw payload before advancing their durable checkpoint.
+- `parse_receipt_access_json(json: &str) -> Result<ReceiptAccess>`
+  Stateless parser for a known Receipt Access JSON payload.
+- `ReceiptAccess::location_for(receipt_id) -> String`
+  Returns Paykit's canonical Receipt Location for an Encrypted Receipt.
 - `Receipt::encrypt(&self, key) -> Result<String>` / `Receipt::decrypt(encrypted_json, key, location) -> Result<Receipt>`
-  Encrypts or decrypts Receipts using `XChaCha20Poly1305`. Encryption derives the canonical Receipt Location from the Receipt's `PaymentReference` and authenticates that location as AAD. Pass the exact location from the access descriptor when decrypting; it is authenticated as AAD. Decryption also rejects plaintext whose internal reference does not match the authenticated location.
+  Encrypts local plaintext Receipts into Encrypted Receipts, or decrypts Encrypted Receipts back into local plaintext Receipts, using `XChaCha20Poly1305`. Encryption derives the canonical Receipt Location path from the Receipt's `ReceiptId` and authenticates that path as AAD. Pass the exact location from the access descriptor when decrypting; it is authenticated as AAD. Decryption also rejects plaintext whose internal Receipt ID does not match the authenticated location.
 - `decrypt_receipt(encrypted_json, key, location) -> Result<Receipt>`
-  Convenience wrapper around `Receipt::decrypt`. Incoming Receipt Access descriptors are accepted only when `location` equals Paykit's canonical Receipt Location for their `PaymentReference`.
+  Convenience wrapper around `Receipt::decrypt`. This decrypts with the supplied location as authenticated data and rejects plaintext whose `ReceiptId` does not map to that location. Receipt Access descriptor validation happens when parsing or sending Receipt Access.
 
-Receipt Decryption Keys are sensitive. `ReceiptDecryptionKey`, `ReceiptAccess`, and `IssuedReceipt` redact key material from formatted output through the key's custom `Debug`/`Display`, but callers must still avoid logging or persisting the raw `ReceiptDecryptionKey::as_str()` value outside secure storage.
+Receipt Decryption Keys are sensitive. `ReceiptDecryptionKey` and `ReceiptAccess` redact key material from formatted output through the key's custom `Debug`/`Display`, but callers must still avoid logging or persisting the raw `ReceiptDecryptionKey::as_str()` value outside secure storage.
 
-`issue_receipt` stores first and sends access second. If the process crashes or the Noise send ultimately fails after storage succeeds, an encrypted receipt can remain on the issuer's homeserver without the counterparty receiving access. Apps that need stronger delivery guarantees should track receipt issuance in durable app state and retry/reconcile at the application layer.
+Apps should call `prepare_receipt`, persist the returned `PreparedReceipt` or equivalent issuance state, then call `store_prepared_receipt` and `send_receipt_access` in retryable steps. If storage succeeds but sending Receipt Access fails, callers can retry sending the same `PreparedReceipt::access`.
 
 #### Termination
 - `close_encrypted_link(link: EncryptedLink) -> Result<()>`  
@@ -389,7 +430,7 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
 **Snapshot and serialize:**
 
 - `EncryptedLink::snapshot() -> EncryptedLinkSnapshot`  
-  Captures the current Encrypted Link state (transport keys, nonce counters, counterparty identity) as a serializable snapshot.
+  Captures the current Encrypted Link state (transport keys, nonce counters, and counterparty identity) as a serializable snapshot.
 - `EncryptedLink::serialize() -> Vec<u8>`  
   Convenience method equivalent to `self.snapshot().serialize()`.
 - `EncryptedLink::config() -> &Arc<PubkyNoiseConfig>`  
@@ -398,7 +439,7 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
 **Snapshot type:**
 
 - `EncryptedLinkSnapshot::serialize() -> Vec<u8>`  
-  Serializes to a compact 197-byte binary format (the `pubky-noise` 0.1.0-rc5 `PubkyNoiseSessionState` wire format). The counterparty public key is embedded at bytes 165-196.
+  Serializes to a compact 197-byte binary format (the `pubky-noise` 0.1.0-rc5 `PubkyNoiseSessionState` wire format). The counterparty public key is embedded in the Noise state.
 - `EncryptedLinkSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkSnapshot>`  
   Reconstructs a snapshot from bytes, including the embedded recipient public key.
 - `EncryptedLinkSnapshot::recipient() -> &PublicKey`  
@@ -409,7 +450,7 @@ Snapshots produced by `pubky-noise` `0.1.0-rc3` used the older 189-byte format a
 **Restore:**
 
 - `restore_encrypted_link(session, secret_key, remote_pubkey, outbox_client, snapshot) -> Result<EncryptedLink>`  
-  Cross-restart restore. Accepts a fresh `PubkySession` and the same secret key used in the original `initiate_encrypted_link` or `accept_encrypted_link` call. Internally builds a new `PubkyNoiseConfig`, replays all handshake messages from the homeservers through a fresh Noise state with the same ephemeral key material, transitions to transport mode, and sets nonces and transport slot counters from the saved state.
+  Cross-restart restore. Accepts a fresh `PubkySession` and the same secret key used in the original `initiate_encrypted_link` or `accept_encrypted_link` call. Internally builds a new `PubkyNoiseConfig` and restores the transport-phase Noise state and counters directly from the serialized snapshot.
 - `restore_encrypted_link_from_config(config, remote_pubkey, snapshot) -> Result<EncryptedLink>`  
   In-process restore. Reuses an existing `Arc<PubkyNoiseConfig>` (obtainable via `EncryptedLink::config()`) when the link needs rebuilding without an app restart.
 
@@ -417,9 +458,9 @@ After link restore, `max_send_retries` resets to `DEFAULT_MAX_SEND_RETRIES`. Cal
 
 **When to snapshot:**
 
-Take a snapshot after the Encrypted Link is established and periodically after exchanging messages. The snapshot includes nonce counters that must stay in sync with the counterparty — restoring from a stale snapshot may cause nonce desynchronization. Persist the serialized bytes to durable storage so the session can be resumed after an app restart.
+Take a snapshot after the Encrypted Link is established and periodically after exchanging messages. The snapshot includes nonce counters that must stay in sync with the counterparty. Restoring from a stale snapshot may cause nonce desynchronization or replay newer messages. Persist any returned Event Messages and caller dedupe state before replacing the stored snapshot with one whose read counter has advanced past those messages.
 
-Snapshot bytes include sensitive key material and must be treated as secrets (store encrypted at rest; never log or expose them).
+Snapshot bytes include sensitive key material, so they must be treated as secrets (store encrypted at rest; never log or expose them).
 
 ```rust,ignore
 // After establishing the link:
@@ -434,7 +475,7 @@ let remote_pubkey = snapshot.recipient().clone();
 let mut link = restore_encrypted_link(
     fresh_session, secret_key, &remote_pubkey, outbox_client, snapshot,
 ).await?;
-// Continue using set_private_payment_envelope / get_private_payment_envelope
+// Continue using set_private_payment_list and raw stream receive/parsing
 ```
 
 ## Exports
@@ -443,9 +484,10 @@ The crate exports:
 
 - `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) and `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) to standardize Pubky path construction.
 - `set_payment_endpoint`, `remove_payment_endpoint`, `get_payment_list`, and `get_payment_endpoint` for Public Payment Endpoint operations over `pubky::PubkySession` and `pubky::PublicStorage`.
-- `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot`, `EncryptedLinkHandshakeSnapshot` for Encrypted Link types.
-- `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `set_private_payment_envelope`, `get_private_payment_envelope` for Encrypted Link and Private Payment Envelope operations.
-- `ReceiptDraft`, `Receipt`, `ReceiptAccess`, `IssuedReceipt`, `ReceiptDecryptionKey`, `issue_receipt`, `get_receipt_access`, and `decrypt_receipt` for encrypted receipt issuance, access delivery, and decryption.
+- `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot`, `EncryptedLinkHandshakeSnapshot`, `PrivateApplicationMessage`, and `PrivateMessageKind` for Encrypted Link types.
+- `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `EncryptedLink::receive_private_application_messages`, `set_private_payment_list`, and `parse_private_payment_list_json` for Encrypted Link and Private Payment List operations.
+- `PaymentAmount`, `PaymentRequest`, `PaymentRequestEvent`, `PaymentRequestEventMessage`, `PaymentRequestAcceptance`, `PaymentRequestRejection`, `PaymentRequestCancellation`, `PaymentProof`, `send_payment_request`, `serialize_payment_request_event`, `parse_payment_request_event_message`, and proof validation helpers for Payment Request exchange.
+- `ReceiptId`, `ReceiptDraft`, `Receipt`, `PreparedReceipt`, `ReceiptAccess`, `ReceiptAccessEventMessage`, `ReceiptDecryptionKey`, `prepare_receipt`, `store_prepared_receipt`, `send_receipt_access`, `parse_receipt_access_event_message`, `parse_receipt_access_json`, and `decrypt_receipt` for Encrypted Receipt issuance, access delivery, and decryption.
 - `restore_encrypted_link`, `restore_encrypted_link_from_config`, `restore_encrypted_link_handshake`, `restore_encrypted_link_handshake_from_config` for session resumption after app restart or in-process recovery.
 - `DEFAULT_MAX_RECOVERY_ATTEMPTS`, `DEFAULT_MAX_SEND_RETRIES` for configurable retry/recovery limits.
 - `pubky_noise` re-export for advanced callers that need direct access to the encryption layer.
