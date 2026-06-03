@@ -339,6 +339,14 @@ Metadata.
 ### Payment Requests
 
 - `send_payment_request(link, request)`: send a payee-initiated Payment Request.
+- `send_payment_request_acceptance(link, acceptance)`: send payer acceptance
+  for a Payment Request.
+- `send_payment_request_rejection(link, rejection)`: send payer rejection for
+  a Payment Request.
+- `send_payment_request_cancellation(link, cancellation)`: send payer or payee
+  cancellation for a Payment Request.
+- `send_payment_proof(link, proof)`: send payer-submitted Payment Proof after
+  payment.
 - `parse_payment_request_event_message(message)`: parse a raw Private
   Application Message as a Payment Request event when applicable.
 - `serialize_payment_request_event(event)`: serialize a Payment Request event
