@@ -3,6 +3,31 @@ use serde::{Deserialize, Serialize};
 use crate::{BillingPeriod, PaymentAmount};
 
 #[derive(Serialize, Deserialize)]
+pub(crate) struct RequiredNullable<T>(Option<T>);
+
+impl<T> RequiredNullable<T> {
+    pub(crate) fn into_inner(self) -> Option<T> {
+        self.0
+    }
+}
+
+impl<T> From<Option<T>> for RequiredNullable<T> {
+    fn from(value: Option<T>) -> Self {
+        Self(value)
+    }
+}
+
+pub(crate) fn deserialize_optional_no_null<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PaymentAmountWire {
     pub(crate) value: String,

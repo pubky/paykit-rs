@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
-    shared_wire::{BillingPeriodWire, PaymentAmountWire},
+    shared_wire::{deserialize_optional_no_null, BillingPeriodWire, PaymentAmountWire},
+    validation::{invalid_data, validate_wire_version_kind, validate_wire_version_kind_str},
     BillingPeriod, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier,
     PaymentReference, PaymentRequestId, PrivateApplicationMessage, PrivateMessageKind, PublicKey,
     Result,
@@ -61,16 +62,6 @@ pub(super) struct ReceiptAccessWire {
     pub(super) key: String,
 }
 
-fn deserialize_optional_no_null<'de, D, T>(
-    deserializer: D,
-) -> std::result::Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
-}
-
 impl From<&Receipt> for ReceiptWire {
     fn from(receipt: &Receipt) -> Self {
         Self {
@@ -98,15 +89,7 @@ impl TryFrom<ReceiptWire> for Receipt {
     type Error = PaykitError;
 
     fn try_from(wire: ReceiptWire) -> Result<Self> {
-        if wire.version != 1 || wire.kind != "paykit.receipt" {
-            return Err(PaykitError::InvalidData {
-                context: format!(
-                    "unsupported Receipt version/kind: {}/{}",
-                    wire.version, wire.kind
-                ),
-                source: None,
-            });
-        }
+        validate_wire_version_kind_str(wire.version, &wire.kind, "paykit.receipt", "Receipt")?;
         let receipt_id =
             ReceiptId::new(wire.receipt_id).map_err(|err| PaykitError::InvalidData {
                 context: "Receipt contains invalid Receipt ID".into(),
@@ -200,15 +183,12 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
     type Error = PaykitError;
 
     fn try_from(wire: ReceiptAccessWire) -> Result<Self> {
-        if wire.version != 1 || wire.kind != PrivateMessageKind::ReceiptAccess.as_str() {
-            return Err(PaykitError::InvalidData {
-                context: format!(
-                    "unsupported Receipt Access version/kind: {}/{}",
-                    wire.version, wire.kind
-                ),
-                source: None,
-            });
-        }
+        validate_wire_version_kind(
+            wire.version,
+            &wire.kind,
+            PrivateMessageKind::ReceiptAccess,
+            "Receipt Access",
+        )?;
         let event_id = EventId::new(wire.event_id).map_err(|err| PaykitError::InvalidData {
             context: "Receipt Access contains invalid Event ID".into(),
             source: Some(err.into()),
@@ -268,10 +248,10 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
 
 pub(super) fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<String> {
     serde_json::to_string(&ReceiptAccessWire::from(access)).map_err(|err| {
-        PaykitError::InvalidData {
-            context: format!("failed to serialize Receipt Access JSON: {err}"),
-            source: Some(err.into()),
-        }
+        invalid_data(
+            format!("failed to serialize Receipt Access JSON: {err}"),
+            Some(err.into()),
+        )
     })
 }
 
@@ -280,11 +260,12 @@ pub(super) fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<St
 /// Use [`parse_receipt_access_event_message`] when parsing from the raw private
 /// stream.
 pub fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
-    let wire: ReceiptAccessWire =
-        serde_json::from_str(json).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to parse Receipt Access JSON: {err}"),
-            source: Some(err.into()),
-        })?;
+    let wire: ReceiptAccessWire = serde_json::from_str(json).map_err(|err| {
+        invalid_data(
+            format!("failed to parse Receipt Access JSON: {err}"),
+            Some(err.into()),
+        )
+    })?;
     ReceiptAccess::try_from(wire)
 }
 

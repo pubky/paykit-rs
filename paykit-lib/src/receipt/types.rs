@@ -5,8 +5,9 @@ use chacha20poly1305::{aead::OsRng, KeyInit, XChaCha20Poly1305};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
-    BillingPeriod, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier,
-    PaymentReference, PaymentRequestId, PrivateMessageKind, PublicKey, Result,
+    validation::validate_uuid_v4, BillingPeriod, EventId, PaykitError, PaymentAmount,
+    PaymentEndpointIdentifier, PaymentReference, PaymentRequestId, PrivateMessageKind, PublicKey,
+    Result,
 };
 
 pub(crate) const RECEIPT_ENCRYPTION_ALGORITHM: &str = "XChaCha20Poly1305";
@@ -18,16 +19,7 @@ pub struct ReceiptId(String);
 impl ReceiptId {
     /// Create a Receipt ID from a UUID-v4 string.
     pub fn new(id: impl Into<String>) -> Result<Self> {
-        let id = id.into();
-        let uuid = uuid::Uuid::try_parse(&id).map_err(|err| {
-            PaykitError::Validation(format!("Receipt ID must be a UUID v4 string: {err}"))
-        })?;
-        if uuid.get_version_num() != 4 || uuid.get_variant() != uuid::Variant::RFC4122 {
-            return Err(PaykitError::Validation(
-                "Receipt ID must be an RFC4122 UUID v4 string".into(),
-            ));
-        }
-        Ok(Self(uuid.hyphenated().to_string()))
+        validate_uuid_v4(id.into(), "Receipt ID").map(Self)
     }
 
     /// Generate a fresh Receipt ID.

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use crate::{
-    error::map_error, EncryptedLink, PaykitError, PaymentEndpointIdentifier,
+    error::map_error, validation::invalid_data, EncryptedLink, PaymentEndpointIdentifier,
     PaymentEndpointPayload, PrivateMessageKind, Result,
 };
 
@@ -88,32 +88,34 @@ struct PrivatePaymentListWireRef<'a> {
 
 /// Parse a versioned Private Payment List JSON message.
 pub fn parse_private_payment_list_json(json: &str) -> Result<PrivatePaymentList> {
-    let wire: PrivatePaymentListWire =
-        serde_json::from_str(json).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to parse Private Payment List JSON: {err}"),
-            source: Some(err.into()),
-        })?;
+    let wire: PrivatePaymentListWire = serde_json::from_str(json).map_err(|err| {
+        invalid_data(
+            format!("failed to parse Private Payment List JSON: {err}"),
+            Some(err.into()),
+        )
+    })?;
     if wire.version != 1 {
-        return Err(PaykitError::InvalidData {
-            context: format!("unsupported Private Payment List version {}", wire.version),
-            source: None,
-        });
+        return Err(invalid_data(
+            format!("unsupported Private Payment List version {}", wire.version),
+            None,
+        ));
     }
     if wire.kind != PrivateMessageKind::PrivatePaymentList.as_str() {
-        return Err(PaykitError::InvalidData {
-            context: format!("unsupported Private Payment List kind '{}'", wire.kind),
-            source: None,
-        });
+        return Err(invalid_data(
+            format!("unsupported Private Payment List kind '{}'", wire.kind),
+            None,
+        ));
     }
     let mut payment_endpoints = HashMap::new();
     for (key, value) in wire.payment_endpoints {
-        let payment_endpoint_identifier =
-            PaymentEndpointIdentifier::new(&key).map_err(|err| PaykitError::InvalidData {
-                context: format!(
+        let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&key).map_err(|err| {
+            invalid_data(
+                format!(
                     "Private Payment List contains invalid Payment Endpoint Identifier '{key}'"
                 ),
-                source: Some(err.into()),
-            })?;
+                Some(err.into()),
+            )
+        })?;
         payment_endpoints.insert(
             payment_endpoint_identifier,
             PaymentEndpointPayload::new(value),
@@ -134,9 +136,11 @@ fn serialize_private_payment_list_json(list: &PrivatePaymentList) -> Result<Stri
         kind: list.kind.as_str(),
         payment_endpoints,
     };
-    serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
-        context: format!("failed to serialize Private Payment List JSON: {err}"),
-        source: Some(err.into()),
+    serde_json::to_string(&wire).map_err(|err| {
+        invalid_data(
+            format!("failed to serialize Private Payment List JSON: {err}"),
+            Some(err.into()),
+        )
     })
 }
 

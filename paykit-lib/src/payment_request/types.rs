@@ -3,11 +3,10 @@ use std::fmt;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
+    validation::{parse_utc_timestamp, validate_uuid_v4},
     EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
 };
-
-use super::validation::{parse_utc_timestamp, validate_uuid_v4};
 
 /// UUID-v4 identifier for one Payment Request.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

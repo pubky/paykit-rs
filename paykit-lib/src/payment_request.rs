@@ -1,6 +1,5 @@
 mod api;
 mod types;
-mod validation;
 mod wire;
 
 pub use api::{

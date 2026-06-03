@@ -1,6 +1,6 @@
 use crate::{PaykitError, PrivateMessageKind, Result};
 
-pub(super) fn validate_uuid_v4(value: String, label: &'static str) -> Result<String> {
+pub(crate) fn validate_uuid_v4(value: String, label: &'static str) -> Result<String> {
     let uuid = uuid::Uuid::try_parse(&value).map_err(|err| {
         PaykitError::Validation(format!("{label} must be a UUID v4 string: {err}"))
     })?;
@@ -12,7 +12,7 @@ pub(super) fn validate_uuid_v4(value: String, label: &'static str) -> Result<Str
     Ok(uuid.hyphenated().to_string())
 }
 
-pub(super) fn invalid_data(
+pub(crate) fn invalid_data(
     context: impl Into<String>,
     source: Option<anyhow::Error>,
 ) -> PaykitError {
@@ -22,14 +22,14 @@ pub(super) fn invalid_data(
     }
 }
 
-pub(super) fn invalid_wire(err: PaykitError, label: &'static str) -> PaykitError {
+pub(crate) fn invalid_wire(err: PaykitError, label: &'static str) -> PaykitError {
     match err {
         PaykitError::Validation(msg) => invalid_data(format!("{label}: {msg}"), None),
         other => other,
     }
 }
 
-pub(super) fn parse_utc_timestamp(
+pub(crate) fn parse_utc_timestamp(
     value: &str,
     field: &str,
 ) -> Result<chrono::DateTime<chrono::FixedOffset>> {
@@ -43,21 +43,31 @@ pub(super) fn parse_utc_timestamp(
     })
 }
 
-pub(super) fn validate_version_kind(
+pub(crate) fn validate_wire_version_kind(
     version: u8,
     kind: &str,
     expected: PrivateMessageKind,
+    label: &'static str,
 ) -> Result<()> {
-    if version != 1 || kind != expected.as_str() {
-        return Err(PaykitError::InvalidData {
-            context: format!("unsupported Payment Request event version/kind: {version}/{kind}"),
-            source: None,
-        });
+    validate_wire_version_kind_str(version, kind, expected.as_str(), label)
+}
+
+pub(crate) fn validate_wire_version_kind_str(
+    version: u8,
+    kind: &str,
+    expected_kind: &str,
+    label: &'static str,
+) -> Result<()> {
+    if version != 1 || kind != expected_kind {
+        return Err(invalid_data(
+            format!("unsupported {label} version/kind: {version}/{kind}"),
+            None,
+        ));
     }
     Ok(())
 }
 
-pub(super) fn validate_outgoing_version_kind(
+pub(crate) fn validate_outgoing_version_kind(
     version: u8,
     kind: PrivateMessageKind,
     expected: PrivateMessageKind,

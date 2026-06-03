@@ -2,36 +2,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
-    shared_wire::{BillingPeriodWire, PaymentAmountWire},
+    shared_wire::{BillingPeriodWire, PaymentAmountWire, RequiredNullable},
+    validation::{
+        invalid_data, invalid_wire, validate_outgoing_version_kind, validate_wire_version_kind,
+    },
     EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
 };
 
-use super::{
-    types::{
-        BillingPeriod, PaymentProof, PaymentRequest, PaymentRequestAcceptance,
-        PaymentRequestCancellation, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
-        Recurrence, RecurrenceUnit,
-    },
-    validation::{
-        invalid_data, invalid_wire, validate_outgoing_version_kind, validate_version_kind,
-    },
+use super::types::{
+    BillingPeriod, PaymentProof, PaymentRequest, PaymentRequestAcceptance,
+    PaymentRequestCancellation, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
+    Recurrence, RecurrenceUnit,
 };
-
-#[derive(Serialize, Deserialize)]
-struct RequiredNullable<T>(Option<T>);
-
-impl<T> RequiredNullable<T> {
-    fn into_inner(self) -> Option<T> {
-        self.0
-    }
-}
-
-impl<T> From<Option<T>> for RequiredNullable<T> {
-    fn from(value: Option<T>) -> Self {
-        Self(value)
-    }
-}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -193,7 +176,12 @@ impl TryFrom<PaymentRequestWire> for PaymentRequest {
     type Error = PaykitError;
 
     fn try_from(wire: PaymentRequestWire) -> Result<Self> {
-        validate_version_kind(wire.version, &wire.kind, PrivateMessageKind::PaymentRequest)?;
+        validate_wire_version_kind(
+            wire.version,
+            &wire.kind,
+            PrivateMessageKind::PaymentRequest,
+            "Payment Request event",
+        )?;
         Ok(Self {
             version: 1,
             kind: PrivateMessageKind::PaymentRequest,
@@ -279,7 +267,12 @@ impl TryFrom<PaymentProofWire> for PaymentProof {
     type Error = PaykitError;
 
     fn try_from(wire: PaymentProofWire) -> Result<Self> {
-        validate_version_kind(wire.version, &wire.kind, PrivateMessageKind::PaymentProof)?;
+        validate_wire_version_kind(
+            wire.version,
+            &wire.kind,
+            PrivateMessageKind::PaymentProof,
+            "Payment Request event",
+        )?;
         let billing_period = wire.billing_period.into_inner().map(BillingPeriod::from);
         if let Some(period) = &billing_period {
             period.validate()?;
@@ -388,10 +381,11 @@ pub(super) fn parse_payment_request_json(json: &str) -> Result<PaymentRequest> {
 
 pub(super) fn parse_acceptance_json(json: &str) -> Result<PaymentRequestAcceptance> {
     let wire = parse_basic_event_json(json, "Payment Request Acceptance")?;
-    validate_version_kind(
+    validate_wire_version_kind(
         wire.version,
         &wire.kind,
         PrivateMessageKind::PaymentRequestAcceptance,
+        "Payment Request event",
     )?;
     if wire.reason.is_some() {
         return Err(invalid_data(
@@ -411,10 +405,11 @@ pub(super) fn parse_acceptance_json(json: &str) -> Result<PaymentRequestAcceptan
 
 pub(super) fn parse_rejection_json(json: &str) -> Result<PaymentRequestRejection> {
     let wire = parse_basic_event_json(json, "Payment Request Rejection")?;
-    validate_version_kind(
+    validate_wire_version_kind(
         wire.version,
         &wire.kind,
         PrivateMessageKind::PaymentRequestRejection,
+        "Payment Request event",
     )?;
     Ok(PaymentRequestRejection {
         version: 1,
@@ -429,10 +424,11 @@ pub(super) fn parse_rejection_json(json: &str) -> Result<PaymentRequestRejection
 
 pub(super) fn parse_cancellation_json(json: &str) -> Result<PaymentRequestCancellation> {
     let wire = parse_basic_event_json(json, "Payment Request Cancellation")?;
-    validate_version_kind(
+    validate_wire_version_kind(
         wire.version,
         &wire.kind,
         PrivateMessageKind::PaymentRequestCancellation,
+        "Payment Request event",
     )?;
     Ok(PaymentRequestCancellation {
         version: 1,
