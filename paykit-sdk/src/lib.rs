@@ -39,6 +39,16 @@ pub use identity::{
     PubkySessionAccess,
 };
 #[doc(inline)]
+pub use linked_peers::{
+    load_encrypted_link_state, load_linked_peer, mark_recovery_required, save_encrypted_link_state,
+    save_linked_peer_state, LinkedPeerState,
+};
+#[doc(inline)]
+pub use private_stream::{
+    persist_private_stream_batch, EventIdConflict, PrivateStreamIntakeReport,
+    PrivateStreamParseStatus,
+};
+#[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
 #[doc(inline)]
 pub use storage::{

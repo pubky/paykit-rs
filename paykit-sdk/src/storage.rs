@@ -61,6 +61,9 @@ pub trait StorageTransaction {
     /// Save one Encrypted Link state record.
     fn save_encrypted_link_state(&mut self, record: EncryptedLinkStateRecord);
 
+    /// Allocate a receive batch id.
+    fn allocate_receive_batch_id(&mut self) -> u64;
+
     /// Insert one private stream item and return its assigned id.
     fn insert_private_stream_item(&mut self, item: NewPrivateStreamItem) -> u64;
 
@@ -176,8 +179,8 @@ pub struct EventDedupRecord {
     pub event_id: String,
     /// Event kind.
     pub event_kind: String,
-    /// Canonical payload hash.
-    pub canonical_payload_hash: String,
+    /// Hash of the exact payload bytes.
+    pub payload_hash: String,
     /// First stream item that carried the event.
     pub first_stream_item_id: u64,
     /// Duplicate stream items with the same payload.
@@ -197,6 +200,8 @@ pub struct StorageState {
     pub encrypted_link_states: HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
     /// Append-only private stream items.
     pub private_stream_items: Vec<PrivateStreamItemRecord>,
+    /// Next receive batch id.
+    pub next_receive_batch_id: u64,
     /// Next private stream item id.
     pub next_private_stream_item_id: u64,
     /// Event dedupe records by Event ID.
@@ -287,6 +292,12 @@ impl StorageTransaction for InMemoryStorageTransaction {
             .insert(record.counterparty.clone(), record);
     }
 
+    fn allocate_receive_batch_id(&mut self) -> u64 {
+        let receive_batch_id = self.state.next_receive_batch_id;
+        self.state.next_receive_batch_id += 1;
+        receive_batch_id
+    }
+
     fn insert_private_stream_item(&mut self, item: NewPrivateStreamItem) -> u64 {
         let stream_item_id = self.state.next_private_stream_item_id;
         self.state.next_private_stream_item_id += 1;
@@ -362,7 +373,7 @@ mod tests {
                     tx.save_event_dedup_record(EventDedupRecord {
                         event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
                         event_kind: "paykit.test".into(),
-                        canonical_payload_hash: "hash".into(),
+                        payload_hash: "hash".into(),
                         first_stream_item_id: stream_item_id,
                         duplicate_stream_item_ids: Vec::new(),
                         conflicting_stream_item_ids: Vec::new(),

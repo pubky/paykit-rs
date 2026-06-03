@@ -426,7 +426,7 @@ Tracks Event Message idempotency:
 
 - event id
 - event kind
-- canonical payload hash
+- payload hash of the exact stored payload
 - first stream item id
 - duplicate stream item ids
 - conflict status
