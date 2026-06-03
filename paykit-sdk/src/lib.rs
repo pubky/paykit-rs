@@ -41,7 +41,11 @@ pub use identity::{
 #[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
 #[doc(inline)]
-pub use storage::{InMemoryStorage, StorageAdapter, StorageState};
+pub use storage::{
+    EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
+    NewPrivateStreamItem, PrivateStreamItemRecord, StorageAdapter, StorageState,
+    StorageTransaction,
+};
 
 /// Common result alias for Paykit SDK operations.
 pub type Result<T> = std::result::Result<T, PaykitSdkError>;
