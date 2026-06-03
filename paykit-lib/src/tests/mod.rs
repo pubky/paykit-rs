@@ -7,7 +7,7 @@ use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
 mod encrypted_link;
 mod payment_endpoint;
-mod private_payment_envelope;
+mod private_payment_list;
 mod receipt_access;
 
 static SHARED_POSTGRES: OnceCell<EmbeddedPostgres> = OnceCell::const_new();
@@ -136,15 +136,14 @@ impl InProgressHandshakeSetup {
 /// Creates two users on the same ephemeral testnet, performs a full Noise XX
 /// handshake between them using the public `initiate_encrypted_link` /
 /// `accept_encrypted_link` / `advance_handshake` API, and produces ready-to-use
-/// [`EncryptedLink`] handles so that `set_private_payment_envelope` /
-/// `get_private_payment_envelope` can be exercised.
+/// [`EncryptedLink`] handles so private Paykit messages can be exchanged.
 struct PrivateTestSetup {
     _testnet: EphemeralTestnet,
-    /// Sender's Encrypted Link (writes Private Payment Envelopes).
+    /// Sender's Encrypted Link (writes Private Payment Lists).
     sender_link: EncryptedLink,
     /// Sender's session (kept for cleanup via `signout`).
     sender_session: PubkySession,
-    /// Receiver's Encrypted Link (reads Private Payment Envelopes).
+    /// Receiver's Encrypted Link (reads Private Payment Lists).
     receiver_link: EncryptedLink,
     /// Receiver's session (kept for cleanup via `signout`).
     receiver_session: PubkySession,
@@ -237,10 +236,10 @@ impl PrivateTestSetup {
 
 // Shared helpers for integration-style tests under this module.
 
-fn private_payment_envelope(
+fn private_payment_list(
     payment_endpoints: &HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
-) -> PrivatePaymentEnvelope {
-    PrivatePaymentEnvelope::new(PaymentReference::new_v4(), payment_endpoints.clone())
+) -> PrivatePaymentList {
+    PrivatePaymentList::new(payment_endpoints.clone())
 }
 
 async fn send_raw_private_message(link: &mut EncryptedLink, json: &str) {
@@ -251,4 +250,16 @@ async fn send_raw_private_message(link: &mut EncryptedLink, json: &str) {
     link.send_private_application_message_for_test(json.as_bytes())
         .await
         .expect("raw private message should send");
+}
+
+async fn receive_latest_private_payment_list_for_test(
+    link: &mut EncryptedLink,
+) -> Option<PrivatePaymentList> {
+    link.receive_private_application_messages()
+        .await
+        .expect("raw private stream receive should succeed")
+        .into_iter()
+        .filter(|message| message.known_kind() == Some(PrivateMessageKind::PrivatePaymentList))
+        .filter_map(|message| parse_private_payment_list_json(&message.raw_json).ok())
+        .next_back()
 }

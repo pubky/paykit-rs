@@ -5,7 +5,7 @@ mod encrypted_link;
 mod error;
 mod payment_endpoint;
 mod payment_reference;
-mod private_payment_envelope;
+mod private_payment_list;
 mod pubky_routing;
 mod receipt;
 
@@ -14,8 +14,9 @@ pub use encrypted_link::{
     accept_encrypted_link, advance_handshake, close_encrypted_link, initiate_encrypted_link,
     restore_encrypted_link, restore_encrypted_link_from_config, restore_encrypted_link_handshake,
     restore_encrypted_link_handshake_from_config, EncryptedLink, EncryptedLinkHandshake,
-    EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot, HandshakeProgress, PrivateMessageKind,
-    DEFAULT_MAX_RECOVERY_ATTEMPTS, DEFAULT_MAX_SEND_RETRIES,
+    EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot, HandshakeProgress,
+    PrivateApplicationMessage, PrivateMessageKind, DEFAULT_MAX_RECOVERY_ATTEMPTS,
+    DEFAULT_MAX_SEND_RETRIES,
 };
 #[doc(inline)]
 pub use error::PaykitError;
@@ -26,8 +27,9 @@ pub use payment_endpoint::{
 };
 #[doc(inline)]
 pub use payment_reference::PaymentReference;
-pub use private_payment_envelope::{
-    get_private_payment_envelope, set_private_payment_envelope, PrivatePaymentEnvelope,
+#[doc(inline)]
+pub use private_payment_list::{
+    parse_private_payment_list_json, set_private_payment_list, PrivatePaymentList,
 };
 #[doc(inline)]
 pub use pubky::PublicKey;

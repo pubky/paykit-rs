@@ -114,8 +114,8 @@ pub enum HandshakeProgress {
     /// [`advance_handshake`] after a caller-chosen delay.
     Pending(EncryptedLinkHandshake),
 
-    /// Handshake completed successfully. The [`EncryptedLink`] is ready for use
-    /// with [`crate::set_private_payment_envelope`] and [`crate::get_private_payment_envelope`].
+    /// Handshake completed successfully. The [`EncryptedLink`] is ready to send
+    /// and receive private Paykit messages.
     Complete(EncryptedLink),
 }
 
