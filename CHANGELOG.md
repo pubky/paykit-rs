@@ -7,29 +7,46 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc12] - 2026-06-03
+
 ### Added
 - Encrypted Receipt APIs in `paykit-lib`: `ReceiptDraft`, `Receipt`,
-  `ReceiptAccess`, `IssuedReceipt`, `ReceiptDecryptionKey`, `issue_receipt`,
-  `get_receipt_access`, and `decrypt_receipt`.
-- FFI receipt records and exports in `paykit-ffi`: `FfiReceiptDraft`,
-  `FfiReceipt`, `FfiReceiptAccess`, `FfiIssuedReceipt`,
-  `paykit_issue_receipt`, `paykit_get_receipt_access`,
+  `PreparedReceipt`, `ReceiptAccess`, `ReceiptDecryptionKey`,
+  `prepare_receipt`, `store_prepared_receipt`, `send_receipt_access`,
+  `parse_receipt_access_json`, and `decrypt_receipt`.
+- Payment Request APIs in `paykit-lib`: request/proof/event types, send helpers,
+  `parse_payment_request_event_message`, and stateless proof/request validation.
+- FFI private stream and receipt exports in `paykit-ffi`:
+  `FfiPrivateApplicationMessage`, `FfiReceiptDraft`, `FfiReceipt`,
+  `FfiReceiptAccess`, `FfiPreparedReceipt`,
+  `paykit_receive_private_application_messages`, `paykit_prepare_receipt`,
+  `paykit_store_prepared_receipt`, `paykit_send_receipt_access`,
   `paykit_receipt_location`, and `paykit_decrypt_receipt`.
+- FFI and React Native Payment Request exports for typed event records, send
+  helpers, raw event parsing, canonical event serialization, and stateless
+  proof/request correlation validation.
 
 ### Changed
 - **BREAKING:** `paykit-lib` now treats Pubky as the only supported transport.
   Public Payment Endpoint APIs accept concrete Pubky SDK handles (`PubkySession` for
   writes and `PublicStorage` for reads) instead of generic transport traits.
-- Private Application Messages now distinguish Latest-State Message
-  Private Payment Envelopes from Event Message Receipt Access messages.
-  `get_private_payment_envelope` collapses pending Private Payment Envelope
-  messages to the latest message by kind,
-  then parses that selected message. If that latest envelope is malformed,
-  it returns InvalidData rather than falling back to an older valid envelope,
-  while `get_receipt_access` returns all currently available Receipt Access
-  descriptors as a FIFO vector.
-- Unsupported syntactically valid Private Application Message kinds are logged
-  and dropped rather than buffered indefinitely.
+- Private Application Messages now use
+  `EncryptedLink::receive_private_application_messages` as the low-level
+  ordered receive API. Typed receive/routing helpers belong in a future
+  SDK/runtime layer.
+- The private endpoint-sharing protocol and APIs now use
+  `PrivatePaymentList`, `set_private_payment_list`, and
+  `paykit.private_payment_list`.
+- Receipt structs and wire JSON now use `payment_reference` and optional
+  `PaymentAmount { value, asset }` instead of generic `reference`,
+  string-only `amount`, and `currency`.
+- Receipt Metadata is now a JSON object, matching Payment Request metadata.
+  FFI exposes it as `metadata_json`; React Native exposes it as `metadata`.
+- Event Messages now carry `EventId`; `ReceiptAccess` includes `event_id` and
+  no longer carries an encryption `algorithm` field.
+- Unsupported syntactically valid Private Application Message kinds are returned
+  by the raw stream for future SDK/runtime routing instead of being hidden or
+  dropped by typed getters.
 - `PaymentEndpointIdentifier::new("private")` is now rejected with `PaykitError::Validation` because
   `private` is reserved for private Paykit storage paths.
 
@@ -37,13 +54,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - **BREAKING:** Removed the `pubky` feature flag, `AuthenticatedTransport` /
   `UnauthenticatedTransportRead` traits, and Pubky transport adapter wrappers.
   Pubky dependencies are now unconditional.
+- **BREAKING:** Removed library and FFI typed private receive helpers for
+  individual private message kinds. Callers now use the ordered private message
+  stream plus stateless parsers.
+- **BREAKING:** Removed the one-shot receipt issuance convenience API in favor
+  of explicit `prepare_receipt`, `store_prepared_receipt`, and
+  `send_receipt_access` steps.
+- **BREAKING:** Removed `reference` from `PrivatePaymentList`; Payment
+  References now belong to Payment Requests, Payment Proofs, and Receipts.
+- **BREAKING:** Removed Payment Reference generator helpers from the library,
+  FFI, and React Native surfaces. Callers now provide their own free-form
+  Payment Reference values.
 
 ### Security
 - Receipt Decryption Keys are redacted from Rust `Debug`/`Display` formatting
-  in the library and from FFI wrapper debug output. Callers must still treat raw
-  key fields returned through FFI as secrets.
-- Receipt Locations are validated against their `PaymentReference`, and
-  decrypted receipt plaintext is rejected if its reference does not match the
+  in the library and from Rust FFI wrapper debug output. Generated platform
+  bindings still expose raw key fields, so callers must treat them as secrets.
+- Receipt Locations are validated against their `ReceiptId`, and decrypted
+  receipt plaintext is rejected if its Receipt ID does not match the
   authenticated Receipt Location.
 
 ## [0.1.0-rc2] - 2026-03-10
@@ -113,6 +141,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc12...HEAD
+[0.1.0-rc12]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc12
 [0.1.0-rc2]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc2
 [0.1.0-rc1]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc1
 [0.1.0]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0
