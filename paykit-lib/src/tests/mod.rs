@@ -7,6 +7,7 @@ use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
 mod encrypted_link;
 mod payment_endpoint;
+mod payment_request;
 mod private_payment_list;
 mod receipt_access;
 
@@ -262,4 +263,15 @@ async fn receive_latest_private_payment_list_for_test(
         .filter(|message| message.known_kind() == Some(PrivateMessageKind::PrivatePaymentList))
         .filter_map(|message| parse_private_payment_list_json(&message.raw_json).ok())
         .next_back()
+}
+
+async fn receive_payment_request_events_for_test(
+    link: &mut EncryptedLink,
+) -> Vec<PaymentRequestEventMessage> {
+    link.receive_private_application_messages()
+        .await
+        .expect("raw private stream receive should succeed")
+        .iter()
+        .filter_map(parse_payment_request_event_message)
+        .collect()
 }

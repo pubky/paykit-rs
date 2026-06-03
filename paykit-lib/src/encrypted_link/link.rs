@@ -129,7 +129,42 @@ impl EncryptedLink {
     }
 
     pub(crate) async fn send_receipt_access_message(&mut self, plaintext: &[u8]) -> Result<()> {
-        self.send_private_application_message(plaintext, "Receipt Access").await
+        self.send_private_application_message(plaintext, "Receipt Access")
+            .await
+    }
+
+    pub(crate) async fn send_payment_request_message(&mut self, plaintext: &[u8]) -> Result<()> {
+        self.send_private_application_message(plaintext, "Payment Request")
+            .await
+    }
+
+    pub(crate) async fn send_payment_request_acceptance_message(
+        &mut self,
+        plaintext: &[u8],
+    ) -> Result<()> {
+        self.send_private_application_message(plaintext, "Payment Request Acceptance")
+            .await
+    }
+
+    pub(crate) async fn send_payment_request_rejection_message(
+        &mut self,
+        plaintext: &[u8],
+    ) -> Result<()> {
+        self.send_private_application_message(plaintext, "Payment Request Rejection")
+            .await
+    }
+
+    pub(crate) async fn send_payment_request_cancellation_message(
+        &mut self,
+        plaintext: &[u8],
+    ) -> Result<()> {
+        self.send_private_application_message(plaintext, "Payment Request Cancellation")
+            .await
+    }
+
+    pub(crate) async fn send_payment_proof_message(&mut self, plaintext: &[u8]) -> Result<()> {
+        self.send_private_application_message(plaintext, "Payment Proof")
+            .await
     }
 
     pub(crate) async fn receive_receipt_access_messages(

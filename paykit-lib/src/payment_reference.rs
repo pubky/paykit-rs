@@ -1,24 +1,35 @@
 use crate::{PaykitError, Result};
 
-/// UUID-v4 correlation reference used to connect Private Payment Envelopes and receipts.
+/// Payee-visible correlation reference used to connect payments with Paykit artifacts.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PaymentReference(String);
 
+/// Maximum Payment Reference length in Unicode scalar values.
+pub const PAYMENT_REFERENCE_MAX_LEN: usize = 256;
+
 impl PaymentReference {
-    /// Create a Payment Reference after validating that the input is a UUID v4 string.
-    ///
-    /// Accepted UUID-v4 inputs are canonicalized to lowercase hyphenated form.
+    /// Create a Payment Reference after validating that the input is non-empty,
+    /// bounded, and free of control characters.
     pub fn new(reference: impl Into<String>) -> Result<Self> {
         let reference = reference.into();
-        let uuid = uuid::Uuid::try_parse(&reference).map_err(|err| {
-            PaykitError::Validation(format!("Payment Reference must be a UUID v4 string: {err}"))
-        })?;
-        if uuid.get_version_num() != 4 || uuid.get_variant() != uuid::Variant::RFC4122 {
+        if reference.is_empty() {
             return Err(PaykitError::Validation(
-                "Payment Reference must be an RFC4122 UUID v4 string".into(),
+                "Payment Reference must not be empty".into(),
             ));
         }
-        Ok(Self(uuid.hyphenated().to_string()))
+        let char_count = reference.chars().count();
+        if char_count > PAYMENT_REFERENCE_MAX_LEN {
+            return Err(PaykitError::Validation(format!(
+                "Payment Reference must not exceed {PAYMENT_REFERENCE_MAX_LEN} characters, got {char_count}"
+            )));
+        }
+        if let Some((pos, ch)) = reference.char_indices().find(|&(_, ch)| ch.is_control()) {
+            return Err(PaykitError::Validation(format!(
+                "Payment Reference must not contain control character U+{:04X} at byte {pos}",
+                ch as u32
+            )));
+        }
+        Ok(Self(reference))
     }
 
     /// Generate a fresh random UUID-v4 Payment Reference.
@@ -26,7 +37,7 @@ impl PaymentReference {
         Self(uuid::Uuid::new_v4().to_string())
     }
 
-    /// Access the inner UUID string.
+    /// Access the inner reference string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -50,36 +61,32 @@ mod tests {
     use crate::PaykitError;
 
     #[test]
-    fn test_payment_reference_accepts_uuid_v4() {
-        let reference = PaymentReference::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        assert_eq!(reference.as_str(), "550e8400-e29b-41d4-a716-446655440000");
-        assert_eq!(
-            format!("{reference}"),
-            "550e8400-e29b-41d4-a716-446655440000"
+    fn test_payment_reference_accepts_text() {
+        let reference = PaymentReference::new("invoice 2026/0001").unwrap();
+        assert_eq!(reference.as_str(), "invoice 2026/0001");
+        assert_eq!(format!("{reference}"), "invoice 2026/0001");
+    }
+
+    #[test]
+    fn test_payment_reference_rejects_empty() {
+        let err = PaymentReference::new("").unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("must not be empty"))
         );
     }
 
     #[test]
-    fn test_payment_reference_canonicalizes_uuid_v4() {
-        let reference = PaymentReference::new("550E8400-E29B-41D4-A716-446655440000").unwrap();
-        assert_eq!(reference.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+    fn test_payment_reference_rejects_control_characters() {
+        let err = PaymentReference::new("invoice\n2026").unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("control character"))
+        );
     }
 
     #[test]
-    fn test_payment_reference_rejects_non_uuid() {
-        let err = PaymentReference::new("not-a-uuid").unwrap_err();
-        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("UUID v4")));
-    }
-
-    #[test]
-    fn test_payment_reference_rejects_uuid_v1() {
-        let err = PaymentReference::new("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap_err();
-        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("UUID v4")));
-    }
-
-    #[test]
-    fn test_payment_reference_rejects_non_rfc4122_variant() {
-        let err = PaymentReference::new("550e8400-e29b-41d4-0716-446655440000").unwrap_err();
-        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("RFC4122 UUID v4")));
+    fn test_payment_reference_rejects_over_max_length() {
+        let reference = "a".repeat(PAYMENT_REFERENCE_MAX_LEN + 1);
+        let err = PaymentReference::new(reference).unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("must not exceed")));
     }
 }

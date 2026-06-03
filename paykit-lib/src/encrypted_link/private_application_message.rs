@@ -9,6 +9,16 @@ pub enum PrivateMessageKind {
     PrivatePaymentList,
     /// Receipt Access Event Message (`paykit.receipt_access`).
     ReceiptAccess,
+    /// Payment Request Event Message (`paykit.payment_request`).
+    PaymentRequest,
+    /// Payment Request Acceptance Event Message (`paykit.payment_request_acceptance`).
+    PaymentRequestAcceptance,
+    /// Payment Request Rejection Event Message (`paykit.payment_request_rejection`).
+    PaymentRequestRejection,
+    /// Payment Request Cancellation Event Message (`paykit.payment_request_cancellation`).
+    PaymentRequestCancellation,
+    /// Payment Proof Event Message (`paykit.payment_proof`).
+    PaymentProof,
 }
 
 impl PrivateMessageKind {
@@ -17,6 +27,11 @@ impl PrivateMessageKind {
         match self {
             Self::PrivatePaymentList => "paykit.private_payment_list",
             Self::ReceiptAccess => "paykit.receipt_access",
+            Self::PaymentRequest => "paykit.payment_request",
+            Self::PaymentRequestAcceptance => "paykit.payment_request_acceptance",
+            Self::PaymentRequestRejection => "paykit.payment_request_rejection",
+            Self::PaymentRequestCancellation => "paykit.payment_request_cancellation",
+            Self::PaymentProof => "paykit.payment_proof",
         }
     }
 
@@ -25,8 +40,24 @@ impl PrivateMessageKind {
         match kind {
             "paykit.private_payment_list" => Some(Self::PrivatePaymentList),
             "paykit.receipt_access" => Some(Self::ReceiptAccess),
+            "paykit.payment_request" => Some(Self::PaymentRequest),
+            "paykit.payment_request_acceptance" => Some(Self::PaymentRequestAcceptance),
+            "paykit.payment_request_rejection" => Some(Self::PaymentRequestRejection),
+            "paykit.payment_request_cancellation" => Some(Self::PaymentRequestCancellation),
+            "paykit.payment_proof" => Some(Self::PaymentProof),
             _ => None,
         }
+    }
+
+    pub(crate) fn is_payment_request_event(self) -> bool {
+        matches!(
+            self,
+            Self::PaymentRequest
+                | Self::PaymentRequestAcceptance
+                | Self::PaymentRequestRejection
+                | Self::PaymentRequestCancellation
+                | Self::PaymentProof
+        )
     }
 }
 
@@ -169,7 +200,10 @@ fn is_retryable_private_send_error(err: &pubky_noise::PubkyNoiseError) -> bool {
     matches!(err, pubky_noise::PubkyNoiseError::HomeserverWriteError)
 }
 
-fn validate_private_application_message_size(plaintext: &[u8], context: &'static str) -> Result<()> {
+fn validate_private_application_message_size(
+    plaintext: &[u8],
+    context: &'static str,
+) -> Result<()> {
     if plaintext.len() > pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
         return Err(PaykitError::Validation(format!(
             "{context} payload ({} bytes) exceeds max message size ({} bytes)",
@@ -263,7 +297,8 @@ mod tests {
     #[test]
     fn test_private_application_message_size_validation_rejects_oversized_payload() {
         let payload = vec![b'x'; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN + 1];
-        let err = validate_private_application_message_size(&payload, "Private Payment List").unwrap_err();
+        let err = validate_private_application_message_size(&payload, "Private Payment List")
+            .unwrap_err();
         assert!(
             matches!(err, PaykitError::Validation(ref msg) if msg.contains("exceeds")),
             "expected oversize validation error, got: {err}"

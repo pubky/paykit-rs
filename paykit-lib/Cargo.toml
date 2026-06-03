@@ -17,6 +17,7 @@ categories = ["network-programming", "finance"]
 anyhow = "1.0.102"
 base64 = "0.22"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
+chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 pubky = "0.8.0"
 pubky-noise = "0.1.0-rc5"
 serde = { version = "1", features = ["derive"] }
