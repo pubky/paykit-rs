@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{cmp::Reverse, collections::HashSet};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,10 @@ use crate::{
         enqueue_private_payment_list as enqueue_private_payment_list_message,
     },
     private_stream::{persist_private_stream_batch_with_link_lease, PrivateStreamIntakeReport},
+    receipts::{
+        decrypt_receipt_record_from_access, fetch_encrypted_receipt_json,
+        receipt_record_matches_access, ReceiptAccessRecord, ReceiptRecord, ReceiptRetrievalStatus,
+    },
     storage::{
         EncryptedLinkStateRecord, OutboundPrivateMessageRecord, PeerLinkOperationLease,
         StorageAdapter,
@@ -209,6 +213,199 @@ where
             return Ok(None);
         }
         load_current_private_payment_list(&self.storage, counterparty).await
+    }
+
+    /// Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
+    ///
+    /// The decrypted Receipt is private SDK state. This returns an already
+    /// stored Receipt record when available, and otherwise validates the
+    /// decrypted recipient against the current local Pubky identity before
+    /// saving it.
+    pub async fn retrieve_receipt(
+        &self,
+        counterparty: PubkyPublicKey,
+        receipt_id: &str,
+    ) -> Result<ReceiptRecord> {
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        let local_public_key = identity
+            .public_key
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context: "no local Pubky identity available for receipt retrieval".into(),
+                source: None,
+            })?;
+        let (stored_receipt, access_records) = self
+            .storage
+            .transaction(|tx| {
+                let stored_receipt = tx.receipt_record(&counterparty, receipt_id);
+                let mut access_records = tx
+                    .receipt_access_records(&counterparty)
+                    .into_iter()
+                    .filter(|record| record.receipt_id == receipt_id)
+                    .collect::<Vec<_>>();
+                access_records.sort_by_key(|record| Reverse(record.stream_item_id));
+                Ok((stored_receipt, access_records))
+            })
+            .await?;
+        if let Some(record) = stored_receipt {
+            if record.recipient_public_key != local_public_key {
+                return Err(PaykitSdkError::Protocol(
+                    "stored Receipt recipient does not match local identity".into(),
+                ));
+            }
+            self.reconcile_cached_receipt_access_records(
+                &record,
+                &access_records,
+                self.clock.now(),
+            )
+            .await?;
+            return Ok(record);
+        }
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for receipt retrieval".into(),
+                    source: None,
+                })?;
+        if access_records.is_empty() {
+            return Err(PaykitSdkError::RecoveryRequired(format!(
+                "no Receipt Access record for receipt {receipt_id} from {counterparty}"
+            )));
+        }
+        let now = self.clock.now();
+        let latest_access = &access_records[0];
+
+        let encrypted_json = match fetch_encrypted_receipt_json(
+            &public_storage,
+            &counterparty,
+            &latest_access.location,
+        )
+        .await
+        {
+            Ok(Some(encrypted_json)) => encrypted_json,
+            Ok(None) => {
+                let error = format!(
+                    "encrypted receipt {} was not found at {}",
+                    latest_access.receipt_id, latest_access.location
+                );
+                self.save_receipt_retrieval_error(
+                    latest_access,
+                    ReceiptRetrievalStatus::NotFound,
+                    now,
+                    error.clone(),
+                )
+                .await?;
+                return Err(PaykitSdkError::Transport {
+                    context: error,
+                    source: None,
+                });
+            }
+            Err(err) => {
+                let error = err.to_string();
+                self.save_receipt_retrieval_error(
+                    latest_access,
+                    ReceiptRetrievalStatus::Failed,
+                    now,
+                    error,
+                )
+                .await?;
+                return Err(err);
+            }
+        };
+
+        let all_access_records = access_records.clone();
+        let mut last_error = None;
+        for access in access_records {
+            match decrypt_receipt_record_from_access(
+                &access,
+                &encrypted_json,
+                now,
+                &local_public_key,
+            ) {
+                Ok(record) => {
+                    self.storage
+                        .transaction({
+                            let access = access.mark_retrieved(now);
+                            let record = record.clone();
+                            move |tx| {
+                                tx.save_receipt_access_record(access);
+                                tx.save_receipt_record(record);
+                                Ok(())
+                            }
+                        })
+                        .await?;
+                    self.reconcile_cached_receipt_access_records(&record, &all_access_records, now)
+                        .await?;
+                    return Ok(record);
+                }
+                Err(err) => {
+                    let error = err.to_string();
+                    self.save_receipt_retrieval_error(
+                        &access,
+                        ReceiptRetrievalStatus::Failed,
+                        now,
+                        error,
+                    )
+                    .await?;
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            PaykitSdkError::RecoveryRequired(format!(
+                "no usable Receipt Access record for receipt {receipt_id} from {counterparty}"
+            ))
+        }))
+    }
+
+    async fn reconcile_cached_receipt_access_records(
+        &self,
+        record: &ReceiptRecord,
+        access_records: &[ReceiptAccessRecord],
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.storage
+            .transaction({
+                let record = record.clone();
+                let access_records = access_records.to_vec();
+                move |tx| {
+                    for access in access_records {
+                        if receipt_record_matches_access(&record, &access) {
+                            if access.retrieval_status != ReceiptRetrievalStatus::Retrieved {
+                                tx.save_receipt_access_record(access.mark_retrieved(now));
+                            }
+                        } else if access.retrieval_status == ReceiptRetrievalStatus::Pending {
+                            tx.save_receipt_access_record(access.mark_retrieval_error(
+                                ReceiptRetrievalStatus::Failed,
+                                now,
+                                "Receipt Access does not match stored Receipt".into(),
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
+            })
+            .await
+    }
+
+    async fn save_receipt_retrieval_error(
+        &self,
+        access: &ReceiptAccessRecord,
+        status: ReceiptRetrievalStatus,
+        attempted_at: DateTime<Utc>,
+        error: String,
+    ) -> Result<()> {
+        self.storage
+            .transaction({
+                let access = access.mark_retrieval_error(status, attempted_at, error);
+                move |tx| {
+                    tx.save_receipt_access_record(access);
+                    Ok(())
+                }
+            })
+            .await
     }
 
     /// Enqueue the current complete Private Payment List for one counterparty.

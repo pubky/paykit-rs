@@ -65,8 +65,9 @@ pub use private_lists::{
 pub use private_stream::{EventIdConflict, PrivateStreamIntakeReport, PrivateStreamParseStatus};
 #[doc(inline)]
 pub use receipts::{
-    receipt_access_record_by_receipt_id, receipt_access_records, ReceiptAccessRecord,
-    ReceiptBillingPeriodRecord,
+    receipt_access_record_by_receipt_id, receipt_access_records, receipt_record,
+    ReceiptAccessRecord, ReceiptAmountRecord, ReceiptBillingPeriodRecord, ReceiptRecord,
+    ReceiptRetrievalStatus,
 };
 #[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
