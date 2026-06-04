@@ -10,12 +10,12 @@ pub enum EndpointManagementScope {
     FullPaykitNamespace,
 }
 
-/// Policy for private Payment List sharing.
+/// Policy for private Paykit message sharing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrivateSharingPolicy {
-    /// Private sharing is enabled when the identity is private-link-capable.
+    /// Private Paykit messages are enabled when the identity is private-link-capable.
     Enabled,
-    /// Private sharing is disabled by local policy.
+    /// Private Paykit messages are disabled by local policy.
     Disabled,
 }
 
@@ -35,7 +35,7 @@ pub enum PublicFallbackPolicy {
 pub struct PaykitSdkConfig {
     /// Public endpoint management scope.
     pub endpoint_management_scope: EndpointManagementScope,
-    /// Private endpoint sharing policy.
+    /// Private Paykit message sharing policy.
     pub private_sharing: PrivateSharingPolicy,
     /// Public fallback behavior.
     pub public_fallback: PublicFallbackPolicy,

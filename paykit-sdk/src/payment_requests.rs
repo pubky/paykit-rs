@@ -7,13 +7,16 @@ use std::{cmp::Reverse, collections::HashMap, fmt};
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{
-    parse_payment_request_event_message, PaymentRequest, PaymentRequestEvent,
-    PrivateApplicationMessage,
+    parse_payment_request_event_message, serialize_payment_request_event, PaymentProof,
+    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
+    PaymentRequestRejection, PrivateApplicationMessage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
+    outbound_private::enqueue_private_message,
+    storage::OutboundPrivateMessageRecord,
     storage::{EventDedupRecord, PrivateStreamItemRecord, StorageAdapter},
     PubkyPublicKey, Result,
 };
@@ -224,6 +227,93 @@ where
         })
         .await?;
     derive_received_payment_request_records(counterparty.clone(), items, dedupe_records, now)
+}
+
+/// Queue one raw Payment Request protocol event for outbound delivery.
+///
+/// The exact canonical JSON payload is serialized before it is stored, so retry
+/// workers can resend the same Event ID and payload.
+pub(crate) async fn enqueue_payment_request_event<S>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    event: &PaymentRequestEvent,
+    now: DateTime<Utc>,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
+    let raw_json = serialize_payment_request_event(event)?;
+    enqueue_private_message(storage, counterparty, raw_json, now).await
+}
+
+/// Queue a raw Payment Request proposal for outbound delivery.
+pub(crate) async fn enqueue_payment_request<S>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    event: &PaymentRequest,
+    now: DateTime<Utc>,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
+    let event = PaymentRequestEvent::Request(event.clone());
+    enqueue_payment_request_event(storage, counterparty, &event, now).await
+}
+
+/// Queue a raw Payment Request acceptance for outbound delivery.
+pub(crate) async fn enqueue_payment_request_acceptance<S>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    event: &PaymentRequestAcceptance,
+    now: DateTime<Utc>,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
+    let event = PaymentRequestEvent::Acceptance(event.clone());
+    enqueue_payment_request_event(storage, counterparty, &event, now).await
+}
+
+/// Queue a raw Payment Request rejection for outbound delivery.
+pub(crate) async fn enqueue_payment_request_rejection<S>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    event: &PaymentRequestRejection,
+    now: DateTime<Utc>,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
+    let event = PaymentRequestEvent::Rejection(event.clone());
+    enqueue_payment_request_event(storage, counterparty, &event, now).await
+}
+
+/// Queue a raw Payment Request cancellation for outbound delivery.
+pub(crate) async fn enqueue_payment_request_cancellation<S>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    event: &PaymentRequestCancellation,
+    now: DateTime<Utc>,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
+    let event = PaymentRequestEvent::Cancellation(event.clone());
+    enqueue_payment_request_event(storage, counterparty, &event, now).await
+}
+
+/// Queue a raw Payment Proof for outbound delivery.
+pub(crate) async fn enqueue_payment_proof<S>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    event: &PaymentProof,
+    now: DateTime<Utc>,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
+    let event = PaymentRequestEvent::Proof(event.clone());
+    enqueue_payment_request_event(storage, counterparty, &event, now).await
 }
 
 fn derive_received_payment_request_records(
@@ -455,7 +545,10 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::{private_stream::persist_private_stream_batch, storage::InMemoryStorage};
+    use crate::{
+        outbound_private::queued_outbound_private_messages,
+        private_stream::persist_private_stream_batch, storage::InMemoryStorage,
+    };
 
     fn timestamp() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
@@ -478,6 +571,14 @@ mod tests {
                 .map(str::to_owned),
             raw_json,
         }
+    }
+
+    fn parsed_event(raw_json: String) -> PaymentRequestEvent {
+        parse_payment_request_event_message(&private_message(raw_json))
+            .unwrap()
+            .parsed_event()
+            .unwrap()
+            .clone()
     }
 
     fn request_raw(
@@ -528,6 +629,79 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_payment_request_event_stores_canonical_payload() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        let event = parsed_event(request_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+            "invoice-2026-0001",
+            None,
+            None,
+        ));
+
+        let record =
+            enqueue_payment_request_event(&storage, counterparty.clone(), &event, timestamp())
+                .await
+                .unwrap();
+        let queued = queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
+
+        assert_eq!(queued, vec![record.clone()]);
+        assert_eq!(record.kind, "paykit.payment_request");
+        assert_eq!(
+            record.raw_json,
+            serialize_payment_request_event(&event).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_payment_request_acceptance_sets_kind() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        let PaymentRequestEvent::Acceptance(event) = parsed_event(acceptance_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+            "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+        )) else {
+            panic!("expected acceptance event");
+        };
+
+        let record =
+            enqueue_payment_request_acceptance(&storage, counterparty, &event, timestamp())
+                .await
+                .unwrap();
+
+        assert_eq!(record.kind, "paykit.payment_request_acceptance");
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_payment_request_rejects_invalid_terms() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        let PaymentRequestEvent::Request(mut event) = parsed_event(request_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+            "invoice-2026-0001",
+            None,
+            None,
+        )) else {
+            panic!("expected request event");
+        };
+        event.request.accepted_payment_endpoint_identifiers.clear();
+
+        let err = enqueue_payment_request(&storage, counterparty.clone(), &event, timestamp())
+            .await
+            .unwrap_err();
+        let queued = queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
+
+        assert!(matches!(err, crate::PaykitSdkError::Protocol(_)));
+        assert!(queued.is_empty());
     }
 
     #[tokio::test]

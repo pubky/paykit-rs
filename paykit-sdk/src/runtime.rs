@@ -1,6 +1,10 @@
 use std::{cmp::Reverse, collections::HashSet};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use paykit_lib::{
+    PaymentProof, PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation,
+    PaymentRequestEvent, PaymentRequestRejection,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -29,6 +33,12 @@ use crate::{
         OutboundPrivateSendReport,
     },
     payment_requests::{
+        enqueue_payment_proof as enqueue_payment_proof_message,
+        enqueue_payment_request as enqueue_payment_request_message,
+        enqueue_payment_request_acceptance as enqueue_payment_request_acceptance_message,
+        enqueue_payment_request_cancellation as enqueue_payment_request_cancellation_message,
+        enqueue_payment_request_event as enqueue_payment_request_event_message,
+        enqueue_payment_request_rejection as enqueue_payment_request_rejection_message,
         received_payment_request_records as derive_received_payment_request_records,
         PaymentRequestRecord,
     },
@@ -429,15 +439,13 @@ where
         derive_received_payment_request_records(&self.storage, counterparty, self.clock.now()).await
     }
 
-    /// Enqueue the current complete Private Payment List for one counterparty.
-    pub async fn enqueue_private_payment_list(
+    async fn ensure_private_outbound_ready(
         &self,
-        counterparty: PubkyPublicKey,
-    ) -> Result<OutboundPrivateMessageRecord> {
+        counterparty: &PubkyPublicKey,
+        disabled_message: &str,
+    ) -> Result<()> {
         if self.config.private_sharing == PrivateSharingPolicy::Disabled {
-            return Err(PaykitSdkError::Policy(
-                "private Payment List sharing is disabled".into(),
-            ));
+            return Err(PaykitSdkError::Policy(disabled_message.into()));
         }
 
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
@@ -452,7 +460,7 @@ where
             .storage
             .transaction(|tx| {
                 Ok(tx
-                    .encrypted_link_state(&counterparty)
+                    .encrypted_link_state(counterparty)
                     .and_then(|state| state.link_snapshot)
                     .is_some())
             })
@@ -462,6 +470,137 @@ where
                 "no active Encrypted Link snapshot for counterparty {counterparty}"
             )));
         }
+
+        Ok(())
+    }
+
+    /// Enqueue one raw Payment Request protocol event for outbound delivery.
+    ///
+    /// This validates private-send readiness and stores canonical JSON, but it
+    /// does not enforce role, lifecycle, or proof/request correlation policy.
+    pub async fn enqueue_raw_payment_request_event(
+        &self,
+        counterparty: PubkyPublicKey,
+        event: &PaymentRequestEvent,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        self.ensure_private_outbound_ready(
+            &counterparty,
+            "private Payment Request messaging is disabled",
+        )
+        .await?;
+        enqueue_payment_request_event_message(&self.storage, counterparty, event, self.clock.now())
+            .await
+    }
+
+    /// Enqueue a raw Payment Request proposal for outbound delivery.
+    ///
+    /// This is a queueing primitive; it does not enforce role or lifecycle policy.
+    pub async fn enqueue_raw_payment_request(
+        &self,
+        counterparty: PubkyPublicKey,
+        event: &PaymentRequest,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        self.ensure_private_outbound_ready(
+            &counterparty,
+            "private Payment Request messaging is disabled",
+        )
+        .await?;
+        enqueue_payment_request_message(&self.storage, counterparty, event, self.clock.now()).await
+    }
+
+    /// Enqueue a raw Payment Request acceptance for outbound delivery.
+    ///
+    /// This is a queueing primitive; it does not enforce role or lifecycle policy.
+    pub async fn enqueue_raw_payment_request_acceptance(
+        &self,
+        counterparty: PubkyPublicKey,
+        event: &PaymentRequestAcceptance,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        self.ensure_private_outbound_ready(
+            &counterparty,
+            "private Payment Request messaging is disabled",
+        )
+        .await?;
+        enqueue_payment_request_acceptance_message(
+            &self.storage,
+            counterparty,
+            event,
+            self.clock.now(),
+        )
+        .await
+    }
+
+    /// Enqueue a raw Payment Request rejection for outbound delivery.
+    ///
+    /// This is a queueing primitive; it does not enforce role or lifecycle policy.
+    pub async fn enqueue_raw_payment_request_rejection(
+        &self,
+        counterparty: PubkyPublicKey,
+        event: &PaymentRequestRejection,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        self.ensure_private_outbound_ready(
+            &counterparty,
+            "private Payment Request messaging is disabled",
+        )
+        .await?;
+        enqueue_payment_request_rejection_message(
+            &self.storage,
+            counterparty,
+            event,
+            self.clock.now(),
+        )
+        .await
+    }
+
+    /// Enqueue a raw Payment Request cancellation for outbound delivery.
+    ///
+    /// This is a queueing primitive; it does not enforce role or lifecycle policy.
+    pub async fn enqueue_raw_payment_request_cancellation(
+        &self,
+        counterparty: PubkyPublicKey,
+        event: &PaymentRequestCancellation,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        self.ensure_private_outbound_ready(
+            &counterparty,
+            "private Payment Request messaging is disabled",
+        )
+        .await?;
+        enqueue_payment_request_cancellation_message(
+            &self.storage,
+            counterparty,
+            event,
+            self.clock.now(),
+        )
+        .await
+    }
+
+    /// Enqueue a raw Payment Proof for outbound delivery.
+    ///
+    /// This is a queueing primitive; it does not enforce role, lifecycle, or
+    /// proof/request correlation policy.
+    pub async fn enqueue_raw_payment_proof(
+        &self,
+        counterparty: PubkyPublicKey,
+        event: &PaymentProof,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        self.ensure_private_outbound_ready(
+            &counterparty,
+            "private Payment Request messaging is disabled",
+        )
+        .await?;
+        enqueue_payment_proof_message(&self.storage, counterparty, event, self.clock.now()).await
+    }
+
+    /// Enqueue the current complete Private Payment List for one counterparty.
+    pub async fn enqueue_private_payment_list(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        self.ensure_private_outbound_ready(
+            &counterparty,
+            "private Payment List sharing is disabled",
+        )
+        .await?;
 
         let receiving_details = self
             .payment
@@ -1141,8 +1280,17 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<OutboundPrivateSendReport> {
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
         let report = OutboundPrivateSendReport::default();
+        let queued = queued_outbound_private_messages(&self.storage, &counterparty).await?;
+        if queued.is_empty() {
+            return Ok(report);
+        }
+        if self.config.private_sharing == PrivateSharingPolicy::Disabled {
+            return Err(PaykitSdkError::Policy(
+                "private Paykit message sending is disabled".into(),
+            ));
+        }
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
         let queued = queued_outbound_private_messages(&self.storage, &counterparty).await?;
         if queued.is_empty() {
             return Ok(report);
@@ -1988,6 +2136,103 @@ mod tests {
         let result = sdk.enqueue_private_payment_list(counterparty).await;
 
         assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_payment_request_event_requires_private_capable_identity() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+        let event = PaymentRequestAcceptance::new(
+            paykit_lib::EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102").unwrap(),
+            paykit_lib::PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap(),
+        );
+
+        let result = sdk
+            .enqueue_raw_payment_request_acceptance(counterparty, &event)
+            .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_payment_request_event_respects_private_sharing_policy() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig {
+                private_sharing: PrivateSharingPolicy::Disabled,
+                ..PaykitSdkConfig::default()
+            },
+            FixedClock,
+        );
+        let event = PaymentRequestAcceptance::new(
+            paykit_lib::EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102").unwrap(),
+            paykit_lib::PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap(),
+        );
+
+        let result = sdk
+            .enqueue_raw_payment_request_acceptance(counterparty, &event)
+            .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+        assert!(storage
+            .snapshot()
+            .unwrap()
+            .outbound_private_messages
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_outbound_private_messages_respects_private_sharing_policy() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let event = PaymentRequestAcceptance::new(
+            paykit_lib::EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102").unwrap(),
+            paykit_lib::PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap(),
+        );
+        let event = PaymentRequestEvent::Acceptance(event);
+        crate::payment_requests::enqueue_payment_request_event(
+            &storage,
+            counterparty.clone(),
+            &event,
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig {
+                private_sharing: PrivateSharingPolicy::Disabled,
+                ..PaykitSdkConfig::default()
+            },
+            FixedClock,
+        );
+
+        let result = sdk.process_outbound_private_messages(counterparty).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+        assert_eq!(
+            storage
+                .snapshot()
+                .unwrap()
+                .outbound_private_messages
+                .first()
+                .unwrap()
+                .status,
+            crate::OutboundPrivateMessageStatus::Pending
+        );
     }
 
     #[tokio::test]
