@@ -14,6 +14,7 @@ use crate::{
     linked_peers::LinkedPeerState,
     outbound_private::OutboundPrivateMessageStatus,
     private_stream::PrivateStreamParseStatus,
+    receipts::ReceiptAccessRecord,
     PaykitSdkError, Result,
 };
 
@@ -134,6 +135,19 @@ pub trait StorageTransaction {
 
     /// Save an Event Message dedupe record.
     fn save_event_dedup_record(&mut self, record: EventDedupRecord);
+
+    /// Save one indexed Receipt Access record.
+    fn save_receipt_access_record(&mut self, record: ReceiptAccessRecord);
+
+    /// List indexed Receipt Access records for one counterparty.
+    fn receipt_access_records(&self, counterparty: &PubkyPublicKey) -> Vec<ReceiptAccessRecord>;
+
+    /// Load the latest indexed Receipt Access record for a receipt.
+    fn receipt_access_record_by_receipt_id(
+        &self,
+        counterparty: &PubkyPublicKey,
+        receipt_id: &str,
+    ) -> Option<ReceiptAccessRecord>;
 }
 
 /// Durable Linked Peer state.
@@ -582,6 +596,8 @@ pub struct StorageState {
     pub next_private_stream_item_id: u64,
     /// Event dedupe records by counterparty and Event ID.
     pub event_dedup_records: HashMap<(PubkyPublicKey, String), EventDedupRecord>,
+    /// Receipt Access records by counterparty and Event ID.
+    pub receipt_access_records: HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
 }
 
 /// In-memory SDK storage implementation for tests and examples.
@@ -657,6 +673,7 @@ impl StorageTransaction for InMemoryStorageTransaction {
         self.state.outbound_private_messages.clear();
         self.state.private_stream_items.clear();
         self.state.event_dedup_records.clear();
+        self.state.receipt_access_records.clear();
     }
 
     fn linked_peer(&self, counterparty: &PubkyPublicKey) -> Option<LinkedPeerRecord> {
@@ -864,6 +881,40 @@ impl StorageTransaction for InMemoryStorageTransaction {
             record,
         );
     }
+
+    fn save_receipt_access_record(&mut self, record: ReceiptAccessRecord) {
+        self.state.receipt_access_records.insert(
+            (record.counterparty.clone(), record.event_id.clone()),
+            record,
+        );
+    }
+
+    fn receipt_access_records(&self, counterparty: &PubkyPublicKey) -> Vec<ReceiptAccessRecord> {
+        let mut records = self
+            .state
+            .receipt_access_records
+            .values()
+            .filter(|record| &record.counterparty == counterparty)
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| record.stream_item_id);
+        records
+    }
+
+    fn receipt_access_record_by_receipt_id(
+        &self,
+        counterparty: &PubkyPublicKey,
+        receipt_id: &str,
+    ) -> Option<ReceiptAccessRecord> {
+        self.state
+            .receipt_access_records
+            .values()
+            .filter(|record| {
+                &record.counterparty == counterparty && record.receipt_id == receipt_id
+            })
+            .max_by_key(|record| record.stream_item_id)
+            .cloned()
+    }
 }
 
 fn is_claimable_outbound_private_message(
@@ -920,6 +971,22 @@ mod tests {
         )
     }
 
+    fn receipt_access_record(counterparty: PubkyPublicKey) -> ReceiptAccessRecord {
+        ReceiptAccessRecord {
+            counterparty,
+            stream_item_id: 0,
+            receive_batch_id: 0,
+            event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
+            receipt_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            payment_reference: "invoice-2026-0001".into(),
+            payment_request_id: None,
+            billing_period: None,
+            location: "/pub/paykit/v0/private/receipts/550e8400-e29b-41d4-a716-446655440000".into(),
+            key: "receipt-secret".into(),
+            received_at: timestamp(),
+        }
+    }
+
     #[test]
     fn test_sensitive_storage_debug_is_redacted() {
         let counterparty = counterparty();
@@ -949,10 +1016,12 @@ mod tests {
                 received_at: timestamp(),
             }),
         );
+        let receipt_access = receipt_access_record(stream.counterparty.clone());
 
-        let debug = format!("{link_state:?} {outbound:?} {stream:?}");
+        let debug = format!("{link_state:?} {outbound:?} {stream:?} {receipt_access:?}");
         assert!(debug.contains("<redacted:"));
         assert!(!debug.contains("secret"));
+        assert!(!debug.contains("receipt-secret"));
         assert!(!debug.contains("[1, 2, 3]"));
     }
 
@@ -1001,6 +1070,8 @@ mod tests {
                         conflicting_stream_item_ids: Vec::new(),
                     });
 
+                    tx.save_receipt_access_record(receipt_access_record(counterparty));
+
                     Ok(stream_item_id)
                 }
             })
@@ -1017,6 +1088,7 @@ mod tests {
         assert_eq!(snapshot.outbound_private_messages.len(), 1);
         assert_eq!(snapshot.private_stream_items.len(), 1);
         assert_eq!(snapshot.event_dedup_records.len(), 1);
+        assert_eq!(snapshot.receipt_access_records.len(), 1);
         assert_eq!(snapshot.next_private_stream_item_id, 1);
         assert_eq!(snapshot.next_outbound_private_message_id, 1);
     }
@@ -1214,6 +1286,7 @@ mod tests {
                             received_at: timestamp(),
                         },
                     ));
+                    tx.save_receipt_access_record(receipt_access_record(counterparty));
                     tx.clear_identity_scoped_state();
                     Ok(())
                 }
@@ -1229,6 +1302,7 @@ mod tests {
         assert!(snapshot.outbound_private_messages.is_empty());
         assert!(snapshot.private_stream_items.is_empty());
         assert!(snapshot.event_dedup_records.is_empty());
+        assert!(snapshot.receipt_access_records.is_empty());
     }
 
     #[tokio::test]
@@ -1268,7 +1342,7 @@ mod tests {
                     ));
                     tx.insert_private_stream_item(NewPrivateStreamItem::new(
                         NewPrivateStreamItemDetails {
-                            counterparty,
+                            counterparty: counterparty.clone(),
                             receive_batch_id: 0,
                             raw_json: r#"{"version":1,"kind":"paykit.test"}"#.into(),
                             parsed_version: Some(1),
@@ -1279,6 +1353,7 @@ mod tests {
                             received_at: timestamp(),
                         },
                     ));
+                    tx.save_receipt_access_record(receipt_access_record(counterparty));
                     tx.clear_private_identity_scoped_state();
                     Ok(())
                 }
@@ -1294,6 +1369,7 @@ mod tests {
         assert!(snapshot.outbound_private_messages.is_empty());
         assert!(snapshot.private_stream_items.is_empty());
         assert!(snapshot.event_dedup_records.is_empty());
+        assert!(snapshot.receipt_access_records.is_empty());
         assert_eq!(snapshot.next_peer_link_operation_lease_id, 1);
         assert_eq!(snapshot.next_outbound_private_message_id, 1);
         assert_eq!(snapshot.next_receive_batch_id, 1);

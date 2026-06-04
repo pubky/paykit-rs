@@ -15,6 +15,7 @@ pub mod linked_peers;
 pub mod outbound_private;
 pub mod private_lists;
 pub mod private_stream;
+pub mod receipts;
 /// SDK runtime facade.
 pub mod runtime;
 /// Durable storage traits and in-memory test storage.
@@ -62,6 +63,11 @@ pub use private_lists::{
 };
 #[doc(inline)]
 pub use private_stream::{EventIdConflict, PrivateStreamIntakeReport, PrivateStreamParseStatus};
+#[doc(inline)]
+pub use receipts::{
+    receipt_access_record_by_receipt_id, receipt_access_records, ReceiptAccessRecord,
+    ReceiptBillingPeriodRecord,
+};
 #[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
 #[doc(inline)]
