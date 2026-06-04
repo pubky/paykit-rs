@@ -11,6 +11,7 @@ use crate::{
     endpoints::EndpointPublicationStatus,
     identity::{IdentityState, PubkyPublicKey},
     linked_peers::LinkedPeerState,
+    outbound_private::OutboundPrivateMessageStatus,
     private_stream::PrivateStreamParseStatus,
     PaykitSdkError, Result,
 };
@@ -67,6 +68,29 @@ pub trait StorageTransaction {
 
     /// Save one Encrypted Link state record.
     fn save_encrypted_link_state(&mut self, record: EncryptedLinkStateRecord);
+
+    /// Insert one outbound private message and return its assigned record.
+    fn insert_outbound_private_message(
+        &mut self,
+        message: NewOutboundPrivateMessage,
+    ) -> OutboundPrivateMessageRecord;
+
+    /// List outbound private messages that should be attempted.
+    fn queued_outbound_private_messages(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Vec<OutboundPrivateMessageRecord>;
+
+    /// Claim the next outbound private message for sending, preserving FIFO.
+    fn claim_next_outbound_private_message(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Option<OutboundPrivateMessageRecord>;
+
+    /// Save one outbound private message record.
+    fn save_outbound_private_message(&mut self, record: OutboundPrivateMessageRecord);
 
     /// Allocate a receive batch id.
     fn allocate_receive_batch_id(&mut self) -> u64;
@@ -127,6 +151,64 @@ pub struct EncryptedLinkStateRecord {
     pub generation: u64,
     /// Last checkpoint time.
     pub checkpointed_at: DateTime<Utc>,
+}
+
+/// New outbound private message before storage assigns an id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewOutboundPrivateMessage {
+    /// Counterparty public key.
+    pub counterparty: PubkyPublicKey,
+    /// Private Message Kind string.
+    pub kind: String,
+    /// Exact raw JSON payload to send.
+    pub raw_json: String,
+    /// Queue time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Durable outbound private message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundPrivateMessageRecord {
+    /// Assigned outbound message id.
+    pub outbound_message_id: u64,
+    /// Counterparty public key.
+    pub counterparty: PubkyPublicKey,
+    /// Private Message Kind string.
+    pub kind: String,
+    /// Exact raw JSON payload to send.
+    pub raw_json: String,
+    /// Delivery status.
+    pub status: OutboundPrivateMessageStatus,
+    /// Number of send attempts.
+    pub attempt_count: u32,
+    /// Queue time.
+    pub created_at: DateTime<Utc>,
+    /// Last status update time.
+    pub updated_at: DateTime<Utc>,
+    /// Last send attempt time.
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    /// Successful send time.
+    pub sent_at: Option<DateTime<Utc>>,
+    /// Last send error, when available.
+    pub last_error: Option<String>,
+}
+
+impl OutboundPrivateMessageRecord {
+    fn from_new(outbound_message_id: u64, message: NewOutboundPrivateMessage) -> Self {
+        Self {
+            outbound_message_id,
+            counterparty: message.counterparty,
+            kind: message.kind,
+            raw_json: message.raw_json,
+            status: OutboundPrivateMessageStatus::Pending,
+            attempt_count: 0,
+            created_at: message.created_at,
+            updated_at: message.created_at,
+            last_attempt_at: None,
+            sent_at: None,
+            last_error: None,
+        }
+    }
 }
 
 /// New private stream item before storage assigns an id.
@@ -222,6 +304,10 @@ pub struct StorageState {
     pub public_endpoint_records: HashMap<String, PublicEndpointRecord>,
     /// Encrypted Link state records by counterparty.
     pub encrypted_link_states: HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
+    /// Append-only outbound private message records.
+    pub outbound_private_messages: Vec<OutboundPrivateMessageRecord>,
+    /// Next outbound private message id.
+    pub next_outbound_private_message_id: u64,
     /// Append-only private stream items.
     pub private_stream_items: Vec<PrivateStreamItemRecord>,
     /// Next receive batch id.
@@ -330,6 +416,86 @@ impl StorageTransaction for InMemoryStorageTransaction {
             .insert(record.counterparty.clone(), record);
     }
 
+    fn insert_outbound_private_message(
+        &mut self,
+        message: NewOutboundPrivateMessage,
+    ) -> OutboundPrivateMessageRecord {
+        let outbound_message_id = self.state.next_outbound_private_message_id;
+        self.state.next_outbound_private_message_id += 1;
+        let record = OutboundPrivateMessageRecord::from_new(outbound_message_id, message);
+        self.state.outbound_private_messages.push(record.clone());
+        record
+    }
+
+    fn queued_outbound_private_messages(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Vec<OutboundPrivateMessageRecord> {
+        let mut messages = self
+            .state
+            .outbound_private_messages
+            .iter()
+            .filter(|message| {
+                &message.counterparty == counterparty
+                    && matches!(
+                        message.status,
+                        OutboundPrivateMessageStatus::Pending
+                            | OutboundPrivateMessageStatus::Sending
+                            | OutboundPrivateMessageStatus::Failed
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        messages.sort_by_key(|message| message.outbound_message_id);
+        messages
+    }
+
+    fn claim_next_outbound_private_message(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Option<OutboundPrivateMessageRecord> {
+        let mut indexes = self
+            .state
+            .outbound_private_messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| {
+                &message.counterparty == counterparty
+                    && message.status != OutboundPrivateMessageStatus::Sent
+            })
+            .map(|(index, message)| (index, message.outbound_message_id))
+            .collect::<Vec<_>>();
+        indexes.sort_by_key(|(_, outbound_message_id)| *outbound_message_id);
+
+        let (index, _) = indexes.first().copied()?;
+        let message = &mut self.state.outbound_private_messages[index];
+        if !is_claimable_outbound_private_message(message, stale_before) {
+            return None;
+        }
+
+        message.status = OutboundPrivateMessageStatus::Sending;
+        message.attempt_count = message.attempt_count.saturating_add(1);
+        message.last_attempt_at = Some(now);
+        message.updated_at = now;
+        message.last_error = None;
+        Some(message.clone())
+    }
+
+    fn save_outbound_private_message(&mut self, record: OutboundPrivateMessageRecord) {
+        if let Some(existing) = self
+            .state
+            .outbound_private_messages
+            .iter_mut()
+            .find(|message| message.outbound_message_id == record.outbound_message_id)
+        {
+            *existing = record;
+        } else {
+            self.state.outbound_private_messages.push(record);
+        }
+    }
+
     fn allocate_receive_batch_id(&mut self) -> u64 {
         let receive_batch_id = self.state.next_receive_batch_id;
         self.state.next_receive_batch_id += 1;
@@ -365,6 +531,20 @@ impl StorageTransaction for InMemoryStorageTransaction {
     }
 }
 
+fn is_claimable_outbound_private_message(
+    message: &OutboundPrivateMessageRecord,
+    stale_before: DateTime<Utc>,
+) -> bool {
+    match message.status {
+        OutboundPrivateMessageStatus::Pending | OutboundPrivateMessageStatus::Failed => true,
+        OutboundPrivateMessageStatus::Sending => match message.last_attempt_at {
+            Some(last_attempt_at) => last_attempt_at <= stale_before,
+            None => true,
+        },
+        OutboundPrivateMessageStatus::Sent => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
@@ -389,6 +569,17 @@ mod tests {
         }
     }
 
+    fn outbound_private_message(counterparty: PubkyPublicKey) -> NewOutboundPrivateMessage {
+        NewOutboundPrivateMessage {
+            counterparty,
+            kind: "paykit.private_payment_list".into(),
+            raw_json:
+                r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
+                    .into(),
+            created_at: timestamp(),
+        }
+    }
+
     #[tokio::test]
     async fn test_transaction_commits_records() {
         let storage = InMemoryStorage::new();
@@ -406,6 +597,9 @@ mod tests {
                         failure_count: 0,
                     });
                     tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
+                    tx.insert_outbound_private_message(outbound_private_message(
+                        counterparty.clone(),
+                    ));
 
                     let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem {
                         counterparty: counterparty.clone(),
@@ -441,9 +635,11 @@ mod tests {
             LinkedPeerState::Linked
         );
         assert_eq!(snapshot.public_endpoint_records.len(), 1);
+        assert_eq!(snapshot.outbound_private_messages.len(), 1);
         assert_eq!(snapshot.private_stream_items.len(), 1);
         assert_eq!(snapshot.event_dedup_records.len(), 1);
         assert_eq!(snapshot.next_private_stream_item_id, 1);
+        assert_eq!(snapshot.next_outbound_private_message_id, 1);
     }
 
     #[tokio::test]

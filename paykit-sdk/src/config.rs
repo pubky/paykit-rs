@@ -66,6 +66,8 @@ pub struct PaykitSdkConfig {
     pub public_fallback: PublicFallbackPolicy,
     /// Maximum time to spend on private recovery before returning/falling back.
     pub private_recovery_timeout: Duration,
+    /// Time after which an in-progress outbound private send can be retried.
+    pub outbound_private_send_lease_timeout: Duration,
     /// Unknown private message retention limits.
     pub unknown_message_retention: UnknownMessageRetentionPolicy,
 }
@@ -77,6 +79,7 @@ impl Default for PaykitSdkConfig {
             private_sharing: PrivateSharingPolicy::Enabled,
             public_fallback: PublicFallbackPolicy::AfterPrivateRecoveryTimeout,
             private_recovery_timeout: Duration::from_secs(3),
+            outbound_private_send_lease_timeout: Duration::from_secs(60),
             unknown_message_retention: UnknownMessageRetentionPolicy::default(),
         }
     }

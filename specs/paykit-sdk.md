@@ -532,20 +532,25 @@ Receipt records:
 
 Receipt Decryption Keys must be redacted in logs and debug output.
 
-### OutboundMessageRecord
+### OutboundPrivateMessageRecord
 
-Durable outbound queue:
+Durable outbound private-message queue:
 
 - outbound id
 - counterparty
 - message kind
 - event id, when applicable
-- exact serialized payload
-- payload hash
+- exact raw JSON payload
 - send status
-- retry count
-- next retry time
+- attempt count
+- created, updated, attempted, and sent timestamps
 - last error
+
+The SDK should use one generic outbound private-message record type for all
+Private Application Message kinds, but process it as a FIFO queue per
+counterparty/Encrypted Link. Send workers must claim the next message through
+storage before sending it, and in-progress claims must expire so a crashed
+worker can be retried without letting two workers advance the same link at once.
 
 Event Message retries must reuse the same Event ID and exact payload.
 
@@ -599,7 +604,7 @@ Recommended locks:
 - peer link lock: serializes Encrypted Link restore, handshake, send, receive,
   and snapshot updates per counterparty.
 - private stream lock: serializes receive/checkpoint work per counterparty.
-- outbound queue lock: serializes retry workers per counterparty.
+- outbound queue claim/lock: serializes retry workers per counterparty.
 - reservation lock: serializes contact-scoped receiving-detail reservation and
   rotation per counterparty/method.
 

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -12,9 +12,15 @@ use crate::{
     },
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
     linked_peers::mark_recovery_required,
+    outbound_private::{
+        claim_next_outbound_private_message,
+        enqueue_private_message as enqueue_outbound_private_message, mark_outbound_failed,
+        mark_outbound_sent, queued_outbound_private_messages, OutboundPrivateSendFailure,
+        OutboundPrivateSendReport,
+    },
     private_lists::current_private_payment_list as load_current_private_payment_list,
     private_stream::{persist_private_stream_batch, PrivateStreamIntakeReport},
-    storage::{EncryptedLinkStateRecord, StorageAdapter},
+    storage::{EncryptedLinkStateRecord, OutboundPrivateMessageRecord, StorageAdapter},
     PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointEvaluation,
     PaymentEndpointSelection, PaymentEndpointSelectionRequest, PaymentEndpointSource,
     PrivatePaymentListView, PubkyPublicKey, PubkySessionProvider, ReceivingDetailScope, Result,
@@ -140,6 +146,16 @@ where
         counterparty: &PubkyPublicKey,
     ) -> Result<Option<crate::PrivatePaymentListView>> {
         load_current_private_payment_list(&self.storage, counterparty).await
+    }
+
+    /// Enqueue one raw JSON Private Application Message for later delivery.
+    pub async fn enqueue_private_message(
+        &self,
+        counterparty: PubkyPublicKey,
+        raw_json: String,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        enqueue_outbound_private_message(&self.storage, counterparty, raw_json, self.clock.now())
+            .await
     }
 
     /// Resolve a payable endpoint for one counterparty.
@@ -429,6 +445,139 @@ where
         .await
     }
 
+    /// Send queued outbound private messages for one counterparty in order.
+    pub async fn process_outbound_private_messages(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<OutboundPrivateSendReport> {
+        let mut report = OutboundPrivateSendReport::default();
+        let queued = queued_outbound_private_messages(&self.storage, &counterparty).await?;
+        if queued.is_empty() {
+            return Ok(report);
+        }
+
+        let session_access =
+            self.pubky
+                .load_session_access()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky session available".into(),
+                    source: None,
+                })?;
+        let secret_key = *session_access
+            .local_secret_key
+            .as_ref()
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
+                source: None,
+            })?
+            .as_bytes();
+        let remote_public_key = counterparty.to_public_key()?;
+        let stored_link_state = self
+            .storage
+            .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
+            .await?
+            .ok_or_else(|| {
+                PaykitSdkError::RecoveryRequired(format!(
+                    "no Encrypted Link state for counterparty {counterparty}"
+                ))
+            })?;
+        let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
+            let now = self.clock.now();
+            mark_recovery_required(&self.storage, counterparty.clone(), now).await?;
+            return Err(PaykitSdkError::RecoveryRequired(format!(
+                "no active Encrypted Link snapshot for counterparty {counterparty}"
+            )));
+        };
+        let snapshot = match paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                let now = self.clock.now();
+                mark_recovery_required(&self.storage, counterparty.clone(), now).await?;
+                return Err(err.into());
+            }
+        };
+        let mut link = paykit_lib::restore_encrypted_link(
+            session_access.session,
+            secret_key,
+            &remote_public_key,
+            session_access.outbox_client,
+            snapshot,
+        )
+        .await?;
+        let mut link_state = stored_link_state;
+
+        loop {
+            let now = self.clock.now();
+            let lease_timeout = ChronoDuration::from_std(
+                self.config.outbound_private_send_lease_timeout,
+            )
+            .map_err(|err| {
+                PaykitSdkError::Policy(format!(
+                    "invalid outbound private send lease timeout: {err}"
+                ))
+            })?;
+            let stale_before = now - lease_timeout;
+            let Some(sending) = claim_next_outbound_private_message(
+                &self.storage,
+                &counterparty,
+                now,
+                stale_before,
+            )
+            .await?
+            else {
+                break;
+            };
+            report.attempted.push(sending.outbound_message_id);
+
+            match link
+                .send_private_application_message_json(&sending.raw_json)
+                .await
+            {
+                Ok(()) => {
+                    let now = self.clock.now();
+                    let sent = mark_outbound_sent(sending, now);
+                    link_state.link_snapshot = Some(link.serialize());
+                    link_state.generation = link_state.generation.saturating_add(1);
+                    link_state.checkpointed_at = now;
+                    self.storage
+                        .transaction({
+                            let sent = sent.clone();
+                            let link_state = link_state.clone();
+                            move |tx| {
+                                tx.save_outbound_private_message(sent);
+                                tx.save_encrypted_link_state(link_state);
+                                Ok(())
+                            }
+                        })
+                        .await?;
+                    report.sent.push(sent.outbound_message_id);
+                }
+                Err(err) => {
+                    let now = self.clock.now();
+                    let error = err.to_string();
+                    let failed = mark_outbound_failed(sending, error.clone(), now);
+                    self.storage
+                        .transaction({
+                            let failed = failed.clone();
+                            move |tx| {
+                                tx.save_outbound_private_message(failed);
+                                Ok(())
+                            }
+                        })
+                        .await?;
+                    report.failed.push(OutboundPrivateSendFailure {
+                        outbound_message_id: failed.outbound_message_id,
+                        error,
+                    });
+                    break;
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
     async fn public_payment_candidates(
         &self,
         counterparty: &PubkyPublicKey,
@@ -686,6 +835,66 @@ mod tests {
                 r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"btc-lightning-bolt11":"{payload}"}}}}"#
             ),
         }
+    }
+
+    fn private_list_json() -> String {
+        r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#.into()
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_private_message_stores_outbound_record() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let record = sdk
+            .enqueue_private_message(counterparty.clone(), private_list_json())
+            .await
+            .unwrap();
+
+        let queued = crate::queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
+        assert_eq!(record.outbound_message_id, 0);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].attempt_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_outbound_private_messages_requires_pubky_session() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        crate::enqueue_private_message(
+            &storage,
+            counterparty.clone(),
+            private_list_json(),
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk
+            .process_outbound_private_messages(counterparty.clone())
+            .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+        let queued = crate::queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
+        assert_eq!(queued[0].attempt_count, 0);
     }
 
     #[tokio::test]
