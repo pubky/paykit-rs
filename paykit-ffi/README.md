@@ -2,6 +2,10 @@
 
 UniFFI bindings for [paykit-lib](../paykit-lib/), exposing Paykit's payment routing functionality to iOS (Swift) and Android (Kotlin).
 
+These bindings expose the low-level, stateless Paykit Library API. The
+stateful `paykit-sdk` runtime is a separate Rust crate and does not have
+platform bindings yet.
+
 ## Exported API
 
 ### Initialization
@@ -84,7 +88,7 @@ Private Paykit APIs require an active session and an established Encrypted Link 
 
 #### Private Application Message and receipt handling
 
-- `FfiPrivateApplicationMessage` is one received Private Application Message with optional parsed `version`, optional parsed `kind`, and raw JSON payload. Platform SDK/runtime code should persist the raw JSON and route messages with recognized `kind` values.
+- `FfiPrivateApplicationMessage` is one received Private Application Message with optional parsed `version`, optional parsed `kind`, and raw payload text. Platform SDK/runtime code should persist the raw payload and route messages with recognized `kind` values.
 - Payment Request bindings expose the same stateless protocol tools as `paykit-lib`: typed records, send helpers, raw event parsing, canonical event serialization, and proof/request correlation validation. They do not derive lifecycle state, enforce roles, schedule recurring payments, or validate method-specific proofs.
 - `FfiPaymentRequestEventMessage` preserves `kind`, optional parsed IDs, `raw_json`, parsed event data when valid, and `validation_error` when a recognized event is malformed.
 - `FfiReceiptDraft` is caller input for `paykit_prepare_receipt`: optional `receipt_id`, `payment_reference`, optional `payment_request_id` and `billing_period` for Payment Request correlation, optional `payment_endpoint_identifier`, optional `amount` (`value` plus `asset`), and `metadata_json`, which must serialize to a JSON object.
@@ -107,20 +111,20 @@ Private Paykit APIs require an active session and an established Encrypted Link 
 ./build.sh all
 ```
 
-### Platform-Specific Builds
-```
-./build.sh ios      # iOS only
-./build.sh android  # Android only
-```
-
 ### Release Builds (with version bump)
-The `-r/--release` flag bumps versions in `Cargo.toml`, the root `Package.swift`, and `gradle.properties`, then builds.
-Defaults to patch version bump; use `--major`/`-M` or `--minor`/`-m` for other increments.
+Always build all platform bindings together so Swift and Kotlin stay in sync.
+The `-r/--release` flag bumps versions in the crate `Cargo.toml` files, the
+SDK's `paykit-lib` dependency, the root `Package.swift`, and
+`gradle.properties`, then builds.
+When the current version is an RC, `-r` without `--rc` finalizes that RC
+version. When the current version is not an RC, `-r` defaults to a patch bump.
+Use `--rc` to create or increment an RC version.
 
 ```
-./build.sh -r ios              # Bump patch (default) and build iOS
-./build.sh -r --minor android  # Bump minor and build Android
-./build.sh -r -M all           # Bump major and build all platforms
+./build.sh -r all           # Finalize current RC, or bump patch if not on an RC
+./build.sh -r --rc all      # Create/increment an RC and build all platforms
+./build.sh -r --minor all   # Bump minor and build all platforms
+./build.sh -r -M all        # Bump major and build all platforms
 ```
 
 ### Run Tests
@@ -228,12 +232,12 @@ paykit-ffi/
 │       └── uniffi-bindgen.rs
 ├── uniffi.toml             # Swift binding config
 ├── uniffi-android.toml     # Kotlin binding config
-├── build.sh                # Unified build script (ios|android|all + version bump)
-├── build_ios.sh            # iOS build + XCFramework generation
-├── build_android.sh        # Android build + Gradle publish
+├── build.sh                # Unified all-platform build script + version bump
+├── build_ios.sh            # Internal iOS sub-build script
+├── build_android.sh        # Internal Android sub-build script
 ├── update_package.py       # Auto-update root Package.swift checksum/tag
 ├── bindings/
-│   ├── ios/                # Generated: Swift bindings + XCFramework (after build_ios.sh)
+│   ├── ios/                # Generated: Swift bindings + XCFramework
 │   └── android/            # Gradle project for Maven publishing
 │       ├── build.gradle.kts
 │       ├── settings.gradle.kts
@@ -243,7 +247,7 @@ paykit-ffi/
 │           ├── build.gradle.kts
 │           └── src/main/
 │               ├── AndroidManifest.xml
-│               ├── jniLibs/    # Generated: .so files (after build_android.sh)
-│               └── kotlin/     # Generated: Kotlin bindings (after build_android.sh)
+│               ├── jniLibs/    # Generated: .so files
+│               └── kotlin/     # Generated: Kotlin bindings
 └── README.md
 ```
