@@ -62,7 +62,8 @@ pub use outbound_private::{
 };
 #[doc(inline)]
 pub use private_lists::{
-    current_private_payment_list, derive_private_payment_list_view, PrivatePaymentListView,
+    current_private_payment_list, derive_private_payment_list_view, enqueue_private_payment_list,
+    PrivatePaymentListView,
 };
 #[doc(inline)]
 pub use private_stream::{

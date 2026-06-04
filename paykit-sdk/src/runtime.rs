@@ -2,7 +2,9 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{EndpointManagementScope, PaykitSdkConfig, PublicFallbackPolicy},
+    config::{
+        EndpointManagementScope, PaykitSdkConfig, PrivateSharingPolicy, PublicFallbackPolicy,
+    },
     contacts::{
         ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
     },
@@ -18,7 +20,10 @@ use crate::{
         mark_outbound_sent, queued_outbound_private_messages, OutboundPrivateSendFailure,
         OutboundPrivateSendReport,
     },
-    private_lists::current_private_payment_list as load_current_private_payment_list,
+    private_lists::{
+        current_private_payment_list as load_current_private_payment_list,
+        enqueue_private_payment_list as enqueue_private_payment_list_message,
+    },
     private_stream::{persist_private_stream_batch, PrivateStreamIntakeReport},
     storage::{EncryptedLinkStateRecord, OutboundPrivateMessageRecord, StorageAdapter},
     PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointEvaluation,
@@ -156,6 +161,62 @@ where
     ) -> Result<OutboundPrivateMessageRecord> {
         enqueue_outbound_private_message(&self.storage, counterparty, raw_json, self.clock.now())
             .await
+    }
+
+    /// Enqueue the current complete Private Payment List for one counterparty.
+    pub async fn enqueue_private_payment_list(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        if self.config.private_sharing == PrivateSharingPolicy::Disabled {
+            return Err(PaykitSdkError::Policy(
+                "private Payment List sharing is disabled".into(),
+            ));
+        }
+
+        let identity =
+            self.storage
+                .load_identity_state()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "SDK identity is not initialized".into(),
+                    source: None,
+                })?;
+        if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
+            return Err(PaykitSdkError::Identity {
+                context: "local Pubky identity is not private-link-capable".into(),
+                source: None,
+            });
+        }
+
+        let has_active_link = self
+            .storage
+            .transaction(|tx| {
+                Ok(tx
+                    .encrypted_link_state(&counterparty)
+                    .and_then(|state| state.link_snapshot)
+                    .is_some())
+            })
+            .await?;
+        if !has_active_link {
+            return Err(PaykitSdkError::RecoveryRequired(format!(
+                "no active Encrypted Link snapshot for counterparty {counterparty}"
+            )));
+        }
+
+        let receiving_details = self
+            .payment
+            .current_receiving_details(ReceivingDetailScope::Private {
+                counterparty: counterparty.clone(),
+            })
+            .await?;
+        enqueue_private_payment_list_message(
+            &self.storage,
+            counterparty,
+            receiving_details,
+            self.clock.now(),
+        )
+        .await
     }
 
     /// Resolve a payable endpoint for one counterparty.
@@ -691,10 +752,10 @@ mod tests {
             ReceivingDetailScope,
         },
         private_stream::persist_private_stream_batch,
-        storage::InMemoryStorage,
+        storage::{EncryptedLinkStateRecord, InMemoryStorage},
         PubkySessionAccess,
     };
-    use paykit_lib::PrivateApplicationMessage;
+    use paykit_lib::{parse_private_payment_list_json, PrivateApplicationMessage};
 
     #[derive(Clone)]
     struct FixedClock;
@@ -747,6 +808,51 @@ mod tests {
                         priority: Some(index as u32),
                     })
                     .collect(),
+            })
+        }
+
+        async fn build_payment_target(
+            &self,
+            endpoint: &PaymentEndpointCandidate,
+        ) -> Result<PaymentTarget> {
+            Ok(PaymentTarget {
+                payload: endpoint.payload.clone(),
+            })
+        }
+
+        async fn execute_payment_request(
+            &self,
+            _request: &PaymentRequestExecution,
+        ) -> Result<PaymentExecutionResult> {
+            Ok(PaymentExecutionResult {
+                proof: None,
+                settled: false,
+            })
+        }
+    }
+
+    struct PrivateListPaymentAdapter;
+
+    #[async_trait]
+    impl PaymentAdapter for PrivateListPaymentAdapter {
+        async fn current_receiving_details(
+            &self,
+            scope: ReceivingDetailScope,
+        ) -> Result<Vec<ReceivingDetail>> {
+            assert!(matches!(scope, ReceivingDetailScope::Private { .. }));
+            Ok(vec![ReceivingDetail {
+                identifier: "btc-lightning-bolt11".into(),
+                payload: "ln-private".into(),
+            }])
+        }
+
+        async fn select_payment_endpoint(
+            &self,
+            _request: &PaymentEndpointSelectionRequest,
+        ) -> Result<PaymentEndpointSelection> {
+            Ok(PaymentEndpointSelection {
+                selected: None,
+                evaluations: Vec::new(),
             })
         }
 
@@ -864,6 +970,85 @@ mod tests {
         assert_eq!(record.outbound_message_id, 0);
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].attempt_count, 0);
+    }
+
+    async fn seed_private_capable_identity_and_link(
+        storage: &InMemoryStorage,
+        counterparty: PubkyPublicKey,
+    ) {
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(PubkyPublicKey::from_public_key(
+                    &pubky::Keypair::random().public_key(),
+                )),
+                capability: PubkyIdentityCapability::PrivateLinkCapable,
+                local_secret_available: true,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        storage
+            .transaction(move |tx| {
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty,
+                    link_snapshot: Some(vec![1, 2, 3]),
+                    handshake_snapshot: None,
+                    generation: 0,
+                    checkpointed_at: FixedClock.now(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_private_payment_list_builds_adapter_list() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            PrivateListPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let record = sdk
+            .enqueue_private_payment_list(counterparty.clone())
+            .await
+            .unwrap();
+
+        let queued = crate::queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
+        assert_eq!(record.outbound_message_id, queued[0].outbound_message_id);
+        let list = parse_private_payment_list_json(&queued[0].raw_json).unwrap();
+        assert_eq!(
+            list.get(&paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap())
+                .unwrap()
+                .as_str(),
+            "ln-private"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_private_payment_list_requires_private_capable_identity() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            PrivateListPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.enqueue_private_payment_list(counterparty).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     }
 
     #[tokio::test]

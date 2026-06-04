@@ -58,7 +58,7 @@ pub(crate) fn normalize_receiving_details(
         let identifier = PaymentEndpointIdentifier::new(detail.identifier)?;
         if desired.contains_key(&identifier) {
             return Err(PaykitSdkError::Protocol(format!(
-                "duplicate public Payment Endpoint identifier '{}'",
+                "duplicate Payment Endpoint identifier '{}'",
                 identifier.as_str()
             )));
         }

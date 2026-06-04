@@ -652,15 +652,14 @@ configured to manage the whole Paykit public namespace.
 ### Publish Private Payment List
 
 1. Ensure the identity is private-link-capable.
-2. Ensure or restore Linked Peer.
+2. Ensure the counterparty has an active Encrypted Link snapshot.
 3. Ask `PaymentAdapter` for private receiving details scoped to the counterparty.
 4. Apply reservation policy if enabled.
 5. Build a complete Private Payment List.
 6. Enforce the pubky-noise message size limit.
-7. Skip send when payload hash matches the last published payload.
-8. Persist outbound record and exact payload.
-9. Send through Encrypted Link.
-10. Persist send result and updated link snapshot.
+7. Persist outbound record and exact payload.
+8. Let the outbound private-message worker send through Encrypted Link.
+9. Persist send result and updated link snapshot.
 
 Private Payment Lists publish endpoints only. Payment References come from
 Payment Requests, Payment Proofs, and Receipts.

@@ -3,12 +3,18 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use paykit_lib::{parse_private_payment_list_json, PrivateMessageKind};
+use paykit_lib::{
+    parse_private_payment_list_json, serialize_private_payment_list_json, PrivateMessageKind,
+    PrivatePaymentList,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    adapters::ReceivingDetail,
+    endpoints::normalize_receiving_details,
+    outbound_private::enqueue_private_message,
     private_stream::PrivateStreamParseStatus,
-    storage::{PrivateStreamItemRecord, StorageAdapter},
+    storage::{OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageAdapter},
     PubkyPublicKey, Result,
 };
 
@@ -35,6 +41,22 @@ where
         .transaction(|tx| Ok(tx.private_stream_items(counterparty)))
         .await?;
     derive_private_payment_list_view(items)
+}
+
+/// Queue a complete Private Payment List for delivery to one counterparty.
+pub async fn enqueue_private_payment_list<S>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    receiving_details: Vec<ReceivingDetail>,
+    now: DateTime<Utc>,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
+    let payment_endpoints = normalize_receiving_details(receiving_details)?;
+    let list = PrivatePaymentList::new(payment_endpoints);
+    let raw_json = serialize_private_payment_list_json(&list)?;
+    enqueue_private_message(storage, counterparty, raw_json, now).await
 }
 
 /// Derive the latest valid Private Payment List view from private stream items.
@@ -73,6 +95,8 @@ mod tests {
 
     use super::*;
     use crate::{
+        adapters::ReceivingDetail,
+        outbound_private::queued_outbound_private_messages,
         private_stream::persist_private_stream_batch,
         storage::{InMemoryStorage, PrivateStreamItemRecord},
     };
@@ -175,5 +199,36 @@ mod tests {
 
         assert_eq!(view.latest_stream_item_id, Some(0));
         assert_eq!(view.payment_endpoints["btc-lightning-bolt11"], "ln-storage");
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_private_payment_list_stores_exact_list_message() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+
+        let record = enqueue_private_payment_list(
+            &storage,
+            counterparty.clone(),
+            vec![ReceivingDetail {
+                identifier: "btc-lightning-bolt11".into(),
+                payload: "ln-private".into(),
+            }],
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        let queued = queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
+        assert_eq!(record.outbound_message_id, queued[0].outbound_message_id);
+        let list = parse_private_payment_list_json(&queued[0].raw_json).unwrap();
+        assert_eq!(list.kind(), PrivateMessageKind::PrivatePaymentList);
+        assert_eq!(
+            list.get(&paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap())
+                .unwrap()
+                .as_str(),
+            "ln-private"
+        );
     }
 }

@@ -124,8 +124,8 @@ pub fn parse_private_payment_list_json(json: &str) -> Result<PrivatePaymentList>
     Ok(PrivatePaymentList::new(payment_endpoints))
 }
 
-/// Serializes a Private Payment List into its JSON wire representation.
-fn serialize_private_payment_list_json(list: &PrivatePaymentList) -> Result<String> {
+/// Serialize a Private Payment List into its JSON wire representation.
+pub fn serialize_private_payment_list_json(list: &PrivatePaymentList) -> Result<String> {
     let payment_endpoints = list
         .payment_endpoints
         .iter()
