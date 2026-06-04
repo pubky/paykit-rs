@@ -384,8 +384,8 @@ Tracks local Pubky identity state:
 One record per counterparty:
 
 - counterparty public key
-- relationship state: unknown, known, linked, recovery required, blocked
-- initiator/responder role
+- relationship state: unknown, known, linking, linked, recovery required, blocked
+- in-progress handshake role: initiator or responder
 - last sync time
 - last private receive time
 - current recovery marker state
@@ -578,14 +578,14 @@ advanced Encrypted Link snapshot.
 
 For each receive cycle:
 
-1. Acquire the per-counterparty private-stream lock.
+1. Claim the per-counterparty peer link operation lease.
 2. Restore or establish the Encrypted Link.
 3. Receive the full batch from `paykit-lib`.
 4. Parse every syntactically valid JSON Private Application Message enough to
    identify version/kind.
 5. In one transaction, insert raw stream items, update dedupe records, update
    derived views, and then save the advanced link snapshot.
-6. Release the lock.
+6. Release the lease.
 
 If the app crashes after messages are stored but before the snapshot is stored,
 replay is acceptable and must be deduped. If the snapshot is stored without the
@@ -601,9 +601,8 @@ Recommended locks:
 - identity lock: serializes import/export/sign-out and capability refresh.
 - public endpoint lock: serializes publication and cleanup of local public
   Payment Endpoints.
-- peer link lock: serializes Encrypted Link restore, handshake, send, receive,
-  and snapshot updates per counterparty.
-- private stream lock: serializes receive/checkpoint work per counterparty.
+- storage-backed peer link operation lease: serializes Encrypted Link restore,
+  handshake, send, receive, and snapshot updates per counterparty.
 - outbound queue claim/lock: serializes retry workers per counterparty.
 - reservation lock: serializes contact-scoped receiving-detail reservation and
   rotation per counterparty/method.
@@ -611,6 +610,9 @@ Recommended locks:
 These are local SDK/runtime locks, not protocol messages. They can be in-memory
 with durable recovery markers where needed. If a platform can run multiple
 processes against the same storage, lock ownership must be storage-backed.
+Lease expiry makes a stale operation reclaimable by another worker; durable
+writes still check the currently stored lease id so an old holder cannot commit
+after a newer lease has replaced it.
 
 ## Workflows
 
@@ -649,6 +651,19 @@ processes against the same storage, lock ownership must be storage-backed.
 The SDK should not remove endpoints it did not create unless explicitly
 configured to manage the whole Paykit public namespace.
 
+### Establish Encrypted Link
+
+1. Ensure the identity is private-link-capable.
+2. Start an initiator or responder Encrypted Link Handshake through
+   `paykit-lib`.
+3. Persist the handshake snapshot, role, and `linking` peer state.
+4. Advance the stored handshake on retry/poll cycles.
+5. When the handshake is pending, replace the stored handshake snapshot.
+6. When the handshake completes, persist the active link snapshot, clear the
+   handshake snapshot/role, and mark the peer `linked`.
+7. If restore or handshake advancement fails, mark the peer recovery-required
+   and stop private automation for that peer.
+
 ### Publish Private Payment List
 
 1. Ensure the identity is private-link-capable.
@@ -666,7 +681,7 @@ Payment Requests, Payment Proofs, and Receipts.
 
 ### Receive Private Stream
 
-1. Acquire peer link/private stream locks.
+1. Claim the peer link operation lease.
 2. Restore or establish Encrypted Link.
 3. Receive ordered Private Application Messages through `paykit-lib`.
 4. Persist raw messages and parse results.

@@ -13,9 +13,14 @@ use crate::{
         EndpointPublicationStatus, EndpointSyncChange, EndpointSyncReport,
     },
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
-    linked_peers::mark_recovery_required,
+    linked_peers::{
+        mark_recovery_required_with_lease, save_link_handshake_state_if_generation_with_lease,
+        save_link_handshake_state_with_lease, save_linked_peer_link_state_if_generation_with_lease,
+        save_linked_peer_state_with_lease, EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport,
+        LinkedPeerState,
+    },
     outbound_private::{
-        claim_next_outbound_private_message,
+        claim_next_outbound_private_message_with_peer_lease,
         enqueue_private_message as enqueue_outbound_private_message, mark_outbound_failed,
         mark_outbound_sent, queued_outbound_private_messages, OutboundPrivateSendFailure,
         OutboundPrivateSendReport,
@@ -24,11 +29,15 @@ use crate::{
         current_private_payment_list as load_current_private_payment_list,
         enqueue_private_payment_list as enqueue_private_payment_list_message,
     },
-    private_stream::{persist_private_stream_batch, PrivateStreamIntakeReport},
-    storage::{EncryptedLinkStateRecord, OutboundPrivateMessageRecord, StorageAdapter},
+    private_stream::{persist_private_stream_batch_with_link_lease, PrivateStreamIntakeReport},
+    storage::{
+        EncryptedLinkStateRecord, OutboundPrivateMessageRecord, PeerLinkOperationLease,
+        StorageAdapter,
+    },
     PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointEvaluation,
     PaymentEndpointSelection, PaymentEndpointSelectionRequest, PaymentEndpointSource,
-    PrivatePaymentListView, PubkyPublicKey, PubkySessionProvider, ReceivingDetailScope, Result,
+    PrivatePaymentListView, PubkyPublicKey, PubkySessionAccess, PubkySessionProvider,
+    ReceivingDetailScope, Result,
 };
 
 /// Clock abstraction used by SDK workflows and tests.
@@ -217,6 +226,112 @@ where
             self.clock.now(),
         )
         .await
+    }
+
+    /// Start an Encrypted Link Handshake as the initiator.
+    pub async fn initiate_link_with_peer(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        self.start_link_handshake(counterparty, EncryptedLinkHandshakeRole::Initiator)
+            .await
+    }
+
+    /// Start an Encrypted Link Handshake as the responder.
+    pub async fn accept_link_with_peer(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        self.start_link_handshake(counterparty, EncryptedLinkHandshakeRole::Responder)
+            .await
+    }
+
+    /// Advance the stored Encrypted Link Handshake for one counterparty.
+    pub async fn advance_link_handshake(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        let lease = self.claim_peer_link_operation(&counterparty).await?;
+        let result = self
+            .advance_link_handshake_with_claim(counterparty, lease.clone())
+            .await;
+        self.finish_peer_link_operation(lease, result).await
+    }
+
+    async fn advance_link_handshake_with_claim(
+        &self,
+        counterparty: PubkyPublicKey,
+        lease: PeerLinkOperationLease,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        self.ensure_peer_not_blocked(&counterparty).await?;
+        let Some(stored_link_state) = self
+            .storage
+            .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
+            .await?
+        else {
+            return Err(PaykitSdkError::RecoveryRequired(format!(
+                "no Encrypted Link state for counterparty {counterparty}"
+            )));
+        };
+        if stored_link_state.link_snapshot.is_some() {
+            save_linked_peer_state_with_lease(
+                &self.storage,
+                counterparty.clone(),
+                LinkedPeerState::Linked,
+                lease.clone(),
+                self.clock.now(),
+            )
+            .await?;
+            return Ok(LinkedPeerHandshakeReport {
+                counterparty,
+                state: LinkedPeerState::Linked,
+                generation: stored_link_state.generation,
+                handshake_role: None,
+            });
+        }
+
+        let Some(handshake_role) = stored_link_state.handshake_role else {
+            mark_recovery_required_with_lease(
+                &self.storage,
+                counterparty.clone(),
+                lease.clone(),
+                self.clock.now(),
+            )
+            .await?;
+            return Err(PaykitSdkError::RecoveryRequired(format!(
+                "missing Encrypted Link Handshake role for counterparty {counterparty}"
+            )));
+        };
+        let Some(snapshot_bytes) = stored_link_state.handshake_snapshot.as_ref() else {
+            mark_recovery_required_with_lease(
+                &self.storage,
+                counterparty.clone(),
+                lease.clone(),
+                self.clock.now(),
+            )
+            .await?;
+            return Err(PaykitSdkError::RecoveryRequired(format!(
+                "no in-progress Encrypted Link Handshake snapshot for counterparty {counterparty}"
+            )));
+        };
+
+        let result = self
+            .advance_link_handshake_from_snapshot(
+                counterparty.clone(),
+                snapshot_bytes,
+                handshake_role,
+                stored_link_state.generation,
+                lease.clone(),
+            )
+            .await;
+        if result
+            .as_ref()
+            .is_err_and(should_mark_link_recovery_required)
+        {
+            mark_recovery_required_with_lease(&self.storage, counterparty, lease, self.clock.now())
+                .await?;
+        }
+        result
     }
 
     /// Resolve a payable endpoint for one counterparty.
@@ -435,6 +550,18 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<PrivateStreamIntakeReport> {
+        let lease = self.claim_peer_link_operation(&counterparty).await?;
+        let result = self
+            .receive_private_messages_with_claim(counterparty, lease.clone())
+            .await;
+        self.finish_peer_link_operation(lease, result).await
+    }
+
+    async fn receive_private_messages_with_claim(
+        &self,
+        counterparty: PubkyPublicKey,
+        lease: PeerLinkOperationLease,
+    ) -> Result<PrivateStreamIntakeReport> {
         let session_access =
             self.pubky
                 .load_session_access()
@@ -464,7 +591,13 @@ where
             })?;
         let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
             let now = self.clock.now();
-            mark_recovery_required(&self.storage, counterparty.clone(), now).await?;
+            mark_recovery_required_with_lease(
+                &self.storage,
+                counterparty.clone(),
+                lease.clone(),
+                now,
+            )
+            .await?;
             return Err(PaykitSdkError::RecoveryRequired(format!(
                 "no active Encrypted Link snapshot for counterparty {counterparty}"
             )));
@@ -473,7 +606,13 @@ where
             Ok(snapshot) => snapshot,
             Err(err) => {
                 let now = self.clock.now();
-                mark_recovery_required(&self.storage, counterparty.clone(), now).await?;
+                mark_recovery_required_with_lease(
+                    &self.storage,
+                    counterparty.clone(),
+                    lease.clone(),
+                    now,
+                )
+                .await?;
                 return Err(err.into());
             }
         };
@@ -491,16 +630,18 @@ where
         let next_link_state = EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             link_snapshot: Some(link.serialize()),
-            handshake_snapshot: stored_link_state.handshake_snapshot,
+            handshake_snapshot: None,
+            handshake_role: None,
             generation: stored_link_state.generation.saturating_add(1),
             checkpointed_at: now,
         };
 
-        persist_private_stream_batch(
+        persist_private_stream_batch_with_link_lease(
             &self.storage,
             counterparty,
             messages,
             Some(next_link_state),
+            Some(lease),
             now,
         )
         .await
@@ -511,12 +652,25 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<OutboundPrivateSendReport> {
-        let mut report = OutboundPrivateSendReport::default();
+        let report = OutboundPrivateSendReport::default();
         let queued = queued_outbound_private_messages(&self.storage, &counterparty).await?;
         if queued.is_empty() {
             return Ok(report);
         }
 
+        let lease = self.claim_peer_link_operation(&counterparty).await?;
+        let result = self
+            .process_outbound_private_messages_with_claim(counterparty, report, lease.clone())
+            .await;
+        self.finish_peer_link_operation(lease, result).await
+    }
+
+    async fn process_outbound_private_messages_with_claim(
+        &self,
+        counterparty: PubkyPublicKey,
+        mut report: OutboundPrivateSendReport,
+        lease: PeerLinkOperationLease,
+    ) -> Result<OutboundPrivateSendReport> {
         let session_access =
             self.pubky
                 .load_session_access()
@@ -545,7 +699,13 @@ where
             })?;
         let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
             let now = self.clock.now();
-            mark_recovery_required(&self.storage, counterparty.clone(), now).await?;
+            mark_recovery_required_with_lease(
+                &self.storage,
+                counterparty.clone(),
+                lease.clone(),
+                now,
+            )
+            .await?;
             return Err(PaykitSdkError::RecoveryRequired(format!(
                 "no active Encrypted Link snapshot for counterparty {counterparty}"
             )));
@@ -554,7 +714,13 @@ where
             Ok(snapshot) => snapshot,
             Err(err) => {
                 let now = self.clock.now();
-                mark_recovery_required(&self.storage, counterparty.clone(), now).await?;
+                mark_recovery_required_with_lease(
+                    &self.storage,
+                    counterparty.clone(),
+                    lease.clone(),
+                    now,
+                )
+                .await?;
                 return Err(err.into());
             }
         };
@@ -579,11 +745,12 @@ where
                 ))
             })?;
             let stale_before = now - lease_timeout;
-            let Some(sending) = claim_next_outbound_private_message(
+            let Some(sending) = claim_next_outbound_private_message_with_peer_lease(
                 &self.storage,
                 &counterparty,
                 now,
                 stale_before,
+                lease.clone(),
             )
             .await?
             else {
@@ -599,13 +766,17 @@ where
                     let now = self.clock.now();
                     let sent = mark_outbound_sent(sending, now);
                     link_state.link_snapshot = Some(link.serialize());
+                    link_state.handshake_snapshot = None;
+                    link_state.handshake_role = None;
                     link_state.generation = link_state.generation.saturating_add(1);
                     link_state.checkpointed_at = now;
                     self.storage
                         .transaction({
                             let sent = sent.clone();
                             let link_state = link_state.clone();
+                            let lease = lease.clone();
                             move |tx| {
+                                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                                 tx.save_outbound_private_message(sent);
                                 tx.save_encrypted_link_state(link_state);
                                 Ok(())
@@ -621,7 +792,9 @@ where
                     self.storage
                         .transaction({
                             let failed = failed.clone();
+                            let lease = lease.clone();
                             move |tx| {
+                                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                                 tx.save_outbound_private_message(failed);
                                 Ok(())
                             }
@@ -669,6 +842,229 @@ where
         endpoints.sort_by(|left, right| left.identifier.cmp(&right.identifier));
         Ok(endpoints)
     }
+
+    async fn start_link_handshake(
+        &self,
+        counterparty: PubkyPublicKey,
+        role: EncryptedLinkHandshakeRole,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        let lease = self.claim_peer_link_operation(&counterparty).await?;
+        let result = self
+            .start_link_handshake_with_claim(counterparty, role, lease.clone())
+            .await;
+        self.finish_peer_link_operation(lease, result).await
+    }
+
+    async fn start_link_handshake_with_claim(
+        &self,
+        counterparty: PubkyPublicKey,
+        role: EncryptedLinkHandshakeRole,
+        lease: PeerLinkOperationLease,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        self.ensure_peer_not_blocked(&counterparty).await?;
+        if let Some(existing) = self
+            .storage
+            .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
+            .await?
+        {
+            if existing.link_snapshot.is_some() {
+                save_linked_peer_state_with_lease(
+                    &self.storage,
+                    counterparty.clone(),
+                    LinkedPeerState::Linked,
+                    lease.clone(),
+                    self.clock.now(),
+                )
+                .await?;
+                return Ok(LinkedPeerHandshakeReport {
+                    counterparty,
+                    state: LinkedPeerState::Linked,
+                    generation: existing.generation,
+                    handshake_role: None,
+                });
+            }
+            if existing.handshake_snapshot.is_some() {
+                if existing.handshake_role.is_none() {
+                    mark_recovery_required_with_lease(
+                        &self.storage,
+                        counterparty.clone(),
+                        lease.clone(),
+                        self.clock.now(),
+                    )
+                    .await?;
+                    return Err(PaykitSdkError::RecoveryRequired(format!(
+                        "missing Encrypted Link Handshake role for counterparty {counterparty}"
+                    )));
+                }
+                save_linked_peer_state_with_lease(
+                    &self.storage,
+                    counterparty.clone(),
+                    LinkedPeerState::Linking,
+                    lease.clone(),
+                    self.clock.now(),
+                )
+                .await?;
+                return Ok(LinkedPeerHandshakeReport {
+                    counterparty,
+                    state: LinkedPeerState::Linking,
+                    generation: existing.generation,
+                    handshake_role: existing.handshake_role,
+                });
+            }
+        }
+
+        let (session_access, secret_key) = self.private_link_session_access().await?;
+        let remote_public_key = counterparty.to_public_key()?;
+        let handshake = match role {
+            EncryptedLinkHandshakeRole::Initiator => paykit_lib::initiate_encrypted_link(
+                session_access.session,
+                secret_key,
+                &remote_public_key,
+                session_access.outbox_client,
+            )?,
+            EncryptedLinkHandshakeRole::Responder => paykit_lib::accept_encrypted_link(
+                session_access.session,
+                secret_key,
+                &remote_public_key,
+                session_access.outbox_client,
+            )?,
+        };
+
+        save_link_handshake_state_with_lease(
+            &self.storage,
+            counterparty,
+            role,
+            handshake.serialize(),
+            lease,
+            self.clock.now(),
+        )
+        .await
+    }
+
+    async fn claim_peer_link_operation(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<PeerLinkOperationLease> {
+        let now = self.clock.now();
+        let lease_timeout = ChronoDuration::from_std(self.config.peer_link_operation_lease_timeout)
+            .map_err(|err| {
+                PaykitSdkError::Policy(format!("invalid peer link lease timeout: {err}"))
+            })?;
+        let expires_at = now + lease_timeout;
+        self.storage
+            .transaction(|tx| Ok(tx.claim_peer_link_operation(counterparty, now, expires_at)))
+            .await?
+            .ok_or_else(|| {
+                PaykitSdkError::Policy(format!(
+                    "peer link operation already in progress for counterparty {counterparty}"
+                ))
+            })
+    }
+
+    async fn release_peer_link_operation(&self, lease: &PeerLinkOperationLease) -> Result<()> {
+        self.storage
+            .transaction(|tx| {
+                tx.release_peer_link_operation(&lease.counterparty, lease.lease_id);
+                Ok(())
+            })
+            .await
+    }
+
+    async fn finish_peer_link_operation<T>(
+        &self,
+        lease: PeerLinkOperationLease,
+        result: Result<T>,
+    ) -> Result<T> {
+        let release_result = self.release_peer_link_operation(&lease).await;
+        match (result, release_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(err), _) => Err(err),
+            (Ok(_), Err(err)) => Err(err),
+        }
+    }
+
+    async fn ensure_peer_not_blocked(&self, counterparty: &PubkyPublicKey) -> Result<()> {
+        let peer = self
+            .storage
+            .transaction(|tx| Ok(tx.linked_peer(counterparty)))
+            .await?;
+        if peer
+            .as_ref()
+            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+        {
+            return Err(PaykitSdkError::Policy(format!(
+                "Linked Peer {counterparty} is blocked"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn advance_link_handshake_from_snapshot(
+        &self,
+        counterparty: PubkyPublicKey,
+        snapshot_bytes: &[u8],
+        handshake_role: EncryptedLinkHandshakeRole,
+        expected_generation: u64,
+        lease: PeerLinkOperationLease,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        let (session_access, secret_key) = self.private_link_session_access().await?;
+        let remote_public_key = counterparty.to_public_key()?;
+        let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot_bytes)?;
+        let handshake = paykit_lib::restore_encrypted_link_handshake(
+            session_access.session,
+            secret_key,
+            &remote_public_key,
+            session_access.outbox_client,
+            snapshot,
+        )
+        .await?;
+
+        match paykit_lib::advance_handshake(handshake).await? {
+            paykit_lib::HandshakeProgress::Pending(handshake) => {
+                save_link_handshake_state_if_generation_with_lease(
+                    &self.storage,
+                    counterparty,
+                    handshake_role,
+                    handshake.serialize(),
+                    expected_generation,
+                    lease,
+                    self.clock.now(),
+                )
+                .await
+            }
+            paykit_lib::HandshakeProgress::Complete(link) => {
+                save_linked_peer_link_state_if_generation_with_lease(
+                    &self.storage,
+                    counterparty,
+                    link.serialize(),
+                    expected_generation,
+                    lease,
+                    self.clock.now(),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn private_link_session_access(&self) -> Result<(PubkySessionAccess, [u8; 32])> {
+        let session_access =
+            self.pubky
+                .load_session_access()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky session available".into(),
+                    source: None,
+                })?;
+        let secret_key = *session_access
+            .local_secret_key
+            .as_ref()
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
+                source: None,
+            })?
+            .as_bytes();
+        Ok((session_access, secret_key))
+    }
 }
 
 fn private_candidates(
@@ -690,6 +1086,15 @@ fn private_candidates(
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.identifier.cmp(&right.identifier));
     candidates
+}
+
+fn should_mark_link_recovery_required(err: &PaykitSdkError) -> bool {
+    matches!(
+        err,
+        PaykitSdkError::Transport { .. }
+            | PaykitSdkError::Protocol(_)
+            | PaykitSdkError::RecoveryRequired(_)
+    )
 }
 
 fn payable_resolution(
@@ -994,6 +1399,7 @@ mod tests {
                     counterparty,
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
+                    handshake_role: None,
                     generation: 0,
                     checkpointed_at: FixedClock.now(),
                 });
@@ -1049,6 +1455,259 @@ mod tests {
         let result = sdk.enqueue_private_payment_list(counterparty).await;
 
         assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_initiate_link_with_peer_requires_pubky_session() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.initiate_link_with_peer(counterparty).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_initiate_link_with_peer_returns_linked_when_already_linked() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let report = sdk
+            .initiate_link_with_peer(counterparty.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(report.counterparty, counterparty);
+        assert_eq!(report.state, LinkedPeerState::Linked);
+        assert_eq!(report.generation, 0);
+        assert_eq!(report.handshake_role, None);
+        let peer = crate::load_linked_peer(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(peer.state, LinkedPeerState::Linked);
+    }
+
+    #[tokio::test]
+    async fn test_initiate_link_with_peer_returns_existing_linking_state() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        crate::linked_peers::save_link_handshake_state(
+            &storage,
+            counterparty.clone(),
+            EncryptedLinkHandshakeRole::Initiator,
+            vec![1, 2, 3],
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let report = sdk
+            .initiate_link_with_peer(counterparty.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(report.counterparty, counterparty);
+        assert_eq!(report.state, LinkedPeerState::Linking);
+        assert_eq!(report.generation, 0);
+        assert_eq!(
+            report.handshake_role,
+            Some(EncryptedLinkHandshakeRole::Initiator)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initiate_link_with_peer_rejects_blocked_peer() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        crate::linked_peers::save_linked_peer_state(
+            &storage,
+            counterparty.clone(),
+            LinkedPeerState::Blocked,
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.initiate_link_with_peer(counterparty).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    }
+
+    #[tokio::test]
+    async fn test_initiate_link_with_peer_rejects_busy_peer_link() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.claim_peer_link_operation(
+                        &counterparty,
+                        FixedClock.now(),
+                        FixedClock.now() + chrono::Duration::seconds(60),
+                    );
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.initiate_link_with_peer(counterparty).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    }
+
+    #[tokio::test]
+    async fn test_advance_link_handshake_marks_missing_snapshot_recovery_required() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                        counterparty,
+                        link_snapshot: None,
+                        handshake_snapshot: None,
+                        handshake_role: None,
+                        generation: 0,
+                        checkpointed_at: FixedClock.now(),
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.advance_link_handshake(counterparty.clone()).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
+        let peer = crate::load_linked_peer(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+    }
+
+    #[tokio::test]
+    async fn test_advance_link_handshake_missing_session_does_not_mark_recovery() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                        counterparty,
+                        link_snapshot: None,
+                        handshake_snapshot: Some(vec![1, 2, 3]),
+                        handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
+                        generation: 0,
+                        checkpointed_at: FixedClock.now(),
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.advance_link_handshake(counterparty.clone()).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+        assert!(crate::load_linked_peer(&storage, &counterparty)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_advance_link_handshake_missing_role_marks_recovery_required() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                        counterparty,
+                        link_snapshot: None,
+                        handshake_snapshot: Some(vec![1, 2, 3]),
+                        handshake_role: None,
+                        generation: 0,
+                        checkpointed_at: FixedClock.now(),
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.advance_link_handshake(counterparty.clone()).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
+        let peer = crate::load_linked_peer(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
     }
 
     #[tokio::test]

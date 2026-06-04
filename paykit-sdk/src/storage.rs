@@ -69,6 +69,23 @@ pub trait StorageTransaction {
     /// Save one Encrypted Link state record.
     fn save_encrypted_link_state(&mut self, record: EncryptedLinkStateRecord);
 
+    /// Claim exclusive local work on one peer's Encrypted Link.
+    fn claim_peer_link_operation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Option<PeerLinkOperationLease>;
+
+    /// Load the active peer link operation lease.
+    fn peer_link_operation_lease(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Option<PeerLinkOperationLease>;
+
+    /// Release a previously claimed peer link operation.
+    fn release_peer_link_operation(&mut self, counterparty: &PubkyPublicKey, lease_id: u64);
+
     /// Insert one outbound private message and return its assigned record.
     fn insert_outbound_private_message(
         &mut self,
@@ -147,10 +164,25 @@ pub struct EncryptedLinkStateRecord {
     pub link_snapshot: Option<Vec<u8>>,
     /// Serialized in-progress handshake snapshot.
     pub handshake_snapshot: Option<Vec<u8>>,
+    /// Local role for the in-progress handshake.
+    pub handshake_role: Option<crate::EncryptedLinkHandshakeRole>,
     /// Local snapshot generation.
     pub generation: u64,
     /// Last checkpoint time.
     pub checkpointed_at: DateTime<Utc>,
+}
+
+/// Storage-backed lease for one peer link operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLinkOperationLease {
+    /// Counterparty public key.
+    pub counterparty: PubkyPublicKey,
+    /// Assigned lease id.
+    pub lease_id: u64,
+    /// Claim time.
+    pub claimed_at: DateTime<Utc>,
+    /// Expiry time after which another worker may retry.
+    pub expires_at: DateTime<Utc>,
 }
 
 /// New outbound private message before storage assigns an id.
@@ -208,6 +240,19 @@ impl OutboundPrivateMessageRecord {
             sent_at: None,
             last_error: None,
         }
+    }
+}
+
+pub(crate) fn require_peer_link_operation_lease(
+    tx: &dyn StorageTransaction,
+    lease: &PeerLinkOperationLease,
+) -> Result<()> {
+    match tx.peer_link_operation_lease(&lease.counterparty) {
+        Some(active) if active.lease_id == lease.lease_id => Ok(()),
+        _ => Err(PaykitSdkError::Policy(format!(
+            "peer link operation lease {} is no longer active for counterparty {}",
+            lease.lease_id, lease.counterparty
+        ))),
     }
 }
 
@@ -304,6 +349,10 @@ pub struct StorageState {
     pub public_endpoint_records: HashMap<String, PublicEndpointRecord>,
     /// Encrypted Link state records by counterparty.
     pub encrypted_link_states: HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
+    /// Active peer link operation leases by counterparty.
+    pub peer_link_operation_leases: HashMap<PubkyPublicKey, PeerLinkOperationLease>,
+    /// Next peer link operation lease id.
+    pub next_peer_link_operation_lease_id: u64,
     /// Append-only outbound private message records.
     pub outbound_private_messages: Vec<OutboundPrivateMessageRecord>,
     /// Next outbound private message id.
@@ -414,6 +463,52 @@ impl StorageTransaction for InMemoryStorageTransaction {
         self.state
             .encrypted_link_states
             .insert(record.counterparty.clone(), record);
+    }
+
+    fn claim_peer_link_operation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Option<PeerLinkOperationLease> {
+        if let Some(existing) = self.state.peer_link_operation_leases.get(counterparty) {
+            if existing.expires_at > now {
+                return None;
+            }
+        }
+
+        let lease = PeerLinkOperationLease {
+            counterparty: counterparty.clone(),
+            lease_id: self.state.next_peer_link_operation_lease_id,
+            claimed_at: now,
+            expires_at,
+        };
+        self.state.next_peer_link_operation_lease_id += 1;
+        self.state
+            .peer_link_operation_leases
+            .insert(counterparty.clone(), lease.clone());
+        Some(lease)
+    }
+
+    fn peer_link_operation_lease(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Option<PeerLinkOperationLease> {
+        self.state
+            .peer_link_operation_leases
+            .get(counterparty)
+            .cloned()
+    }
+
+    fn release_peer_link_operation(&mut self, counterparty: &PubkyPublicKey, lease_id: u64) {
+        if self
+            .state
+            .peer_link_operation_leases
+            .get(counterparty)
+            .is_some_and(|lease| lease.lease_id == lease_id)
+        {
+            self.state.peer_link_operation_leases.remove(counterparty);
+        }
     }
 
     fn insert_outbound_private_message(
@@ -550,6 +645,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
+    use crate::outbound_private::{mark_outbound_failed, mark_outbound_sent};
 
     fn timestamp() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
@@ -640,6 +736,249 @@ mod tests {
         assert_eq!(snapshot.event_dedup_records.len(), 1);
         assert_eq!(snapshot.next_private_stream_item_id, 1);
         assert_eq!(snapshot.next_outbound_private_message_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_peer_link_operation_lease_blocks_until_released() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+
+        let first = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    Ok(tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(60),
+                    ))
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let blocked = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    Ok(tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(60),
+                    ))
+                }
+            })
+            .await
+            .unwrap();
+        assert!(blocked.is_none());
+
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.release_peer_link_operation(&counterparty, first.lease_id);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let second = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    Ok(tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(60),
+                    ))
+                }
+            })
+            .await
+            .unwrap();
+
+        assert!(second.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_peer_link_operation_lease_can_be_reclaimed_after_expiry() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+
+        let first = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    Ok(tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(10),
+                    ))
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let second = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    Ok(tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp() + chrono::Duration::seconds(11),
+                        timestamp() + chrono::Duration::seconds(71),
+                    ))
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(first.lease_id, second.lease_id);
+        assert_eq!(
+            storage
+                .transaction({
+                    let counterparty = counterparty.clone();
+                    move |tx| Ok(tx.peer_link_operation_lease(&counterparty))
+                })
+                .await
+                .unwrap(),
+            Some(second)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_link_operation_stale_release_keeps_newer_lease() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+
+        let first = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    Ok(tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(10),
+                    ))
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let second = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    Ok(tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp() + chrono::Duration::seconds(11),
+                        timestamp() + chrono::Duration::seconds(71),
+                    ))
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.release_peer_link_operation(&counterparty, first.lease_id);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .transaction({
+                    let counterparty = counterparty.clone();
+                    move |tx| Ok(tx.peer_link_operation_lease(&counterparty))
+                })
+                .await
+                .unwrap(),
+            Some(second)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+
+        let (record, first_lease) = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    let record = tx.insert_outbound_private_message(outbound_private_message(
+                        counterparty.clone(),
+                    ));
+                    let lease = tx
+                        .claim_peer_link_operation(
+                            &counterparty,
+                            timestamp(),
+                            timestamp() + chrono::Duration::seconds(10),
+                        )
+                        .unwrap();
+                    Ok((record, lease))
+                }
+            })
+            .await
+            .unwrap();
+        let active_lease = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    Ok(tx
+                        .claim_peer_link_operation(
+                            &counterparty,
+                            timestamp() + chrono::Duration::seconds(11),
+                            timestamp() + chrono::Duration::seconds(71),
+                        )
+                        .unwrap())
+                }
+            })
+            .await
+            .unwrap();
+        let sent = mark_outbound_sent(record.clone(), timestamp() + chrono::Duration::seconds(12));
+        storage
+            .transaction({
+                let sent = sent.clone();
+                let active_lease = active_lease.clone();
+                move |tx| {
+                    require_peer_link_operation_lease(tx, &active_lease)?;
+                    tx.save_outbound_private_message(sent);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let failed = mark_outbound_failed(
+            record,
+            "late failed send".into(),
+            timestamp() + chrono::Duration::seconds(13),
+        );
+        let stale_result: Result<()> = storage
+            .transaction({
+                let failed = failed.clone();
+                move |tx| {
+                    require_peer_link_operation_lease(tx, &first_lease)?;
+                    tx.save_outbound_private_message(failed);
+                    Ok(())
+                }
+            })
+            .await;
+
+        assert!(matches!(stale_result, Err(PaykitSdkError::Policy(_))));
+        let snapshot = storage.snapshot().unwrap();
+        assert_eq!(
+            snapshot.outbound_private_messages[0].status,
+            OutboundPrivateMessageStatus::Sent
+        );
+        assert!(snapshot.outbound_private_messages[0].last_error.is_none());
     }
 
     #[tokio::test]

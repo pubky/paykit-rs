@@ -5,7 +5,10 @@ use paykit_lib::PrivateMessageKind;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    storage::{NewOutboundPrivateMessage, OutboundPrivateMessageRecord, StorageAdapter},
+    storage::{
+        require_peer_link_operation_lease, NewOutboundPrivateMessage, OutboundPrivateMessageRecord,
+        PeerLinkOperationLease, StorageAdapter,
+    },
     PaykitSdkError, PubkyPublicKey, Result,
 };
 
@@ -79,6 +82,7 @@ where
         .await
 }
 
+#[cfg(test)]
 pub(crate) async fn claim_next_outbound_private_message<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
@@ -90,6 +94,24 @@ where
 {
     storage
         .transaction(|tx| {
+            Ok(tx.claim_next_outbound_private_message(counterparty, now, stale_before))
+        })
+        .await
+}
+
+pub(crate) async fn claim_next_outbound_private_message_with_peer_lease<S>(
+    storage: &S,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+    stale_before: DateTime<Utc>,
+    lease: PeerLinkOperationLease,
+) -> Result<Option<OutboundPrivateMessageRecord>>
+where
+    S: StorageAdapter,
+{
+    storage
+        .transaction(move |tx| {
+            require_peer_link_operation_lease(tx, &lease)?;
             Ok(tx.claim_next_outbound_private_message(counterparty, now, stale_before))
         })
         .await
@@ -246,5 +268,65 @@ mod tests {
         .unwrap();
         assert_eq!(stale_claim.outbound_message_id, claimed.outbound_message_id);
         assert_eq!(stale_claim.attempt_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        enqueue_private_message(
+            &storage,
+            counterparty.clone(),
+            raw_private_list(),
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        let first_lease = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    Ok(tx
+                        .claim_peer_link_operation(
+                            &counterparty,
+                            timestamp(),
+                            timestamp() + chrono::Duration::seconds(10),
+                        )
+                        .unwrap())
+                }
+            })
+            .await
+            .unwrap();
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp() + chrono::Duration::seconds(11),
+                        timestamp() + chrono::Duration::seconds(71),
+                    );
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let result = claim_next_outbound_private_message_with_peer_lease(
+            &storage,
+            &counterparty,
+            timestamp() + chrono::Duration::seconds(12),
+            timestamp(),
+            first_lease,
+        )
+        .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+        let queued = queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
+        assert_eq!(queued[0].status, OutboundPrivateMessageStatus::Pending);
+        assert_eq!(queued[0].attempt_count, 0);
     }
 }

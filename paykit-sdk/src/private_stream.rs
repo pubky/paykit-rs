@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    storage::{EncryptedLinkStateRecord, EventDedupRecord, NewPrivateStreamItem, StorageAdapter},
+    storage::{
+        require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
+        NewPrivateStreamItem, PeerLinkOperationLease, StorageAdapter,
+    },
     PubkyPublicKey, Result,
 };
 
@@ -50,11 +53,35 @@ pub struct EventIdConflict {
 }
 
 /// Persist an ordered batch of Private Application Messages and a link checkpoint.
-pub async fn persist_private_stream_batch<S>(
+#[cfg(test)]
+pub(crate) async fn persist_private_stream_batch<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
     messages: Vec<PrivateApplicationMessage>,
     link_state: Option<EncryptedLinkStateRecord>,
+    received_at: DateTime<Utc>,
+) -> Result<PrivateStreamIntakeReport>
+where
+    S: StorageAdapter,
+{
+    persist_private_stream_batch_with_link_lease(
+        storage,
+        counterparty,
+        messages,
+        link_state,
+        None,
+        received_at,
+    )
+    .await
+}
+
+/// Persist a batch and checkpoint only if the peer link lease is still active.
+pub(crate) async fn persist_private_stream_batch_with_link_lease<S>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    messages: Vec<PrivateApplicationMessage>,
+    link_state: Option<EncryptedLinkStateRecord>,
+    link_lease: Option<PeerLinkOperationLease>,
     received_at: DateTime<Utc>,
 ) -> Result<PrivateStreamIntakeReport>
 where
@@ -98,6 +125,9 @@ where
             }
 
             if let Some(link_state) = link_state {
+                if let Some(lease) = link_lease.as_ref() {
+                    require_peer_link_operation_lease(tx, lease)?;
+                }
                 tx.save_encrypted_link_state(link_state);
             }
 
@@ -244,7 +274,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::{storage::InMemoryStorage, EncryptedLinkStateRecord, PrivateStreamParseStatus};
+    use crate::{
+        storage::InMemoryStorage, EncryptedLinkStateRecord, PaykitSdkError,
+        PrivateStreamParseStatus,
+    };
 
     fn counterparty() -> PubkyPublicKey {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
@@ -283,6 +316,7 @@ mod tests {
             counterparty: counterparty.clone(),
             link_snapshot: Some(vec![1, 2, 3]),
             handshake_snapshot: None,
+            handshake_role: None,
             generation: 1,
             checkpointed_at: timestamp(),
         };
@@ -368,5 +402,63 @@ mod tests {
             .as_ref()
             .is_some_and(|error| error.contains("amount.value")));
         assert_eq!(snapshot.event_dedup_records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        let first_lease = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    Ok(tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(10),
+                    ))
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp() + chrono::Duration::seconds(11),
+                        timestamp() + chrono::Duration::seconds(71),
+                    );
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let link_state = EncryptedLinkStateRecord {
+            counterparty: counterparty.clone(),
+            link_snapshot: Some(vec![1, 2, 3]),
+            handshake_snapshot: None,
+            handshake_role: None,
+            generation: 1,
+            checkpointed_at: timestamp() + chrono::Duration::seconds(12),
+        };
+
+        let result = persist_private_stream_batch_with_link_lease(
+            &storage,
+            counterparty,
+            vec![private_message(r#"{"version":1,"kind":"paykit.unknown"}"#)],
+            Some(link_state),
+            Some(first_lease),
+            timestamp() + chrono::Duration::seconds(12),
+        )
+        .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+        let snapshot = storage.snapshot().unwrap();
+        assert!(snapshot.private_stream_items.is_empty());
+        assert!(snapshot.encrypted_link_states.is_empty());
+        assert_eq!(snapshot.next_private_stream_item_id, 0);
     }
 }
