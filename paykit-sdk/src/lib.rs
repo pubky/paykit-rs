@@ -1,38 +1,35 @@
 #![doc = "Stateful runtime layer for Paykit integrations."]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+/// Adapter traits and payment endpoint selection types.
 pub mod adapters;
-pub mod backup;
+/// SDK runtime policy configuration.
 pub mod config;
 pub mod contacts;
 pub mod endpoints;
+/// SDK error type.
 pub mod error;
+/// Pubky identity and capability types.
 pub mod identity;
 pub mod linked_peers;
 pub mod outbound_private;
-pub mod payment_requests;
 pub mod private_lists;
 pub mod private_stream;
-pub mod receipts;
-pub mod reservations;
+/// SDK runtime facade.
 pub mod runtime;
-pub mod scheduler;
+/// Durable storage traits and in-memory test storage.
 pub mod storage;
-pub mod telemetry;
 
 #[doc(inline)]
 pub use adapters::{
-    ContactRecord, EndpointCompatibility, EndpointReservationAdapter, PaymentAdapter,
-    PaymentAmountContext, PaymentEndpointCandidate, PaymentEndpointEvaluation,
-    PaymentEndpointSelection, PaymentEndpointSelectionRequest, PaymentEndpointSource,
-    PaymentExecutionResult, PaymentRequestExecution, PaymentTarget, ProfileRecord, ProfileUpdate,
-    PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, ReservedReceivingDetail,
-    SchedulerAdapter,
+    EndpointCompatibility, PaymentAdapter, PaymentAmountContext, PaymentEndpointCandidate,
+    PaymentEndpointEvaluation, PaymentEndpointSelection, PaymentEndpointSelectionRequest,
+    PaymentEndpointSource, PaymentTarget, PubkySessionProvider, ReceivingDetail,
+    ReceivingDetailScope,
 };
 #[doc(inline)]
 pub use config::{
     EndpointManagementScope, PaykitSdkConfig, PrivateSharingPolicy, PublicFallbackPolicy,
-    UnknownMessageRetentionPolicy,
 };
 #[doc(inline)]
 pub use contacts::{
@@ -40,8 +37,7 @@ pub use contacts::{
 };
 #[doc(inline)]
 pub use endpoints::{
-    load_public_endpoint_records, save_public_endpoint_record, EndpointPublicationStatus,
-    EndpointSyncChange, EndpointSyncReport,
+    load_public_endpoint_records, EndpointPublicationStatus, EndpointSyncChange, EndpointSyncReport,
 };
 #[doc(inline)]
 pub use error::PaykitSdkError;
@@ -57,13 +53,12 @@ pub use linked_peers::{
 };
 #[doc(inline)]
 pub use outbound_private::{
-    enqueue_private_message, queued_outbound_private_messages, OutboundPrivateMessageStatus,
-    OutboundPrivateSendFailure, OutboundPrivateSendReport,
+    queued_outbound_private_messages, OutboundPrivateMessageStatus, OutboundPrivateSendFailure,
+    OutboundPrivateSendReport,
 };
 #[doc(inline)]
 pub use private_lists::{
-    current_private_payment_list, derive_private_payment_list_view, enqueue_private_payment_list,
-    PrivatePaymentListView,
+    current_private_payment_list, derive_private_payment_list_view, PrivatePaymentListView,
 };
 #[doc(inline)]
 pub use private_stream::{EventIdConflict, PrivateStreamIntakeReport, PrivateStreamParseStatus};
@@ -72,9 +67,8 @@ pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
 #[doc(inline)]
 pub use storage::{
     EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
-    NewOutboundPrivateMessage, NewPrivateStreamItem, OutboundPrivateMessageRecord,
-    PrivateStreamItemRecord, PublicEndpointRecord, StorageAdapter, StorageState,
-    StorageTransaction,
+    OutboundPrivateMessageRecord, PrivateStreamItemRecord, PublicEndpointRecord, StorageAdapter,
+    StorageState, StorageTransaction,
 };
 
 /// Common result alias for Paykit SDK operations.

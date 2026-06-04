@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     storage::{
         require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
-        NewPrivateStreamItem, PeerLinkOperationLease, StorageAdapter,
+        NewPrivateStreamItem, NewPrivateStreamItemDetails, PeerLinkOperationLease, StorageAdapter,
     },
     PubkyPublicKey, Result,
 };
@@ -98,21 +98,26 @@ where
 
             for message in messages {
                 let classification = classify_message(&message);
-                let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem {
-                    counterparty: counterparty.clone(),
-                    receive_batch_id,
-                    raw_json: message.raw_json.clone(),
-                    parsed_version: message.version.map(u32::from),
-                    parsed_kind: message.kind.clone(),
-                    known_paykit_kind: message.known_kind().map(|kind| kind.as_str().to_owned()),
-                    parse_status: classification.status,
-                    parse_error: classification.parse_error,
-                    received_at,
-                });
+                let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
+                    NewPrivateStreamItemDetails {
+                        counterparty: counterparty.clone(),
+                        receive_batch_id,
+                        raw_json: message.raw_json.clone(),
+                        parsed_version: message.version.map(u32::from),
+                        parsed_kind: message.kind.clone(),
+                        known_paykit_kind: message
+                            .known_kind()
+                            .map(|kind| kind.as_str().to_owned()),
+                        parse_status: classification.status,
+                        parse_error: classification.parse_error,
+                        received_at,
+                    },
+                ));
 
                 if let Some(event) = classification.event {
                     update_event_dedupe(
                         tx,
+                        &counterparty,
                         event.event_id,
                         event.event_kind,
                         payload_hash(&message.raw_json),
@@ -232,14 +237,16 @@ fn status_from_event_validity(is_valid: bool) -> PrivateStreamParseStatus {
 
 fn update_event_dedupe(
     tx: &mut dyn crate::storage::StorageTransaction,
+    counterparty: &PubkyPublicKey,
     event_id: String,
     event_kind: String,
     payload_hash: String,
     stream_item_id: u64,
     report: &mut PrivateStreamIntakeReport,
 ) {
-    let Some(mut record) = tx.event_dedup_record(&event_id) else {
+    let Some(mut record) = tx.event_dedup_record(counterparty, &event_id) else {
         tx.save_event_dedup_record(EventDedupRecord {
+            counterparty: counterparty.clone(),
             event_id,
             event_kind,
             payload_hash,
@@ -360,19 +367,55 @@ mod tests {
             private_message(&payment_request_raw("invoice-2026-0002")),
         ];
 
-        let report =
-            persist_private_stream_batch(&storage, counterparty, messages, None, timestamp())
-                .await
-                .unwrap();
+        let report = persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            messages,
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
 
         let snapshot = storage.snapshot().unwrap();
         let record = snapshot
             .event_dedup_records
-            .get("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101")
+            .get(&(counterparty, "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101".into()))
             .unwrap();
         assert_eq!(report.event_conflicts.len(), 1);
         assert_eq!(record.first_stream_item_id, 0);
         assert_eq!(record.conflicting_stream_item_ids, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_persist_private_stream_batch_scopes_event_dedupe_by_counterparty() {
+        let storage = InMemoryStorage::new();
+        let first_counterparty = counterparty();
+        let second_counterparty = counterparty();
+
+        let first_report = persist_private_stream_batch(
+            &storage,
+            first_counterparty,
+            vec![private_message(&payment_request_raw("invoice-2026-0001"))],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        let second_report = persist_private_stream_batch(
+            &storage,
+            second_counterparty,
+            vec![private_message(&payment_request_raw("invoice-2026-0002"))],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        let snapshot = storage.snapshot().unwrap();
+        assert!(first_report.event_conflicts.is_empty());
+        assert!(second_report.event_conflicts.is_empty());
+        assert_eq!(snapshot.event_dedup_records.len(), 2);
     }
 
     #[tokio::test]
@@ -402,6 +445,34 @@ mod tests {
             .as_ref()
             .is_some_and(|error| error.contains("amount.value")));
         assert_eq!(snapshot.event_dedup_records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_persist_private_stream_batch_keeps_invalid_json_payloads() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        let raw_json = "not json";
+
+        let report = persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![PrivateApplicationMessage {
+                version: None,
+                kind: None,
+                raw_json: raw_json.into(),
+            }],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        let snapshot = storage.snapshot().unwrap();
+        let item = &snapshot.private_stream_items[0];
+        assert_eq!(report.stream_item_ids, vec![0]);
+        assert_eq!(item.counterparty, counterparty);
+        assert_eq!(item.raw_json, raw_json);
+        assert_eq!(item.parse_status, PrivateStreamParseStatus::InvalidJson);
     }
 
     #[tokio::test]

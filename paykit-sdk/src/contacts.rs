@@ -1,6 +1,7 @@
-//! Contact records and contact payment resolution types.
+//! Contact payment resolution types.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::{
     PaymentAmountContext, PaymentEndpointCandidate, PaymentEndpointEvaluation, PubkyPublicKey,
@@ -31,7 +32,7 @@ pub struct ContactPaymentResolutionRequest {
 }
 
 /// Result of resolving a contact payment endpoint.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactPaymentResolution {
     /// Resolution status.
     pub status: ContactPaymentResolutionStatus,
@@ -41,4 +42,15 @@ pub struct ContactPaymentResolution {
     pub evaluations: Vec<PaymentEndpointEvaluation>,
     /// Whether public Payment Endpoints were used after private candidates.
     pub used_public_fallback: bool,
+}
+
+impl fmt::Debug for ContactPaymentResolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContactPaymentResolution")
+            .field("status", &self.status)
+            .field("selected_endpoint", &self.selected_endpoint)
+            .field("evaluations", &self.evaluations)
+            .field("used_public_fallback", &self.used_public_fallback)
+            .finish()
+    }
 }

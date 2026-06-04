@@ -23,6 +23,8 @@ pub enum OutboundPrivateMessageStatus {
     Sent,
     /// Last send attempt failed.
     Failed,
+    /// The stored payload is invalid and must not be retried automatically.
+    Invalid,
 }
 
 /// Failed outbound private send attempt.
@@ -46,7 +48,7 @@ pub struct OutboundPrivateSendReport {
 }
 
 /// Enqueue one raw JSON Private Application Message.
-pub async fn enqueue_private_message<S>(
+pub(crate) async fn enqueue_private_message<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
     raw_json: String,
@@ -58,12 +60,12 @@ where
     let kind = validate_outbound_private_message(&raw_json)?;
     storage
         .transaction(move |tx| {
-            let record = tx.insert_outbound_private_message(NewOutboundPrivateMessage {
+            let record = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 counterparty,
                 kind,
                 raw_json,
-                created_at: now,
-            });
+                now,
+            ));
             Ok(record)
         })
         .await
@@ -139,6 +141,30 @@ pub(crate) fn mark_outbound_failed(
     record
 }
 
+pub(crate) fn mark_outbound_invalid(
+    mut record: OutboundPrivateMessageRecord,
+    error: String,
+    now: DateTime<Utc>,
+) -> OutboundPrivateMessageRecord {
+    record.status = OutboundPrivateMessageStatus::Invalid;
+    record.updated_at = now;
+    record.last_error = Some(error);
+    record
+}
+
+pub(crate) fn validate_queued_outbound_private_message(
+    record: &OutboundPrivateMessageRecord,
+) -> Result<()> {
+    let kind = validate_outbound_private_message(&record.raw_json)?;
+    if kind != record.kind {
+        return Err(PaykitSdkError::Protocol(format!(
+            "queued private message kind '{}' does not match payload kind '{kind}'",
+            record.kind
+        )));
+    }
+    Ok(())
+}
+
 fn validate_outbound_private_message(raw_json: &str) -> Result<String> {
     if raw_json.len() > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
         return Err(PaykitSdkError::Protocol(
@@ -161,11 +187,61 @@ fn validate_outbound_private_message(raw_json: &str) -> Result<String> {
         .get("kind")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| PaykitSdkError::Protocol("private message kind is missing".into()))?;
-    PrivateMessageKind::parse(kind).ok_or_else(|| {
+    let parsed_kind = PrivateMessageKind::parse(kind).ok_or_else(|| {
         PaykitSdkError::Protocol(format!("unsupported private message kind '{kind}'"))
     })?;
+    validate_outbound_private_message_body(parsed_kind, raw_json)?;
 
     Ok(kind.to_owned())
+}
+
+fn validate_outbound_private_message_body(kind: PrivateMessageKind, raw_json: &str) -> Result<()> {
+    match kind {
+        PrivateMessageKind::PrivatePaymentList => {
+            paykit_lib::parse_private_payment_list_json(raw_json)?;
+        }
+        PrivateMessageKind::ReceiptAccess => {
+            let message = private_application_message(kind, raw_json);
+            let event =
+                paykit_lib::parse_receipt_access_event_message(&message).ok_or_else(|| {
+                    PaykitSdkError::Protocol(
+                        "Receipt Access payload does not match private message kind".into(),
+                    )
+                })?;
+            if let Some(error) = event.validation_error() {
+                return Err(PaykitSdkError::Protocol(error.to_owned()));
+            }
+        }
+        PrivateMessageKind::PaymentRequest
+        | PrivateMessageKind::PaymentRequestAcceptance
+        | PrivateMessageKind::PaymentRequestRejection
+        | PrivateMessageKind::PaymentRequestCancellation
+        | PrivateMessageKind::PaymentProof => {
+            let message = private_application_message(kind, raw_json);
+            let event =
+                paykit_lib::parse_payment_request_event_message(&message).ok_or_else(|| {
+                    PaykitSdkError::Protocol(
+                        "Payment Request event payload does not match private message kind".into(),
+                    )
+                })?;
+            if let Some(error) = event.validation_error() {
+                return Err(PaykitSdkError::Protocol(error.to_owned()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn private_application_message(
+    kind: PrivateMessageKind,
+    raw_json: &str,
+) -> paykit_lib::PrivateApplicationMessage {
+    paykit_lib::PrivateApplicationMessage {
+        version: Some(1),
+        kind: Some(kind.as_str().to_owned()),
+        raw_json: raw_json.to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -191,7 +267,6 @@ mod tests {
     async fn test_enqueue_private_message_stores_pending_record() {
         let storage = InMemoryStorage::new();
         let counterparty = counterparty();
-
         let record = enqueue_private_message(
             &storage,
             counterparty.clone(),
@@ -218,6 +293,43 @@ mod tests {
             timestamp(),
         )
         .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_private_message_rejects_malformed_known_body() {
+        let result = enqueue_private_message(
+            &InMemoryStorage::new(),
+            counterparty(),
+            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"../bad":"ln"}}"#
+                .into(),
+            timestamp(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    }
+
+    #[test]
+    fn test_validate_queued_outbound_private_message_rejects_malformed_known_body() {
+        let record = OutboundPrivateMessageRecord {
+            outbound_message_id: 7,
+            counterparty: counterparty(),
+            kind: "paykit.private_payment_list".into(),
+            raw_json:
+                r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"../bad":"ln"}}"#
+                    .into(),
+            status: OutboundPrivateMessageStatus::Pending,
+            attempt_count: 0,
+            created_at: timestamp(),
+            updated_at: timestamp(),
+            last_attempt_at: None,
+            sent_at: None,
+            last_error: None,
+        };
+
+        let result = validate_queued_outbound_private_message(&record);
 
         assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
     }

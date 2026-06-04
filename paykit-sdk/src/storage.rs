@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt,
     sync::{Arc, Mutex},
 };
 
@@ -47,6 +48,12 @@ pub trait StorageTransaction {
 
     /// Save the current identity state.
     fn save_identity_state(&mut self, state: IdentityState);
+
+    /// Clear SDK-managed state that belongs to one local identity.
+    fn clear_identity_scoped_state(&mut self);
+
+    /// Clear private SDK-managed state that depends on local secret-key access.
+    fn clear_private_identity_scoped_state(&mut self);
 
     /// Load one Linked Peer record.
     fn linked_peer(&self, counterparty: &PubkyPublicKey) -> Option<LinkedPeerRecord>;
@@ -106,7 +113,7 @@ pub trait StorageTransaction {
         stale_before: DateTime<Utc>,
     ) -> Option<OutboundPrivateMessageRecord>;
 
-    /// Save one outbound private message record.
+    /// Save updates for one existing outbound private message record.
     fn save_outbound_private_message(&mut self, record: OutboundPrivateMessageRecord);
 
     /// Allocate a receive batch id.
@@ -119,7 +126,11 @@ pub trait StorageTransaction {
     fn private_stream_items(&self, counterparty: &PubkyPublicKey) -> Vec<PrivateStreamItemRecord>;
 
     /// Load an Event Message dedupe record.
-    fn event_dedup_record(&self, event_id: &str) -> Option<EventDedupRecord>;
+    fn event_dedup_record(
+        &self,
+        counterparty: &PubkyPublicKey,
+        event_id: &str,
+    ) -> Option<EventDedupRecord>;
 
     /// Save an Event Message dedupe record.
     fn save_event_dedup_record(&mut self, record: EventDedupRecord);
@@ -156,7 +167,10 @@ pub struct PublicEndpointRecord {
 }
 
 /// Durable Encrypted Link snapshot state.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Snapshot bytes contain Noise key and counter material. Store them encrypted
+/// at rest and avoid logging them.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedLinkStateRecord {
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
@@ -170,6 +184,31 @@ pub struct EncryptedLinkStateRecord {
     pub generation: u64,
     /// Last checkpoint time.
     pub checkpointed_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for EncryptedLinkStateRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptedLinkStateRecord")
+            .field("counterparty", &self.counterparty)
+            .field(
+                "link_snapshot",
+                &self
+                    .link_snapshot
+                    .as_ref()
+                    .map(|snapshot| format!("<redacted:{} bytes>", snapshot.len())),
+            )
+            .field(
+                "handshake_snapshot",
+                &self
+                    .handshake_snapshot
+                    .as_ref()
+                    .map(|snapshot| format!("<redacted:{} bytes>", snapshot.len())),
+            )
+            .field("handshake_role", &self.handshake_role)
+            .field("generation", &self.generation)
+            .field("checkpointed_at", &self.checkpointed_at)
+            .finish()
+    }
 }
 
 /// Storage-backed lease for one peer link operation.
@@ -186,20 +225,68 @@ pub struct PeerLinkOperationLease {
 }
 
 /// New outbound private message before storage assigns an id.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The payload may contain private Paykit secrets. `Debug` redacts it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct NewOutboundPrivateMessage {
+    counterparty: PubkyPublicKey,
+    kind: String,
+    raw_json: String,
+    created_at: DateTime<Utc>,
+}
+
+impl NewOutboundPrivateMessage {
+    pub(crate) fn new(
+        counterparty: PubkyPublicKey,
+        kind: String,
+        raw_json: String,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            counterparty,
+            kind,
+            raw_json,
+            created_at,
+        }
+    }
+
     /// Counterparty public key.
-    pub counterparty: PubkyPublicKey,
+    pub fn counterparty(&self) -> &PubkyPublicKey {
+        &self.counterparty
+    }
+
     /// Private Message Kind string.
-    pub kind: String,
-    /// Exact raw JSON payload to send.
-    pub raw_json: String,
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// Exact outbound JSON payload to send.
+    pub fn raw_json(&self) -> &str {
+        &self.raw_json
+    }
+
     /// Queue time.
-    pub created_at: DateTime<Utc>,
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+}
+
+impl fmt::Debug for NewOutboundPrivateMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewOutboundPrivateMessage")
+            .field("counterparty", &self.counterparty)
+            .field("kind", &self.kind)
+            .field(
+                "raw_json",
+                &format!("<redacted:{} bytes>", self.raw_json.len()),
+            )
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 /// Durable outbound private message.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundPrivateMessageRecord {
     /// Assigned outbound message id.
     pub outbound_message_id: u64,
@@ -207,7 +294,7 @@ pub struct OutboundPrivateMessageRecord {
     pub counterparty: PubkyPublicKey,
     /// Private Message Kind string.
     pub kind: String,
-    /// Exact raw JSON payload to send.
+    /// Exact outbound JSON payload to send.
     pub raw_json: String,
     /// Delivery status.
     pub status: OutboundPrivateMessageStatus,
@@ -223,6 +310,27 @@ pub struct OutboundPrivateMessageRecord {
     pub sent_at: Option<DateTime<Utc>>,
     /// Last send error, when available.
     pub last_error: Option<String>,
+}
+
+impl fmt::Debug for OutboundPrivateMessageRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OutboundPrivateMessageRecord")
+            .field("outbound_message_id", &self.outbound_message_id)
+            .field("counterparty", &self.counterparty)
+            .field("kind", &self.kind)
+            .field(
+                "raw_json",
+                &format!("<redacted:{} bytes>", self.raw_json.len()),
+            )
+            .field("status", &self.status)
+            .field("attempt_count", &self.attempt_count)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("last_attempt_at", &self.last_attempt_at)
+            .field("sent_at", &self.sent_at)
+            .field("last_error", &self.last_error)
+            .finish()
+    }
 }
 
 impl OutboundPrivateMessageRecord {
@@ -257,13 +365,125 @@ pub(crate) fn require_peer_link_operation_lease(
 }
 
 /// New private stream item before storage assigns an id.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The payload may contain private Paykit secrets. `Debug` redacts it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct NewPrivateStreamItem {
+    counterparty: PubkyPublicKey,
+    receive_batch_id: u64,
+    raw_json: String,
+    parsed_version: Option<u32>,
+    parsed_kind: Option<String>,
+    known_paykit_kind: Option<String>,
+    parse_status: PrivateStreamParseStatus,
+    parse_error: Option<String>,
+    received_at: DateTime<Utc>,
+}
+
+impl NewPrivateStreamItem {
+    pub(crate) fn new(details: NewPrivateStreamItemDetails) -> Self {
+        Self {
+            counterparty: details.counterparty,
+            receive_batch_id: details.receive_batch_id,
+            raw_json: details.raw_json,
+            parsed_version: details.parsed_version,
+            parsed_kind: details.parsed_kind,
+            known_paykit_kind: details.known_paykit_kind,
+            parse_status: details.parse_status,
+            parse_error: details.parse_error,
+            received_at: details.received_at,
+        }
+    }
+
+    /// Counterparty public key.
+    pub fn counterparty(&self) -> &PubkyPublicKey {
+        &self.counterparty
+    }
+
+    /// Receive batch id assigned by the SDK runtime.
+    pub fn receive_batch_id(&self) -> u64 {
+        self.receive_batch_id
+    }
+
+    /// Raw plaintext payload.
+    pub fn raw_json(&self) -> &str {
+        &self.raw_json
+    }
+
+    /// Parsed Private Application Message version.
+    pub fn parsed_version(&self) -> Option<u32> {
+        self.parsed_version
+    }
+
+    /// Parsed Private Application Message kind.
+    pub fn parsed_kind(&self) -> Option<&str> {
+        self.parsed_kind.as_deref()
+    }
+
+    /// Whether the kind is a known Paykit kind.
+    pub fn known_paykit_kind(&self) -> Option<&str> {
+        self.known_paykit_kind.as_deref()
+    }
+
+    /// Parse status.
+    pub fn parse_status(&self) -> PrivateStreamParseStatus {
+        self.parse_status.clone()
+    }
+
+    /// Parse error, when available.
+    pub fn parse_error(&self) -> Option<&str> {
+        self.parse_error.as_deref()
+    }
+
+    /// Receive time.
+    pub fn received_at(&self) -> DateTime<Utc> {
+        self.received_at
+    }
+}
+
+pub(crate) struct NewPrivateStreamItemDetails {
+    pub(crate) counterparty: PubkyPublicKey,
+    pub(crate) receive_batch_id: u64,
+    pub(crate) raw_json: String,
+    pub(crate) parsed_version: Option<u32>,
+    pub(crate) parsed_kind: Option<String>,
+    pub(crate) known_paykit_kind: Option<String>,
+    pub(crate) parse_status: PrivateStreamParseStatus,
+    pub(crate) parse_error: Option<String>,
+    pub(crate) received_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for NewPrivateStreamItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewPrivateStreamItem")
+            .field("counterparty", &self.counterparty)
+            .field("receive_batch_id", &self.receive_batch_id)
+            .field(
+                "raw_json",
+                &format!("<redacted:{} bytes>", self.raw_json.len()),
+            )
+            .field("parsed_version", &self.parsed_version)
+            .field("parsed_kind", &self.parsed_kind)
+            .field("known_paykit_kind", &self.known_paykit_kind)
+            .field("parse_status", &self.parse_status)
+            .field("parse_error", &self.parse_error)
+            .field("received_at", &self.received_at)
+            .finish()
+    }
+}
+
+/// Durable private stream item.
+///
+/// The payload may contain private Paykit secrets. `Debug` redacts it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateStreamItemRecord {
+    /// Assigned stream item id.
+    pub stream_item_id: u64,
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
     /// Receive batch id assigned by the SDK runtime.
     pub receive_batch_id: u64,
-    /// Raw JSON payload.
+    /// Raw plaintext payload.
     pub raw_json: String,
     /// Parsed Private Application Message version.
     pub parsed_version: Option<u32>,
@@ -279,29 +499,24 @@ pub struct NewPrivateStreamItem {
     pub received_at: DateTime<Utc>,
 }
 
-/// Durable private stream item.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PrivateStreamItemRecord {
-    /// Assigned stream item id.
-    pub stream_item_id: u64,
-    /// Counterparty public key.
-    pub counterparty: PubkyPublicKey,
-    /// Receive batch id assigned by the SDK runtime.
-    pub receive_batch_id: u64,
-    /// Raw JSON payload.
-    pub raw_json: String,
-    /// Parsed Private Application Message version.
-    pub parsed_version: Option<u32>,
-    /// Parsed Private Application Message kind.
-    pub parsed_kind: Option<String>,
-    /// Whether the kind is a known Paykit kind.
-    pub known_paykit_kind: Option<String>,
-    /// Parse status.
-    pub parse_status: PrivateStreamParseStatus,
-    /// Parse error, when available.
-    pub parse_error: Option<String>,
-    /// Receive time.
-    pub received_at: DateTime<Utc>,
+impl fmt::Debug for PrivateStreamItemRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivateStreamItemRecord")
+            .field("stream_item_id", &self.stream_item_id)
+            .field("counterparty", &self.counterparty)
+            .field("receive_batch_id", &self.receive_batch_id)
+            .field(
+                "raw_json",
+                &format!("<redacted:{} bytes>", self.raw_json.len()),
+            )
+            .field("parsed_version", &self.parsed_version)
+            .field("parsed_kind", &self.parsed_kind)
+            .field("known_paykit_kind", &self.known_paykit_kind)
+            .field("parse_status", &self.parse_status)
+            .field("parse_error", &self.parse_error)
+            .field("received_at", &self.received_at)
+            .finish()
+    }
 }
 
 impl PrivateStreamItemRecord {
@@ -324,6 +539,8 @@ impl PrivateStreamItemRecord {
 /// Event Message dedupe/conflict record.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventDedupRecord {
+    /// Counterparty that sent the event.
+    pub counterparty: PubkyPublicKey,
     /// Event ID.
     pub event_id: String,
     /// Event kind.
@@ -363,8 +580,8 @@ pub struct StorageState {
     pub next_receive_batch_id: u64,
     /// Next private stream item id.
     pub next_private_stream_item_id: u64,
-    /// Event dedupe records by Event ID.
-    pub event_dedup_records: HashMap<String, EventDedupRecord>,
+    /// Event dedupe records by counterparty and Event ID.
+    pub event_dedup_records: HashMap<(PubkyPublicKey, String), EventDedupRecord>,
 }
 
 /// In-memory SDK storage implementation for tests and examples.
@@ -426,6 +643,20 @@ impl StorageTransaction for InMemoryStorageTransaction {
 
     fn save_identity_state(&mut self, state: IdentityState) {
         self.state.identity_state = Some(state);
+    }
+
+    fn clear_identity_scoped_state(&mut self) {
+        self.clear_private_identity_scoped_state();
+        self.state.public_endpoint_records.clear();
+    }
+
+    fn clear_private_identity_scoped_state(&mut self) {
+        self.state.linked_peers.clear();
+        self.state.encrypted_link_states.clear();
+        self.state.peer_link_operation_leases.clear();
+        self.state.outbound_private_messages.clear();
+        self.state.private_stream_items.clear();
+        self.state.event_dedup_records.clear();
     }
 
     fn linked_peer(&self, counterparty: &PubkyPublicKey) -> Option<LinkedPeerRecord> {
@@ -558,7 +789,10 @@ impl StorageTransaction for InMemoryStorageTransaction {
             .enumerate()
             .filter(|(_, message)| {
                 &message.counterparty == counterparty
-                    && message.status != OutboundPrivateMessageStatus::Sent
+                    && !matches!(
+                        message.status,
+                        OutboundPrivateMessageStatus::Sent | OutboundPrivateMessageStatus::Invalid
+                    )
             })
             .map(|(index, message)| (index, message.outbound_message_id))
             .collect::<Vec<_>>();
@@ -586,8 +820,6 @@ impl StorageTransaction for InMemoryStorageTransaction {
             .find(|message| message.outbound_message_id == record.outbound_message_id)
         {
             *existing = record;
-        } else {
-            self.state.outbound_private_messages.push(record);
         }
     }
 
@@ -615,14 +847,22 @@ impl StorageTransaction for InMemoryStorageTransaction {
             .collect()
     }
 
-    fn event_dedup_record(&self, event_id: &str) -> Option<EventDedupRecord> {
-        self.state.event_dedup_records.get(event_id).cloned()
+    fn event_dedup_record(
+        &self,
+        counterparty: &PubkyPublicKey,
+        event_id: &str,
+    ) -> Option<EventDedupRecord> {
+        self.state
+            .event_dedup_records
+            .get(&(counterparty.clone(), event_id.to_owned()))
+            .cloned()
     }
 
     fn save_event_dedup_record(&mut self, record: EventDedupRecord) {
-        self.state
-            .event_dedup_records
-            .insert(record.event_id.clone(), record);
+        self.state.event_dedup_records.insert(
+            (record.counterparty.clone(), record.event_id.clone()),
+            record,
+        );
     }
 }
 
@@ -636,7 +876,7 @@ fn is_claimable_outbound_private_message(
             Some(last_attempt_at) => last_attempt_at <= stale_before,
             None => true,
         },
-        OutboundPrivateMessageStatus::Sent => false,
+        OutboundPrivateMessageStatus::Sent | OutboundPrivateMessageStatus::Invalid => false,
     }
 }
 
@@ -645,7 +885,13 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::outbound_private::{mark_outbound_failed, mark_outbound_sent};
+    use crate::{
+        outbound_private::{
+            claim_next_outbound_private_message, mark_outbound_failed, mark_outbound_invalid,
+            mark_outbound_sent,
+        },
+        queued_outbound_private_messages,
+    };
 
     fn timestamp() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
@@ -666,14 +912,48 @@ mod tests {
     }
 
     fn outbound_private_message(counterparty: PubkyPublicKey) -> NewOutboundPrivateMessage {
-        NewOutboundPrivateMessage {
+        NewOutboundPrivateMessage::new(
             counterparty,
-            kind: "paykit.private_payment_list".into(),
-            raw_json:
-                r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
-                    .into(),
-            created_at: timestamp(),
-        }
+            "paykit.private_payment_list".into(),
+            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#.into(),
+            timestamp(),
+        )
+    }
+
+    #[test]
+    fn test_sensitive_storage_debug_is_redacted() {
+        let counterparty = counterparty();
+        let link_state = EncryptedLinkStateRecord {
+            counterparty: counterparty.clone(),
+            link_snapshot: Some(vec![1, 2, 3]),
+            handshake_snapshot: Some(vec![4, 5, 6]),
+            handshake_role: None,
+            generation: 0,
+            checkpointed_at: timestamp(),
+        };
+        let outbound = OutboundPrivateMessageRecord::from_new(
+            0,
+            outbound_private_message(counterparty.clone()),
+        );
+        let stream = PrivateStreamItemRecord::from_new(
+            0,
+            NewPrivateStreamItem::new(NewPrivateStreamItemDetails {
+                counterparty,
+                receive_batch_id: 0,
+                raw_json: r#"{"key":"secret"}"#.into(),
+                parsed_version: Some(1),
+                parsed_kind: Some("paykit.receipt_access".into()),
+                known_paykit_kind: Some("paykit.receipt_access".into()),
+                parse_status: PrivateStreamParseStatus::Valid,
+                parse_error: None,
+                received_at: timestamp(),
+            }),
+        );
+
+        let debug = format!("{link_state:?} {outbound:?} {stream:?}");
+        assert!(debug.contains("<redacted:"));
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("[1, 2, 3]"));
     }
 
     #[tokio::test]
@@ -697,19 +977,22 @@ mod tests {
                         counterparty.clone(),
                     ));
 
-                    let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem {
-                        counterparty: counterparty.clone(),
-                        receive_batch_id: 7,
-                        raw_json: r#"{"version":1,"kind":"paykit.test"}"#.into(),
-                        parsed_version: Some(1),
-                        parsed_kind: Some("paykit.test".into()),
-                        known_paykit_kind: None,
-                        parse_status: PrivateStreamParseStatus::UnknownKind,
-                        parse_error: None,
-                        received_at: timestamp(),
-                    });
+                    let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
+                        NewPrivateStreamItemDetails {
+                            counterparty: counterparty.clone(),
+                            receive_batch_id: 7,
+                            raw_json: r#"{"version":1,"kind":"paykit.test"}"#.into(),
+                            parsed_version: Some(1),
+                            parsed_kind: Some("paykit.test".into()),
+                            known_paykit_kind: None,
+                            parse_status: PrivateStreamParseStatus::UnknownKind,
+                            parse_error: None,
+                            received_at: timestamp(),
+                        },
+                    ));
 
                     tx.save_event_dedup_record(EventDedupRecord {
+                        counterparty: counterparty.clone(),
                         event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
                         event_kind: "paykit.test".into(),
                         payload_hash: "hash".into(),
@@ -736,6 +1019,96 @@ mod tests {
         assert_eq!(snapshot.event_dedup_records.len(), 1);
         assert_eq!(snapshot.next_private_stream_item_id, 1);
         assert_eq!(snapshot.next_outbound_private_message_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_save_outbound_private_message_updates_existing_only() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.save_outbound_private_message(OutboundPrivateMessageRecord {
+                        outbound_message_id: 99,
+                        counterparty,
+                        kind: "paykit.private_payment_list".into(),
+                        raw_json:
+                            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
+                                .into(),
+                        status: OutboundPrivateMessageStatus::Pending,
+                        attempt_count: 0,
+                        created_at: timestamp(),
+                        updated_at: timestamp(),
+                        last_attempt_at: None,
+                        sent_at: None,
+                        last_error: None,
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        assert!(storage
+            .snapshot()
+            .unwrap()
+            .outbound_private_messages
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_invalid_outbound_private_message_does_not_block_later_records() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+
+        let (first, second) = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    let first = tx.insert_outbound_private_message(outbound_private_message(
+                        counterparty.clone(),
+                    ));
+                    let second =
+                        tx.insert_outbound_private_message(outbound_private_message(counterparty));
+                    Ok((first, second))
+                }
+            })
+            .await
+            .unwrap();
+        storage
+            .transaction({
+                let invalid = mark_outbound_invalid(
+                    first,
+                    "invalid private message JSON".into(),
+                    timestamp(),
+                );
+                move |tx| {
+                    tx.save_outbound_private_message(invalid);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let claimed = claim_next_outbound_private_message(
+            &storage,
+            &counterparty,
+            timestamp(),
+            timestamp() - chrono::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(claimed.outbound_message_id, second.outbound_message_id);
+        assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
+        let queued = queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].outbound_message_id, second.outbound_message_id);
     }
 
     #[tokio::test]
@@ -797,6 +1170,134 @@ mod tests {
             .unwrap();
 
         assert!(second.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_clear_identity_scoped_state_preserves_identity_only() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        let identity = IdentityState {
+            public_key: Some(counterparty.clone()),
+            capability: crate::PubkyIdentityCapability::PrivateLinkCapable,
+            local_secret_available: true,
+            initialized_at: timestamp(),
+            sign_out_generation: 1,
+        };
+
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                let identity = identity.clone();
+                move |tx| {
+                    tx.save_identity_state(identity);
+                    tx.save_linked_peer(LinkedPeerRecord {
+                        counterparty: counterparty.clone(),
+                        state: LinkedPeerState::Linked,
+                        last_sync_at: Some(timestamp()),
+                        last_private_receive_at: None,
+                        failure_count: 0,
+                    });
+                    tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
+                    tx.insert_outbound_private_message(outbound_private_message(
+                        counterparty.clone(),
+                    ));
+                    tx.insert_private_stream_item(NewPrivateStreamItem::new(
+                        NewPrivateStreamItemDetails {
+                            counterparty: counterparty.clone(),
+                            receive_batch_id: 0,
+                            raw_json: r#"{"version":1,"kind":"paykit.test"}"#.into(),
+                            parsed_version: Some(1),
+                            parsed_kind: Some("paykit.test".into()),
+                            known_paykit_kind: None,
+                            parse_status: PrivateStreamParseStatus::UnknownKind,
+                            parse_error: None,
+                            received_at: timestamp(),
+                        },
+                    ));
+                    tx.clear_identity_scoped_state();
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let snapshot = storage.snapshot().unwrap();
+        assert_eq!(snapshot.identity_state, Some(identity));
+        assert!(snapshot.linked_peers.is_empty());
+        assert!(snapshot.public_endpoint_records.is_empty());
+        assert!(snapshot.encrypted_link_states.is_empty());
+        assert!(snapshot.outbound_private_messages.is_empty());
+        assert!(snapshot.private_stream_items.is_empty());
+        assert!(snapshot.event_dedup_records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_clear_private_identity_scoped_state_preserves_public_endpoints() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        let identity = IdentityState {
+            public_key: Some(counterparty.clone()),
+            capability: crate::PubkyIdentityCapability::PrivateLinkCapable,
+            local_secret_available: true,
+            initialized_at: timestamp(),
+            sign_out_generation: 1,
+        };
+
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                let identity = identity.clone();
+                move |tx| {
+                    tx.save_identity_state(identity);
+                    tx.save_linked_peer(LinkedPeerRecord {
+                        counterparty: counterparty.clone(),
+                        state: LinkedPeerState::Linked,
+                        last_sync_at: Some(timestamp()),
+                        last_private_receive_at: None,
+                        failure_count: 0,
+                    });
+                    tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
+                    tx.claim_peer_link_operation(
+                        &counterparty,
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(60),
+                    );
+                    tx.allocate_receive_batch_id();
+                    tx.insert_outbound_private_message(outbound_private_message(
+                        counterparty.clone(),
+                    ));
+                    tx.insert_private_stream_item(NewPrivateStreamItem::new(
+                        NewPrivateStreamItemDetails {
+                            counterparty,
+                            receive_batch_id: 0,
+                            raw_json: r#"{"version":1,"kind":"paykit.test"}"#.into(),
+                            parsed_version: Some(1),
+                            parsed_kind: Some("paykit.test".into()),
+                            known_paykit_kind: None,
+                            parse_status: PrivateStreamParseStatus::UnknownKind,
+                            parse_error: None,
+                            received_at: timestamp(),
+                        },
+                    ));
+                    tx.clear_private_identity_scoped_state();
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let snapshot = storage.snapshot().unwrap();
+        assert_eq!(snapshot.identity_state, Some(identity));
+        assert_eq!(snapshot.public_endpoint_records.len(), 1);
+        assert!(snapshot.linked_peers.is_empty());
+        assert!(snapshot.encrypted_link_states.is_empty());
+        assert!(snapshot.outbound_private_messages.is_empty());
+        assert!(snapshot.private_stream_items.is_empty());
+        assert!(snapshot.event_dedup_records.is_empty());
+        assert_eq!(snapshot.next_peer_link_operation_lease_id, 1);
+        assert_eq!(snapshot.next_outbound_private_message_id, 1);
+        assert_eq!(snapshot.next_receive_batch_id, 1);
+        assert_eq!(snapshot.next_private_stream_item_id, 1);
     }
 
     #[tokio::test]

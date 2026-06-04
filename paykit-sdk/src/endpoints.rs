@@ -79,22 +79,6 @@ where
         .await
 }
 
-/// Save one SDK-managed public endpoint record.
-pub async fn save_public_endpoint_record<S>(
-    storage: &S,
-    record: PublicEndpointRecord,
-) -> Result<PublicEndpointRecord>
-where
-    S: StorageAdapter,
-{
-    storage
-        .transaction(move |tx| {
-            tx.save_public_endpoint_record(record.clone());
-            Ok(record)
-        })
-        .await
-}
-
 pub(crate) fn published_record(
     identifier: &PaymentEndpointIdentifier,
     payload: &PaymentEndpointPayload,
@@ -104,6 +88,34 @@ pub(crate) fn published_record(
         identifier: identifier.as_str().to_owned(),
         payload: Some(payload.as_str().to_owned()),
         status: EndpointPublicationStatus::Published,
+        updated_at: now,
+        last_error: None,
+    }
+}
+
+pub(crate) fn desired_record(
+    identifier: &PaymentEndpointIdentifier,
+    payload: &PaymentEndpointPayload,
+    now: DateTime<Utc>,
+) -> PublicEndpointRecord {
+    PublicEndpointRecord {
+        identifier: identifier.as_str().to_owned(),
+        payload: Some(payload.as_str().to_owned()),
+        status: EndpointPublicationStatus::Desired,
+        updated_at: now,
+        last_error: None,
+    }
+}
+
+pub(crate) fn pending_removal_record(
+    identifier: String,
+    payload: Option<String>,
+    now: DateTime<Utc>,
+) -> PublicEndpointRecord {
+    PublicEndpointRecord {
+        identifier,
+        payload,
+        status: EndpointPublicationStatus::PendingRemoval,
         updated_at: now,
         last_error: None,
     }

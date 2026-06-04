@@ -111,6 +111,10 @@ impl From<[u8; 32]> for PubkyLocalSecretKey {
 }
 
 /// Live Pubky access used by SDK workflows that touch Pubky storage or links.
+///
+/// Providers must ensure the optional local secret key belongs to the local
+/// session public key. The SDK treats a present secret key as private-link
+/// capability.
 #[derive(Clone)]
 pub struct PubkySessionAccess {
     /// Authenticated Pubky session for local homeserver writes.

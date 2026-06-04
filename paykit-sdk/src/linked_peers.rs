@@ -211,6 +211,16 @@ where
             record.last_sync_at = Some(now);
             record.failure_count = record.failure_count.saturating_add(1);
             tx.save_linked_peer(record.clone());
+            if let Some(link_state) = tx.encrypted_link_state(&counterparty) {
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: counterparty.clone(),
+                    link_snapshot: None,
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: link_state.generation.saturating_add(1),
+                    checkpointed_at: now,
+                });
+            }
             Ok(record)
         })
         .await
@@ -633,6 +643,58 @@ mod tests {
         assert_eq!(link_state.link_snapshot, Some(vec![4, 5, 6]));
         assert!(link_state.handshake_snapshot.is_none());
         assert!(link_state.handshake_role.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mark_recovery_required_clears_active_link_snapshot() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        save_linked_peer_link_state(&storage, counterparty.clone(), vec![4, 5, 6], timestamp())
+            .await
+            .unwrap();
+
+        let peer = mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+        let link_state = load_encrypted_link_state(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(link_state.link_snapshot.is_none());
+        assert!(link_state.handshake_snapshot.is_none());
+        assert!(link_state.handshake_role.is_none());
+        assert_eq!(link_state.generation, 1);
+    }
+
+    #[tokio::test]
+    async fn test_mark_recovery_required_clears_handshake_snapshot() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        save_link_handshake_state(
+            &storage,
+            counterparty.clone(),
+            EncryptedLinkHandshakeRole::Responder,
+            vec![1, 2, 3],
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        let peer = mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
+            .await
+            .unwrap();
+
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+        let link_state = load_encrypted_link_state(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(link_state.link_snapshot.is_none());
+        assert!(link_state.handshake_snapshot.is_none());
+        assert!(link_state.handshake_role.is_none());
+        assert_eq!(link_state.generation, 1);
     }
 
     #[tokio::test]

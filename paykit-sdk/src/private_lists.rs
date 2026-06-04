@@ -1,6 +1,6 @@
 //! Private Payment List latest-state records.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{
@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// Derived latest-state view of a counterparty's Private Payment List.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivatePaymentListView {
     /// Stream item id of the latest valid list.
     pub latest_stream_item_id: Option<u64>,
@@ -27,6 +27,17 @@ pub struct PrivatePaymentListView {
     pub payment_endpoints: HashMap<String, String>,
     /// Receive time of the latest valid list.
     pub last_refresh_at: Option<DateTime<Utc>>,
+}
+
+impl fmt::Debug for PrivatePaymentListView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let identifiers = self.payment_endpoints.keys().collect::<Vec<_>>();
+        f.debug_struct("PrivatePaymentListView")
+            .field("latest_stream_item_id", &self.latest_stream_item_id)
+            .field("payment_endpoint_identifiers", &identifiers)
+            .field("last_refresh_at", &self.last_refresh_at)
+            .finish()
+    }
 }
 
 /// Load the current Private Payment List view for one counterparty.
@@ -44,7 +55,10 @@ where
 }
 
 /// Queue a complete Private Payment List for delivery to one counterparty.
-pub async fn enqueue_private_payment_list<S>(
+///
+/// The list replaces the counterparty's latest Private Payment List view when
+/// received, so callers should pass every endpoint they want to share.
+pub(crate) async fn enqueue_private_payment_list<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
     receiving_details: Vec<ReceivingDetail>,
@@ -158,6 +172,22 @@ mod tests {
         assert_eq!(view.latest_stream_item_id, Some(1));
         assert_eq!(view.payment_endpoints["btc-lightning-bolt11"], "ln-new");
         assert_eq!(view.last_refresh_at, Some(timestamp()));
+    }
+
+    #[test]
+    fn test_private_payment_list_view_debug_redacts_payloads() {
+        let mut payment_endpoints = HashMap::new();
+        payment_endpoints.insert("btc-lightning-bolt11".into(), "ln-private-secret".into());
+        let view = PrivatePaymentListView {
+            latest_stream_item_id: Some(42),
+            payment_endpoints,
+            last_refresh_at: Some(timestamp()),
+        };
+
+        let debug = format!("{view:?}");
+
+        assert!(debug.contains("btc-lightning-bolt11"));
+        assert!(!debug.contains("ln-private-secret"));
     }
 
     #[test]

@@ -9,7 +9,7 @@ rust-version = "1.91.1"
 repository = "https://github.com/pubky/paykit-rs"
 homepage = "https://github.com/pubky/paykit-rs#readme"
 documentation = "https://docs.rs/paykit-sdk"
-readme = "../README.md"
+readme = "README.md"
 keywords = ["paykit", "payments", "routing", "pubky"]
 categories = ["network-programming", "finance"]
 
