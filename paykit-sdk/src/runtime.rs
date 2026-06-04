@@ -28,6 +28,10 @@ use crate::{
         validate_queued_outbound_private_message, OutboundPrivateSendFailure,
         OutboundPrivateSendReport,
     },
+    payment_requests::{
+        received_payment_request_records as derive_received_payment_request_records,
+        PaymentRequestRecord,
+    },
     private_lists::{
         current_private_payment_list as load_current_private_payment_list,
         enqueue_private_payment_list as enqueue_private_payment_list_message,
@@ -406,6 +410,23 @@ where
                 }
             })
             .await
+    }
+
+    /// Return received Payment Request records for one counterparty.
+    ///
+    /// Records are derived from the persisted inbound private stream and
+    /// returned newest-first by last applied stream item. Malformed recognized
+    /// Payment Request events without a valid `payment_request_id` stay in the
+    /// raw private stream log and cannot be attached to a request-scoped record.
+    pub async fn received_payment_request_records(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<PaymentRequestRecord>> {
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
+            return Ok(Vec::new());
+        }
+        derive_received_payment_request_records(&self.storage, counterparty, self.clock.now()).await
     }
 
     /// Enqueue the current complete Private Payment List for one counterparty.

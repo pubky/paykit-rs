@@ -13,6 +13,7 @@ pub mod error;
 pub mod identity;
 pub mod linked_peers;
 pub mod outbound_private;
+pub mod payment_requests;
 pub mod private_lists;
 pub mod private_stream;
 pub mod receipts;
@@ -56,6 +57,11 @@ pub use linked_peers::{
 pub use outbound_private::{
     queued_outbound_private_messages, OutboundPrivateMessageStatus, OutboundPrivateSendFailure,
     OutboundPrivateSendReport,
+};
+#[doc(inline)]
+pub use payment_requests::{
+    received_payment_request_records, PaymentRequestAmountRecord, PaymentRequestLifecycleState,
+    PaymentRequestRecord, PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord,
 };
 #[doc(inline)]
 pub use private_lists::{
