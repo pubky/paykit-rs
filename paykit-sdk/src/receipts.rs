@@ -547,6 +547,53 @@ mod tests {
     }
 
     #[test]
+    fn test_receipt_access_record_deserializes_pending_retrieval_defaults() {
+        let counterparty = PubkyPublicKey::from_public_key(&public_key());
+        let value = serde_json::json!({
+            "counterparty": counterparty.as_str(),
+            "stream_item_id": 0,
+            "receive_batch_id": 0,
+            "event_id": "650e8400-e29b-41d4-a716-446655440000",
+            "receipt_id": "550e8400-e29b-41d4-a716-446655440000",
+            "payment_reference": "invoice-2026-0001",
+            "payment_request_id": null,
+            "billing_period": null,
+            "location": "/pub/paykit/v0/private/receipts/550e8400-e29b-41d4-a716-446655440000",
+            "key": "receipt-secret",
+            "received_at": timestamp(),
+        });
+
+        let record: ReceiptAccessRecord = serde_json::from_value(value).unwrap();
+
+        assert_eq!(record.retrieval_status, ReceiptRetrievalStatus::Pending);
+        assert!(record.retrieval_attempted_at.is_none());
+        assert!(record.retrieved_at.is_none());
+        assert!(record.last_retrieval_error.is_none());
+    }
+
+    #[test]
+    fn test_receipt_access_record_error_clears_success_timestamp() {
+        let receipt_id =
+            paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let key = ReceiptDecryptionKey::generate();
+        let record = receipt_access_record(&receipt_id, &key, "invoice-2026-0001")
+            .mark_retrieved(timestamp());
+
+        let failed = record.mark_retrieval_error(
+            ReceiptRetrievalStatus::Failed,
+            timestamp() + chrono::Duration::seconds(1),
+            "decryption failed".into(),
+        );
+
+        assert_eq!(failed.retrieval_status, ReceiptRetrievalStatus::Failed);
+        assert!(failed.retrieved_at.is_none());
+        assert_eq!(
+            failed.last_retrieval_error.as_deref(),
+            Some("decryption failed")
+        );
+    }
+
+    #[test]
     fn test_decrypt_receipt_record_from_access_rejects_mismatch() {
         let receipt_id =
             paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();

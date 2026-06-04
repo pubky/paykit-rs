@@ -107,13 +107,13 @@ Suggested module responsibilities:
   parsing, dedupe, and current derived view rebuilds.
 - `private_lists`: local and remote Private Payment List publication, caching,
   latest-state derivation, and size policy.
+- `receipts`: Receipt Access event indexing, Encrypted Receipt retrieval,
+  decryption, and retrieval state.
 
 Future modules should be added only when they have concrete implementation:
 
 - `payment_requests`: Payment Request event state machine, outbound event
   queueing, proof correlation, and scheduling hooks.
-- `receipts`: Receipt Access event indexing, Encrypted Receipt retrieval,
-  decryption, and retry of access messages.
 - `reservations`: optional contact-scoped or single-use receiving-detail
   reservation records.
 - `backup`: versioned export/import of SDK-managed state.
@@ -502,17 +502,21 @@ Receipt Access records:
 - Receipt Decryption Key
 - optional Payment Request ID
 - optional Billing Period
-- retrieval state
+- retrieval state, timestamps, and last retrieval error
 
 Receipt records:
 
 - receipt id
-- decrypted receipt payload
 - payment reference
 - optional Payment Request ID
 - optional Billing Period
 - issuer context
+- recipient public key
+- optional Payment Endpoint Identifier
+- optional Payment Amount
+- caller-defined Receipt Metadata
 - retrieval/decryption time
+- Receipt Access Event ID and key hash used for retrieval
 
 Receipt Decryption Keys must be redacted in logs and debug output.
 
@@ -658,12 +662,12 @@ Payment Requests, Payment Proofs, and Receipts.
 4. Persist raw messages and parse results.
 5. Update Event Message dedupe records.
 6. Persist the updated Encrypted Link snapshot in the same transaction.
-7. Derive current views on read. The initial Rust SDK derives Private Payment
-   List latest-state views from stored stream items.
+7. Index Receipt Access events. Private Payment List views are derived on read
+   from stored stream items.
 8. Return a receive report.
 
-Future receive routing should extend the same raw stream log to Receipt Access,
-Payment Requests, Payment Proofs, and any other Event Message kinds.
+Future receive routing should extend the same raw stream log to Payment
+Requests, Payment Proofs, and any other Event Message kinds.
 
 ### Resolve Contact Payment
 
@@ -746,7 +750,10 @@ settlement confirmation.
 4. Fetch Encrypted Receipt when requested or configured.
 5. Decrypt with Receipt Decryption Key.
 6. Verify Receipt ID/location correlation through `paykit-lib`.
-7. Index by Receipt ID, Payment Reference, Payment Request ID, Billing Period,
+7. Verify the decrypted receipt recipient matches the local Pubky identity.
+8. Try newer Receipt Access records first, but fall back to older valid records
+   for the same Receipt ID.
+9. Index by Receipt ID, Payment Reference, Payment Request ID, Billing Period,
    counterparty, and issuer.
 
 ### Backup And Restore
@@ -948,17 +955,16 @@ These should stay outside Paykit SDK:
 The current Rust SDK foundation includes the crate skeleton, error/config
 types, adapter traits, in-memory test storage, identity state, public endpoint
 sync, Encrypted Link runtime records, private stream intake, Private Payment
-List latest-state derivation, contact payment resolution, and outbound Private
-Application Message delivery.
+List latest-state derivation, contact payment resolution, outbound Private
+Application Message delivery, Receipt Access indexing, and receipt retrieval.
 
 Next work:
 
-1. Add Receipt Access indexing and Receipt retrieval.
-2. Add Payment Request lifecycle derivation and outbound lifecycle APIs.
-3. Add optional endpoint reservation support.
-4. Add backup/export/restore for SDK-managed state.
-5. Add SDK FFI and platform wrappers.
-6. Migrate one existing app integration behind the SDK and use that to refine
+1. Add Payment Request lifecycle derivation and outbound lifecycle APIs.
+2. Add optional endpoint reservation support.
+3. Add backup/export/restore for SDK-managed state.
+4. Add SDK FFI and platform wrappers.
+5. Migrate one existing app integration behind the SDK and use that to refine
    adapters.
 
 Each step should include unit tests for storage invariants and at least one

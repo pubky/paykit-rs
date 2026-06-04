@@ -5,7 +5,8 @@ Stateful Rust runtime for Paykit integrations.
 `paykit-sdk` builds on `paykit-lib` and owns SDK-level local state for Pubky
 identity status, public Payment Endpoint sync, Encrypted Link state, private
 stream intake, Private Payment List derivation, contact payment resolution, and
-outbound Private Application Message delivery.
+outbound Private Application Message delivery. It also indexes Receipt Access
+events and retrieves/decrypts Encrypted Receipts into private SDK state.
 
 The crate is currently Rust-only. Existing Swift, Kotlin, and React Native
 bindings continue to expose low-level `paykit-lib` APIs until SDK bindings are
