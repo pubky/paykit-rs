@@ -541,6 +541,10 @@ fn mark_restored_peers_recovery_required(
                 last_sync_at: None,
                 last_private_receive_at: None,
                 failure_count: 0,
+                local_recovery_attempt_id: None,
+                local_recovery_marker_created_at: None,
+                remote_recovery_attempt_id: None,
+                remote_recovery_marker_observed_at: None,
             });
     }
 
@@ -1007,6 +1011,10 @@ mod tests {
                 last_sync_at: Some(timestamp()),
                 last_private_receive_at: None,
                 failure_count: 0,
+                local_recovery_attempt_id: None,
+                local_recovery_marker_created_at: None,
+                remote_recovery_attempt_id: None,
+                remote_recovery_marker_observed_at: None,
             }],
             public_endpoint_records: Vec::new(),
             payment_endpoint_reservations: Vec::new(),

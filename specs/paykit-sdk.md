@@ -668,6 +668,37 @@ configured to manage the whole Paykit public namespace.
 7. If restore or handshake advancement fails, mark the peer recovery-required
    and stop private automation for that peer.
 
+### Encrypted Link Recovery Markers
+
+When one side can no longer trust its local Encrypted Link state, the SDK should
+fail closed locally and may publish an Encrypted Link Recovery Marker through
+Pubky public storage. The marker is not sent over the broken link. It is a
+minimal public signal that the counterparty should relink.
+
+Marker privacy rules:
+
+- derive marker paths per peer pair from local secret material and the
+  counterparty public key
+- keep marker payloads minimal: version, kind, recovery attempt ID, and creation
+  time
+- do not include Payment Endpoints, Payment References, message counts, peer
+  display metadata, payment state, or detailed recovery stages
+- make marker usage policy-controlled so apps can disable public markers and
+  require manual or out-of-band relink when needed
+
+SDK behavior:
+
+1. Publish a local marker when a link is marked recovery-required and the local
+   identity is private-link-capable.
+2. Observe the counterparty marker before trusting cached private payment state.
+3. If a new counterparty attempt ID is observed, mark the peer
+   recovery-required, clear active link/handshake snapshots, and pause private
+   automation.
+4. Record observed attempt IDs so a stale marker does not repeatedly break a
+   newly established link.
+5. Remove local markers after successful relink when possible; stale remote
+   markers remain safe because attempt IDs are deduped locally.
+
 ### Publish Private Payment List
 
 1. Ensure the identity is private-link-capable.
@@ -908,6 +939,7 @@ Current `PaykitSdkConfig` includes:
 - private sharing enabled/disabled
 - public fallback policy
 - private recovery wait duration
+- Encrypted Link Recovery Marker policy
 - peer link operation lease timeout
 - outbound private send lease timeout
 

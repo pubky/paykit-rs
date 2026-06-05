@@ -58,7 +58,7 @@
 
 ### Payment Endpoint Identifier
 - **Definition**: The canonical machine-readable identifier for a payment endpoint type, such as `btc-lightning-bolt12` or `eur-sepa-iban`.
-- **NOT**: The full Payment Endpoint or the payload/credential itself.
+- **NOT**: The full Payment Endpoint, the payload/credential itself, or reserved Paykit storage path segments such as `private` or `encrypted-link-recovery`.
 - **Synonyms to AVOID**: method id, payment method id
 - **Related terms**: Payment Endpoint, Payment Method, Asset, Rail, Endpoint Format
 
@@ -129,6 +129,12 @@
 - **NOT**: A Payment Request ID, Payment Reference, relationship identifier, or a hash of the Event Message payload.
 - **Synonyms to AVOID**: event reference, message reference when naming the protocol identifier
 - **Related terms**: Event Message, Payment Request, Payment Request ID
+
+### Encrypted Link Recovery Marker
+- **Definition**: A minimal public Pubky marker that one peer publishes to signal that a counterparty should relink an Encrypted Link. Marker paths are pairwise-derived; marker payloads carry only version, kind, recovery attempt ID, and creation time.
+- **NOT**: A Private Application Message, payment message, recovery transcript, or proof that the counterparty received the marker.
+- **Synonyms to AVOID**: private recovery marker, recovery message when naming the public marker concept
+- **Related terms**: Encrypted Link, Linked Peer, Paykit SDK
 
 ### Private Payment List
 - **Definition**: A versioned encrypted Paykit message carrying a complete Payment List shared with a Linked Peer. Latest-State Message semantics apply; a newer Private Payment List supersedes older queued Private Payment List messages.

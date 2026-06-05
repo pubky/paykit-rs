@@ -30,6 +30,15 @@ pub enum PublicFallbackPolicy {
     AfterPrivateRecoveryTimeout,
 }
 
+/// Policy for public Encrypted Link recovery markers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EncryptedLinkRecoveryMarkerPolicy {
+    /// Publish and observe minimal public recovery markers.
+    Enabled,
+    /// Do not use public recovery markers.
+    Disabled,
+}
+
 /// Runtime configuration for Paykit SDK.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaykitSdkConfig {
@@ -41,6 +50,9 @@ pub struct PaykitSdkConfig {
     pub public_fallback: PublicFallbackPolicy,
     /// Maximum time to spend on private recovery before returning/falling back.
     pub private_recovery_timeout: Duration,
+    /// Public recovery marker behavior.
+    #[serde(default = "default_encrypted_link_recovery_marker_policy")]
+    pub encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy,
     /// Time after which an in-progress peer link operation can be retried.
     pub peer_link_operation_lease_timeout: Duration,
     /// Time after which an in-progress outbound private send can be retried.
@@ -54,8 +66,13 @@ impl Default for PaykitSdkConfig {
             private_sharing: PrivateSharingPolicy::Enabled,
             public_fallback: PublicFallbackPolicy::AfterPrivateRecoveryTimeout,
             private_recovery_timeout: Duration::from_secs(3),
+            encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy::Enabled,
             peer_link_operation_lease_timeout: Duration::from_secs(60),
             outbound_private_send_lease_timeout: Duration::from_secs(60),
         }
     }
+}
+
+fn default_encrypted_link_recovery_marker_policy() -> EncryptedLinkRecoveryMarkerPolicy {
+    EncryptedLinkRecoveryMarkerPolicy::Enabled
 }

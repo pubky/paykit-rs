@@ -203,6 +203,14 @@ pub struct LinkedPeerRecord {
     pub last_private_receive_at: Option<DateTime<Utc>>,
     /// Consecutive failure count for recovery/retry policy.
     pub failure_count: u32,
+    /// Locally published Encrypted Link recovery attempt id.
+    pub local_recovery_attempt_id: Option<String>,
+    /// Creation time for the local recovery marker payload.
+    pub local_recovery_marker_created_at: Option<DateTime<Utc>>,
+    /// Latest counterparty recovery attempt id already observed.
+    pub remote_recovery_attempt_id: Option<String>,
+    /// Time the counterparty recovery marker was observed.
+    pub remote_recovery_marker_observed_at: Option<DateTime<Utc>>,
 }
 
 /// Durable SDK-managed public Payment Endpoint publication record.
@@ -1270,6 +1278,10 @@ mod tests {
                         last_sync_at: Some(timestamp()),
                         last_private_receive_at: Some(timestamp()),
                         failure_count: 0,
+                        local_recovery_attempt_id: None,
+                        local_recovery_marker_created_at: None,
+                        remote_recovery_attempt_id: None,
+                        remote_recovery_marker_observed_at: None,
                     });
                     tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
                     tx.save_payment_endpoint_reservation(payment_endpoint_reservation_record(
@@ -1586,6 +1598,10 @@ mod tests {
                         last_sync_at: Some(timestamp()),
                         last_private_receive_at: None,
                         failure_count: 0,
+                        local_recovery_attempt_id: None,
+                        local_recovery_marker_created_at: None,
+                        remote_recovery_attempt_id: None,
+                        remote_recovery_marker_observed_at: None,
                     });
                     tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
                     tx.save_payment_endpoint_reservation(payment_endpoint_reservation_record(
@@ -1653,6 +1669,10 @@ mod tests {
                         last_sync_at: Some(timestamp()),
                         last_private_receive_at: None,
                         failure_count: 0,
+                        local_recovery_attempt_id: None,
+                        local_recovery_marker_created_at: None,
+                        remote_recovery_attempt_id: None,
+                        remote_recovery_marker_observed_at: None,
                     });
                     tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
                     tx.save_payment_endpoint_reservation(payment_endpoint_reservation_record(
@@ -1903,6 +1923,10 @@ mod tests {
                         last_sync_at: Some(timestamp()),
                         last_private_receive_at: None,
                         failure_count: 0,
+                        local_recovery_attempt_id: None,
+                        local_recovery_marker_created_at: None,
+                        remote_recovery_attempt_id: None,
+                        remote_recovery_marker_observed_at: None,
                     });
 
                     Err(PaykitSdkError::Storage {
