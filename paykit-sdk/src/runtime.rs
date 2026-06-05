@@ -16,6 +16,10 @@ use crate::{
     contacts::{
         ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
     },
+    endpoint_reservations::{
+        payment_endpoint_reservations, queue_private_payment_list_with_reservations,
+        reservation_payload_hash,
+    },
     endpoints::{
         desired_record, failed_record, normalize_receiving_details, pending_removal_record,
         published_record, removed_record, EndpointPublicationStatus, EndpointSyncChange,
@@ -60,9 +64,10 @@ use crate::{
         StorageAdapter,
     },
     PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointEvaluation,
-    PaymentEndpointSelection, PaymentEndpointSelectionRequest, PaymentEndpointSource,
-    PrivatePaymentListView, PubkyPublicKey, PubkySessionAccess, PubkySessionProvider,
-    ReceivingDetailScope, Result,
+    PaymentEndpointReservation, PaymentEndpointReservationRelease,
+    PaymentEndpointReservationRequest, PaymentEndpointSelection, PaymentEndpointSelectionRequest,
+    PaymentEndpointSource, PrivatePaymentListView, PubkyPublicKey, PubkySessionAccess,
+    PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, Result,
 };
 
 /// Clock abstraction used by SDK workflows and tests.
@@ -781,19 +786,99 @@ where
         )
         .await?;
 
-        let receiving_details = self
-            .payment
+        self.enqueue_private_payment_list_from_receiving_details(counterparty)
+            .await
+    }
+
+    async fn enqueue_private_payment_list_from_receiving_details(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        let request = PaymentEndpointReservationRequest {
+            counterparty: counterparty.clone(),
+        };
+        if let Some(reservations) = self.payment.reserve_receiving_details(&request).await? {
+            let releases = reservations
+                .iter()
+                .map(|reservation| reservation_release(&counterparty, reservation))
+                .collect::<Vec<_>>();
+            let now = self.clock.now();
+            let result = queue_private_payment_list_with_reservations(
+                &self.storage,
+                &request,
+                reservations,
+                now,
+            )
+            .await;
+            match result {
+                Ok(record) => Ok(record),
+                Err(err) => {
+                    if let Err(release_err) = self
+                        .release_reservations_after_queue_error(&releases, &counterparty)
+                        .await
+                    {
+                        return Err(PaykitSdkError::Policy(format!(
+                            "failed to queue reserved receiving details: {err}; reservation cleanup also failed: {release_err}"
+                        )));
+                    }
+                    Err(err)
+                }
+            }
+        } else {
+            let receiving_details = self.private_receiving_details(&counterparty).await?;
+            enqueue_private_payment_list_message(
+                &self.storage,
+                counterparty,
+                receiving_details,
+                self.clock.now(),
+            )
+            .await
+        }
+    }
+
+    async fn release_reservations_after_queue_error(
+        &self,
+        releases: &[PaymentEndpointReservationRelease],
+        counterparty: &PubkyPublicKey,
+    ) -> Result<()> {
+        let existing = payment_endpoint_reservations(&self.storage, counterparty).await?;
+        let mut release_errors = Vec::new();
+        for release in releases {
+            if existing.iter().any(|record| {
+                record.reservation_id == release.reservation_id
+                    && record.counterparty == release.counterparty
+                    && record.identifier == release.identifier
+                    && record.payload_hash == release.payload_hash
+            }) {
+                continue;
+            }
+            if let Err(err) = self
+                .payment
+                .release_receiving_detail_reservation(release)
+                .await
+            {
+                release_errors.push(format!("{}: {err}", release.reservation_id));
+            }
+        }
+        if release_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(PaykitSdkError::Policy(format!(
+                "failed to release reserved receiving details: {}",
+                release_errors.join("; ")
+            )))
+        }
+    }
+
+    async fn private_receiving_details(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<ReceivingDetail>> {
+        self.payment
             .current_receiving_details(ReceivingDetailScope::Private {
                 counterparty: counterparty.clone(),
             })
-            .await?;
-        enqueue_private_payment_list_message(
-            &self.storage,
-            counterparty,
-            receiving_details,
-            self.clock.now(),
-        )
-        .await
+            .await
     }
 
     /// Start an Encrypted Link Handshake as the initiator.
@@ -2025,17 +2110,35 @@ fn require_state(
     }
 }
 
+fn reservation_release(
+    counterparty: &PubkyPublicKey,
+    reservation: &PaymentEndpointReservation,
+) -> PaymentEndpointReservationRelease {
+    PaymentEndpointReservationRelease {
+        reservation_id: reservation.reservation_id.clone(),
+        counterparty: counterparty.clone(),
+        identifier: reservation.receiving_detail.identifier.clone(),
+        payload_hash: reservation_payload_hash(&reservation.receiving_detail.payload),
+        attribution: reservation.attribution.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
     use crate::{
         adapters::{
             EndpointCompatibility, PaymentEndpointCandidate, PaymentEndpointEvaluation,
-            PaymentEndpointSelection, PaymentEndpointSelectionRequest, PaymentTarget,
-            ReceivingDetail, ReceivingDetailScope,
+            PaymentEndpointReservation, PaymentEndpointReservationRelease,
+            PaymentEndpointReservationRequest, PaymentEndpointSelection,
+            PaymentEndpointSelectionRequest, PaymentTarget, ReceivingDetail, ReceivingDetailScope,
         },
         private_stream::persist_private_stream_batch,
         storage::{EncryptedLinkStateRecord, InMemoryStorage},
@@ -2120,6 +2223,193 @@ mod tests {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "ln-private".into(),
             }])
+        }
+
+        async fn select_payment_endpoint(
+            &self,
+            _request: &PaymentEndpointSelectionRequest,
+        ) -> Result<PaymentEndpointSelection> {
+            Ok(PaymentEndpointSelection {
+                selected: None,
+                evaluations: Vec::new(),
+            })
+        }
+
+        async fn build_payment_target(
+            &self,
+            endpoint: &PaymentEndpointCandidate,
+        ) -> Result<PaymentTarget> {
+            Ok(PaymentTarget {
+                payload: endpoint.payload.clone(),
+            })
+        }
+    }
+
+    struct ReservedPrivateListPaymentAdapter;
+
+    #[async_trait]
+    impl PaymentAdapter for ReservedPrivateListPaymentAdapter {
+        async fn current_receiving_details(
+            &self,
+            _scope: ReceivingDetailScope,
+        ) -> Result<Vec<ReceivingDetail>> {
+            panic!("reservation-capable adapter should not use fallback details");
+        }
+
+        async fn reserve_receiving_details(
+            &self,
+            request: &PaymentEndpointReservationRequest,
+        ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
+            assert!(!request.counterparty.as_str().is_empty());
+            Ok(Some(vec![PaymentEndpointReservation {
+                reservation_id: "reservation-1".into(),
+                receiving_detail: ReceivingDetail {
+                    identifier: "btc-lightning-bolt11".into(),
+                    payload: "ln-reserved".into(),
+                },
+                expires_at: None,
+                attribution: HashMap::from([("contact".into(), "alice".into())]),
+            }]))
+        }
+
+        async fn select_payment_endpoint(
+            &self,
+            request: &PaymentEndpointSelectionRequest,
+        ) -> Result<PaymentEndpointSelection> {
+            Ok(PaymentEndpointSelection {
+                selected: request.candidates.first().cloned(),
+                evaluations: Vec::new(),
+            })
+        }
+
+        async fn build_payment_target(
+            &self,
+            endpoint: &PaymentEndpointCandidate,
+        ) -> Result<PaymentTarget> {
+            Ok(PaymentTarget {
+                payload: endpoint.payload.clone(),
+            })
+        }
+    }
+
+    struct InvalidReservedPrivateListPaymentAdapter {
+        released: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
+        async fn current_receiving_details(
+            &self,
+            _scope: ReceivingDetailScope,
+        ) -> Result<Vec<ReceivingDetail>> {
+            panic!("reservation-capable adapter should not use fallback details");
+        }
+
+        async fn reserve_receiving_details(
+            &self,
+            _request: &PaymentEndpointReservationRequest,
+        ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
+            Ok(Some(vec![
+                PaymentEndpointReservation {
+                    reservation_id: "reservation-1".into(),
+                    receiving_detail: ReceivingDetail {
+                        identifier: "btc-lightning-bolt11".into(),
+                        payload: "one".into(),
+                    },
+                    expires_at: None,
+                    attribution: HashMap::new(),
+                },
+                PaymentEndpointReservation {
+                    reservation_id: "reservation-2".into(),
+                    receiving_detail: ReceivingDetail {
+                        identifier: "btc-lightning-bolt11".into(),
+                        payload: "two".into(),
+                    },
+                    expires_at: None,
+                    attribution: HashMap::new(),
+                },
+            ]))
+        }
+
+        async fn release_receiving_detail_reservation(
+            &self,
+            release: &PaymentEndpointReservationRelease,
+        ) -> Result<()> {
+            self.released
+                .lock()
+                .unwrap()
+                .push(release.reservation_id.clone());
+            Ok(())
+        }
+
+        async fn select_payment_endpoint(
+            &self,
+            _request: &PaymentEndpointSelectionRequest,
+        ) -> Result<PaymentEndpointSelection> {
+            Ok(PaymentEndpointSelection {
+                selected: None,
+                evaluations: Vec::new(),
+            })
+        }
+
+        async fn build_payment_target(
+            &self,
+            endpoint: &PaymentEndpointCandidate,
+        ) -> Result<PaymentTarget> {
+            Ok(PaymentTarget {
+                payload: endpoint.payload.clone(),
+            })
+        }
+    }
+
+    struct MixedExistingReservedPrivateListPaymentAdapter {
+        released: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl PaymentAdapter for MixedExistingReservedPrivateListPaymentAdapter {
+        async fn current_receiving_details(
+            &self,
+            _scope: ReceivingDetailScope,
+        ) -> Result<Vec<ReceivingDetail>> {
+            panic!("reservation-capable adapter should not use fallback details");
+        }
+
+        async fn reserve_receiving_details(
+            &self,
+            _request: &PaymentEndpointReservationRequest,
+        ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
+            Ok(Some(vec![
+                PaymentEndpointReservation {
+                    reservation_id: "existing-reservation".into(),
+                    receiving_detail: ReceivingDetail {
+                        identifier: "btc-lightning-bolt11".into(),
+                        payload: "existing".into(),
+                    },
+                    expires_at: None,
+                    attribution: HashMap::new(),
+                },
+                PaymentEndpointReservation {
+                    reservation_id: "conflicting-reservation".into(),
+                    receiving_detail: ReceivingDetail {
+                        identifier: "btc-lightning-bolt11".into(),
+                        payload: "conflict".into(),
+                    },
+                    expires_at: None,
+                    attribution: HashMap::new(),
+                },
+            ]))
+        }
+
+        async fn release_receiving_detail_reservation(
+            &self,
+            release: &PaymentEndpointReservationRelease,
+        ) -> Result<()> {
+            self.released
+                .lock()
+                .unwrap()
+                .push(release.reservation_id.clone());
+            Ok(())
         }
 
         async fn select_payment_endpoint(
@@ -2357,6 +2647,157 @@ mod tests {
         let result = sdk.enqueue_private_payment_list(counterparty).await;
 
         assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_private_payment_list_uses_fallback_details() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            PrivateListPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let outbound = sdk
+            .enqueue_private_payment_list_from_receiving_details(counterparty)
+            .await
+            .unwrap();
+
+        let list = paykit_lib::parse_private_payment_list_json(&outbound.raw_json).unwrap();
+        assert_eq!(
+            list.get(&PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap())
+                .unwrap()
+                .as_str(),
+            "ln-private"
+        );
+        assert!(storage
+            .snapshot()
+            .unwrap()
+            .payment_endpoint_reservations
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_private_payment_list_uses_reserved_details() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            ReservedPrivateListPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let outbound = sdk
+            .enqueue_private_payment_list_from_receiving_details(counterparty.clone())
+            .await
+            .unwrap();
+
+        let list = paykit_lib::parse_private_payment_list_json(&outbound.raw_json).unwrap();
+        assert_eq!(
+            list.get(&PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap())
+                .unwrap()
+                .as_str(),
+            "ln-reserved"
+        );
+        let reservations = storage
+            .snapshot()
+            .unwrap()
+            .payment_endpoint_reservations
+            .into_values()
+            .collect::<Vec<_>>();
+        assert_eq!(reservations.len(), 1);
+        assert_eq!(
+            reservations[0].outbound_message_id,
+            outbound.outbound_message_id
+        );
+        assert_ne!(reservations[0].payload_hash, "ln-reserved");
+        assert!(!format!("{:?}", reservations[0]).contains("ln-reserved"));
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_private_payment_list_releases_invalid_reservations() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let released = Arc::new(Mutex::new(Vec::new()));
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            InvalidReservedPrivateListPaymentAdapter {
+                released: released.clone(),
+            },
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk
+            .enqueue_private_payment_list_from_receiving_details(counterparty)
+            .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+        assert_eq!(
+            *released.lock().unwrap(),
+            vec!["reservation-1".to_string(), "reservation-2".to_string()]
+        );
+        let snapshot = storage.snapshot().unwrap();
+        assert!(snapshot.payment_endpoint_reservations.is_empty());
+        assert!(snapshot.outbound_private_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        queue_private_payment_list_with_reservations(
+            &storage,
+            &PaymentEndpointReservationRequest {
+                counterparty: counterparty.clone(),
+            },
+            vec![PaymentEndpointReservation {
+                reservation_id: "existing-reservation".into(),
+                receiving_detail: ReceivingDetail {
+                    identifier: "btc-lightning-bolt11".into(),
+                    payload: "existing".into(),
+                },
+                expires_at: None,
+                attribution: HashMap::new(),
+            }],
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        let released = Arc::new(Mutex::new(Vec::new()));
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            MixedExistingReservedPrivateListPaymentAdapter {
+                released: released.clone(),
+            },
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk
+            .enqueue_private_payment_list_from_receiving_details(counterparty)
+            .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+        assert_eq!(
+            *released.lock().unwrap(),
+            vec!["conflicting-reservation".to_string()]
+        );
+        assert_eq!(
+            storage
+                .snapshot()
+                .unwrap()
+                .payment_endpoint_reservations
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

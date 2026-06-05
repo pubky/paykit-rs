@@ -6,6 +6,7 @@ pub mod adapters;
 /// SDK runtime policy configuration.
 pub mod config;
 pub mod contacts;
+pub mod endpoint_reservations;
 pub mod endpoints;
 /// SDK error type.
 pub mod error;
@@ -25,7 +26,8 @@ pub mod storage;
 #[doc(inline)]
 pub use adapters::{
     EndpointCompatibility, PaymentAdapter, PaymentAmountContext, PaymentEndpointCandidate,
-    PaymentEndpointEvaluation, PaymentEndpointSelection, PaymentEndpointSelectionRequest,
+    PaymentEndpointEvaluation, PaymentEndpointReservation, PaymentEndpointReservationRelease,
+    PaymentEndpointReservationRequest, PaymentEndpointSelection, PaymentEndpointSelectionRequest,
     PaymentEndpointSource, PaymentTarget, PubkySessionProvider, ReceivingDetail,
     ReceivingDetailScope,
 };
@@ -37,6 +39,8 @@ pub use config::{
 pub use contacts::{
     ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
 };
+#[doc(inline)]
+pub use endpoint_reservations::payment_endpoint_reservations;
 #[doc(inline)]
 pub use endpoints::{
     load_public_endpoint_records, EndpointPublicationStatus, EndpointSyncChange, EndpointSyncReport,
@@ -82,8 +86,8 @@ pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
 #[doc(inline)]
 pub use storage::{
     EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
-    OutboundPrivateMessageRecord, PrivateStreamItemRecord, PublicEndpointRecord, StorageAdapter,
-    StorageState, StorageTransaction,
+    OutboundPrivateMessageRecord, PaymentEndpointReservationRecord, PrivateStreamItemRecord,
+    PublicEndpointRecord, StorageAdapter, StorageState, StorageTransaction,
 };
 
 /// Common result alias for Paykit SDK operations.

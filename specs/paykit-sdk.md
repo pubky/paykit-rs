@@ -82,6 +82,7 @@ paykit-sdk/
     linked_peers.rs
     private_stream.rs
     private_lists.rs
+    endpoint_reservations.rs
 ```
 
 Suggested module responsibilities:
@@ -107,6 +108,8 @@ Suggested module responsibilities:
   parsing, dedupe, and current derived view rebuilds.
 - `private_lists`: local and remote Private Payment List publication, caching,
   latest-state derivation, and size policy.
+- `endpoint_reservations`: optional receiving-detail reservation records for
+  Private Payment List sharing.
 - `receipts`: Receipt Access event indexing, Encrypted Receipt retrieval,
   decryption, and retrieval state.
 
@@ -114,8 +117,6 @@ Future modules should be added only when they have concrete implementation:
 
 - `payment_requests`: Payment Request event state machine, outbound event
   queueing, proof correlation, and scheduling hooks.
-- `reservations`: optional contact-scoped or single-use receiving-detail
-  reservation records.
 - `backup`: versioned export/import of SDK-managed state.
 - `scheduler`: optional recurring Payment Request scheduling integration.
 - `telemetry`: structured logs and redaction helpers.
@@ -185,6 +186,7 @@ The current Rust SDK foundation supports records for:
 - linked peer state
 - Encrypted Link snapshots and handshake snapshots
 - endpoint publication records
+- endpoint reservation records
 - outbound Private Application Message records and retry state
 - raw Private Application Message stream items
 - Event Message dedupe indexes
@@ -192,7 +194,6 @@ The current Rust SDK foundation supports records for:
 Future SDK storage should add records for:
 
 - parsed event records and derived current views
-- endpoint reservations
 - receipt records
 - backup metadata
 - recovery/fail-closed markers
@@ -297,6 +298,16 @@ pub trait PaymentAdapter {
         scope: ReceivingDetailScope,
     ) -> Result<Vec<ReceivingDetail>>;
 
+    async fn reserve_receiving_details(
+        &self,
+        request: &PaymentEndpointReservationRequest,
+    ) -> Result<Option<Vec<PaymentEndpointReservation>>>;
+
+    async fn release_receiving_detail_reservation(
+        &self,
+        release: &PaymentEndpointReservationRelease,
+    ) -> Result<()>;
+
     async fn select_payment_endpoint(
         &self,
         request: &PaymentEndpointSelectionRequest,
@@ -324,12 +335,30 @@ Payment execution and settlement detection stay with the integrating
 application or payment provider. Future SDK APIs may accept execution results
 from those systems.
 
-### Future Endpoint Reservations
+### Payment Endpoint Reservations
 
-Some payment methods need contact-scoped or single-use receiving details. The
-current SDK keeps this out of the public adapter surface. A future reservation
-module can add durable records and adapter hooks once the first product
-integration proves the exact shape.
+Some payment methods need contact-scoped receiving details. The current SDK lets
+payment adapters reserve receiving details for Private Payment List sharing. The
+SDK queues the Private Payment List and stores linked reservation records in one
+storage transaction. Reservation records keep lifecycle metadata and a payload
+hash; they do not store the raw reserved endpoint payload.
+
+When an adapter returns reservations, those reservations are the complete
+Private Payment List to share for that counterparty. Adapters that need mixed
+reserved and ordinary entries should include both as returned reservations.
+
+The payment adapter creates reservations before the SDK can persist linked
+records. Adapters should make reserved details idempotent, expiring, or safe to
+abandon if the process stops before durable queueing. The SDK releases returned
+reservations on SDK-side validation or queueing failure.
+
+Reservation IDs are counterparty-scoped idempotency keys for SDK reservation
+records, not for Private Payment List delivery. Requeueing the same reservation
+details may queue another latest-state Private Payment List and update the
+record to the latest outbound message id.
+
+Single-use Payment Request reservations are not part of the current SDK shape.
+They need more request-specific context before they should be exposed.
 
 ### Future Scheduling
 
@@ -452,11 +481,10 @@ Tracks optional contact-scoped receiving details:
 - reservation id
 - counterparty public key
 - Payment Endpoint Identifier
-- adapter-provided receiving detail id
 - payload hash
-- state: active, used, rotated, retired
+- latest outbound message id used to queue the reservation for sharing
 - attribution metadata
-- backup generation
+- reservation expiry, when provided by the payment adapter
 
 ### PaymentRequestRecord
 
@@ -578,8 +606,12 @@ Recommended locks:
 - storage-backed peer link operation lease: serializes Encrypted Link restore,
   handshake, send, receive, and snapshot updates per counterparty.
 - outbound queue claim/lock: serializes retry workers per counterparty.
-- reservation lock: serializes contact-scoped receiving-detail reservation and
-  rotation per counterparty/Payment Endpoint Identifier.
+- reservation transaction: stores reservation records and the outbound message
+  that shares them atomically. Existing reservation IDs with the same
+  counterparty, Payment Endpoint Identifier, and payload hash are idempotent;
+  conflicting existing details and duplicate IDs in the same batch are rejected.
+  The idempotency applies to reservation records, while Private Payment List
+  delivery remains latest-state and may queue another outbound message.
 
 These are local SDK/runtime locks, not protocol messages. They can be in-memory
 with durable recovery markers where needed. If a platform can run multiple
@@ -642,14 +674,16 @@ configured to manage the whole Paykit public namespace.
 
 1. Ensure the identity is private-link-capable.
 2. Ensure the counterparty has an active Encrypted Link snapshot.
-3. Ask `PaymentAdapter` for private receiving details scoped to the counterparty.
-4. Apply reservation policy if enabled.
-5. Build a complete Private Payment List.
-6. Enforce the pubky-noise message size limit.
-7. Persist outbound record and exact payload.
-8. Let the outbound Private Application Message worker send through Encrypted
+3. Ask `PaymentAdapter` for Private Payment List reservations.
+4. If reservations are returned, build the complete Private Payment List and
+   persist the outbound record plus linked reservation records atomically.
+5. If reservations are not returned, ask `PaymentAdapter` for private receiving
+   details scoped to the counterparty and queue the list normally.
+6. Release adapter reservations when SDK-side validation or queueing fails
+   before durable queueing.
+7. Let the outbound Private Application Message worker send through Encrypted
    Link.
-9. Persist send result and updated link snapshot.
+8. Persist send result and updated link snapshot.
 
 Private Payment Lists publish endpoints only. Payment References come from
 Payment Requests, Payment Proofs, and Receipts.
@@ -793,8 +827,10 @@ The current Rust SDK exposes initialization, identity status, public endpoint
 sync, linked peer handshakes, private stream receive, Private Payment List
 derivation/publication, contact payment resolution, and outbound Private
 Application Message processing, Receipt Access indexing/retrieval, and Payment
-Request lifecycle derivation plus checked outbound lifecycle queueing. Use
-`paykit-sdk` rustdoc for the exact current signatures.
+Request lifecycle derivation plus checked outbound lifecycle queueing. It also
+supports optional Payment Endpoint Reservation records and adapter hooks for
+reserved private receiving details. Use `paykit-sdk` rustdoc for the exact
+current signatures.
 
 Future SDK versions should extend the current surface with operations like:
 
@@ -930,14 +966,14 @@ sync, Encrypted Link runtime records, private stream intake, Private Payment
 List latest-state derivation, contact payment resolution, outbound Private
 Application Message delivery, Receipt Access indexing, receipt retrieval,
 Payment Request lifecycle derivation, and checked outbound Payment Request
-lifecycle queueing.
+lifecycle queueing, and optional Payment Endpoint Reservation storage for
+reserved private receiving details.
 
 Next work:
 
-1. Add optional endpoint reservation support.
-2. Add backup/export/restore for SDK-managed state.
-3. Add SDK FFI and platform wrappers.
-4. Migrate one existing app integration behind the SDK and use that to refine
+1. Add backup/export/restore for SDK-managed state.
+2. Add SDK FFI and platform wrappers.
+3. Migrate one existing app integration behind the SDK and use that to refine
    adapters.
 
 Each step should include unit tests for storage invariants and at least one
@@ -978,7 +1014,8 @@ Platform tests:
    under `/pub/paykit/`?
 3. Should the current default public fallback and private recovery timeouts
    differ for saved contacts versus one-off counterparties?
-4. How much endpoint reservation should be generalized in the first SDK version?
+4. Which reservation lifecycle hooks should be standardized beyond private-list
+   queueing?
 5. How much recurring Payment Request scheduling should the SDK own versus
    delegating to app/runtime schedulers?
 6. What unknown Private Application Message retention defaults are appropriate
