@@ -83,6 +83,7 @@ paykit-sdk/
     private_stream.rs
     private_lists.rs
     endpoint_reservations.rs
+    backup.rs
 ```
 
 Suggested module responsibilities:
@@ -112,12 +113,12 @@ Suggested module responsibilities:
   Private Payment List sharing.
 - `receipts`: Receipt Access event indexing, Encrypted Receipt retrieval,
   decryption, and retrieval state.
+- `backup`: versioned export/import of SDK-managed state.
 
 Future modules should be added only when they have concrete implementation:
 
 - `payment_requests`: Payment Request event state machine, outbound event
   queueing, proof correlation, and scheduling hooks.
-- `backup`: versioned export/import of SDK-managed state.
 - `scheduler`: optional recurring Payment Request scheduling integration.
 - `telemetry`: structured logs and redaction helpers.
 
@@ -190,12 +191,7 @@ The current Rust SDK foundation supports records for:
 - outbound Private Application Message records and retry state
 - raw Private Application Message stream items
 - Event Message dedupe indexes
-
-Future SDK storage should add records for:
-
-- parsed event records and derived current views
 - receipt records
-- backup metadata
 - recovery/fail-closed markers
 
 The SDK should ship an in-memory storage implementation for tests and examples.
@@ -355,7 +351,9 @@ reservations on SDK-side validation or queueing failure.
 Reservation IDs are counterparty-scoped idempotency keys for SDK reservation
 records, not for Private Payment List delivery. Requeueing the same reservation
 details may queue another latest-state Private Payment List and update the
-record to the latest outbound message id.
+record to the latest outbound message id. Idempotent repeats preserve the
+original reservation attribution, expiry, and creation time; adapters that want
+new metadata should use a new reservation id.
 
 Single-use Payment Request reservations are not part of the current SDK shape.
 They need more request-specific context before they should be exposed.
@@ -385,7 +383,6 @@ Tracks local Pubky identity state:
 
 - local public key
 - capability state
-- session backup metadata
 - whether local secret key is available
 - last successful initialization time
 - sign-out generation
@@ -794,7 +791,7 @@ settlement confirmation.
 
 Backup should include SDK-managed state:
 
-- identity backup metadata, when safe
+- public identity/capability state
 - peer records
 - Encrypted Link snapshots
 - handshake snapshots
@@ -814,10 +811,10 @@ Backup should not include:
 
 Restore flow:
 
-1. Load backup into storage under a restore transaction.
-2. Validate local identity compatibility.
-3. Validate every link snapshot recipient.
-4. Mark peers requiring resync.
+1. Validate local identity compatibility before replacing storage state.
+2. Validate backup record shape and every link snapshot recipient.
+3. Load backup into storage under a restore transaction.
+4. Mark peers requiring resync before committing restored private state.
 5. Do not execute automatic payments until private stream and request state are
    consistent.
 
@@ -825,12 +822,11 @@ Restore flow:
 
 The current Rust SDK exposes initialization, identity status, public endpoint
 sync, linked peer handshakes, private stream receive, Private Payment List
-derivation/publication, contact payment resolution, and outbound Private
-Application Message processing, Receipt Access indexing/retrieval, and Payment
-Request lifecycle derivation plus checked outbound lifecycle queueing. It also
-supports optional Payment Endpoint Reservation records and adapter hooks for
-reserved private receiving details. Use `paykit-sdk` rustdoc for the exact
-current signatures.
+derivation/publication, contact payment resolution, outbound Private
+Application Message processing, Receipt Access indexing/retrieval, Payment
+Request lifecycle derivation plus checked outbound lifecycle queueing, optional
+Payment Endpoint Reservation records, and backup/export/restore for
+SDK-managed state. Use `paykit-sdk` rustdoc for the exact current signatures.
 
 Future SDK versions should extend the current surface with operations like:
 
@@ -854,13 +850,7 @@ impl PaykitSdk {
         filter: ReceiptAccessFilter,
     ) -> Result<Vec<ReceiptAccessRecord>>;
 
-    async fn retrieve_receipt(
-        &mut self,
-        receipt_id: ReceiptId,
-    ) -> Result<ReceiptRecord>;
-
-    async fn export_backup_state(&self) -> Result<SdkBackupState>;
-    async fn restore_backup_state(&mut self, backup: SdkBackupState) -> Result<RestoreReport>;
+    async fn retrieve_receipt(&self, receipt_id: ReceiptId) -> Result<ReceiptRecord>;
 }
 ```
 
@@ -966,14 +956,13 @@ sync, Encrypted Link runtime records, private stream intake, Private Payment
 List latest-state derivation, contact payment resolution, outbound Private
 Application Message delivery, Receipt Access indexing, receipt retrieval,
 Payment Request lifecycle derivation, and checked outbound Payment Request
-lifecycle queueing, and optional Payment Endpoint Reservation storage for
-reserved private receiving details.
+lifecycle queueing, optional Payment Endpoint Reservation storage for reserved
+private receiving details, and backup/export/restore for SDK-managed state.
 
 Next work:
 
-1. Add backup/export/restore for SDK-managed state.
-2. Add SDK FFI and platform wrappers.
-3. Migrate one existing app integration behind the SDK and use that to refine
+1. Add SDK FFI and platform wrappers.
+2. Migrate one existing app integration behind the SDK and use that to refine
    adapters.
 
 Each step should include unit tests for storage invariants and at least one

@@ -3,6 +3,8 @@
 
 /// Adapter traits and payment endpoint selection types.
 pub mod adapters;
+/// SDK backup and restore payloads.
+pub mod backup;
 /// SDK runtime policy configuration.
 pub mod config;
 pub mod contacts;
@@ -32,6 +34,8 @@ pub use adapters::{
     ReceivingDetailScope,
 };
 #[doc(inline)]
+pub use backup::{export_backup_state, RestoreReport, SdkBackupState, SDK_BACKUP_VERSION};
+#[doc(inline)]
 pub use config::{
     EndpointManagementScope, PaykitSdkConfig, PrivateSharingPolicy, PublicFallbackPolicy,
 };
@@ -39,8 +43,6 @@ pub use config::{
 pub use contacts::{
     ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
 };
-#[doc(inline)]
-pub use endpoint_reservations::payment_endpoint_reservations;
 #[doc(inline)]
 pub use endpoints::{
     load_public_endpoint_records, EndpointPublicationStatus, EndpointSyncChange, EndpointSyncReport,
@@ -59,25 +61,20 @@ pub use linked_peers::{
 };
 #[doc(inline)]
 pub use outbound_private::{
-    queued_outbound_private_messages, OutboundPrivateMessageStatus, OutboundPrivateSendFailure,
-    OutboundPrivateSendReport,
+    OutboundPrivateMessageStatus, OutboundPrivateSendFailure, OutboundPrivateSendReport,
 };
 #[doc(inline)]
 pub use payment_requests::{
-    payment_request_records, received_payment_request_records, PaymentProofRecord,
-    PaymentRequestAmountRecord, PaymentRequestBillingPeriodRecord, PaymentRequestLifecycleState,
-    PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
-    PaymentRequestTermsRecord,
+    PaymentProofRecord, PaymentRequestAmountRecord, PaymentRequestBillingPeriodRecord,
+    PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
+    PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord,
 };
 #[doc(inline)]
-pub use private_lists::{
-    current_private_payment_list, derive_private_payment_list_view, PrivatePaymentListView,
-};
+pub use private_lists::PrivatePaymentListView;
 #[doc(inline)]
 pub use private_stream::{EventIdConflict, PrivateStreamIntakeReport, PrivateStreamParseStatus};
 #[doc(inline)]
 pub use receipts::{
-    receipt_access_record_by_receipt_id, receipt_access_records, receipt_record,
     ReceiptAccessRecord, ReceiptAmountRecord, ReceiptBillingPeriodRecord, ReceiptRecord,
     ReceiptRetrievalStatus,
 };

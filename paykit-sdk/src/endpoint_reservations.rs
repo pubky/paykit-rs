@@ -18,7 +18,7 @@ use crate::{
 use paykit_lib::{serialize_private_payment_list_json, PrivatePaymentList};
 
 /// Load Payment Endpoint Reservation records for one counterparty.
-pub async fn payment_endpoint_reservations<S>(
+pub(crate) async fn payment_endpoint_reservations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
 ) -> Result<Vec<PaymentEndpointReservationRecord>>

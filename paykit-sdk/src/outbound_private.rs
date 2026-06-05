@@ -72,7 +72,7 @@ where
 }
 
 /// Load private messages that should be attempted for one counterparty.
-pub async fn queued_outbound_private_messages<S>(
+pub(crate) async fn queued_outbound_private_messages<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
 ) -> Result<Vec<OutboundPrivateMessageRecord>>

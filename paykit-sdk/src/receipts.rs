@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
 
-use crate::{storage::StorageAdapter, PaykitSdkError, PubkyPublicKey, Result};
+use crate::{PaykitSdkError, PubkyPublicKey, Result};
+
+#[cfg(test)]
+use crate::storage::StorageAdapter;
 
 /// Durable Billing Period fields copied from a Receipt Access event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,7 +272,8 @@ impl fmt::Debug for ReceiptRecord {
 }
 
 /// List indexed Receipt Access records for one counterparty.
-pub async fn receipt_access_records<S>(
+#[cfg(test)]
+pub(crate) async fn receipt_access_records<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
 ) -> Result<Vec<ReceiptAccessRecord>>
@@ -282,7 +286,8 @@ where
 }
 
 /// Load the latest indexed Receipt Access record for a receipt.
-pub async fn receipt_access_record_by_receipt_id<S>(
+#[cfg(test)]
+pub(crate) async fn receipt_access_record_by_receipt_id<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
     receipt_id: &str,
@@ -292,20 +297,6 @@ where
 {
     storage
         .transaction(|tx| Ok(tx.receipt_access_record_by_receipt_id(counterparty, receipt_id)))
-        .await
-}
-
-/// Load a decrypted Receipt record.
-pub async fn receipt_record<S>(
-    storage: &S,
-    issuer: &PubkyPublicKey,
-    receipt_id: &str,
-) -> Result<Option<ReceiptRecord>>
-where
-    S: StorageAdapter,
-{
-    storage
-        .transaction(|tx| Ok(tx.receipt_record(issuer, receipt_id)))
         .await
 }
 

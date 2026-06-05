@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    backup::ValidatedStorageState,
     endpoints::EndpointPublicationStatus,
     identity::{IdentityState, PubkyPublicKey},
     linked_peers::LinkedPeerState,
@@ -44,6 +45,12 @@ pub trait StorageAdapter: Send + Sync {
 
 /// Mutable operations available inside one storage transaction.
 pub trait StorageTransaction {
+    /// Export the full logical SDK storage state.
+    fn export_storage_state(&self) -> StorageState;
+
+    /// Replace the full logical SDK storage state after backup validation.
+    fn replace_storage_state(&mut self, state: ValidatedStorageState);
+
     /// Load the current identity state.
     fn load_identity_state(&self) -> Option<IdentityState>;
 
@@ -618,7 +625,7 @@ pub struct EventDedupRecord {
     pub conflicting_stream_item_ids: Vec<u64>,
 }
 
-/// In-memory storage state used for tests and examples.
+/// Logical SDK storage state used by snapshots, tests, and backup/restore.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StorageState {
     /// Current identity state.
@@ -707,6 +714,14 @@ struct InMemoryStorageTransaction {
 }
 
 impl StorageTransaction for InMemoryStorageTransaction {
+    fn export_storage_state(&self) -> StorageState {
+        self.state.clone()
+    }
+
+    fn replace_storage_state(&mut self, state: ValidatedStorageState) {
+        self.state = state.into_storage_state();
+    }
+
     fn load_identity_state(&self) -> Option<IdentityState> {
         self.state.identity_state.clone()
     }
@@ -1053,12 +1068,9 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::{
-        outbound_private::{
-            claim_next_outbound_private_message, mark_outbound_failed, mark_outbound_invalid,
-            mark_outbound_sent,
-        },
-        queued_outbound_private_messages,
+    use crate::outbound_private::{
+        claim_next_outbound_private_message, mark_outbound_failed, mark_outbound_invalid,
+        mark_outbound_sent, queued_outbound_private_messages,
     };
 
     fn timestamp() -> DateTime<Utc> {
