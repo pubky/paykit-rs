@@ -2250,7 +2250,7 @@ where
         Ok(report)
     }
 
-    /// Receive and durably persist currently available private messages.
+    /// Receive and durably persist available private messages.
     ///
     /// This requires a stored Encrypted Link snapshot for the counterparty.
     /// Handshake establishment and recovery are separate workflows.

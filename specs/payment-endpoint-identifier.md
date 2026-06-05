@@ -112,10 +112,10 @@ than introducing intra-segment punctuation.
 The *endpoint format* segment names the handle format on that rail
 (`p2tr`, `bolt11`, `bolt12`, `address`, `iban`, `tag`).
 
-When a rail currently has a single canonical address format, use `address`
-rather than inventing a more specific name. Reserve distinct Endpoint Format
-values for rails that genuinely expose multiple incompatible formats (for
-example, Bitcoin's `p2wpkh`, `p2tr`, and so on).
+When a rail has a single canonical address format, use `address` rather than
+inventing a more specific name. Reserve distinct Endpoint Format values for
+rails that genuinely expose multiple incompatible formats (for example,
+Bitcoin's `p2wpkh`, `p2tr`, and so on).
 
 Whichever name is used, authors SHOULD still name it explicitly, so that
 future formats on the same rail can be added as new identifiers without

@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_private_payment_list_json_rejects_removed_reference_field() {
+    fn test_parse_private_payment_list_json_rejects_reference_field() {
         let err = parse_private_payment_list_json(
             r#"{"version":1,"kind":"paykit.private_payment_list","reference":"invoice-2026-0001","payment_endpoints":{}}"#,
         )

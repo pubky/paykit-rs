@@ -17,7 +17,7 @@ use crate::{
 pub enum OutboundPrivateMessageStatus {
     /// Message is queued and has not been sent.
     Pending,
-    /// A worker is currently trying to send this message.
+    /// A worker is sending this message.
     Sending,
     /// Message was sent successfully.
     Sent,

@@ -197,7 +197,7 @@ impl EncryptedLink {
         .await
     }
 
-    /// Receive currently available Private Application Messages in stream order.
+    /// Receive available Private Application Messages in stream order.
     ///
     /// The Noise read checkpoint advances past the returned messages. Callers
     /// that need crash-safe Event Message handling should persist returned

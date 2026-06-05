@@ -90,7 +90,7 @@ Module responsibilities:
 - `runtime`: owns `PaykitSdk`, coordinates adapters, storage, and workflow
   modules.
 - `config`: product-neutral policy knobs such as fallback behavior, retry
-  limits, stale cache rules, and future message retention limits.
+  limits, stale cache rules, and message retention limits.
 - `adapters`: payment-method adapter plus narrow platform hook for live Pubky
   session access.
 - `storage`: durable records, transaction interface, and in-memory test
@@ -344,11 +344,11 @@ new metadata should use a new reservation id.
 Single-use Payment Request reservations are outside the SDK shape until the
 request-specific context is defined.
 
-### Future Scheduling
+### Recurring Scheduling
 
-Recurring Payment Request scheduling is future SDK scope. The SDK should derive
-eligibility and durable state, while the integrating app/runtime may still own
-the actual timer service.
+Recurring Payment Request scheduling is outside this SDK scope. The SDK should
+derive eligibility and durable state, while the integrating app/runtime may
+still own the actual timer service.
 
 ### Logger And Clock
 
@@ -602,8 +602,8 @@ These are local SDK/runtime locks, not protocol messages. They can be in-memory
 with durable recovery markers where needed. If a platform can run multiple
 processes against the same storage, lock ownership must be storage-backed.
 Lease expiry makes a stale operation reclaimable by another worker; durable
-writes still check the currently stored lease id so an old holder cannot commit
-after a newer lease has replaced it.
+writes still check the stored lease id so an earlier holder cannot commit after
+a newer lease has replaced it.
 
 ## Workflows
 
@@ -682,7 +682,7 @@ SDK behavior:
    recovery-required, clear active link/handshake snapshots, and pause private
    automation.
 4. Record observed attempt IDs so a stale marker does not repeatedly break a
-   newly established link.
+   re-established link.
 5. Remove local markers after successful relink when possible; stale remote
    markers remain safe because attempt IDs are deduped locally.
 
@@ -841,7 +841,7 @@ Restore flow:
 
 ## Public SDK API Shape
 
-The current Rust SDK exposes initialization, identity status, public endpoint
+The Rust SDK exposes initialization, identity status, public endpoint
 sync, linked peer handshakes, private stream receive, Private Payment List
 derivation/publication, Paykit Profile publication/fetching, local Contact
 Record CRUD/profile refresh, contact payment resolution, outbound Private
@@ -923,7 +923,7 @@ belongs to the app.
 
 ## Policy Configuration
 
-Current `PaykitSdkConfig` includes:
+`PaykitSdkConfig` includes:
 
 - public endpoint management scope
 - private sharing enabled/disabled
@@ -1008,7 +1008,7 @@ Platform tests:
   Pubky namespaces.
 - Public contact marker discovery and richer contact-sharing policy.
 - Public fallback and private recovery timeout policies for saved contacts
-  versus one-off counterparties.
+  versus unsaved counterparties.
 - Reservation lifecycle hooks beyond Private Payment List queueing.
 - Recurring Payment Request scheduling ownership between the SDK and
   app/runtime schedulers.
