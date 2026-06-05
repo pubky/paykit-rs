@@ -2,10 +2,12 @@ use std::{cmp::Reverse, collections::HashSet};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use paykit_lib::{
-    PaymentProof, PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation,
-    PaymentRequestEvent, PaymentRequestRejection,
+    BillingPeriod, EventId, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
+    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent, PaymentRequestId,
+    PaymentRequestRejection, PaymentRequestTerms,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
     config::{
@@ -39,7 +41,9 @@ use crate::{
         enqueue_payment_request_cancellation as enqueue_payment_request_cancellation_message,
         enqueue_payment_request_event as enqueue_payment_request_event_message,
         enqueue_payment_request_rejection as enqueue_payment_request_rejection_message,
+        payment_request_records as derive_payment_request_records,
         received_payment_request_records as derive_received_payment_request_records,
+        request_from_record, PaymentRequestLifecycleState, PaymentRequestLocalRole,
         PaymentRequestRecord,
     },
     private_lists::{
@@ -439,6 +443,21 @@ where
         derive_received_payment_request_records(&self.storage, counterparty, self.clock.now()).await
     }
 
+    /// Return merged local Payment Request records for one counterparty.
+    ///
+    /// Records combine received private-stream events and local outbound
+    /// Payment Request events, returned newest-first.
+    pub async fn payment_request_records(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<PaymentRequestRecord>> {
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
+            return Ok(Vec::new());
+        }
+        derive_payment_request_records(&self.storage, counterparty, self.clock.now()).await
+    }
+
     async fn ensure_private_outbound_ready(
         &self,
         counterparty: &PubkyPublicKey,
@@ -472,6 +491,166 @@ where
         }
 
         Ok(())
+    }
+
+    /// Queue a new Payment Request proposal and return local derived state.
+    ///
+    /// The returned record reflects the local outbound queue, not delivery or
+    /// counterparty processing.
+    pub async fn propose_payment_request(
+        &self,
+        counterparty: PubkyPublicKey,
+        terms: PaymentRequestTerms,
+    ) -> Result<PaymentRequestRecord> {
+        let event = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
+        let payment_request_id = event.payment_request_id.clone();
+        self.enqueue_raw_payment_request(counterparty.clone(), &event)
+            .await?;
+        self.load_payment_request_record(&counterparty, &payment_request_id)
+            .await
+    }
+
+    /// Queue acceptance for a received Payment Request and return local derived state.
+    ///
+    /// The returned record reflects the local outbound queue, not delivery or
+    /// counterparty processing.
+    pub async fn accept_payment_request(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+    ) -> Result<PaymentRequestRecord> {
+        let record = self
+            .load_payment_request_record(&counterparty, payment_request_id)
+            .await?;
+        require_payer_role(&record, "accept Payment Request")?;
+        require_state(
+            &record,
+            &[PaymentRequestLifecycleState::Proposed],
+            "accept Payment Request",
+        )?;
+        let event = PaymentRequestAcceptance::new(EventId::new_v4(), payment_request_id.clone());
+        self.enqueue_raw_payment_request_acceptance(counterparty.clone(), &event)
+            .await?;
+        self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
+    }
+
+    /// Queue rejection for a received Payment Request and return local derived state.
+    ///
+    /// The returned record reflects the local outbound queue, not delivery or
+    /// counterparty processing.
+    pub async fn reject_payment_request(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+        reason: Option<String>,
+    ) -> Result<PaymentRequestRecord> {
+        let record = self
+            .load_payment_request_record(&counterparty, payment_request_id)
+            .await?;
+        require_payer_role(&record, "reject Payment Request")?;
+        require_state(
+            &record,
+            &[PaymentRequestLifecycleState::Proposed],
+            "reject Payment Request",
+        )?;
+        let event =
+            PaymentRequestRejection::new(EventId::new_v4(), payment_request_id.clone(), reason);
+        self.enqueue_raw_payment_request_rejection(counterparty.clone(), &event)
+            .await?;
+        self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
+    }
+
+    /// Queue cancellation for a known non-terminal Payment Request and return local derived state.
+    ///
+    /// The returned record reflects the local outbound queue, not delivery or
+    /// counterparty processing.
+    pub async fn cancel_payment_request(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+        reason: Option<String>,
+    ) -> Result<PaymentRequestRecord> {
+        let record = self
+            .load_payment_request_record(&counterparty, payment_request_id)
+            .await?;
+        require_state(
+            &record,
+            &[
+                PaymentRequestLifecycleState::Proposed,
+                PaymentRequestLifecycleState::ProposalExpired,
+                PaymentRequestLifecycleState::Accepted,
+                PaymentRequestLifecycleState::ActiveRecurring,
+                PaymentRequestLifecycleState::ProofSubmitted,
+            ],
+            "cancel Payment Request",
+        )?;
+        let event =
+            PaymentRequestCancellation::new(EventId::new_v4(), payment_request_id.clone(), reason);
+        self.enqueue_raw_payment_request_cancellation(counterparty.clone(), &event)
+            .await?;
+        self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
+    }
+
+    /// Queue a Payment Proof for an accepted Payment Request and return local derived state.
+    ///
+    /// The returned record reflects the local outbound queue, not delivery or
+    /// counterparty processing.
+    pub async fn submit_payment_proof(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+        billing_period: Option<BillingPeriod>,
+        payment_endpoint_identifier: PaymentEndpointIdentifier,
+        proof: JsonMap<String, JsonValue>,
+    ) -> Result<PaymentRequestRecord> {
+        let record = self
+            .load_payment_request_record(&counterparty, payment_request_id)
+            .await?;
+        require_payer_role(&record, "submit Payment Proof")?;
+        require_state(
+            &record,
+            &[
+                PaymentRequestLifecycleState::Accepted,
+                PaymentRequestLifecycleState::ActiveRecurring,
+            ],
+            "submit Payment Proof",
+        )?;
+        let request = request_from_record(&record).ok_or_else(|| {
+            PaykitSdkError::Protocol("Payment Request terms are unavailable".into())
+        })?;
+        let event = PaymentProof::new(
+            EventId::new_v4(),
+            payment_request_id.clone(),
+            request.request.payment_reference.clone(),
+            billing_period,
+            payment_endpoint_identifier,
+            proof,
+        );
+        event.validate_for_request(&request)?;
+        self.enqueue_raw_payment_proof(counterparty.clone(), &event)
+            .await?;
+        self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
+    }
+
+    async fn load_payment_request_record(
+        &self,
+        counterparty: &PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+    ) -> Result<PaymentRequestRecord> {
+        derive_payment_request_records(&self.storage, counterparty, self.clock.now())
+            .await?
+            .into_iter()
+            .find(|record| record.payment_request_id == payment_request_id.as_str())
+            .ok_or_else(|| {
+                PaykitSdkError::Protocol(format!(
+                    "Payment Request {} is not known for counterparty {}",
+                    payment_request_id, counterparty
+                ))
+            })
     }
 
     /// Enqueue one raw Payment Request protocol event for outbound delivery.
@@ -1821,6 +2000,31 @@ fn selected_from_batch(
     }
 }
 
+fn require_payer_role(record: &PaymentRequestRecord, action: &str) -> Result<()> {
+    if record.local_role == Some(PaymentRequestLocalRole::Payer) {
+        Ok(())
+    } else {
+        Err(PaykitSdkError::Policy(format!(
+            "cannot {action}: local identity is not the payer"
+        )))
+    }
+}
+
+fn require_state(
+    record: &PaymentRequestRecord,
+    allowed: &[PaymentRequestLifecycleState],
+    action: &str,
+) -> Result<()> {
+    if allowed.contains(&record.state) {
+        Ok(())
+    } else {
+        Err(PaykitSdkError::Policy(format!(
+            "cannot {action}: Payment Request {} is in state {:?}",
+            record.payment_request_id, record.state
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
@@ -2069,6 +2273,23 @@ mod tests {
         r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#.into()
     }
 
+    fn payment_request_message(
+        event_id: &str,
+        request_id: &str,
+        expires_at: Option<&str>,
+    ) -> PrivateApplicationMessage {
+        let expiry = expires_at
+            .map(|value| format!(r#""{value}""#))
+            .unwrap_or_else(|| "null".into());
+        PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some("paykit.payment_request".into()),
+            raw_json: format!(
+                r#"{{"version":1,"kind":"paykit.payment_request","event_id":"{event_id}","payment_request_id":"{request_id}","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":{expiry},"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{{}}}}}}"#
+            ),
+        }
+    }
+
     async fn seed_private_capable_identity_and_link(
         storage: &InMemoryStorage,
         counterparty: PubkyPublicKey,
@@ -2233,6 +2454,116 @@ mod tests {
                 .status,
             crate::OutboundPrivateMessageStatus::Pending
         );
+    }
+
+    #[tokio::test]
+    async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
+        persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![payment_request_message(
+                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+                request_id.as_str(),
+                Some("2026-06-03T11:59:59Z"),
+            )],
+            None,
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.accept_payment_request(counterparty, &request_id).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+        assert!(storage
+            .snapshot()
+            .unwrap()
+            .outbound_private_messages
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_reject_payment_request_rejects_expired_proposal_before_enqueue() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
+        persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![payment_request_message(
+                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+                request_id.as_str(),
+                Some("2026-06-03T11:59:59Z"),
+            )],
+            None,
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk
+            .reject_payment_request(counterparty, &request_id, None)
+            .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+        assert!(storage
+            .snapshot()
+            .unwrap()
+            .outbound_private_messages
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_accept_payment_request_checks_lifecycle_before_send_readiness() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
+        persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![payment_request_message(
+                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+                request_id.as_str(),
+                None,
+            )],
+            None,
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.accept_payment_request(counterparty, &request_id).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+        assert!(storage
+            .snapshot()
+            .unwrap()
+            .outbound_private_messages
+            .is_empty());
     }
 
     #[tokio::test]

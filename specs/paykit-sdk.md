@@ -792,8 +792,9 @@ Restore flow:
 The current Rust SDK exposes initialization, identity status, public endpoint
 sync, linked peer handshakes, private stream receive, Private Payment List
 derivation/publication, contact payment resolution, and outbound Private
-Application Message processing. Use `paykit-sdk` rustdoc for the exact current
-signatures.
+Application Message processing, Receipt Access indexing/retrieval, and Payment
+Request lifecycle derivation plus checked outbound lifecycle queueing. Use
+`paykit-sdk` rustdoc for the exact current signatures.
 
 Future SDK versions should extend the current surface with operations like:
 
@@ -806,35 +807,6 @@ impl PaykitSdk {
 
     async fn sync_contact(&mut self, counterparty: PubkyPublicKey) -> Result<ContactSyncReport>;
     async fn sync_saved_contacts(&mut self, contacts: Vec<PubkyPublicKey>) -> Result<SyncReport>;
-
-    async fn propose_payment_request(
-        &mut self,
-        counterparty: PubkyPublicKey,
-        terms: PaymentRequestTermsInput,
-    ) -> Result<PaymentRequestRecord>;
-
-    async fn accept_payment_request(
-        &mut self,
-        id: PaymentRequestId,
-    ) -> Result<PaymentRequestRecord>;
-
-    async fn reject_payment_request(
-        &mut self,
-        id: PaymentRequestId,
-        reason: Option<String>,
-    ) -> Result<PaymentRequestRecord>;
-
-    async fn cancel_payment_request(
-        &mut self,
-        id: PaymentRequestId,
-        reason: Option<String>,
-    ) -> Result<PaymentRequestRecord>;
-
-    async fn record_payment_proof(
-        &mut self,
-        id: PaymentRequestId,
-        proof: PaymentProofInput,
-    ) -> Result<PaymentRequestRecord>;
 
     async fn list_payment_requests(
         &self,
@@ -956,15 +928,16 @@ The current Rust SDK foundation includes the crate skeleton, error/config
 types, adapter traits, in-memory test storage, identity state, public endpoint
 sync, Encrypted Link runtime records, private stream intake, Private Payment
 List latest-state derivation, contact payment resolution, outbound Private
-Application Message delivery, Receipt Access indexing, and receipt retrieval.
+Application Message delivery, Receipt Access indexing, receipt retrieval,
+Payment Request lifecycle derivation, and checked outbound Payment Request
+lifecycle queueing.
 
 Next work:
 
-1. Add Payment Request lifecycle derivation and outbound lifecycle APIs.
-2. Add optional endpoint reservation support.
-3. Add backup/export/restore for SDK-managed state.
-4. Add SDK FFI and platform wrappers.
-5. Migrate one existing app integration behind the SDK and use that to refine
+1. Add optional endpoint reservation support.
+2. Add backup/export/restore for SDK-managed state.
+3. Add SDK FFI and platform wrappers.
+4. Migrate one existing app integration behind the SDK and use that to refine
    adapters.
 
 Each step should include unit tests for storage invariants and at least one

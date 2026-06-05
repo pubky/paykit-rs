@@ -106,6 +106,12 @@ pub trait StorageTransaction {
         counterparty: &PubkyPublicKey,
     ) -> Vec<OutboundPrivateMessageRecord>;
 
+    /// List all outbound private messages for one counterparty.
+    fn outbound_private_messages(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Vec<OutboundPrivateMessageRecord>;
+
     /// Claim the next outbound private message for sending, preserving FIFO.
     fn claim_next_outbound_private_message(
         &mut self,
@@ -796,6 +802,21 @@ impl StorageTransaction for InMemoryStorageTransaction {
                             | OutboundPrivateMessageStatus::Failed
                     )
             })
+            .cloned()
+            .collect::<Vec<_>>();
+        messages.sort_by_key(|message| message.outbound_message_id);
+        messages
+    }
+
+    fn outbound_private_messages(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Vec<OutboundPrivateMessageRecord> {
+        let mut messages = self
+            .state
+            .outbound_private_messages
+            .iter()
+            .filter(|message| &message.counterparty == counterparty)
             .cloned()
             .collect::<Vec<_>>();
         messages.sort_by_key(|message| message.outbound_message_id);
