@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     backup::ValidatedStorageState,
+    contacts::ContactRecord,
     endpoints::EndpointPublicationStatus,
     identity::{IdentityState, PubkyPublicKey},
     linked_peers::LinkedPeerState,
@@ -69,6 +70,18 @@ pub trait StorageTransaction {
 
     /// Save one Linked Peer record.
     fn save_linked_peer(&mut self, record: LinkedPeerRecord);
+
+    /// List local contact records.
+    fn contact_records(&self) -> Vec<ContactRecord>;
+
+    /// Load one local contact record.
+    fn contact_record(&self, public_key: &PubkyPublicKey) -> Option<ContactRecord>;
+
+    /// Save one local contact record.
+    fn save_contact_record(&mut self, record: ContactRecord);
+
+    /// Remove one local contact record.
+    fn remove_contact_record(&mut self, public_key: &PubkyPublicKey) -> Option<ContactRecord>;
 
     /// List SDK-managed public Payment Endpoint records.
     fn public_endpoint_records(&self) -> Vec<PublicEndpointRecord>;
@@ -639,12 +652,14 @@ pub struct EventDedupRecord {
 }
 
 /// Logical SDK storage state used by snapshots, tests, and backup/restore.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct StorageState {
     /// Current identity state.
     pub identity_state: Option<IdentityState>,
     /// Linked Peer records by counterparty.
     pub linked_peers: HashMap<PubkyPublicKey, LinkedPeerRecord>,
+    /// Local contact records by public key.
+    pub contact_records: HashMap<PubkyPublicKey, ContactRecord>,
     /// SDK-managed public endpoint records by identifier.
     pub public_endpoint_records: HashMap<String, PublicEndpointRecord>,
     /// SDK-managed Payment Endpoint Reservation records by counterparty and reservation id.
@@ -672,6 +687,74 @@ pub struct StorageState {
     pub receipt_access_records: HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
     /// Decrypted Receipt records by issuer and Receipt ID.
     pub receipt_records: HashMap<(PubkyPublicKey, String), ReceiptRecord>,
+}
+
+impl fmt::Debug for StorageState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StorageState")
+            .field(
+                "identity_state",
+                &self.identity_state.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "linked_peers",
+                &format_args!("{} records", self.linked_peers.len()),
+            )
+            .field(
+                "contact_records",
+                &format_args!("{} records", self.contact_records.len()),
+            )
+            .field(
+                "public_endpoint_records",
+                &format_args!("{} records", self.public_endpoint_records.len()),
+            )
+            .field(
+                "payment_endpoint_reservations",
+                &format_args!("{} records", self.payment_endpoint_reservations.len()),
+            )
+            .field(
+                "encrypted_link_states",
+                &format_args!("{} records", self.encrypted_link_states.len()),
+            )
+            .field(
+                "peer_link_operation_leases",
+                &format_args!("{} records", self.peer_link_operation_leases.len()),
+            )
+            .field(
+                "next_peer_link_operation_lease_id",
+                &self.next_peer_link_operation_lease_id,
+            )
+            .field(
+                "outbound_private_messages",
+                &format_args!("{} records", self.outbound_private_messages.len()),
+            )
+            .field(
+                "next_outbound_private_message_id",
+                &self.next_outbound_private_message_id,
+            )
+            .field(
+                "private_stream_items",
+                &format_args!("{} records", self.private_stream_items.len()),
+            )
+            .field("next_receive_batch_id", &self.next_receive_batch_id)
+            .field(
+                "next_private_stream_item_id",
+                &self.next_private_stream_item_id,
+            )
+            .field(
+                "event_dedup_records",
+                &format_args!("{} records", self.event_dedup_records.len()),
+            )
+            .field(
+                "receipt_access_records",
+                &format_args!("{} records", self.receipt_access_records.len()),
+            )
+            .field(
+                "receipt_records",
+                &format_args!("{} records", self.receipt_records.len()),
+            )
+            .finish()
+    }
 }
 
 /// In-memory SDK storage implementation for tests and examples.
@@ -745,6 +828,7 @@ impl StorageTransaction for InMemoryStorageTransaction {
 
     fn clear_identity_scoped_state(&mut self) {
         self.clear_private_identity_scoped_state();
+        self.state.contact_records.clear();
         self.state.public_endpoint_records.clear();
     }
 
@@ -768,6 +852,31 @@ impl StorageTransaction for InMemoryStorageTransaction {
         self.state
             .linked_peers
             .insert(record.counterparty.clone(), record);
+    }
+
+    fn contact_records(&self) -> Vec<ContactRecord> {
+        let mut records = self
+            .state
+            .contact_records
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| left.public_key.as_str().cmp(right.public_key.as_str()));
+        records
+    }
+
+    fn contact_record(&self, public_key: &PubkyPublicKey) -> Option<ContactRecord> {
+        self.state.contact_records.get(public_key).cloned()
+    }
+
+    fn save_contact_record(&mut self, record: ContactRecord) {
+        self.state
+            .contact_records
+            .insert(record.public_key.clone(), record);
+    }
+
+    fn remove_contact_record(&mut self, public_key: &PubkyPublicKey) -> Option<ContactRecord> {
+        self.state.contact_records.remove(public_key)
     }
 
     fn public_endpoint_records(&self) -> Vec<PublicEndpointRecord> {
@@ -1222,9 +1331,9 @@ mod tests {
 
     #[test]
     fn test_sensitive_storage_debug_is_redacted() {
-        let counterparty = counterparty();
+        let stream_counterparty = counterparty();
         let link_state = EncryptedLinkStateRecord {
-            counterparty: counterparty.clone(),
+            counterparty: stream_counterparty.clone(),
             link_snapshot: Some(vec![1, 2, 3]),
             handshake_snapshot: Some(vec![4, 5, 6]),
             handshake_role: None,
@@ -1233,12 +1342,12 @@ mod tests {
         };
         let outbound = OutboundPrivateMessageRecord::from_new(
             0,
-            outbound_private_message(counterparty.clone()),
+            outbound_private_message(stream_counterparty.clone()),
         );
         let stream = PrivateStreamItemRecord::from_new(
             0,
             NewPrivateStreamItem::new(NewPrivateStreamItemDetails {
-                counterparty,
+                counterparty: stream_counterparty,
                 receive_batch_id: 0,
                 raw_json: r#"{"key":"secret"}"#.into(),
                 parsed_version: Some(1),
@@ -1252,14 +1361,35 @@ mod tests {
         let receipt_access = receipt_access_record(stream.counterparty.clone());
         let receipt = receipt_record(receipt_access.counterparty.clone());
         let reservation = payment_endpoint_reservation_record(receipt_access.counterparty.clone());
+        let contact_public_key = counterparty();
+        let contact = ContactRecord {
+            public_key: contact_public_key.clone(),
+            label: Some("contact-secret".into()),
+            profile: Some(crate::PaykitProfile {
+                display_name: Some("profile-secret".into()),
+                image_uri: None,
+            }),
+            profile_fetched_at: Some(timestamp()),
+            created_at: timestamp(),
+            updated_at: timestamp(),
+            public_contact_marker_status: crate::PublicContactMarkerStatus::Published,
+            public_contact_published_at: Some(timestamp()),
+            public_contact_removed_at: None,
+            public_contact_last_error: Some("marker-secret".into()),
+        };
+        let storage_state = StorageState {
+            contact_records: HashMap::from([(contact_public_key.clone(), contact.clone())]),
+            ..StorageState::default()
+        };
 
         let debug = format!(
-            "{link_state:?} {outbound:?} {stream:?} {receipt_access:?} {receipt:?} {reservation:?}"
+            "{link_state:?} {outbound:?} {stream:?} {receipt_access:?} {receipt:?} {reservation:?} {contact:?} {storage_state:?}"
         );
         assert!(debug.contains("<redacted:"));
         assert!(!debug.contains("secret"));
         assert!(!debug.contains("receipt-secret"));
         assert!(!debug.contains("alice"));
+        assert!(!debug.contains(contact_public_key.as_str()));
         assert!(!debug.contains("[1, 2, 3]"));
     }
 

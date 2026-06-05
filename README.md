@@ -201,9 +201,10 @@ before executing a payment through their existing infrastructure.
 
 `paykit-sdk` is the Rust runtime layer for SDK-managed local
 state such as endpoint sync, Encrypted Link snapshots, private stream intake,
-Private Payment Lists, and contact payment resolution. Payment execution,
-settlement detection, product UI, and platform session storage remain with the
-integrating application and its adapters.
+Private Payment Lists, Paykit Profiles, local Contact Records, and contact
+payment resolution. Payment execution, settlement detection, product UI, and
+platform session storage remain with the integrating application and its
+adapters.
 
 ## Library Crates
 

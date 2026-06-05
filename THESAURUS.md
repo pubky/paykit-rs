@@ -36,6 +36,26 @@
 - **Synonyms to AVOID**: Paykit SDK
 - **Related terms**: Paykit Library
 
+## SDK Terms
+
+### Paykit Profile
+- **Definition**: Public Paykit-facing display metadata published by a Pubky identity, such as display name and image pointer, under the SDK default profile path.
+- **NOT**: A product-specific profile page, app account record, or Payment Endpoint.
+- **Synonyms to AVOID**: Payment Profile when referring to SDK display metadata
+- **Related terms**: Paykit SDK, Pubky Routing, Contact Record
+
+### Contact Record
+- **Definition**: A local SDK record for a saved Pubky public key, optional local label, cached Paykit Profile, and contact-related SDK state.
+- **NOT**: A public social graph requirement or a Payment List.
+- **Synonyms to AVOID**: contact payment option
+- **Related terms**: Paykit SDK, Paykit Profile, Public Contact Marker
+
+### Public Contact Marker
+- **Definition**: An optional public Pubky marker published by explicit SDK policy to indicate a saved contact in the shared Paykit namespace.
+- **NOT**: The default Contact Record storage model or proof of an active Encrypted Link.
+- **Synonyms to AVOID**: public contact record when referring to the marker only
+- **Related terms**: Contact Record, Paykit Profile, Paykit SDK
+
 ## Core Protocol Terms
 
 ### Pubky Routing

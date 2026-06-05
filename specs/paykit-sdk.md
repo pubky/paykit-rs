@@ -93,15 +93,14 @@ Module responsibilities:
   limits, stale cache rules, and future message retention limits.
 - `adapters`: payment-method adapter plus narrow platform hook for live Pubky
   session access.
-- `storage`: durable records, transaction interface, migrations, and in-memory
-  test storage.
+- `storage`: durable records, transaction interface, and in-memory test
+  storage.
 - `identity`: SDK-owned Pubky session capability state and identity
   refresh/import/export workflows.
 - `endpoints`: public Payment Endpoint publication, cleanup, and remote public
   Payment List reads.
-- `contacts`: contact payment resolution types. SDK-owned Paykit-facing
-  contact/profile records, shared namespace handling, and optional custom
-  path/schema hooks are future scope.
+- `contacts`: SDK-owned Paykit-facing profile records, local contact records,
+  optional public contact markers, and contact payment resolution types.
 - `linked_peers`: Encrypted Link establishment, restore, recovery, and
   per-counterparty runtime state.
 - `private_stream`: ordered Private Application Message intake, persistence,
@@ -184,6 +183,7 @@ The Rust SDK storage model supports records for:
 
 - identity state
 - linked peer state
+- local Contact Records and cached Paykit Profiles
 - Encrypted Link snapshots and handshake snapshots
 - endpoint publication records
 - endpoint reservation records
@@ -235,48 +235,35 @@ not a separate Pubky SDK that integrators must use.
 
 ### Paykit Profile And Contact Namespace
 
-The SDK should provide default Pubky-backed Paykit-facing profile and contact
-metadata so different Paykit apps can interoperate. This belongs in the SDK, not
-in `paykit-lib` core protocol validation.
+The SDK provides default Pubky-backed Paykit-facing profile metadata so
+different Paykit apps can interoperate. This belongs in the SDK, not in
+`paykit-lib` core protocol validation.
 
-The default namespace must not pollute the public Payment Endpoint root. Public
-Payment Endpoints currently live directly under `/pub/paykit/v0/`, so SDK
-profile/contact records should use a reserved Paykit path such as:
+The default public profile namespace is unversioned:
 
-- a reserved subdirectory under `/pub/paykit/v0/`, or
-- an unversioned Paykit-level path under `/pub/paykit/`.
+- profile record: `/pub/paykit/profile.json`
+- profile blobs: `/pub/paykit/blobs/...`
 
-The versioned option keeps SDK metadata beside the current protocol version.
-The unversioned option may be better if profile/contact records should remain
-stable across Paykit protocol versions. Either way, the chosen path must be
-reserved so it cannot collide with Payment Endpoint Identifier files.
+Public Payment Endpoints remain under `/pub/paykit/v0/`, so SDK profile paths
+do not collide with Payment Endpoint Identifier files.
 
-The exact path policy should be configurable:
+`image_uri` may point at `/pub/paykit/blobs/...` or another public image
+location. The SDK profile API publishes `profile.json`; blob upload/delete
+helpers are caller-managed.
 
-- default shared Paykit SDK profile/contact paths for apps that want
-  cross-Paykit interoperability
-- custom app paths for products that already have profile/contact storage
-- adapter-only mode for apps that want Paykit SDK to consume profile/contact
-  data without writing any Pubky profile/contact records
-
-Custom profile/contact hooks are optional escape hatches. The default path for
-most integrators should be: configure Paykit SDK, provide secure storage and a
-payment adapter, and let the SDK handle Pubky-backed Paykit profile/contact
-reads and writes.
-
-Default profile records can be public because they are display metadata. Contact
-records need more care because they can reveal a social/payment graph. The SDK
-should support shared Paykit contacts, but should also allow apps to keep saved
-contacts local, encrypted, or app-specific when privacy policy requires it.
+Default profile records can be public because they are display metadata.
+Contacts need more care because they can reveal a social/payment graph. The SDK
+keeps saved contacts in local/private SDK storage by default. Public contact
+markers under `/pub/paykit/contacts/` are opt-in through SDK policy and explicit
+runtime calls.
 
 Schemas should be small, versioned, and Paykit-facing:
 
 - profile display name and image pointer
 - normalized Pubky public key
-- optional app/profile source metadata
 - contact public key
 - optional local display snapshot
-- optional Paykit capability summary
+- optional public contact marker
 
 The SDK should not standardize product profile pages, social graph semantics,
 contact grouping, or UI behavior.
@@ -327,14 +314,14 @@ The adapter owns payment-method-specific endpoint details:
 - method-specific payload parsing beyond basic Paykit compatibility
 
 Payment execution and settlement detection stay with the integrating
-application or payment provider. Future SDK APIs may accept execution results
-from those systems.
+application or payment provider. SDK APIs can accept execution results from
+those systems when Paykit needs to record them.
 
 ### Payment Endpoint Reservations
 
-Some payment methods need contact-scoped receiving details. The current SDK lets
-payment adapters reserve receiving details for Private Payment List sharing. The
-SDK queues the Private Payment List and stores linked reservation records in one
+Some payment methods need contact-scoped receiving details. The SDK lets payment
+adapters reserve receiving details for Private Payment List sharing. The SDK
+queues the Private Payment List and stores linked reservation records in one
 storage transaction. Reservation records keep lifecycle metadata and a payload
 hash; they do not store the raw reserved endpoint payload.
 
@@ -354,8 +341,8 @@ record to the latest outbound message id. Idempotent repeats preserve the
 original reservation attribution, expiry, and creation time; adapters that want
 new metadata should use a new reservation id.
 
-Single-use Payment Request reservations are not part of the current SDK shape.
-They need more request-specific context before they should be exposed.
+Single-use Payment Request reservations are outside the SDK shape until the
+request-specific context is defined.
 
 ### Future Scheduling
 
@@ -467,8 +454,8 @@ Tracks SDK-managed public Payment Endpoint publication:
 - last status update time
 - last error, when available
 
-Future versions may add payload hashes, separate attempt/confirmation times,
-and retry counters if the SDK needs change detection or richer retry policy.
+Additional endpoint fields should be added only when the SDK needs change
+detection or richer retry policy.
 
 ### EndpointReservationRecord
 
@@ -729,8 +716,8 @@ Payment Requests, Payment Proofs, and Receipts.
    from stored stream items.
 8. Return a receive report.
 
-Future receive routing should extend the same raw stream log to Payment
-Requests, Payment Proofs, and any other Event Message kinds.
+Receive routing should extend the same raw stream log to Payment Requests,
+Payment Proofs, and any other Event Message kinds.
 
 ### Resolve Contact Payment
 
@@ -830,6 +817,8 @@ Backup should include SDK-managed state:
 - Private Payment List cache
 - endpoint publication records
 - endpoint reservations
+- local Contact Records, including local labels, cached Paykit Profiles, public
+  contact marker status/timestamps, and marker errors
 - raw private stream log or checkpointed subset
 - outbound queue
 - recovery markers
@@ -837,7 +826,7 @@ Backup should include SDK-managed state:
 Backup should not include:
 
 - app cloud transport details
-- product-specific profile/contact schema beyond adapter-owned records
+- product-specific profile/contact data outside SDK Contact Records
 - payment-provider secrets unless explicitly provided by the payment adapter
 - seed material unless Paykit standardizes that policy
 
@@ -854,13 +843,14 @@ Restore flow:
 
 The current Rust SDK exposes initialization, identity status, public endpoint
 sync, linked peer handshakes, private stream receive, Private Payment List
-derivation/publication, contact payment resolution, outbound Private
+derivation/publication, Paykit Profile publication/fetching, local Contact
+Record CRUD/profile refresh, contact payment resolution, outbound Private
 Application Message processing, Receipt Access indexing/retrieval, Payment
 Request lifecycle derivation plus checked outbound lifecycle queueing, optional
-Payment Endpoint Reservation records, and backup/export/restore for
-SDK-managed state. Use `paykit-sdk` rustdoc for the exact current signatures.
+Payment Endpoint Reservation records, and backup/export/restore for SDK-managed
+state. Use `paykit-sdk` rustdoc for exact signatures.
 
-Future SDK versions should extend the current surface with operations like:
+Additional SDK operations can extend this surface with methods like:
 
 ```rust
 impl PaykitSdk {
@@ -940,10 +930,11 @@ Current `PaykitSdkConfig` includes:
 - public fallback policy
 - private recovery wait duration
 - Encrypted Link Recovery Marker policy
+- public contact sharing policy, defaulting to local-only Contact Records
 - peer link operation lease timeout
 - outbound private send lease timeout
 
-Future policy configuration may add:
+Additional policy configuration can add:
 
 - stale private cache policy
 - outbound retry policy beyond lease expiry
@@ -964,6 +955,7 @@ These are good candidates to move into Paykit SDK:
 - Encrypted Link snapshot and handshake runtime
 - stale link recovery markers and bounded recovery policy
 - ordered private stream receive/persist/route
+- Paykit profile publishing/fetching and local contact records
 - contact payment resolution and payable endpoint checks
 - endpoint reservation records and attribution helpers
 - SDK-managed backup records
@@ -997,6 +989,7 @@ Core tests:
 - outbound retries reuse exact Event ID and payload
 - Payment Request role/lifecycle checks
 - Receipt Access dedupe and receipt retrieval
+- profile serialization and local contact storage
 - backup/restore validates snapshot recipient and pauses unsafe automation
 
 Platform tests:
@@ -1011,8 +1004,9 @@ Platform tests:
 
 - Durable storage adapters, including whether Paykit should ship a
   SQLite-backed implementation.
-- Default Paykit SDK profile/contact namespace under `/pub/paykit/v0/` or an
-  unversioned Paykit-level path under `/pub/paykit/`.
+- Custom profile/contact path hooks for apps that already have product-specific
+  Pubky namespaces.
+- Public contact marker discovery and richer contact-sharing policy.
 - Public fallback and private recovery timeout policies for saved contacts
   versus one-off counterparties.
 - Reservation lifecycle hooks beyond Private Payment List queueing.

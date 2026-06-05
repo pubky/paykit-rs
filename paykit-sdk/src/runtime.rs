@@ -6,6 +6,7 @@ use paykit_lib::{
     PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
     PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
 };
+use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -16,10 +17,12 @@ use crate::{
     },
     config::{
         EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
-        PrivateSharingPolicy, PublicFallbackPolicy,
+        PrivateSharingPolicy, PublicContactSharingPolicy, PublicFallbackPolicy,
     },
     contacts::{
+        parse_profile_json, profile_json, public_contact_json, public_contact_path,
         ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
+        ContactRecord, ContactUpdate, PaykitProfile, PaykitProfileRecord, PAYKIT_PROFILE_PATH,
     },
     endpoint_reservations::{
         payment_endpoint_reservations, queue_private_payment_list_with_reservations,
@@ -207,6 +210,44 @@ where
         Ok((session, state))
     }
 
+    async fn require_initialized_identity(&self, context: &str) -> Result<PubkyPublicKey> {
+        self.storage
+            .transaction(|tx| {
+                tx.load_identity_state()
+                    .and_then(|state| state.public_key)
+                    .ok_or_else(|| PaykitSdkError::Identity {
+                        context: format!("cannot {context} without an initialized Pubky identity"),
+                        source: None,
+                    })
+            })
+            .await
+    }
+
+    async fn load_session_access_for_initialized_identity(
+        &self,
+        context: &str,
+    ) -> Result<PubkySessionAccess> {
+        let expected_public_key = self.require_initialized_identity(context).await?;
+        let session_access =
+            self.pubky
+                .load_session_access()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: format!("cannot {context} without an active Pubky session"),
+                    source: None,
+                })?;
+        let actual_public_key = session_access.public_key()?;
+        if actual_public_key != expected_public_key {
+            return Err(PaykitSdkError::Identity {
+                context: format!(
+                    "cannot {context} because active Pubky session does not match initialized identity"
+                ),
+                source: None,
+            });
+        }
+        Ok(session_access)
+    }
+
     /// Return the last persisted identity status, if initialized.
     pub async fn identity_status(&self) -> Result<Option<IdentityStatus>> {
         Ok(self
@@ -220,6 +261,272 @@ where
     /// Access SDK configuration.
     pub fn config(&self) -> &PaykitSdkConfig {
         &self.config
+    }
+
+    /// Save or update a local contact record.
+    pub async fn save_contact(&self, update: ContactUpdate) -> Result<ContactRecord> {
+        update.validate()?;
+        self.require_initialized_identity("save contact").await?;
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let existing = tx.contact_record(&update.public_key);
+                let record = ContactRecord::from_update(update, existing, now);
+                tx.save_contact_record(record.clone());
+                Ok(record)
+            })
+            .await
+    }
+
+    /// Load one local contact record.
+    pub async fn contact_record(
+        &self,
+        public_key: &PubkyPublicKey,
+    ) -> Result<Option<ContactRecord>> {
+        self.require_initialized_identity("load contact").await?;
+        self.storage
+            .transaction(|tx| Ok(tx.contact_record(public_key)))
+            .await
+    }
+
+    /// List local contact records.
+    pub async fn contact_records(&self) -> Result<Vec<ContactRecord>> {
+        self.require_initialized_identity("list contacts").await?;
+        self.storage
+            .transaction(|tx| Ok(tx.contact_records()))
+            .await
+    }
+
+    /// Remove one local contact record.
+    pub async fn remove_contact(
+        &self,
+        public_key: &PubkyPublicKey,
+    ) -> Result<Option<ContactRecord>> {
+        self.require_initialized_identity("remove contact").await?;
+        self.storage
+            .transaction(|tx| {
+                let Some(existing) = tx.contact_record(public_key) else {
+                    return Ok(None);
+                };
+                if !existing.can_remove_locally() {
+                    return Err(PaykitSdkError::Policy(format!(
+                        "remove public contact marker before deleting contact {public_key}"
+                    )));
+                }
+                Ok(tx.remove_contact_record(public_key))
+            })
+            .await
+    }
+
+    /// Publish the local public Paykit profile.
+    ///
+    /// This writes only `/pub/paykit/profile.json`. Profile image blob upload
+    /// and deletion are caller-managed.
+    pub async fn publish_profile(&self, profile: PaykitProfile) -> Result<PaykitProfileRecord> {
+        let json = profile_json(&profile)?;
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available for profile publication".into(),
+            source: None,
+        })?;
+        session_access
+            .session
+            .storage()
+            .put(PAYKIT_PROFILE_PATH, json)
+            .await
+            .map_err(|err| map_pubky_transport_error("publish Paykit profile", err))?;
+        Ok(PaykitProfileRecord {
+            public_key: session_access.public_key()?,
+            profile,
+            path: PAYKIT_PROFILE_PATH.into(),
+            updated_at: self.clock.now(),
+        })
+    }
+
+    /// Fetch a public Paykit profile.
+    pub async fn fetch_profile(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<Option<PaykitProfileRecord>> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for profile lookup".into(),
+                    source: None,
+                })?;
+        let Some(raw_json) = fetch_public_text(
+            &public_storage,
+            &public_key,
+            PAYKIT_PROFILE_PATH,
+            "fetch profile",
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PaykitProfileRecord {
+            public_key,
+            profile: parse_profile_json(&raw_json)?,
+            path: PAYKIT_PROFILE_PATH.into(),
+            updated_at: self.clock.now(),
+        }))
+    }
+
+    /// Fetch a contact's public profile and cache it in the local contact record.
+    pub async fn refresh_contact_profile(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<Option<ContactRecord>> {
+        self.require_initialized_identity("refresh contact profile")
+            .await?;
+        let fetched = self.fetch_profile(public_key.clone()).await?;
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let Some(existing) = tx.contact_record(&public_key) else {
+                    return Ok(None);
+                };
+                let record = existing.with_profile(fetched.map(|record| record.profile), now);
+                tx.save_contact_record(record.clone());
+                Ok(Some(record))
+            })
+            .await
+    }
+
+    /// Publish a public contact marker for a saved local contact.
+    ///
+    /// This can reveal part of the local contact graph. It only runs when
+    /// `public_contact_sharing` is `PublicPaykitNamespace`.
+    pub async fn publish_public_contact(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<ContactRecord> {
+        if self.config.public_contact_sharing != PublicContactSharingPolicy::PublicPaykitNamespace {
+            return Err(PaykitSdkError::Policy(
+                "public contact sharing is disabled".into(),
+            ));
+        }
+        let session_access = self
+            .load_session_access_for_initialized_identity("publish public contact")
+            .await?;
+        let pending_at = self.clock.now();
+        self.storage
+            .transaction(|tx| {
+                let Some(existing) = tx.contact_record(&public_key) else {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "cannot publish unsaved contact {public_key}"
+                    )));
+                };
+                tx.save_contact_record(
+                    existing.mark_public_contact_publication_pending(pending_at),
+                );
+                Ok(())
+            })
+            .await?;
+        let path = public_contact_path(&public_key);
+        let write_result = session_access
+            .session
+            .storage()
+            .put(path, public_contact_json(&public_key)?)
+            .await
+            .map_err(|err| map_pubky_transport_error("publish public contact", err));
+        if let Err(err) = write_result {
+            self.mark_public_contact_failed(&public_key, err.to_string())
+                .await?;
+            return Err(err);
+        }
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let Some(existing) = tx.contact_record(&public_key) else {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "contact {public_key} disappeared before public publication was recorded"
+                    )));
+                };
+                let record = existing.mark_public_contact_published(now);
+                tx.save_contact_record(record.clone());
+                Ok(record)
+            })
+            .await
+    }
+
+    /// Remove a public contact marker for a saved local contact.
+    ///
+    /// Cleanup is allowed even when public contact sharing is disabled, so an
+    /// app can stop publishing markers and still remove previously published
+    /// markers.
+    pub async fn remove_public_contact(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<Option<ContactRecord>> {
+        let existing_record = self
+            .storage
+            .transaction(|tx| Ok(tx.contact_record(&public_key)))
+            .await?;
+        let session_access = self
+            .load_session_access_for_initialized_identity("remove public contact")
+            .await?;
+        let had_local_record = existing_record.is_some();
+        if existing_record
+            .as_ref()
+            .is_some_and(ContactRecord::may_have_public_marker)
+        {
+            let pending_at = self.clock.now();
+            self.storage
+                .transaction(|tx| {
+                    let Some(existing) = tx.contact_record(&public_key) else {
+                        return Ok(());
+                    };
+                    tx.save_contact_record(
+                        existing.mark_public_contact_removal_pending(pending_at),
+                    );
+                    Ok(())
+                })
+                .await?;
+        }
+        let path = public_contact_path(&public_key);
+        let delete_result = session_access.session.storage().delete(path).await;
+        if let Err(err) = delete_result {
+            if !is_pubky_not_found(&err) {
+                let err = map_pubky_transport_error("remove public contact", err);
+                self.mark_public_contact_failed(&public_key, err.to_string())
+                    .await?;
+                return Err(err);
+            }
+        }
+        if !had_local_record {
+            return Ok(None);
+        }
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let Some(existing) = tx.contact_record(&public_key) else {
+                    return Ok(None);
+                };
+                let record = existing.mark_public_contact_removed(now);
+                tx.save_contact_record(record.clone());
+                Ok(Some(record))
+            })
+            .await
+    }
+
+    async fn mark_public_contact_failed(
+        &self,
+        public_key: &PubkyPublicKey,
+        error: String,
+    ) -> Result<()> {
+        let failed_at = self.clock.now();
+        self.storage
+            .transaction(|tx| {
+                let Some(existing) = tx.contact_record(public_key) else {
+                    return Ok(());
+                };
+                tx.save_contact_record(existing.mark_public_contact_failed(error, failed_at));
+                Ok(())
+            })
+            .await
     }
 
     /// Access the payment adapter.
@@ -2764,6 +3071,49 @@ fn reservation_release(
     }
 }
 
+async fn fetch_public_text(
+    storage: &pubky::PublicStorage,
+    public_key: &PubkyPublicKey,
+    path: &str,
+    context: &'static str,
+) -> Result<Option<String>> {
+    let addr = format!("{public_key}{path}");
+    match storage.get(addr).await {
+        Ok(resp) => {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|err| PaykitSdkError::Transport {
+                    context: context.into(),
+                    source: Some(err.into()),
+                })?;
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            String::from_utf8(bytes.to_vec())
+                .map(Some)
+                .map_err(|err| PaykitSdkError::Protocol(format!("{context}: invalid UTF-8: {err}")))
+        }
+        Err(err) if is_pubky_not_found(&err) => Ok(None),
+        Err(err) => Err(map_pubky_transport_error(context, err)),
+    }
+}
+
+fn map_pubky_transport_error(context: &'static str, err: PubkyError) -> PaykitSdkError {
+    PaykitSdkError::Transport {
+        context: context.into(),
+        source: Some(err.into()),
+    }
+}
+
+fn is_pubky_not_found(err: &PubkyError) -> bool {
+    matches!(
+        err,
+        PubkyError::Request(RequestError::Server { status, .. })
+            if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
@@ -3135,6 +3485,19 @@ mod tests {
                         updated_at: FixedClock.now(),
                         last_error: None,
                     });
+                    tx.save_contact_record(ContactRecord {
+                        public_key: counterparty.clone(),
+                        label: Some("Alice".into()),
+                        profile: None,
+                        profile_fetched_at: None,
+                        created_at: FixedClock.now(),
+                        updated_at: FixedClock.now(),
+                        public_contact_marker_status:
+                            crate::PublicContactMarkerStatus::NotPublished,
+                        public_contact_published_at: None,
+                        public_contact_removed_at: None,
+                        public_contact_last_error: None,
+                    });
                     tx.insert_outbound_private_message(
                         crate::storage::NewOutboundPrivateMessage::new(
                             counterparty,
@@ -3162,8 +3525,333 @@ mod tests {
         let identity = snapshot.identity_state.unwrap();
         assert_eq!(identity.sign_out_generation, 4);
         assert!(snapshot.linked_peers.is_empty());
+        assert!(snapshot.contact_records.is_empty());
         assert!(snapshot.public_endpoint_records.is_empty());
         assert!(snapshot.outbound_private_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_contact_records_save_list_and_remove_locally() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let saved = sdk
+            .save_contact(ContactUpdate {
+                public_key: contact_public_key.clone(),
+                label: Some("Alice".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(saved.label.as_deref(), Some("Alice"));
+        assert_eq!(sdk.contact_records().await.unwrap(), vec![saved.clone()]);
+        assert_eq!(
+            sdk.contact_record(&contact_public_key).await.unwrap(),
+            Some(saved.clone())
+        );
+        assert_eq!(
+            sdk.remove_contact(&contact_public_key).await.unwrap(),
+            Some(saved)
+        );
+        assert!(sdk
+            .contact_record(&contact_public_key)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_save_contact_empty_label_clears_existing_label() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        sdk.save_contact(ContactUpdate {
+            public_key: contact_public_key.clone(),
+            label: Some("Alice".into()),
+        })
+        .await
+        .unwrap();
+        let updated = sdk
+            .save_contact(ContactUpdate {
+                public_key: contact_public_key,
+                label: Some(String::new()),
+            })
+            .await
+            .unwrap();
+
+        assert!(updated.label.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_remove_contact_blocks_when_public_marker_may_exist() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        storage
+            .transaction({
+                let contact_public_key = contact_public_key.clone();
+                move |tx| {
+                    tx.save_contact_record(ContactRecord {
+                        public_key: contact_public_key,
+                        label: None,
+                        profile: None,
+                        profile_fetched_at: None,
+                        created_at: FixedClock.now(),
+                        updated_at: FixedClock.now(),
+                        public_contact_marker_status: crate::PublicContactMarkerStatus::Published,
+                        public_contact_published_at: Some(FixedClock.now()),
+                        public_contact_removed_at: None,
+                        public_contact_last_error: None,
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.remove_contact(&contact_public_key).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    }
+
+    #[tokio::test]
+    async fn test_publish_public_contact_does_not_mark_pending_without_session() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        storage
+            .transaction({
+                let contact_public_key = contact_public_key.clone();
+                move |tx| {
+                    tx.save_contact_record(ContactRecord {
+                        public_key: contact_public_key,
+                        label: None,
+                        profile: None,
+                        profile_fetched_at: None,
+                        created_at: FixedClock.now(),
+                        updated_at: FixedClock.now(),
+                        public_contact_marker_status:
+                            crate::PublicContactMarkerStatus::NotPublished,
+                        public_contact_published_at: None,
+                        public_contact_removed_at: None,
+                        public_contact_last_error: None,
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig {
+                public_contact_sharing: PublicContactSharingPolicy::PublicPaykitNamespace,
+                ..PaykitSdkConfig::default()
+            },
+            FixedClock,
+        );
+
+        let result = sdk.publish_public_contact(contact_public_key.clone()).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+        let record = storage
+            .snapshot()
+            .unwrap()
+            .contact_records
+            .get(&contact_public_key)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            record.public_contact_marker_status,
+            crate::PublicContactMarkerStatus::NotPublished
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        storage
+            .transaction({
+                let contact_public_key = contact_public_key.clone();
+                move |tx| {
+                    tx.save_contact_record(ContactRecord {
+                        public_key: contact_public_key,
+                        label: None,
+                        profile: None,
+                        profile_fetched_at: None,
+                        created_at: FixedClock.now(),
+                        updated_at: FixedClock.now(),
+                        public_contact_marker_status: crate::PublicContactMarkerStatus::Published,
+                        public_contact_published_at: Some(FixedClock.now()),
+                        public_contact_removed_at: None,
+                        public_contact_last_error: None,
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.remove_public_contact(contact_public_key.clone()).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+        let record = storage
+            .snapshot()
+            .unwrap()
+            .contact_records
+            .get(&contact_public_key)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            record.public_contact_marker_status,
+            crate::PublicContactMarkerStatus::Published
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_public_contact_without_local_record_still_requires_session() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.remove_public_contact(contact_public_key).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_save_contact_requires_initialized_identity() {
+        let storage = InMemoryStorage::new();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+
+        let result = sdk
+            .save_contact(ContactUpdate {
+                public_key: contact_public_key,
+                label: None,
+            })
+            .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     }
 
     #[tokio::test]
@@ -3976,6 +4664,7 @@ mod tests {
                 sign_out_generation: 0,
             }),
             linked_peers: Vec::new(),
+            contact_records: Vec::new(),
             public_endpoint_records: Vec::new(),
             payment_endpoint_reservations: Vec::new(),
             encrypted_link_states: Vec::new(),
