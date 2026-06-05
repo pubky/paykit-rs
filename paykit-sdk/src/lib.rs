@@ -65,7 +65,8 @@ pub use linked_peers::{
 };
 #[doc(inline)]
 pub use outbound_private::{
-    OutboundPrivateMessageStatus, OutboundPrivateSendFailure, OutboundPrivateSendReport,
+    OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
+    OutboundPrivateSendFailure, OutboundPrivateSendReport, ReservationCleanupFailure,
 };
 #[doc(inline)]
 pub use payment_requests::{
@@ -76,10 +77,13 @@ pub use payment_requests::{
 #[doc(inline)]
 pub use private_lists::PrivatePaymentListView;
 #[doc(inline)]
-pub use private_stream::{EventIdConflict, PrivateStreamIntakeReport, PrivateStreamParseStatus};
+pub use private_stream::{
+    EventIdConflict, PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,
+    PrivateStreamParseStatus,
+};
 #[doc(inline)]
 pub use receipts::{
-    ReceiptAccessRecord, ReceiptAmountRecord, ReceiptBillingPeriodRecord, ReceiptRecord,
+    ReceiptAccessView, ReceiptAmountRecord, ReceiptBillingPeriodRecord, ReceiptRecord,
     ReceiptRetrievalStatus,
 };
 #[doc(inline)]
@@ -87,11 +91,7 @@ pub use recovery::EncryptedLinkRecoveryMarkerReport;
 #[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
 #[doc(inline)]
-pub use storage::{
-    EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
-    OutboundPrivateMessageRecord, PaymentEndpointReservationRecord, PrivateStreamItemRecord,
-    PublicEndpointRecord, StorageAdapter, StorageState, StorageTransaction,
-};
+pub use storage::{InMemoryStorage, StorageAdapter, StorageTransaction};
 
 /// Common result alias for Paykit SDK operations.
 pub type Result<T> = std::result::Result<T, PaykitSdkError>;

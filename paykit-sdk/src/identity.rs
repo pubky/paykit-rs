@@ -3,6 +3,7 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use paykit_lib::PublicKey;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// Pubky public key string used by SDK records.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -93,14 +94,22 @@ impl PubkyLocalSecretKey {
     }
 
     /// Consume the wrapper and return the secret key bytes.
-    pub fn into_inner(self) -> [u8; 32] {
-        self.0
+    pub fn into_inner(mut self) -> [u8; 32] {
+        let bytes = self.0;
+        self.0.zeroize();
+        bytes
     }
 }
 
 impl fmt::Debug for PubkyLocalSecretKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PubkyLocalSecretKey(<redacted>)")
+    }
+}
+
+impl Drop for PubkyLocalSecretKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 

@@ -68,13 +68,19 @@ pub async fn delete_payment_endpoint(
 ) -> Result<()> {
     let path = payment_endpoint_path(identifier);
     debug!(path = %path, "deleting payment endpoint from Pubky storage");
-    session.storage().delete(path).await.map_err(|err| {
-        error!(error = %err, "failed to delete payment endpoint");
-        PaykitError::Transport {
-            context: "delete endpoint".into(),
-            source: err.into(),
+    match session.storage().delete(path).await {
+        Ok(_) => {}
+        Err(err) if is_not_found(&err) => {
+            debug!("payment endpoint already absent");
         }
-    })?;
+        Err(err) => {
+            error!(error = %err, "failed to delete payment endpoint");
+            return Err(PaykitError::Transport {
+                context: "delete endpoint".into(),
+                source: err.into(),
+            });
+        }
+    }
     debug!("payment endpoint removed successfully");
     Ok(())
 }

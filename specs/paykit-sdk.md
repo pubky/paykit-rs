@@ -554,6 +554,16 @@ retried without letting two workers advance the same link at once.
 
 Event Message retries must reuse the same Event ID and exact payload.
 
+Sending through Pubky is not atomic with local storage. If a worker sends a
+message and crashes before storing the `Sent` status and advanced Encrypted Link
+snapshot, the next worker may retry from the previous checkpoint. That retry
+must send the same payload; Event Message consumers dedupe by Event ID, and
+Latest-State Messages tolerate repeated newer state. SDK records expose local
+outbound status so apps can distinguish queued intent from checkpointed send
+state. The status is not an acknowledgement from the counterparty.
+Superseded reservation cleanup failures are reported as local cleanup failures;
+they do not change whether the current outbound message was sent or failed.
+
 ## Storage And Checkpoint Invariant
 
 The most important SDK invariant is:
@@ -604,6 +614,11 @@ processes against the same storage, lock ownership must be storage-backed.
 Lease expiry makes a stale operation reclaimable by another worker; durable
 writes still check the stored lease id so an earlier holder cannot commit after
 a newer lease has replaced it.
+
+The Rust SDK implementation provides storage-backed per-peer leases for
+Encrypted Link work. Integrators that run more than one runtime instance against
+the same storage must serialize identity-scoped operations and public endpoint
+sync with their own process or storage lock.
 
 ## Workflows
 
@@ -744,6 +759,9 @@ Flow:
    - `PrivateRecoveryPending`
    - `PublicOnlySession`
 
+When the result is `Payable`, it includes the selected Payment Endpoint and the
+adapter-built `PaymentTarget` for that endpoint.
+
 The SDK should not block indefinitely waiting for private recovery.
 
 ### Send Payment Request
@@ -779,6 +797,9 @@ For outbound lifecycle events:
 5. Send and retry using the same Event ID and payload.
 
 Cancellation is unilateral. Acceptance and rejection are payer-only in v0.2.
+Derived records include local outbound delivery status for queued lifecycle
+events. Apps should not treat outbound status as counterparty acceptance or
+settlement confirmation.
 
 ### Record Payment Proof
 

@@ -210,7 +210,7 @@ async fn demo(session: &pubky::PubkySession) -> paykit_lib::Result<()> {
 }
 ```
 
-**Note:** Removing a non-existent Payment Endpoint returns the error surfaced by the Pubky SDK as `PaykitError::Transport`.
+**Note:** Removing a non-existent Payment Endpoint succeeds, so cleanup can be retried safely.
 
 #### `get_payment_list`
 

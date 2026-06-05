@@ -6,16 +6,19 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    adapters::{PaymentEndpointReservation, PaymentEndpointReservationRequest, ReceivingDetail},
+    adapters::{
+        PaymentEndpointReservation, PaymentEndpointReservationRelease,
+        PaymentEndpointReservationRequest, ReceivingDetail,
+    },
     endpoints::normalize_receiving_details,
-    outbound_private::validate_outbound_private_message,
+    outbound_private::{validate_outbound_private_message, OutboundPrivateMessageStatus},
     storage::{
         NewOutboundPrivateMessage, OutboundPrivateMessageRecord, PaymentEndpointReservationRecord,
         StorageAdapter,
     },
     PaykitSdkError, PubkyPublicKey, Result,
 };
-use paykit_lib::{serialize_private_payment_list_json, PrivatePaymentList};
+use paykit_lib::{serialize_private_payment_list_json, PrivateMessageKind, PrivatePaymentList};
 
 /// Load Payment Endpoint Reservation records for one counterparty.
 pub(crate) async fn payment_endpoint_reservations<S>(
@@ -27,6 +30,44 @@ where
 {
     storage
         .transaction(|tx| Ok(tx.payment_endpoint_reservations(counterparty)))
+        .await
+}
+
+/// Load reservation releases for superseded Private Payment Lists that were never attempted.
+pub(crate) async fn unattempted_superseded_reservation_releases<S>(
+    storage: &S,
+    counterparty: &PubkyPublicKey,
+) -> Result<Vec<PaymentEndpointReservationRelease>>
+where
+    S: StorageAdapter,
+{
+    storage
+        .transaction(|tx| {
+            let outbound = tx.outbound_private_messages(counterparty);
+            let superseded_unattempted = outbound
+                .iter()
+                .filter(|message| {
+                    message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+                        && message.status == OutboundPrivateMessageStatus::Superseded
+                        && message.last_attempt_at.is_none()
+                })
+                .map(|message| message.outbound_message_id)
+                .collect::<std::collections::HashSet<_>>();
+
+            let releases = tx
+                .payment_endpoint_reservations(counterparty)
+                .into_iter()
+                .filter(|record| superseded_unattempted.contains(&record.outbound_message_id))
+                .map(|record| PaymentEndpointReservationRelease {
+                    reservation_id: record.reservation_id,
+                    counterparty: record.counterparty,
+                    identifier: record.identifier,
+                    payload_hash: record.payload_hash,
+                    attribution: record.attribution,
+                })
+                .collect();
+            Ok(releases)
+        })
         .await
 }
 
@@ -327,6 +368,44 @@ mod tests {
             .unwrap();
         assert_eq!(record.attribution.get("contact").unwrap(), "alice");
         assert!(record.expires_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unattempted_superseded_reservation_releases() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        queue_private_payment_list_with_reservations(
+            &storage,
+            &request(counterparty.clone()),
+            vec![reservation("res-1", "one")],
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        queue_private_payment_list_with_reservations(
+            &storage,
+            &request(counterparty.clone()),
+            vec![reservation("res-2", "two")],
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        crate::outbound_private::claim_next_outbound_private_message(
+            &storage,
+            &counterparty,
+            timestamp(),
+            timestamp() - chrono::Duration::seconds(1),
+            timestamp() - chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+
+        let releases = unattempted_superseded_reservation_releases(&storage, &counterparty)
+            .await
+            .unwrap();
+
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].reservation_id, "res-1");
     }
 
     #[tokio::test]

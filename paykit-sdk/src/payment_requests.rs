@@ -103,7 +103,7 @@ impl fmt::Debug for PaymentRequestTermsRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PaymentRequestTermsRecord")
             .field("amount", &"<redacted>")
-            .field("payment_reference", &self.payment_reference)
+            .field("payment_reference", &"<redacted>")
             .field("proposal_expires_at", &self.proposal_expires_at)
             .field("recurrence", &self.recurrence)
             .field(
@@ -171,6 +171,8 @@ pub struct PaymentProofRecord {
     pub event_id: String,
     /// Outbound message id, when proof was sent locally.
     pub outbound_message_id: Option<u64>,
+    /// Local outbound delivery status, when proof was queued locally.
+    pub outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Stream item id, when proof was received from the counterparty.
     pub stream_item_id: Option<u64>,
     /// Payment Reference copied from the proof.
@@ -190,8 +192,9 @@ impl fmt::Debug for PaymentProofRecord {
         f.debug_struct("PaymentProofRecord")
             .field("event_id", &self.event_id)
             .field("outbound_message_id", &self.outbound_message_id)
+            .field("outbound_status", &self.outbound_status)
             .field("stream_item_id", &self.stream_item_id)
-            .field("payment_reference", &self.payment_reference)
+            .field("payment_reference", &"<redacted>")
             .field("billing_period", &self.billing_period)
             .field(
                 "payment_endpoint_identifier",
@@ -221,22 +224,32 @@ pub struct PaymentRequestRecord {
     pub proposal_stream_item_id: Option<u64>,
     /// Outbound message id of the proposal event.
     pub proposal_outbound_message_id: Option<u64>,
+    /// Local outbound delivery status for the proposal event.
+    pub proposal_outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Proposal Event ID.
     pub proposal_event_id: Option<String>,
     /// Immutable terms from the proposal.
     pub terms: Option<PaymentRequestTermsRecord>,
     /// Acceptance Event ID.
     pub accepted_event_id: Option<String>,
+    /// Local outbound delivery status for an acceptance event.
+    pub accepted_outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Rejection Event ID.
     pub rejected_event_id: Option<String>,
+    /// Local outbound delivery status for a rejection event.
+    pub rejected_outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Cancellation Event ID.
     pub canceled_event_id: Option<String>,
+    /// Local outbound delivery status for a cancellation event.
+    pub canceled_outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Payment Proof records in local record order.
     pub payment_proofs: Vec<PaymentProofRecord>,
     /// Last inbound stream item applied to this record.
     pub last_stream_item_id: Option<u64>,
     /// Last outbound message applied to this record.
     pub last_outbound_message_id: Option<u64>,
+    /// Local delivery status of the last outbound message applied to this record.
+    pub last_outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Last event local record time.
     pub last_event_at: Option<DateTime<Utc>>,
     /// Invalid state reason, when available.
@@ -255,13 +268,18 @@ impl fmt::Debug for PaymentRequestRecord {
                 "proposal_outbound_message_id",
                 &self.proposal_outbound_message_id,
             )
+            .field("proposal_outbound_status", &self.proposal_outbound_status)
             .field("proposal_event_id", &self.proposal_event_id)
             .field("accepted_event_id", &self.accepted_event_id)
+            .field("accepted_outbound_status", &self.accepted_outbound_status)
             .field("rejected_event_id", &self.rejected_event_id)
+            .field("rejected_outbound_status", &self.rejected_outbound_status)
             .field("canceled_event_id", &self.canceled_event_id)
+            .field("canceled_outbound_status", &self.canceled_outbound_status)
             .field("payment_proof_count", &self.payment_proofs.len())
             .field("last_stream_item_id", &self.last_stream_item_id)
             .field("last_outbound_message_id", &self.last_outbound_message_id)
+            .field("last_outbound_status", &self.last_outbound_status)
             .field("last_event_at", &self.last_event_at)
             .field("invalid_reason", &self.invalid_reason)
             .finish()
@@ -277,14 +295,19 @@ impl PaymentRequestRecord {
             state: PaymentRequestLifecycleState::InvalidConflict,
             proposal_stream_item_id: None,
             proposal_outbound_message_id: None,
+            proposal_outbound_status: None,
             proposal_event_id: None,
             terms: None,
             accepted_event_id: None,
+            accepted_outbound_status: None,
             rejected_event_id: None,
+            rejected_outbound_status: None,
             canceled_event_id: None,
+            canceled_outbound_status: None,
             payment_proofs: Vec::new(),
             last_stream_item_id: None,
             last_outbound_message_id: None,
+            last_outbound_status: None,
             last_event_at: None,
             invalid_reason: None,
         }
@@ -297,6 +320,7 @@ impl PaymentRequestRecord {
 
     fn touch_outbound(&mut self, message: &OutboundPrivateMessageRecord) {
         self.last_outbound_message_id = Some(message.outbound_message_id);
+        self.last_outbound_status = Some(message.status.clone());
         self.last_event_at = Some(message.created_at);
     }
 
@@ -1076,6 +1100,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 return;
             }
             record.accepted_event_id = Some(acceptance.event_id.as_str().to_owned());
+            record.accepted_outbound_status = outbound_status(stored);
             record.state = if record
                 .terms
                 .as_ref()
@@ -1121,6 +1146,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 return;
             }
             record.rejected_event_id = Some(rejection.event_id.as_str().to_owned());
+            record.rejected_outbound_status = outbound_status(stored);
             record.state = PaymentRequestLifecycleState::Rejected;
             touch_stored(record, stored);
         }
@@ -1146,6 +1172,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 return;
             }
             record.canceled_event_id = Some(cancellation.event_id.as_str().to_owned());
+            record.canceled_outbound_status = outbound_status(stored);
             record.state = PaymentRequestLifecycleState::Canceled;
             touch_stored(record, stored);
         }
@@ -1182,6 +1209,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                     }
                     StoredPaymentRequestEvent::Received { .. } => None,
                 },
+                outbound_status: outbound_status(stored),
                 stream_item_id: match stored {
                     StoredPaymentRequestEvent::Received { item, .. } => Some(item.stream_item_id),
                     StoredPaymentRequestEvent::Outbound { .. } => None,
@@ -1240,6 +1268,7 @@ fn apply_stored_request(
         }
         StoredPaymentRequestEvent::Outbound { message, .. } => {
             record.proposal_outbound_message_id = Some(message.outbound_message_id);
+            record.proposal_outbound_status = Some(message.status.clone());
         }
     }
     record.proposal_event_id = Some(request.event_id.as_str().to_owned());
@@ -1280,6 +1309,13 @@ fn touch_stored(record: &mut PaymentRequestRecord, stored: &StoredPaymentRequest
     match stored {
         StoredPaymentRequestEvent::Received { item, .. } => record.touch(item),
         StoredPaymentRequestEvent::Outbound { message, .. } => record.touch_outbound(message),
+    }
+}
+
+fn outbound_status(stored: &StoredPaymentRequestEvent) -> Option<OutboundPrivateMessageStatus> {
+    match stored {
+        StoredPaymentRequestEvent::Outbound { message, .. } => Some(message.status.clone()),
+        StoredPaymentRequestEvent::Received { .. } => None,
     }
 }
 
@@ -1593,6 +1629,14 @@ mod tests {
             records[0].accepted_event_id.as_deref(),
             Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102")
         );
+        assert_eq!(
+            records[0].accepted_outbound_status,
+            Some(OutboundPrivateMessageStatus::Pending)
+        );
+        assert_eq!(
+            records[0].last_outbound_status,
+            Some(OutboundPrivateMessageStatus::Pending)
+        );
     }
 
     #[tokio::test]
@@ -1672,6 +1716,10 @@ mod tests {
 
         assert_eq!(records[0].state, PaymentRequestLifecycleState::Accepted);
         assert_eq!(records[0].proposal_outbound_message_id, Some(1));
+        assert_eq!(
+            records[0].proposal_outbound_status,
+            Some(OutboundPrivateMessageStatus::Pending)
+        );
         assert_eq!(records[0].last_stream_item_id, Some(0));
     }
 
@@ -1726,6 +1774,14 @@ mod tests {
             PaymentRequestLifecycleState::ProofSubmitted
         );
         assert_eq!(records[0].payment_proofs.len(), 1);
+        assert_eq!(
+            records[0].payment_proofs[0].outbound_status,
+            Some(OutboundPrivateMessageStatus::Pending)
+        );
+        assert_eq!(
+            records[0].last_outbound_status,
+            Some(OutboundPrivateMessageStatus::Pending)
+        );
         assert!(!format!("{:?}", records[0].payment_proofs[0]).contains("secret"));
     }
 

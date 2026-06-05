@@ -10,12 +10,12 @@ pub enum EndpointManagementScope {
     FullPaykitNamespace,
 }
 
-/// Policy for private Paykit message sharing.
+/// Policy for private Paykit workflows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrivateSharingPolicy {
-    /// Private Paykit messages are enabled when the identity is private-link-capable.
+    /// Private Paykit workflows are enabled when the identity is private-link-capable.
     Enabled,
-    /// Private Paykit messages are disabled by local policy.
+    /// Private Paykit workflows are disabled by local policy.
     Disabled,
 }
 
@@ -69,6 +69,9 @@ pub struct PaykitSdkConfig {
     pub peer_link_operation_lease_timeout: Duration,
     /// Time after which an in-progress outbound private send can be retried.
     pub outbound_private_send_lease_timeout: Duration,
+    /// Minimum delay before retrying a failed outbound private send.
+    #[serde(default = "default_outbound_private_retry_backoff")]
+    pub outbound_private_retry_backoff: Duration,
 }
 
 impl Default for PaykitSdkConfig {
@@ -82,8 +85,41 @@ impl Default for PaykitSdkConfig {
             public_contact_sharing: PublicContactSharingPolicy::LocalOnly,
             peer_link_operation_lease_timeout: Duration::from_secs(60),
             outbound_private_send_lease_timeout: Duration::from_secs(60),
+            outbound_private_retry_backoff: Duration::from_secs(30),
         }
     }
+}
+
+impl PaykitSdkConfig {
+    /// Validate runtime configuration values.
+    pub fn validate(&self) -> crate::Result<()> {
+        validate_runtime_duration("private recovery timeout", self.private_recovery_timeout)?;
+        validate_runtime_duration(
+            "peer link operation lease timeout",
+            self.peer_link_operation_lease_timeout,
+        )?;
+        validate_runtime_duration(
+            "outbound private send lease timeout",
+            self.outbound_private_send_lease_timeout,
+        )?;
+        validate_runtime_duration(
+            "outbound private retry backoff",
+            self.outbound_private_retry_backoff,
+        )?;
+        Ok(())
+    }
+}
+
+fn validate_runtime_duration(label: &str, duration: Duration) -> crate::Result<()> {
+    if duration.is_zero() {
+        return Err(crate::PaykitSdkError::Policy(format!(
+            "{label} must be greater than zero"
+        )));
+    }
+    chrono::Duration::from_std(duration).map_err(|err| {
+        crate::PaykitSdkError::Policy(format!("{label} must fit SDK runtime duration: {err}"))
+    })?;
+    Ok(())
 }
 
 fn default_encrypted_link_recovery_marker_policy() -> EncryptedLinkRecoveryMarkerPolicy {
@@ -92,4 +128,33 @@ fn default_encrypted_link_recovery_marker_policy() -> EncryptedLinkRecoveryMarke
 
 fn default_public_contact_sharing_policy() -> PublicContactSharingPolicy {
     PublicContactSharingPolicy::LocalOnly
+}
+
+fn default_outbound_private_retry_backoff() -> Duration {
+    Duration::from_secs(30)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_validate_rejects_zero_timeouts() {
+        let config = PaykitSdkConfig {
+            peer_link_operation_lease_timeout: Duration::ZERO,
+            ..PaykitSdkConfig::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_rejects_oversized_timeouts() {
+        let config = PaykitSdkConfig {
+            outbound_private_send_lease_timeout: Duration::MAX,
+            ..PaykitSdkConfig::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
 }

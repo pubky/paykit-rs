@@ -104,13 +104,13 @@ async fn list_reflects_additions_and_removals() {
 }
 
 #[tokio::test]
-async fn removing_missing_endpoint_is_error() {
+async fn removing_missing_endpoint_is_idempotent() {
     let setup = TestSetup::new().await;
     let method = PaymentEndpointIdentifier::new("unused").unwrap();
 
     remove_payment_endpoint(&setup.session, method)
         .await
-        .expect_err("removing non-existent endpoint should fail");
+        .expect("removing non-existent endpoint should be idempotent");
 
     setup.raw_session.signout().await.unwrap();
 }

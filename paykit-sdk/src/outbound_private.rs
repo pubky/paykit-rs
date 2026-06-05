@@ -38,6 +38,15 @@ pub struct OutboundPrivateSendFailure {
     pub error: String,
 }
 
+/// Failed cleanup of a superseded Payment Endpoint Reservation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReservationCleanupFailure {
+    /// Reservation id, when the failure is tied to a specific reservation.
+    pub reservation_id: Option<String>,
+    /// Cleanup error.
+    pub error: String,
+}
+
 /// Summary returned after processing outbound private messages.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundPrivateSendReport {
@@ -47,6 +56,19 @@ pub struct OutboundPrivateSendReport {
     pub sent: Vec<u64>,
     /// Messages that failed in this run.
     pub failed: Vec<OutboundPrivateSendFailure>,
+    /// Superseded reservation cleanup failures observed in this run.
+    pub reservation_cleanup_failures: Vec<ReservationCleanupFailure>,
+}
+
+/// Summary for processing outbound private messages for one counterparty.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundPrivateCounterpartySendReport {
+    /// Counterparty whose queue was processed.
+    pub counterparty: PubkyPublicKey,
+    /// Successful send report, when processing completed.
+    pub report: Option<OutboundPrivateSendReport>,
+    /// Error text, when processing failed for this counterparty.
+    pub error: Option<String>,
 }
 
 /// Enqueue one raw JSON Private Application Message.
@@ -92,13 +114,19 @@ pub(crate) async fn claim_next_outbound_private_message<S>(
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
     stale_before: DateTime<Utc>,
+    failed_retry_after: DateTime<Utc>,
 ) -> Result<Option<OutboundPrivateMessageRecord>>
 where
     S: StorageAdapter,
 {
     storage
         .transaction(|tx| {
-            Ok(tx.claim_next_outbound_private_message(counterparty, now, stale_before))
+            Ok(tx.claim_next_outbound_private_message(
+                counterparty,
+                now,
+                stale_before,
+                failed_retry_after,
+            ))
         })
         .await
 }
@@ -108,6 +136,7 @@ pub(crate) async fn claim_next_outbound_private_message_with_peer_lease<S>(
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
     stale_before: DateTime<Utc>,
+    failed_retry_after: DateTime<Utc>,
     lease: PeerLinkOperationLease,
 ) -> Result<Option<OutboundPrivateMessageRecord>>
 where
@@ -116,7 +145,12 @@ where
     storage
         .transaction(move |tx| {
             require_peer_link_operation_lease(tx, &lease)?;
-            Ok(tx.claim_next_outbound_private_message(counterparty, now, stale_before))
+            Ok(tx.claim_next_outbound_private_message(
+                counterparty,
+                now,
+                stale_before,
+                failed_retry_after,
+            ))
         })
         .await
 }
@@ -354,6 +388,7 @@ mod tests {
             &counterparty,
             timestamp(),
             timestamp() - chrono::Duration::seconds(60),
+            timestamp() - chrono::Duration::seconds(60),
         )
         .await
         .unwrap()
@@ -366,6 +401,7 @@ mod tests {
             &counterparty,
             timestamp(),
             timestamp() - chrono::Duration::seconds(60),
+            timestamp() - chrono::Duration::seconds(60),
         )
         .await
         .unwrap();
@@ -375,6 +411,7 @@ mod tests {
             &storage,
             &counterparty,
             timestamp() + chrono::Duration::seconds(61),
+            timestamp(),
             timestamp(),
         )
         .await
@@ -431,6 +468,7 @@ mod tests {
             &storage,
             &counterparty,
             timestamp() + chrono::Duration::seconds(12),
+            timestamp(),
             timestamp(),
             first_lease,
         )

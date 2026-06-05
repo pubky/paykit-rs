@@ -88,6 +88,48 @@ pub struct ReceiptAccessRecord {
     pub received_at: DateTime<Utc>,
 }
 
+/// App-facing view of an indexed Receipt Access event.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptAccessView {
+    /// Counterparty that sent the Receipt Access event.
+    pub counterparty: PubkyPublicKey,
+    /// Receipt Access Event ID.
+    pub event_id: String,
+    /// Receipt ID.
+    pub receipt_id: String,
+    /// Payment Reference copied from Receipt Access.
+    pub payment_reference: String,
+    /// Optional Payment Request ID copied from Receipt Access.
+    pub payment_request_id: Option<String>,
+    /// Optional Billing Period copied from Receipt Access.
+    pub billing_period: Option<ReceiptBillingPeriodRecord>,
+    /// Current retrieval state for the referenced receipt.
+    pub retrieval_status: ReceiptRetrievalStatus,
+    /// Last retrieval attempt time.
+    pub retrieval_attempted_at: Option<DateTime<Utc>>,
+    /// Successful retrieval/decryption time.
+    pub retrieved_at: Option<DateTime<Utc>>,
+    /// Receive time of the indexed stream item.
+    pub received_at: DateTime<Utc>,
+}
+
+impl From<&ReceiptAccessRecord> for ReceiptAccessView {
+    fn from(record: &ReceiptAccessRecord) -> Self {
+        Self {
+            counterparty: record.counterparty.clone(),
+            event_id: record.event_id.clone(),
+            receipt_id: record.receipt_id.clone(),
+            payment_reference: record.payment_reference.clone(),
+            payment_request_id: record.payment_request_id.clone(),
+            billing_period: record.billing_period.clone(),
+            retrieval_status: record.retrieval_status,
+            retrieval_attempted_at: record.retrieval_attempted_at,
+            retrieved_at: record.retrieved_at,
+            received_at: record.received_at,
+        }
+    }
+}
+
 impl ReceiptAccessRecord {
     pub(crate) fn from_access(
         counterparty: PubkyPublicKey,
@@ -153,15 +195,18 @@ impl fmt::Debug for ReceiptAccessRecord {
             .field("receive_batch_id", &self.receive_batch_id)
             .field("event_id", &self.event_id)
             .field("receipt_id", &self.receipt_id)
-            .field("payment_reference", &self.payment_reference)
+            .field("payment_reference", &"<redacted>")
             .field("payment_request_id", &self.payment_request_id)
             .field("billing_period", &self.billing_period)
-            .field("location", &self.location)
+            .field("location", &"<redacted>")
             .field("key", &"<redacted>")
             .field("retrieval_status", &self.retrieval_status)
             .field("retrieval_attempted_at", &self.retrieval_attempted_at)
             .field("retrieved_at", &self.retrieved_at)
-            .field("last_retrieval_error", &self.last_retrieval_error)
+            .field(
+                "last_retrieval_error",
+                &self.last_retrieval_error.as_ref().map(|_| "<redacted>"),
+            )
             .field("received_at", &self.received_at)
             .finish()
     }
@@ -252,7 +297,7 @@ impl fmt::Debug for ReceiptRecord {
             .field("receipt_access_event_id", &self.receipt_access_event_id)
             .field("receipt_access_key_hash", &self.receipt_access_key_hash)
             .field("receipt_id", &self.receipt_id)
-            .field("payment_reference", &self.payment_reference)
+            .field("payment_reference", &"<redacted>")
             .field("payment_request_id", &self.payment_request_id)
             .field("billing_period", &self.billing_period)
             .field("recipient_public_key", &self.recipient_public_key)
@@ -265,7 +310,7 @@ impl fmt::Debug for ReceiptRecord {
                 "metadata",
                 &format_args!("<redacted:{} fields>", self.metadata.len()),
             )
-            .field("location", &self.location)
+            .field("location", &"<redacted>")
             .field("retrieved_at", &self.retrieved_at)
             .finish()
     }
@@ -358,7 +403,7 @@ pub(crate) fn receipt_record_matches_access(
         && record.location == access.location
 }
 
-fn receipt_access_key_hash(key: &str) -> String {
+pub(crate) fn receipt_access_key_hash(key: &str) -> String {
     let digest = Sha256::digest(key.as_bytes());
     format!("sha256:{digest:x}")
 }
@@ -505,6 +550,8 @@ mod tests {
         let debug = format!("{record:?}");
         assert!(debug.contains("<redacted:1 fields>"));
         assert!(!debug.contains("abc-123"));
+        assert!(!debug.contains("invoice-2026-0001"));
+        assert!(!debug.contains(&access.location));
     }
 
     #[test]
@@ -582,6 +629,23 @@ mod tests {
             failed.last_retrieval_error.as_deref(),
             Some("decryption failed")
         );
+        let debug = format!("{failed:?}");
+        assert!(!debug.contains("decryption failed"));
+    }
+
+    #[test]
+    fn test_receipt_access_view_hides_storage_only_fields() {
+        let receipt_id =
+            paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let key = ReceiptDecryptionKey::generate();
+        let access = receipt_access_record(&receipt_id, &key, "invoice-2026-0001");
+
+        let view = ReceiptAccessView::from(&access);
+        let json = serde_json::to_string(&view).unwrap();
+
+        assert_eq!(view.payment_reference, "invoice-2026-0001");
+        assert!(!json.contains(key.as_str()));
+        assert!(!json.contains("/pub/paykit/v0/private/receipts"));
     }
 
     #[test]

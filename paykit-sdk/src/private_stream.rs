@@ -43,6 +43,17 @@ pub struct PrivateStreamIntakeReport {
     pub event_conflicts: Vec<EventIdConflict>,
 }
 
+/// Summary for receiving private messages from one counterparty.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateStreamCounterpartyIntakeReport {
+    /// Counterparty whose private stream was received.
+    pub counterparty: PubkyPublicKey,
+    /// Successful intake report, when receive completed.
+    pub report: Option<PrivateStreamIntakeReport>,
+    /// Error text, when receive failed for this counterparty.
+    pub error: Option<String>,
+}
+
 /// Reused Event ID with a different payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventIdConflict {
@@ -99,12 +110,12 @@ where
             };
 
             for message in messages {
-                let MessageClassification {
+                let PrivateStreamMessageClassification {
                     status,
                     parse_error,
                     event,
                     receipt_access,
-                } = classify_message(&message);
+                } = classify_private_application_message(&message);
                 let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
                     NewPrivateStreamItemDetails {
                         counterparty: counterparty.clone(),
@@ -154,27 +165,36 @@ where
                 }
                 tx.save_encrypted_link_state(link_state);
             }
+            if !report.stream_item_ids.is_empty() {
+                if let Some(mut peer) = tx.linked_peer(&counterparty) {
+                    peer.last_private_receive_at = Some(received_at);
+                    peer.last_sync_at = Some(received_at);
+                    tx.save_linked_peer(peer);
+                }
+            }
 
             Ok(report)
         })
         .await
 }
 
-struct MessageClassification {
-    status: PrivateStreamParseStatus,
-    parse_error: Option<String>,
-    event: Option<EventHeader>,
-    receipt_access: Option<ReceiptAccess>,
+pub(crate) struct PrivateStreamMessageClassification {
+    pub(crate) status: PrivateStreamParseStatus,
+    pub(crate) parse_error: Option<String>,
+    pub(crate) event: Option<PrivateStreamEventHeader>,
+    pub(crate) receipt_access: Option<ReceiptAccess>,
 }
 
-struct EventHeader {
-    event_id: String,
-    event_kind: String,
+pub(crate) struct PrivateStreamEventHeader {
+    pub(crate) event_id: String,
+    pub(crate) event_kind: String,
 }
 
-fn classify_message(message: &PrivateApplicationMessage) -> MessageClassification {
+pub(crate) fn classify_private_application_message(
+    message: &PrivateApplicationMessage,
+) -> PrivateStreamMessageClassification {
     let Some(kind) = message.known_kind() else {
-        return MessageClassification {
+        return PrivateStreamMessageClassification {
             status: if message.version.is_some() && message.kind.is_some() {
                 PrivateStreamParseStatus::UnknownKind
             } else {
@@ -189,13 +209,13 @@ fn classify_message(message: &PrivateApplicationMessage) -> MessageClassificatio
     match kind {
         PrivateMessageKind::PrivatePaymentList => {
             match parse_private_payment_list_json(&message.raw_json) {
-                Ok(_) => MessageClassification {
+                Ok(_) => PrivateStreamMessageClassification {
                     status: PrivateStreamParseStatus::Valid,
                     parse_error: None,
                     event: None,
                     receipt_access: None,
                 },
-                Err(err) => MessageClassification {
+                Err(err) => PrivateStreamMessageClassification {
                     status: PrivateStreamParseStatus::MalformedRecognized,
                     parse_error: Some(err.to_string()),
                     event: None,
@@ -208,11 +228,11 @@ fn classify_message(message: &PrivateApplicationMessage) -> MessageClassificatio
             let event = parsed
                 .as_ref()
                 .and_then(|parsed| parsed.event_id())
-                .map(|event_id| EventHeader {
+                .map(|event_id| PrivateStreamEventHeader {
                     event_id: event_id.as_str().to_owned(),
                     event_kind: kind.as_str().to_owned(),
                 });
-            MessageClassification {
+            PrivateStreamMessageClassification {
                 status: status_from_event_validity(
                     parsed.as_ref().is_some_and(|parsed| parsed.is_valid()),
                 ),
@@ -233,11 +253,11 @@ fn classify_message(message: &PrivateApplicationMessage) -> MessageClassificatio
             let event = parsed
                 .as_ref()
                 .and_then(|parsed| parsed.event_id())
-                .map(|event_id| EventHeader {
+                .map(|event_id| PrivateStreamEventHeader {
                     event_id: event_id.as_str().to_owned(),
                     event_kind: kind.as_str().to_owned(),
                 });
-            MessageClassification {
+            PrivateStreamMessageClassification {
                 status: status_from_event_validity(
                     parsed.as_ref().is_some_and(|parsed| parsed.is_valid()),
                 ),
@@ -317,8 +337,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        storage::InMemoryStorage, EncryptedLinkStateRecord, PaykitSdkError,
-        PrivateStreamParseStatus,
+        linked_peers::LinkedPeerState,
+        storage::{EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord},
+        PaykitSdkError, PrivateStreamParseStatus,
     };
 
     fn counterparty() -> PubkyPublicKey {
@@ -377,6 +398,26 @@ mod tests {
     async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
         let storage = InMemoryStorage::new();
         let counterparty = counterparty();
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.save_linked_peer(LinkedPeerRecord {
+                        counterparty,
+                        state: LinkedPeerState::Linked,
+                        last_sync_at: None,
+                        last_private_receive_at: None,
+                        failure_count: 0,
+                        local_recovery_attempt_id: None,
+                        local_recovery_marker_created_at: None,
+                        remote_recovery_attempt_id: None,
+                        remote_recovery_marker_observed_at: None,
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
         let link_state = EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             link_snapshot: Some(vec![1, 2, 3]),
@@ -414,6 +455,9 @@ mod tests {
         );
         assert_eq!(snapshot.encrypted_link_states[&counterparty], link_state);
         assert_eq!(snapshot.event_dedup_records.len(), 1);
+        let peer = snapshot.linked_peers.get(&counterparty).unwrap();
+        assert_eq!(peer.last_private_receive_at, Some(timestamp()));
+        assert_eq!(peer.last_sync_at, Some(timestamp()));
     }
 
     #[tokio::test]

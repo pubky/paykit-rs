@@ -22,6 +22,11 @@ use crate::{
 };
 
 /// Durable storage boundary for Paykit SDK.
+///
+/// Production adapters must provide atomic transactions with monotonic id
+/// allocation, stable FIFO ordering for outbound/private-stream records, and
+/// lease-aware writes. The SDK assumes all mutation methods called inside one
+/// transaction either commit together or roll back together.
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
     /// Run an atomic storage transaction.
@@ -105,6 +110,13 @@ pub trait StorageTransaction {
     /// Save one Payment Endpoint Reservation record.
     fn save_payment_endpoint_reservation(&mut self, record: PaymentEndpointReservationRecord);
 
+    /// Remove one Payment Endpoint Reservation record.
+    fn remove_payment_endpoint_reservation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        reservation_id: &str,
+    ) -> Option<PaymentEndpointReservationRecord>;
+
     /// Load one Encrypted Link state record.
     fn encrypted_link_state(
         &self,
@@ -159,6 +171,7 @@ pub trait StorageTransaction {
         counterparty: &PubkyPublicKey,
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
+        failed_retry_after: DateTime<Utc>,
     ) -> Option<OutboundPrivateMessageRecord>;
 
     /// Save updates for one existing outbound private message record.
@@ -227,7 +240,7 @@ pub struct LinkedPeerRecord {
 }
 
 /// Durable SDK-managed public Payment Endpoint publication record.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicEndpointRecord {
     /// Payment Endpoint Identifier.
     pub identifier: String,
@@ -239,6 +252,24 @@ pub struct PublicEndpointRecord {
     pub updated_at: DateTime<Utc>,
     /// Last sync error, when available.
     pub last_error: Option<String>,
+}
+
+impl fmt::Debug for PublicEndpointRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublicEndpointRecord")
+            .field("identifier", &self.identifier)
+            .field(
+                "payload",
+                &self
+                    .payload
+                    .as_ref()
+                    .map(|payload| format!("<redacted:{} bytes>", payload.len())),
+            )
+            .field("status", &self.status)
+            .field("updated_at", &self.updated_at)
+            .field("last_error", &self.last_error)
+            .finish()
+    }
 }
 
 /// Durable SDK-managed Payment Endpoint Reservation record.
@@ -926,6 +957,16 @@ impl StorageTransaction for InMemoryStorageTransaction {
         );
     }
 
+    fn remove_payment_endpoint_reservation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        reservation_id: &str,
+    ) -> Option<PaymentEndpointReservationRecord> {
+        self.state
+            .payment_endpoint_reservations
+            .remove(&(counterparty.clone(), reservation_id.to_owned()))
+    }
+
     fn encrypted_link_state(
         &self,
         counterparty: &PubkyPublicKey,
@@ -1039,8 +1080,15 @@ impl StorageTransaction for InMemoryStorageTransaction {
         counterparty: &PubkyPublicKey,
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
+        failed_retry_after: DateTime<Utc>,
     ) -> Option<OutboundPrivateMessageRecord> {
-        supersede_outdated_private_payment_lists(&mut self.state, counterparty, now, stale_before);
+        supersede_outdated_private_payment_lists(
+            &mut self.state,
+            counterparty,
+            now,
+            stale_before,
+            failed_retry_after,
+        );
 
         let mut indexes = self
             .state
@@ -1062,7 +1110,7 @@ impl StorageTransaction for InMemoryStorageTransaction {
 
         let (index, _) = indexes.first().copied()?;
         let message = &mut self.state.outbound_private_messages[index];
-        if !is_claimable_outbound_private_message(message, stale_before) {
+        if !is_claimable_outbound_private_message(message, stale_before, failed_retry_after) {
             return None;
         }
 
@@ -1178,9 +1226,13 @@ impl StorageTransaction for InMemoryStorageTransaction {
 fn is_claimable_outbound_private_message(
     message: &OutboundPrivateMessageRecord,
     stale_before: DateTime<Utc>,
+    failed_retry_after: DateTime<Utc>,
 ) -> bool {
     match message.status {
-        OutboundPrivateMessageStatus::Pending | OutboundPrivateMessageStatus::Failed => true,
+        OutboundPrivateMessageStatus::Pending => true,
+        OutboundPrivateMessageStatus::Failed => message
+            .last_attempt_at
+            .is_none_or(|last_attempt_at| last_attempt_at <= failed_retry_after),
         OutboundPrivateMessageStatus::Sending => match message.last_attempt_at {
             Some(last_attempt_at) => last_attempt_at <= stale_before,
             None => true,
@@ -1191,11 +1243,55 @@ fn is_claimable_outbound_private_message(
     }
 }
 
+pub(crate) fn outbound_private_queue_head_is_claimable(
+    messages: &[OutboundPrivateMessageRecord],
+    stale_before: DateTime<Utc>,
+    failed_retry_after: DateTime<Utc>,
+) -> bool {
+    let latest_private_list_id = messages
+        .iter()
+        .filter(|message| {
+            message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+                && !matches!(
+                    message.status,
+                    OutboundPrivateMessageStatus::Invalid
+                        | OutboundPrivateMessageStatus::Superseded
+                )
+        })
+        .map(|message| message.outbound_message_id)
+        .max();
+    let mut ordered = messages.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|message| message.outbound_message_id);
+
+    for message in ordered {
+        if matches!(
+            message.status,
+            OutboundPrivateMessageStatus::Sent
+                | OutboundPrivateMessageStatus::Invalid
+                | OutboundPrivateMessageStatus::Superseded
+        ) {
+            continue;
+        }
+        let is_supersedable_private_list = latest_private_list_id.is_some_and(|latest| {
+            message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+                && message.outbound_message_id < latest
+                && is_claimable_outbound_private_message(message, stale_before, failed_retry_after)
+        });
+        if is_supersedable_private_list {
+            continue;
+        }
+        return is_claimable_outbound_private_message(message, stale_before, failed_retry_after);
+    }
+
+    false
+}
+
 fn supersede_outdated_private_payment_lists(
     state: &mut StorageState,
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
     stale_before: DateTime<Utc>,
+    failed_retry_after: DateTime<Utc>,
 ) {
     let latest_private_list_id = state
         .outbound_private_messages
@@ -1219,7 +1315,7 @@ fn supersede_outdated_private_payment_lists(
         if &message.counterparty == counterparty
             && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
             && message.outbound_message_id < latest_private_list_id
-            && is_claimable_outbound_private_message(message, stale_before)
+            && is_claimable_outbound_private_message(message, stale_before, failed_retry_after)
         {
             message.status = OutboundPrivateMessageStatus::Superseded;
             message.updated_at = now;
@@ -1249,7 +1345,7 @@ mod tests {
     fn public_endpoint_record(identifier: &str) -> PublicEndpointRecord {
         PublicEndpointRecord {
             identifier: identifier.into(),
-            payload: Some("payload".into()),
+            payload: Some("public-endpoint-secret".into()),
             status: EndpointPublicationStatus::Published,
             updated_at: timestamp(),
             last_error: None,
@@ -1361,6 +1457,7 @@ mod tests {
         let receipt_access = receipt_access_record(stream.counterparty.clone());
         let receipt = receipt_record(receipt_access.counterparty.clone());
         let reservation = payment_endpoint_reservation_record(receipt_access.counterparty.clone());
+        let public_endpoint = public_endpoint_record("btc-lightning-bolt11");
         let contact_public_key = counterparty();
         let contact = ContactRecord {
             public_key: contact_public_key.clone(),
@@ -1379,11 +1476,15 @@ mod tests {
         };
         let storage_state = StorageState {
             contact_records: HashMap::from([(contact_public_key.clone(), contact.clone())]),
+            public_endpoint_records: HashMap::from([(
+                public_endpoint.identifier.clone(),
+                public_endpoint.clone(),
+            )]),
             ..StorageState::default()
         };
 
         let debug = format!(
-            "{link_state:?} {outbound:?} {stream:?} {receipt_access:?} {receipt:?} {reservation:?} {contact:?} {storage_state:?}"
+            "{link_state:?} {outbound:?} {stream:?} {receipt_access:?} {receipt:?} {reservation:?} {public_endpoint:?} {contact:?} {storage_state:?}"
         );
         assert!(debug.contains("<redacted:"));
         assert!(!debug.contains("secret"));
@@ -1547,6 +1648,7 @@ mod tests {
             &counterparty,
             timestamp(),
             timestamp() - chrono::Duration::seconds(60),
+            timestamp() - chrono::Duration::seconds(60),
         )
         .await
         .unwrap()
@@ -1585,6 +1687,7 @@ mod tests {
             &storage,
             &counterparty,
             timestamp(),
+            timestamp() - chrono::Duration::seconds(60),
             timestamp() - chrono::Duration::seconds(60),
         )
         .await
@@ -1627,6 +1730,7 @@ mod tests {
             &storage,
             &counterparty,
             timestamp(),
+            timestamp() - chrono::Duration::seconds(60),
             timestamp() - chrono::Duration::seconds(60),
         )
         .await

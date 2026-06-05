@@ -5,7 +5,7 @@ use std::fmt;
 
 use crate::{
     PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate, PaymentEndpointEvaluation,
-    PubkyPublicKey, Result,
+    PaymentTarget, PubkyPublicKey, Result,
 };
 
 /// Default public Paykit profile path.
@@ -366,6 +366,8 @@ pub struct ContactPaymentResolution {
     pub status: ContactPaymentResolutionStatus,
     /// Selected endpoint, when one is payable.
     pub selected_endpoint: Option<PaymentEndpointCandidate>,
+    /// Adapter-built payment target for the selected endpoint.
+    pub payment_target: Option<PaymentTarget>,
     /// Adapter evaluations from candidate checks.
     pub evaluations: Vec<PaymentEndpointEvaluation>,
     /// Whether public Payment Endpoints were used after private candidates.
@@ -377,6 +379,7 @@ impl fmt::Debug for ContactPaymentResolution {
         f.debug_struct("ContactPaymentResolution")
             .field("status", &self.status)
             .field("selected_endpoint", &self.selected_endpoint)
+            .field("payment_target", &self.payment_target)
             .field("evaluations", &self.evaluations)
             .field("used_public_fallback", &self.used_public_fallback)
             .finish()
@@ -406,7 +409,14 @@ fn validate_optional_text(
 }
 
 fn normalize_label(label: Option<String>) -> Option<String> {
-    label.and_then(|label| if label.is_empty() { None } else { Some(label) })
+    label.and_then(|label| {
+        let label = label.trim();
+        if label.is_empty() {
+            None
+        } else {
+            Some(label.to_owned())
+        }
+    })
 }
 
 #[cfg(test)]
@@ -461,6 +471,30 @@ mod tests {
         };
 
         assert!(update.validate().is_ok());
+    }
+
+    #[test]
+    fn test_contact_record_normalizes_whitespace_labels() {
+        let public_key = public_key();
+        let labeled = ContactRecord::from_update(
+            ContactUpdate {
+                public_key: public_key.clone(),
+                label: Some("  Alice  ".into()),
+            },
+            None,
+            chrono::Utc::now(),
+        );
+        let cleared = ContactRecord::from_update(
+            ContactUpdate {
+                public_key,
+                label: Some("   ".into()),
+            },
+            Some(labeled.clone()),
+            chrono::Utc::now(),
+        );
+
+        assert_eq!(labeled.label.as_deref(), Some("Alice"));
+        assert_eq!(cleared.label, None);
     }
 
     #[test]

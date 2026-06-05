@@ -107,7 +107,7 @@ fn report_current_link_state(
             generation: link_state.generation,
             handshake_role: None,
         }
-    } else {
+    } else if link_state.handshake_snapshot.is_some() {
         peer.state = LinkedPeerState::Linking;
         peer.last_sync_at = Some(now);
         peer.failure_count = 0;
@@ -116,6 +116,17 @@ fn report_current_link_state(
             state: LinkedPeerState::Linking,
             generation: link_state.generation,
             handshake_role: link_state.handshake_role,
+        }
+    } else {
+        peer.state = LinkedPeerState::RecoveryRequired;
+        if peer.last_sync_at.is_none() {
+            peer.last_sync_at = Some(now);
+        }
+        LinkedPeerHandshakeReport {
+            counterparty,
+            state: LinkedPeerState::RecoveryRequired,
+            generation: link_state.generation,
+            handshake_role: None,
         }
     }
 }
@@ -778,6 +789,50 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(link_state.link_snapshot, Some(vec![4, 5, 6]));
+        assert!(link_state.handshake_snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_generation_checked_handshake_save_preserves_recovery_required() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        save_link_handshake_state(
+            &storage,
+            counterparty.clone(),
+            EncryptedLinkHandshakeRole::Initiator,
+            vec![1, 2, 3],
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
+            .await
+            .unwrap();
+
+        let report = save_link_handshake_state_if_generation(
+            &storage,
+            counterparty.clone(),
+            EncryptedLinkHandshakeRole::Initiator,
+            vec![7, 8, 9],
+            0,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.state, LinkedPeerState::RecoveryRequired);
+        assert_eq!(report.generation, 1);
+        assert_eq!(report.handshake_role, None);
+        let peer = load_linked_peer(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+        let link_state = load_encrypted_link_state(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(link_state.link_snapshot.is_none());
         assert!(link_state.handshake_snapshot.is_none());
     }
 
