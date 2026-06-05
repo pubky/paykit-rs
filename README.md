@@ -210,7 +210,7 @@ integrating application and its adapters.
 - [`paykit-lib`](paykit-lib/) is the canonical Rust Paykit Library. It consumes
   concrete Pubky SDK handles and keeps no global application state.
 - [`paykit-sdk`](paykit-sdk/) is the Rust SDK runtime for stateful Paykit
-  workflows. SDK platform bindings are planned separately.
+  workflows.
 - [`paykit-ffi`](paykit-ffi/) exposes UniFFI bindings for Swift and Kotlin.
 - [`paykit-react-native`](paykit-react-native/) wraps the generated bindings for
   React Native.

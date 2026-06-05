@@ -6,6 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use paykit_lib::PrivateMessageKind;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -135,7 +136,11 @@ pub trait StorageTransaction {
         counterparty: &PubkyPublicKey,
     ) -> Vec<OutboundPrivateMessageRecord>;
 
-    /// Claim the next outbound private message for sending, preserving FIFO.
+    /// Claim the next outbound private message for sending.
+    ///
+    /// Event Messages are claimed FIFO. Private Payment Lists are Latest-State
+    /// Messages, so older claimable unsent lists should be marked
+    /// [`OutboundPrivateMessageStatus::Superseded`] before claiming.
     fn claim_next_outbound_private_message(
         &mut self,
         counterparty: &PubkyPublicKey,
@@ -918,6 +923,8 @@ impl StorageTransaction for InMemoryStorageTransaction {
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
     ) -> Option<OutboundPrivateMessageRecord> {
+        supersede_outdated_private_payment_lists(&mut self.state, counterparty, now, stale_before);
+
         let mut indexes = self
             .state
             .outbound_private_messages
@@ -927,7 +934,9 @@ impl StorageTransaction for InMemoryStorageTransaction {
                 &message.counterparty == counterparty
                     && !matches!(
                         message.status,
-                        OutboundPrivateMessageStatus::Sent | OutboundPrivateMessageStatus::Invalid
+                        OutboundPrivateMessageStatus::Sent
+                            | OutboundPrivateMessageStatus::Invalid
+                            | OutboundPrivateMessageStatus::Superseded
                     )
             })
             .map(|(index, message)| (index, message.outbound_message_id))
@@ -1059,7 +1068,46 @@ fn is_claimable_outbound_private_message(
             Some(last_attempt_at) => last_attempt_at <= stale_before,
             None => true,
         },
-        OutboundPrivateMessageStatus::Sent | OutboundPrivateMessageStatus::Invalid => false,
+        OutboundPrivateMessageStatus::Sent
+        | OutboundPrivateMessageStatus::Invalid
+        | OutboundPrivateMessageStatus::Superseded => false,
+    }
+}
+
+fn supersede_outdated_private_payment_lists(
+    state: &mut StorageState,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+    stale_before: DateTime<Utc>,
+) {
+    let latest_private_list_id = state
+        .outbound_private_messages
+        .iter()
+        .filter(|message| {
+            &message.counterparty == counterparty
+                && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+                && !matches!(
+                    message.status,
+                    OutboundPrivateMessageStatus::Invalid
+                        | OutboundPrivateMessageStatus::Superseded
+                )
+        })
+        .map(|message| message.outbound_message_id)
+        .max();
+    let Some(latest_private_list_id) = latest_private_list_id else {
+        return;
+    };
+
+    for message in state.outbound_private_messages.iter_mut() {
+        if &message.counterparty == counterparty
+            && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+            && message.outbound_message_id < latest_private_list_id
+            && is_claimable_outbound_private_message(message, stale_before)
+        {
+            message.status = OutboundPrivateMessageStatus::Superseded;
+            message.updated_at = now;
+            message.last_error = None;
+        }
     }
 }
 
@@ -1096,6 +1144,15 @@ mod tests {
             counterparty,
             "paykit.private_payment_list".into(),
             r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#.into(),
+            timestamp(),
+        )
+    }
+
+    fn outbound_payment_request_message(counterparty: PubkyPublicKey) -> NewOutboundPrivateMessage {
+        NewOutboundPrivateMessage::new(
+            counterparty,
+            "paykit.payment_request".into(),
+            r#"{"version":1,"kind":"paykit.payment_request","event_id":"650e8400-e29b-41d4-a716-446655440000","payment_request_id":"550e8400-e29b-41d4-a716-446655440000","request":{"payment_request_id":"550e8400-e29b-41d4-a716-446655440000","terms":{"amount":{"value":"1","asset":"btc"},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{}}}}"#.into(),
             timestamp(),
         )
     }
@@ -1360,6 +1417,88 @@ mod tests {
             .unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].outbound_message_id, second.outbound_message_id);
+    }
+
+    #[tokio::test]
+    async fn test_private_payment_list_queue_sends_only_latest_state() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+
+        let (first, second) = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    let first = tx.insert_outbound_private_message(outbound_private_message(
+                        counterparty.clone(),
+                    ));
+                    let second =
+                        tx.insert_outbound_private_message(outbound_private_message(counterparty));
+                    Ok((first, second))
+                }
+            })
+            .await
+            .unwrap();
+
+        let claimed = claim_next_outbound_private_message(
+            &storage,
+            &counterparty,
+            timestamp(),
+            timestamp() - chrono::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(claimed.outbound_message_id, second.outbound_message_id);
+        assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
+        let snapshot = storage.snapshot().unwrap();
+        let first = snapshot
+            .outbound_private_messages
+            .iter()
+            .find(|message| message.outbound_message_id == first.outbound_message_id)
+            .unwrap();
+        assert_eq!(first.status, OutboundPrivateMessageStatus::Superseded);
+    }
+
+    #[tokio::test]
+    async fn test_event_message_queue_preserves_fifo() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+
+        let (first, second) = storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    let first = tx.insert_outbound_private_message(
+                        outbound_payment_request_message(counterparty.clone()),
+                    );
+                    let second = tx.insert_outbound_private_message(
+                        outbound_payment_request_message(counterparty),
+                    );
+                    Ok((first, second))
+                }
+            })
+            .await
+            .unwrap();
+
+        let claimed = claim_next_outbound_private_message(
+            &storage,
+            &counterparty,
+            timestamp(),
+            timestamp() - chrono::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(claimed.outbound_message_id, first.outbound_message_id);
+        assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
+        let queued = queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
+        assert!(queued
+            .iter()
+            .any(|message| message.outbound_message_id == second.outbound_message_id));
     }
 
     #[tokio::test]

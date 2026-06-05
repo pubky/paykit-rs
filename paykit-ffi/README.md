@@ -3,8 +3,8 @@
 UniFFI bindings for [paykit-lib](../paykit-lib/), exposing Paykit's payment routing functionality to iOS (Swift) and Android (Kotlin).
 
 These bindings expose the low-level, stateless Paykit Library API. The
-stateful `paykit-sdk` runtime is a separate Rust crate and does not have
-platform bindings yet.
+stateful `paykit-sdk` runtime is a separate Rust crate with a separate
+integration surface.
 
 ## Exported API
 
@@ -227,7 +227,7 @@ paykitSignIn(secretKeyHex)
 paykit-ffi/
 ├── Cargo.toml              # Crate config (lib name = "paykit")
 ├── src/
-│   ├── lib.rs              # UniFFI scaffolding, types, exported functions
+│   ├── lib.rs              # UniFFI exports, types, and functions
 │   └── bin/
 │       └── uniffi-bindgen.rs
 ├── uniffi.toml             # Swift binding config

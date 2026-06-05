@@ -25,7 +25,7 @@
 - **Related terms**: Paykit Protocol, Paykit SDK, Language Bindings
 
 ### Paykit SDK
-- **Definition**: The stateful integration layer above Paykit Library for durable Encrypted Link state, private stream routing, event logs, recovery behavior, Payment Request lifecycle state, receipt indexing, and ergonomic wallet/payment-processor workflows. Current implementation starts as a Rust SDK runtime foundation.
+- **Definition**: The stateful integration layer above Paykit Library for durable Encrypted Link state, private stream routing, event logs, recovery behavior, Payment Request lifecycle state, receipt indexing, and ergonomic wallet/payment-processor workflows.
 - **NOT**: Paykit Library, Paykit Protocol, or payment execution/settlement logic.
 - **Synonyms to AVOID**: Paykit core, Paykit runtime core, Pubky SDK
 - **Related terms**: Paykit, Paykit Library, Language Bindings

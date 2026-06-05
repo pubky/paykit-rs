@@ -709,7 +709,10 @@ fn derive_payment_request_records(
     }
 
     for message in outbound {
-        if message.status == OutboundPrivateMessageStatus::Invalid {
+        if matches!(
+            message.status,
+            OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::Superseded
+        ) {
             continue;
         }
         let Some(parsed) = parse_payment_request_event_message(&PrivateApplicationMessage {

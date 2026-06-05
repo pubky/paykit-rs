@@ -1,11 +1,8 @@
-# Paykit SDK Plan
-
-Status: implementation plan with initial Rust SDK foundation
-Date: 2026-06-04
+# Paykit SDK Architecture
 
 ## Goal
 
-Define the Paykit SDK layer that sits above Paykit Library.
+Describe the Paykit SDK layer that sits above Paykit Library.
 
 Paykit Library remains the stateless Rust implementation of Paykit Protocol
 wire formats, Pubky storage helpers, Encrypted Link transport helpers, and
@@ -64,7 +61,7 @@ only for low-level protocol operations.
 
 ## Crate Layout
 
-The initial implementation adds a new Rust crate:
+The SDK crate uses this layout:
 
 ```text
 paykit-sdk/
@@ -82,11 +79,13 @@ paykit-sdk/
     linked_peers.rs
     private_stream.rs
     private_lists.rs
+    payment_requests.rs
+    receipts.rs
     endpoint_reservations.rs
     backup.rs
 ```
 
-Suggested module responsibilities:
+Module responsibilities:
 
 - `runtime`: owns `PaykitSdk`, coordinates adapters, storage, and workflow
   modules.
@@ -109,16 +108,16 @@ Suggested module responsibilities:
   parsing, dedupe, and current derived view rebuilds.
 - `private_lists`: local and remote Private Payment List publication, caching,
   latest-state derivation, and size policy.
-- `endpoint_reservations`: optional receiving-detail reservation records for
-  Private Payment List sharing.
+- `payment_requests`: Payment Request event state derivation, outbound event
+  queueing, and proof correlation.
 - `receipts`: Receipt Access event indexing, Encrypted Receipt retrieval,
   decryption, and retrieval state.
+- `endpoint_reservations`: optional receiving-detail reservation records for
+  Private Payment List sharing.
 - `backup`: versioned export/import of SDK-managed state.
 
-Future modules should be added only when they have concrete implementation:
+Additional modules should be added only when they have concrete implementation:
 
-- `payment_requests`: Payment Request event state machine, outbound event
-  queueing, proof correlation, and scheduling hooks.
 - `scheduler`: optional recurring Payment Request scheduling integration.
 - `telemetry`: structured logs and redaction helpers.
 
@@ -181,7 +180,7 @@ pub trait StorageAdapter {
 }
 ```
 
-The current Rust SDK foundation supports records for:
+The Rust SDK storage model supports records for:
 
 - identity state
 - linked peer state
@@ -559,10 +558,12 @@ Durable outbound Private Application Message queue:
 - last error
 
 The SDK should use one generic outbound Private Application Message record type
-for all Private Application Message kinds, but process it as a FIFO queue per
-counterparty/Encrypted Link. Send workers must claim the next message through
-storage before sending it, and in-progress claims must expire so a crashed
-worker can be retried without letting two workers advance the same link at once.
+for all Private Application Message kinds. Event Messages are processed as FIFO
+per counterparty/Encrypted Link. Private Payment Lists use latest-state
+semantics, so older unsent lists may be superseded by a newer complete list.
+Send workers must claim the next sendable message through storage before
+sending it, and in-progress claims must expire so a crashed worker can be
+retried without letting two workers advance the same link at once.
 
 Event Message retries must reuse the same Event ID and exact payload.
 
@@ -948,26 +949,6 @@ These should stay outside Paykit SDK:
 - app backup transport and cloud sync
 - seed/secret derivation policy unless standardized
 
-## Current Foundation And Next Work
-
-The current Rust SDK foundation includes the crate skeleton, error/config
-types, adapter traits, in-memory test storage, identity state, public endpoint
-sync, Encrypted Link runtime records, private stream intake, Private Payment
-List latest-state derivation, contact payment resolution, outbound Private
-Application Message delivery, Receipt Access indexing, receipt retrieval,
-Payment Request lifecycle derivation, and checked outbound Payment Request
-lifecycle queueing, optional Payment Endpoint Reservation storage for reserved
-private receiving details, and backup/export/restore for SDK-managed state.
-
-Next work:
-
-1. Add SDK FFI and platform wrappers.
-2. Migrate one existing app integration behind the SDK and use that to refine
-   adapters.
-
-Each step should include unit tests for storage invariants and at least one
-integration-style test using an in-memory adapter setup.
-
 ## Test Plan
 
 Core tests:
@@ -994,20 +975,18 @@ Platform tests:
 - serialization parity for records and errors
 - no nullable/optional protocol ambiguity in wrappers
 
-## Open Questions
+## Later Design Areas
 
-1. Should the first storage implementation be caller-provided only, or should
-   Paykit ship a SQLite-backed storage adapter?
-2. Should the default Paykit SDK profile/contact namespace use a reserved
-   subdirectory under `/pub/paykit/v0/`, or an unversioned Paykit-level path
-   under `/pub/paykit/`?
-3. Should the current default public fallback and private recovery timeouts
-   differ for saved contacts versus one-off counterparties?
-4. Which reservation lifecycle hooks should be standardized beyond private-list
-   queueing?
-5. How much recurring Payment Request scheduling should the SDK own versus
-   delegating to app/runtime schedulers?
-6. What unknown Private Application Message retention defaults are appropriate
-   for mobile storage budgets once retention enforcement is implemented?
-7. Should SDK bindings become the primary mobile API while `paykit-ffi` remains
-   low-level protocol API?
+- Durable storage adapters, including whether Paykit should ship a
+  SQLite-backed implementation.
+- Default Paykit SDK profile/contact namespace under `/pub/paykit/v0/` or an
+  unversioned Paykit-level path under `/pub/paykit/`.
+- Public fallback and private recovery timeout policies for saved contacts
+  versus one-off counterparties.
+- Reservation lifecycle hooks beyond Private Payment List queueing.
+- Recurring Payment Request scheduling ownership between the SDK and
+  app/runtime schedulers.
+- Unknown Private Application Message retention defaults for mobile storage
+  budgets.
+- SDK platform bindings as the primary mobile API, with `paykit-ffi` kept for
+  low-level protocol integrations.
