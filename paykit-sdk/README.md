@@ -94,3 +94,7 @@ The `storage` module is the advanced adapter boundary. Its record types include
 raw private payloads, Encrypted Link snapshots, and Receipt Decryption Keys so
 custom adapters can persist exact SDK state. App code should usually prefer the
 `PaykitSdk` runtime methods and app-facing record/view types.
+
+Backup restore preserves terminal invalid outbound private records for audit,
+while pending, sending, failed, sent, and superseded outbound records are
+validated before restore.

@@ -16,13 +16,15 @@ use crate::{
     private_stream::{
         classify_private_application_message, payload_hash, PrivateStreamParseStatus,
     },
-    receipts::{receipt_access_key_hash, ReceiptAccessRecord, ReceiptRecord},
+    receipts::{
+        receipt_access_key_hash, ReceiptAccessRecord, ReceiptBillingPeriodRecord, ReceiptRecord,
+    },
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
         PaymentEndpointReservationRecord, PrivateStreamItemRecord, PublicEndpointRecord,
         StorageAdapter, StorageState,
     },
-    PaykitSdkError, Result,
+    OutboundPrivateMessageStatus, PaykitSdkError, Result,
 };
 use paykit_lib::{
     parse_private_payment_list_json, PaymentEndpointIdentifier, PrivateApplicationMessage,
@@ -838,6 +840,9 @@ fn validate_payment_endpoint_reservations(
 
 fn validate_outbound_private_messages(records: &[OutboundPrivateMessageRecord]) -> Result<()> {
     for record in records {
+        if record.status == OutboundPrivateMessageStatus::Invalid {
+            continue;
+        }
         validate_queued_outbound_private_message(record)?;
     }
     Ok(())
@@ -1043,6 +1048,16 @@ fn validate_receipt_access_records(
         if access.event_id.as_str() != record.event_id
             || access.receipt_id.as_str() != record.receipt_id
             || access.payment_reference.as_str() != record.payment_reference
+            || access
+                .payment_request_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+                != record.payment_request_id
+            || access
+                .billing_period
+                .as_ref()
+                .map(ReceiptBillingPeriodRecord::from)
+                != record.billing_period
             || access.location != record.location
             || access.key.as_str() != record.key
         {
@@ -1258,6 +1273,27 @@ mod tests {
             sent_at: None,
             last_error: None,
         }
+    }
+
+    fn receipt_access_raw_with_context(
+        event_id: &str,
+        receipt_id: &str,
+        payment_reference: &str,
+        payment_request_id: &str,
+        billing_period: &ReceiptBillingPeriodRecord,
+    ) -> (String, String, String) {
+        let receipt_id = ReceiptId::new(receipt_id).unwrap();
+        let location = paykit_lib::ReceiptAccess::location_for(&receipt_id);
+        let key = paykit_lib::ReceiptDecryptionKey::generate()
+            .as_str()
+            .to_owned();
+        let raw_json = format!(
+            r#"{{"version":1,"kind":"paykit.receipt_access","event_id":"{event_id}","receipt_id":"{}","payment_reference":"{payment_reference}","payment_request_id":"{payment_request_id}","billing_period":{{"starts_at":"{}","ends_at":"{}"}},"location":"{location}","key":"{key}"}}"#,
+            receipt_id.as_str(),
+            billing_period.starts_at,
+            billing_period.ends_at
+        );
+        (raw_json, location, key)
     }
 
     #[tokio::test]
@@ -1829,6 +1865,111 @@ mod tests {
         let result = restore_backup_state(&storage, backup).await;
 
         assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn test_restore_backup_state_rejects_receipt_access_context_mismatch() {
+        let storage = InMemoryStorage::new();
+        let counterparty = public_key();
+        let event_id = "650e8400-e29b-41d4-a716-446655440000";
+        let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
+        let payment_reference = "invoice-2026-0001";
+        let period = ReceiptBillingPeriodRecord {
+            starts_at: "2026-06-01T00:00:00Z".into(),
+            ends_at: "2026-07-01T00:00:00Z".into(),
+        };
+        let (raw_json, location, key) = receipt_access_raw_with_context(
+            event_id,
+            receipt_id,
+            payment_reference,
+            "750e8400-e29b-41d4-a716-446655440000",
+            &period,
+        );
+        let backup = SdkBackupState {
+            version: SDK_BACKUP_VERSION,
+            identity_state: Some(identity(counterparty.clone())),
+            linked_peers: Vec::new(),
+            contact_records: Vec::new(),
+            public_endpoint_records: Vec::new(),
+            payment_endpoint_reservations: Vec::new(),
+            encrypted_link_states: Vec::new(),
+            outbound_private_messages: Vec::new(),
+            private_stream_items: vec![PrivateStreamItemRecord {
+                stream_item_id: 1,
+                counterparty: counterparty.clone(),
+                receive_batch_id: 0,
+                raw_json,
+                parsed_version: Some(1),
+                parsed_kind: Some("paykit.receipt_access".into()),
+                known_paykit_kind: Some("paykit.receipt_access".into()),
+                parse_status: PrivateStreamParseStatus::Valid,
+                parse_error: None,
+                received_at: timestamp(),
+            }],
+            event_dedup_records: Vec::new(),
+            receipt_access_records: vec![ReceiptAccessRecord {
+                counterparty,
+                stream_item_id: 1,
+                receive_batch_id: 0,
+                event_id: event_id.into(),
+                receipt_id: receipt_id.into(),
+                payment_reference: payment_reference.into(),
+                payment_request_id: Some("850e8400-e29b-41d4-a716-446655440000".into()),
+                billing_period: Some(period),
+                location,
+                key,
+                retrieval_status: crate::ReceiptRetrievalStatus::Pending,
+                retrieval_attempted_at: None,
+                retrieved_at: None,
+                last_retrieval_error: None,
+                received_at: timestamp(),
+            }],
+            receipt_records: Vec::new(),
+            next_outbound_private_message_id: 0,
+            next_receive_batch_id: 1,
+            next_private_stream_item_id: 2,
+        };
+
+        let result = restore_backup_state(&storage, backup).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn test_restore_backup_state_preserves_invalid_outbound_audit_record() {
+        let storage = InMemoryStorage::new();
+        let counterparty = public_key();
+        let mut invalid = private_payment_list_outbound(counterparty.clone(), 7, "ln-private");
+        invalid.raw_json = "{malformed".into();
+        invalid.status = OutboundPrivateMessageStatus::Invalid;
+        invalid.last_error = Some("invalid private message JSON".into());
+        let backup = SdkBackupState {
+            version: SDK_BACKUP_VERSION,
+            identity_state: Some(identity(counterparty)),
+            linked_peers: Vec::new(),
+            contact_records: Vec::new(),
+            public_endpoint_records: Vec::new(),
+            payment_endpoint_reservations: Vec::new(),
+            encrypted_link_states: Vec::new(),
+            outbound_private_messages: vec![invalid],
+            private_stream_items: Vec::new(),
+            event_dedup_records: Vec::new(),
+            receipt_access_records: Vec::new(),
+            receipt_records: Vec::new(),
+            next_outbound_private_message_id: 8,
+            next_receive_batch_id: 0,
+            next_private_stream_item_id: 0,
+        };
+
+        restore_backup_state(&storage, backup).await.unwrap();
+        let restored = storage.snapshot().unwrap();
+
+        assert_eq!(restored.outbound_private_messages.len(), 1);
+        assert_eq!(
+            restored.outbound_private_messages[0].status,
+            OutboundPrivateMessageStatus::Invalid
+        );
+        assert_eq!(restored.outbound_private_messages[0].raw_json, "{malformed");
     }
 
     #[tokio::test]

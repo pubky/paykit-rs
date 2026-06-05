@@ -2628,14 +2628,35 @@ where
             }
         };
 
-        let mut link = paykit_lib::restore_encrypted_link(
-            session_access.session,
+        let mut link = match paykit_lib::restore_encrypted_link(
+            session_access.session.clone(),
             secret_key,
             &remote_public_key,
-            session_access.outbox_client,
+            session_access.outbox_client.clone(),
             snapshot,
         )
-        .await?;
+        .await
+        {
+            Ok(link) => link,
+            Err(err) => {
+                let now = self.clock.now();
+                let mark = mark_recovery_required_with_lease(
+                    &self.storage,
+                    counterparty.clone(),
+                    lease.clone(),
+                    now,
+                )
+                .await?;
+                let _ = self
+                    .publish_local_recovery_marker_with_session(
+                        &counterparty,
+                        &session_access,
+                        mark.new_episode,
+                    )
+                    .await;
+                return Err(err.into());
+            }
+        };
         let messages = link.receive_private_application_messages().await?;
         let now = self.clock.now();
         let next_link_state = EncryptedLinkStateRecord {
@@ -2840,14 +2861,35 @@ where
                 return Err(err.into());
             }
         };
-        let mut link = paykit_lib::restore_encrypted_link(
-            session_access.session,
+        let mut link = match paykit_lib::restore_encrypted_link(
+            session_access.session.clone(),
             secret_key,
             &remote_public_key,
-            session_access.outbox_client,
+            session_access.outbox_client.clone(),
             snapshot,
         )
-        .await?;
+        .await
+        {
+            Ok(link) => link,
+            Err(err) => {
+                let now = self.clock.now();
+                let mark = mark_recovery_required_with_lease(
+                    &self.storage,
+                    counterparty.clone(),
+                    lease.clone(),
+                    now,
+                )
+                .await?;
+                let _ = self
+                    .publish_local_recovery_marker_with_session(
+                        &counterparty,
+                        &session_access,
+                        mark.new_episode,
+                    )
+                    .await;
+                return Err(err.into());
+            }
+        };
         let mut link_state = stored_link_state;
 
         loop {

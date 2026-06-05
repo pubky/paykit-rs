@@ -269,7 +269,13 @@ impl ContactRecord {
     }
 
     pub(crate) fn may_have_public_marker(&self) -> bool {
-        self.public_contact_published_at.is_some() && self.public_contact_removed_at.is_none()
+        matches!(
+            self.public_contact_marker_status,
+            PublicContactMarkerStatus::PendingPublication
+                | PublicContactMarkerStatus::PendingRemoval
+                | PublicContactMarkerStatus::Published
+        ) || (self.public_contact_published_at.is_some()
+            && self.public_contact_removed_at.is_none())
     }
 }
 
@@ -495,6 +501,21 @@ mod tests {
 
         assert_eq!(labeled.label.as_deref(), Some("Alice"));
         assert_eq!(cleared.label, None);
+    }
+
+    #[test]
+    fn test_pending_public_contact_marker_may_exist_remotely() {
+        let record = ContactRecord::from_update(
+            ContactUpdate {
+                public_key: public_key(),
+                label: None,
+            },
+            None,
+            chrono::Utc::now(),
+        )
+        .mark_public_contact_publication_pending(chrono::Utc::now());
+
+        assert!(record.may_have_public_marker());
     }
 
     #[test]
