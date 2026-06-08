@@ -40,16 +40,17 @@ use crate::{
     },
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
     linked_peers::{
-        mark_recovery_required_with_lease, save_link_handshake_state_if_generation_with_lease,
-        save_link_handshake_state_with_lease, save_linked_peer_link_state_if_generation_with_lease,
-        save_linked_peer_state_with_lease, EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport,
-        LinkedPeerState,
+        mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
+        save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
+        save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
+        EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
     },
     outbound_private::{
         claim_next_outbound_private_message_with_peer_lease, mark_outbound_failed,
-        mark_outbound_invalid, mark_outbound_sent, queued_outbound_private_messages,
-        validate_queued_outbound_private_message, OutboundPrivateCounterpartySendReport,
-        OutboundPrivateSendFailure, OutboundPrivateSendReport, ReservationCleanupFailure,
+        mark_outbound_invalid, mark_outbound_recovery_required, mark_outbound_sent,
+        queued_outbound_private_messages, validate_queued_outbound_private_message,
+        OutboundPrivateCounterpartySendReport, OutboundPrivateSendFailure,
+        OutboundPrivateSendReport, RecoveryMarkerPublishFailure, ReservationCleanupFailure,
     },
     payment_requests::{
         enqueue_payment_proof as enqueue_payment_proof_message,
@@ -81,11 +82,12 @@ use crate::{
         outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
         OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter,
     },
-    EndpointCompatibility, PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate,
-    PaymentEndpointEvaluation, PaymentEndpointReservation, PaymentEndpointReservationRelease,
-    PaymentEndpointReservationRequest, PaymentEndpointSelection, PaymentEndpointSelectionRequest,
-    PaymentEndpointSource, PaymentTarget, PrivatePaymentListView, PubkyPublicKey,
-    PubkySessionAccess, PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, Result,
+    EndpointCompatibility, OutboundPrivateMessageStatus, PaykitSdkError, PaymentAdapter,
+    PaymentEndpointCandidate, PaymentEndpointEvaluation, PaymentEndpointReservation,
+    PaymentEndpointReservationRelease, PaymentEndpointReservationRequest, PaymentEndpointSelection,
+    PaymentEndpointSelectionRequest, PaymentEndpointSource, PaymentTarget, PrivatePaymentListView,
+    PubkyPublicKey, PubkySessionAccess, PubkySessionProvider, ReceivingDetail,
+    ReceivingDetailScope, Result,
 };
 
 mod backup;

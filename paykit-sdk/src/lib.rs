@@ -8,7 +8,6 @@ pub mod backup;
 /// SDK runtime policy configuration.
 pub mod config;
 pub mod contacts;
-pub mod endpoint_reservations;
 pub mod endpoints;
 /// SDK error type.
 pub mod error;
@@ -25,6 +24,8 @@ pub mod recovery;
 pub mod runtime;
 /// Durable storage traits and in-memory test storage.
 pub mod storage;
+
+mod endpoint_reservations;
 
 #[doc(inline)]
 pub use adapters::{
@@ -66,7 +67,8 @@ pub use linked_peers::{
 #[doc(inline)]
 pub use outbound_private::{
     OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
-    OutboundPrivateSendFailure, OutboundPrivateSendReport, ReservationCleanupFailure,
+    OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
+    ReservationCleanupFailure,
 };
 #[doc(inline)]
 pub use payment_requests::{

@@ -267,6 +267,10 @@ keeps saved contacts in local/private SDK storage by default. Public contact
 markers under `/pub/paykit/contacts/` are opt-in through SDK policy and explicit
 runtime calls.
 
+Profile JSON may ignore unknown fields so the public profile schema can grow
+without breaking older SDKs. Private Paykit protocol messages remain
+closed-world unless their spec says otherwise.
+
 Schemas should be small, versioned, and Paykit-facing:
 
 - profile display name and image pointer
@@ -568,18 +572,22 @@ for all Private Application Message kinds. Event Messages are processed as FIFO
 per counterparty/Encrypted Link. Private Payment Lists use latest-state
 semantics, so older unsent lists may be superseded by a newer complete list.
 Send workers must claim the next sendable message through storage before
-sending it, and in-progress claims must expire so a crashed worker can be
-retried without letting two workers advance the same link at once.
+sending it. An in-progress `Sending` claim must not be retried automatically
+after the lease timeout, because the remote write may already have advanced the
+Encrypted Link while the local checkpoint was lost. The SDK should mark that
+outbound record and peer as recovery-required before any further automatic
+private sends.
 
 Event Message retries must reuse the same Event ID and exact payload.
 
 Sending through Pubky is not atomic with local storage. If a worker sends a
 message and crashes before storing the `Sent` status and advanced Encrypted Link
-snapshot, the next worker may retry from the previous checkpoint. That retry
-must send the same payload; Event Message consumers dedupe by Event ID, and
-Latest-State Messages tolerate repeated newer state. SDK records expose local
-outbound status so apps can distinguish queued intent from checkpointed send
-state. The status is not an acknowledgement from the counterparty.
+snapshot, the SDK must not retry from the previous checkpoint. It should mark
+the stale `Sending` record as recovery-required, clear the local Encrypted Link
+state, and require relink/recovery before automatic private sends continue. SDK
+records expose local outbound status so apps can distinguish queued intent from
+checkpointed send state. The status is not an acknowledgement from the
+counterparty.
 Superseded reservation cleanup failures are reported as local cleanup failures;
 they do not change whether the current outbound message was sent or failed.
 

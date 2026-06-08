@@ -171,6 +171,48 @@ pub(super) fn mark_restored_peers_recovery_required(
     peers
 }
 
+pub(super) fn clear_recovery_required_link_snapshots(
+    encrypted_link_states: &mut HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
+    recovery_required_peers: &[PubkyPublicKey],
+) {
+    for counterparty in recovery_required_peers {
+        let Some(record) = encrypted_link_states.get_mut(counterparty) else {
+            continue;
+        };
+        let had_snapshot = record.link_snapshot.is_some()
+            || record.handshake_snapshot.is_some()
+            || record.handshake_role.is_some();
+        record.link_snapshot = None;
+        record.handshake_snapshot = None;
+        record.handshake_role = None;
+        if had_snapshot {
+            record.generation = record.generation.saturating_add(1);
+        }
+    }
+}
+
+pub(super) fn mark_restored_sending_outbound_recovery_required(
+    records: &mut [OutboundPrivateMessageRecord],
+    recovery_required_peers: &[PubkyPublicKey],
+) {
+    let recovery_required_peers = recovery_required_peers
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    for record in records.iter_mut() {
+        if record.status == OutboundPrivateMessageStatus::Sending
+            && recovery_required_peers.contains(&record.counterparty)
+        {
+            record.status = OutboundPrivateMessageStatus::RecoveryRequired;
+            record.updated_at = record
+                .updated_at
+                .max(record.last_attempt_at.unwrap_or(record.created_at));
+            record.last_error =
+                Some("restored sending message requires Encrypted Link recovery".into());
+        }
+    }
+}
+
 pub(super) struct RecoverySources<'a> {
     pub(super) linked_peers: &'a HashMap<PubkyPublicKey, LinkedPeerRecord>,
     pub(super) payment_endpoint_reservations:
@@ -260,11 +302,97 @@ pub(super) fn validate_encrypted_link_snapshots(
     Ok(())
 }
 
+pub(super) fn validate_linked_peer_records(
+    records: &HashMap<PubkyPublicKey, LinkedPeerRecord>,
+) -> Result<()> {
+    for record in records.values() {
+        validate_recovery_marker_fields(
+            &record.counterparty,
+            "local Encrypted Link recovery marker",
+            record.local_recovery_attempt_id.as_deref(),
+            record.local_recovery_marker_created_at,
+        )?;
+        validate_recovery_marker_fields(
+            &record.counterparty,
+            "remote Encrypted Link recovery marker",
+            record.remote_recovery_attempt_id.as_deref(),
+            record.remote_recovery_marker_observed_at,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_recovery_marker_fields(
+    counterparty: &PubkyPublicKey,
+    label: &str,
+    attempt_id: Option<&str>,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<()> {
+    match (attempt_id, timestamp) {
+        (Some(attempt_id), Some(timestamp)) => {
+            paykit_lib::EncryptedLinkRecoveryMarker::new(
+                attempt_id,
+                timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            )
+            .map_err(|err| {
+                PaykitSdkError::Protocol(format!(
+                    "{label} for counterparty {counterparty} is invalid: {err}"
+                ))
+            })?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(PaykitSdkError::Protocol(format!(
+                "{label} for counterparty {counterparty} must store attempt id and timestamp together"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_public_endpoint_records(
     records: &HashMap<String, PublicEndpointRecord>,
 ) -> Result<()> {
     for record in records.values() {
         PaymentEndpointIdentifier::new(&record.identifier)?;
+        match record.status {
+            EndpointPublicationStatus::Desired | EndpointPublicationStatus::Published => {
+                if record.payload.is_none() {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "public endpoint record '{}' has no payload for status {:?}",
+                        record.identifier, record.status
+                    )));
+                }
+                if record.last_error.is_some() {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "public endpoint record '{}' has an error for status {:?}",
+                        record.identifier, record.status
+                    )));
+                }
+            }
+            EndpointPublicationStatus::PendingRemoval | EndpointPublicationStatus::Removed => {
+                if record.last_error.is_some() {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "public endpoint record '{}' has an error for status {:?}",
+                        record.identifier, record.status
+                    )));
+                }
+                if record.status == EndpointPublicationStatus::Removed && record.payload.is_some() {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "removed public endpoint record '{}' still has a payload",
+                        record.identifier
+                    )));
+                }
+            }
+            EndpointPublicationStatus::Failed => {
+                if record.last_error.is_none() {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "failed public endpoint record '{}' has no error",
+                        record.identifier
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -388,10 +516,56 @@ pub(super) fn validate_outbound_private_messages(
     records: &[OutboundPrivateMessageRecord],
 ) -> Result<()> {
     for record in records {
-        if record.status == OutboundPrivateMessageStatus::Invalid {
+        validate_outbound_private_status(record)?;
+        if matches!(
+            record.status,
+            OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::RecoveryRequired
+        ) {
             continue;
         }
         validate_queued_outbound_private_message(record)?;
+    }
+    Ok(())
+}
+
+fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Result<()> {
+    let invalid = match record.status {
+        OutboundPrivateMessageStatus::Pending => {
+            record.attempt_count != 0
+                || record.last_attempt_at.is_some()
+                || record.sent_at.is_some()
+                || record.last_error.is_some()
+        }
+        OutboundPrivateMessageStatus::Sending => {
+            record.attempt_count == 0
+                || record.last_attempt_at.is_none()
+                || record.sent_at.is_some()
+                || record.last_error.is_some()
+        }
+        OutboundPrivateMessageStatus::Sent => {
+            record.attempt_count == 0
+                || record.last_attempt_at.is_none()
+                || record.sent_at.is_none()
+                || record.last_error.is_some()
+        }
+        OutboundPrivateMessageStatus::Failed => {
+            record.attempt_count == 0
+                || record.last_attempt_at.is_none()
+                || record.sent_at.is_some()
+                || record.last_error.is_none()
+        }
+        OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::RecoveryRequired => {
+            record.sent_at.is_some() || record.last_error.is_none()
+        }
+        OutboundPrivateMessageStatus::Superseded => {
+            record.sent_at.is_some() || record.last_error.is_some()
+        }
+    };
+    if invalid {
+        return Err(PaykitSdkError::Protocol(format!(
+            "outbound Private Application Message {} has inconsistent {:?} status metadata",
+            record.outbound_message_id, record.status
+        )));
     }
     Ok(())
 }
@@ -593,6 +767,7 @@ pub(super) fn validate_receipt_access_records(
         .map(|item| (item.stream_item_id, item))
         .collect::<HashMap<_, _>>();
     for record in records.values() {
+        validate_receipt_access_retrieval_status(record)?;
         let Some(item) = stream_by_id.get(&record.stream_item_id) else {
             return Err(PaykitSdkError::Protocol(format!(
                 "Receipt Access record '{}' references missing stream item {}",
@@ -644,6 +819,45 @@ pub(super) fn validate_receipt_access_records(
                 "Receipt Access record '{}' does not match parsed stream payload",
                 record.event_id
             )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_receipt_access_retrieval_status(record: &ReceiptAccessRecord) -> Result<()> {
+    match record.retrieval_status {
+        ReceiptRetrievalStatus::Pending => {
+            if record.retrieval_attempted_at.is_some()
+                || record.retrieved_at.is_some()
+                || record.last_retrieval_error.is_some()
+            {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "pending Receipt Access record '{}' has retrieval metadata",
+                    record.event_id
+                )));
+            }
+        }
+        ReceiptRetrievalStatus::Retrieved => {
+            if record.retrieval_attempted_at.is_none()
+                || record.retrieved_at.is_none()
+                || record.last_retrieval_error.is_some()
+            {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "retrieved Receipt Access record '{}' has inconsistent retrieval metadata",
+                    record.event_id
+                )));
+            }
+        }
+        ReceiptRetrievalStatus::NotFound | ReceiptRetrievalStatus::Failed => {
+            if record.retrieval_attempted_at.is_none()
+                || record.retrieved_at.is_some()
+                || record.last_retrieval_error.is_none()
+            {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "failed Receipt Access record '{}' has inconsistent retrieval metadata",
+                    record.event_id
+                )));
+            }
         }
     }
     Ok(())

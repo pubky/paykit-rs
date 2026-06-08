@@ -7,12 +7,14 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
-    /// Return received Payment Request records for one counterparty.
+    /// Return inbound-only Payment Request records for one counterparty.
     ///
-    /// Records are derived from the persisted inbound private stream and
-    /// returned newest-first by last applied stream item. Malformed recognized
-    /// Payment Request events without a valid `payment_request_id` stay in the
-    /// raw private stream log and cannot be attached to a request-scoped record.
+    /// This view is useful for inspecting proposals received from a
+    /// counterparty. For normal app state, including responses to locally
+    /// proposed requests, use [`Self::payment_request_records`], which merges
+    /// inbound events with local outbound context. Malformed recognized Payment
+    /// Request events without a valid `payment_request_id` stay in the raw
+    /// private stream log and cannot be attached to a request-scoped record.
     pub async fn received_payment_request_records(
         &self,
         counterparty: &PubkyPublicKey,

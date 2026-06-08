@@ -67,6 +67,8 @@ pub enum PaymentRequestLifecycleState {
     ProofSubmitted,
     /// Recurring request acceptance is present locally.
     ActiveRecurring,
+    /// A local outbound event may have advanced the private link without a durable checkpoint.
+    RecoveryRequired,
     /// Event ordering, dedupe, or lifecycle validation found an invalid state.
     InvalidConflict,
 }

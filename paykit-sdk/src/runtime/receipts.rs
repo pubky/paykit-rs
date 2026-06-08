@@ -234,28 +234,37 @@ where
         access_records: &[ReceiptAccessRecord],
         now: DateTime<Utc>,
     ) -> Result<()> {
-        self.storage
+        let has_mismatched_access = self
+            .storage
             .transaction({
                 let record = record.clone();
                 let access_records = access_records.to_vec();
                 move |tx| {
+                    let mut has_mismatched_access = false;
                     for access in access_records {
                         if receipt_record_matches_access(&record, &access) {
                             if access.retrieval_status != ReceiptRetrievalStatus::Retrieved {
                                 tx.save_receipt_access_record(access.mark_retrieved(now));
                             }
-                        } else if access.retrieval_status == ReceiptRetrievalStatus::Pending {
-                            tx.save_receipt_access_record(access.mark_retrieval_error(
-                                ReceiptRetrievalStatus::Failed,
-                                now,
-                                "Receipt Access does not match stored Receipt".into(),
-                            ));
+                        } else {
+                            has_mismatched_access = true;
+                            if access.retrieval_status == ReceiptRetrievalStatus::Pending {
+                                tx.save_receipt_access_record(access.mark_retrieval_error(
+                                    ReceiptRetrievalStatus::Failed,
+                                    now,
+                                    "Receipt Access does not match stored Receipt".into(),
+                                ));
+                            }
                         }
                     }
-                    Ok(())
+                    Ok(has_mismatched_access)
                 }
             })
-            .await
+            .await?;
+        if has_mismatched_access {
+            return Err(Self::mismatched_receipt_access_error(&record.receipt_id));
+        }
+        Ok(())
     }
 
     fn receipt_access_event_is_conflicted(
@@ -277,6 +286,12 @@ where
     fn conflicted_receipt_access_error(receipt_id: &str) -> PaykitSdkError {
         PaykitSdkError::Protocol(format!(
             "Receipt Access event for receipt {receipt_id} has a conflicting Event ID"
+        ))
+    }
+
+    fn mismatched_receipt_access_error(receipt_id: &str) -> PaykitSdkError {
+        PaykitSdkError::Protocol(format!(
+            "Receipt Access descriptor for receipt {receipt_id} conflicts with stored Receipt"
         ))
     }
 

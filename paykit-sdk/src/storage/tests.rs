@@ -104,6 +104,36 @@ fn payment_endpoint_reservation_record(
     }
 }
 
+#[tokio::test]
+async fn test_storage_adapter_supports_erased_transactions() {
+    let storage: std::sync::Arc<dyn StorageAdapter> = std::sync::Arc::new(InMemoryStorage::new());
+    let identity_public_key = counterparty();
+    let saved_identity = crate::IdentityState {
+        public_key: Some(identity_public_key.clone()),
+        capability: crate::PubkyIdentityCapability::PrivateLinkCapable,
+        local_secret_available: true,
+        initialized_at: timestamp(),
+        sign_out_generation: 0,
+    };
+    let value = storage
+        .transaction_erased(Box::new(move |tx| {
+            tx.save_identity_state(saved_identity);
+            Ok(Box::new(42_u32) as Box<dyn std::any::Any + Send>)
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(*value.downcast::<u32>().unwrap(), 42);
+    let loaded = storage
+        .transaction_erased(Box::new(|tx| {
+            Ok(Box::new(tx.load_identity_state()) as Box<dyn std::any::Any + Send>)
+        }))
+        .await
+        .unwrap();
+    let loaded = *loaded.downcast::<Option<crate::IdentityState>>().unwrap();
+    assert_eq!(loaded.unwrap().public_key, Some(identity_public_key));
+}
+
 #[test]
 fn test_sensitive_storage_debug_is_redacted() {
     let stream_counterparty = counterparty();
@@ -378,6 +408,49 @@ async fn test_private_payment_list_queue_sends_only_latest_state() {
         .find(|message| message.outbound_message_id == first.outbound_message_id)
         .unwrap();
     assert_eq!(first.status, OutboundPrivateMessageStatus::Superseded);
+}
+
+#[tokio::test]
+async fn test_private_payment_list_queue_does_not_supersede_stale_sending() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+
+    let (first, _second) = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let mut first = tx.insert_outbound_private_message(outbound_private_message(
+                    counterparty.clone(),
+                ));
+                first.status = OutboundPrivateMessageStatus::Sending;
+                first.last_attempt_at = Some(timestamp() - chrono::Duration::seconds(120));
+                tx.save_outbound_private_message(first.clone());
+                let second =
+                    tx.insert_outbound_private_message(outbound_private_message(counterparty));
+                Ok((first, second))
+            }
+        })
+        .await
+        .unwrap();
+
+    let claimed = claim_next_outbound_private_message(
+        &storage,
+        &counterparty,
+        timestamp(),
+        timestamp() - chrono::Duration::seconds(60),
+        timestamp() - chrono::Duration::seconds(60),
+    )
+    .await
+    .unwrap();
+
+    assert!(claimed.is_none());
+    let snapshot = storage.snapshot().unwrap();
+    let first = snapshot
+        .outbound_private_messages
+        .iter()
+        .find(|message| message.outbound_message_id == first.outbound_message_id)
+        .unwrap();
+    assert_eq!(first.status, OutboundPrivateMessageStatus::Sending);
 }
 
 #[tokio::test]

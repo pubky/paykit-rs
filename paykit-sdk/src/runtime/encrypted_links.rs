@@ -12,18 +12,31 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<()> {
-        let peer_state = self
+        let (peer_state, has_active_link) = self
             .storage
-            .transaction(|tx| Ok(tx.linked_peer(counterparty).map(|peer| peer.state)))
+            .transaction(|tx| {
+                let peer_state = tx.linked_peer(counterparty).map(|peer| peer.state);
+                let has_active_link = tx
+                    .encrypted_link_state(counterparty)
+                    .and_then(|state| state.link_snapshot)
+                    .is_some();
+                Ok((peer_state, has_active_link))
+            })
             .await?;
         match peer_state {
+            Some(LinkedPeerState::Linked) if has_active_link => Ok(()),
+            Some(LinkedPeerState::Linking) => Err(PaykitSdkError::RecoveryRequired(format!(
+                "Encrypted Link Handshake is still in progress for counterparty {counterparty}"
+            ))),
             Some(LinkedPeerState::RecoveryRequired) => Err(PaykitSdkError::RecoveryRequired(
                 format!("Encrypted Link recovery is required for counterparty {counterparty}"),
             )),
             Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy(format!(
                 "counterparty {counterparty} is blocked"
             ))),
-            _ => Ok(()),
+            _ => Err(PaykitSdkError::RecoveryRequired(format!(
+                "no active Encrypted Link snapshot for counterparty {counterparty}"
+            ))),
         }
     }
 
@@ -41,6 +54,25 @@ where
             )))
         } else {
             Ok(())
+        }
+    }
+
+    pub(super) async fn ensure_peer_not_recovery_required_or_blocked(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<()> {
+        let peer_state = self
+            .storage
+            .transaction(|tx| Ok(tx.linked_peer(counterparty).map(|peer| peer.state)))
+            .await?;
+        match peer_state {
+            Some(LinkedPeerState::RecoveryRequired) => Err(PaykitSdkError::RecoveryRequired(
+                format!("Encrypted Link recovery is required for counterparty {counterparty}"),
+            )),
+            Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy(format!(
+                "counterparty {counterparty} is blocked"
+            ))),
+            _ => Ok(()),
         }
     }
 
@@ -70,6 +102,8 @@ where
         counterparty: PubkyPublicKey,
     ) -> Result<LinkedPeerHandshakeReport> {
         self.ensure_private_workflows_enabled("Encrypted Link Handshake advancement")?;
+        self.ensure_peer_not_recovery_required_or_blocked(&counterparty)
+            .await?;
         let _ = self.private_link_session_access().await?;
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = self
@@ -83,7 +117,7 @@ where
         counterparty: PubkyPublicKey,
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerHandshakeReport> {
-        self.ensure_peer_allows_private_automation(&counterparty)
+        self.ensure_peer_not_recovery_required_or_blocked(&counterparty)
             .await?;
         let Some(stored_link_state) = self
             .storage

@@ -34,6 +34,7 @@ async fn test_export_backup_state_redacts_debug() {
 
     assert!(!debug.contains("ln-private-payload-marker"));
     assert!(!debug.contains("[1, 2, 3]"));
+    assert!(!debug.contains(counterparty.as_str()));
     assert_eq!(backup.outbound_private_messages.len(), 1);
 }
 

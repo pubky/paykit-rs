@@ -35,11 +35,10 @@ impl InMemoryStorage {
 
 #[async_trait]
 impl StorageAdapter for InMemoryStorage {
-    async fn transaction<T, F>(&self, f: F) -> Result<T>
-    where
-        T: Send,
-        F: FnOnce(&mut dyn StorageTransaction) -> Result<T> + Send,
-    {
+    async fn transaction_erased<'a>(
+        &self,
+        f: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn std::any::Any + Send>> {
         let mut guard = self.state.lock().map_err(|err| PaykitSdkError::Storage {
             context: "in-memory storage lock poisoned".into(),
             source: Some(anyhow::anyhow!(err.to_string())),
@@ -129,11 +128,14 @@ impl StorageTransaction for InMemoryStorageTransaction {
     }
 
     fn public_endpoint_records(&self) -> Vec<PublicEndpointRecord> {
-        self.state
+        let mut records = self
+            .state
             .public_endpoint_records
             .values()
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+        records
     }
 
     fn save_public_endpoint_record(&mut self, record: PublicEndpointRecord) {
@@ -319,6 +321,7 @@ impl StorageTransaction for InMemoryStorageTransaction {
                         message.status,
                         OutboundPrivateMessageStatus::Sent
                             | OutboundPrivateMessageStatus::Invalid
+                            | OutboundPrivateMessageStatus::RecoveryRequired
                             | OutboundPrivateMessageStatus::Superseded
                     )
             })

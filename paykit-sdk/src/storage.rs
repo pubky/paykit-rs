@@ -1,3 +1,5 @@
+use std::{any::Any, sync::Arc};
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
@@ -23,6 +25,10 @@ use crate::{
     PaykitSdkError, Result,
 };
 
+/// Erased storage transaction callback for boxed storage adapters.
+pub type StorageTransactionCallback<'a> =
+    Box<dyn FnOnce(&mut dyn StorageTransaction) -> Result<Box<dyn Any + Send>> + Send + 'a>;
+
 /// Durable storage boundary for Paykit SDK.
 ///
 /// Production adapters must provide atomic transactions with monotonic id
@@ -31,24 +37,83 @@ use crate::{
 /// transaction either commit together or roll back together.
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
+    /// Run an atomic storage transaction through an object-safe erased callback.
+    async fn transaction_erased<'a>(
+        &self,
+        f: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>>;
+
     /// Run an atomic storage transaction.
     async fn transaction<T, F>(&self, f: F) -> Result<T>
     where
-        T: Send,
-        F: FnOnce(&mut dyn StorageTransaction) -> Result<T> + Send;
+        Self: Sized,
+        T: Send + 'static,
+        F: FnOnce(&mut dyn StorageTransaction) -> Result<T> + Send,
+    {
+        let result = self
+            .transaction_erased(Box::new(move |tx| {
+                Ok(Box::new(f(tx)?) as Box<dyn Any + Send>)
+            }))
+            .await?;
+        result
+            .downcast::<T>()
+            .map(|value| *value)
+            .map_err(|_| PaykitSdkError::Storage {
+                context: "storage transaction result type mismatch".into(),
+                source: None,
+            })
+    }
 
     /// Load the current identity state.
     async fn load_identity_state(&self) -> Result<Option<IdentityState>> {
-        self.transaction(|tx| Ok(tx.load_identity_state())).await
+        let result = self
+            .transaction_erased(Box::new(|tx| {
+                Ok(Box::new(tx.load_identity_state()) as Box<dyn Any + Send>)
+            }))
+            .await?;
+        result
+            .downcast::<Option<IdentityState>>()
+            .map(|value| *value)
+            .map_err(|_| PaykitSdkError::Storage {
+                context: "storage transaction result type mismatch".into(),
+                source: None,
+            })
     }
 
     /// Save the current identity state atomically.
     async fn save_identity_state(&self, state: IdentityState) -> Result<()> {
-        self.transaction(move |tx| {
+        self.transaction_erased(Box::new(move |tx| {
             tx.save_identity_state(state);
-            Ok(())
-        })
+            Ok(Box::new(()) as Box<dyn Any + Send>)
+        }))
         .await
+        .map(|_| ())
+    }
+}
+
+#[async_trait]
+impl<T> StorageAdapter for Box<T>
+where
+    T: StorageAdapter + ?Sized,
+{
+    async fn transaction_erased<'a>(
+        &self,
+        f: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        (**self).transaction_erased(f).await
+    }
+}
+
+#[async_trait]
+impl<T> StorageAdapter for Arc<T>
+where
+    T: StorageAdapter + ?Sized,
+{
+    async fn transaction_erased<'a>(
+        &self,
+        f: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        (**self).transaction_erased(f).await
     }
 }
 
@@ -163,11 +228,14 @@ pub trait StorageTransaction {
         counterparty: &PubkyPublicKey,
     ) -> Vec<OutboundPrivateMessageRecord>;
 
-    /// Claim the next outbound private message for sending.
+    /// Claim the next retryable outbound private message for sending.
     ///
     /// Event Messages are claimed FIFO. Private Payment Lists are Latest-State
     /// Messages, so older claimable unsent lists should be marked
     /// [`crate::OutboundPrivateMessageStatus::Superseded`] before claiming.
+    /// Stale [`crate::OutboundPrivateMessageStatus::Sending`] records are not
+    /// retryable; the runtime marks them recovery-required before any further
+    /// automatic private sends.
     fn claim_next_outbound_private_message(
         &mut self,
         counterparty: &PubkyPublicKey,

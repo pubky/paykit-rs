@@ -422,6 +422,11 @@ fn validate_optional_text(
             "{label} must not exceed {max_chars} characters"
         )));
     }
+    if value.chars().any(char::is_control) {
+        return Err(PaykitSdkError::Protocol(format!(
+            "{label} must not contain control characters"
+        )));
+    }
     Ok(())
 }
 

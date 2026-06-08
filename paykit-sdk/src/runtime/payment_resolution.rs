@@ -14,18 +14,18 @@ where
     ) -> Result<ContactPaymentResolution> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         let mut evaluations = Vec::new();
-        let mut private_allowed = if self.config.private_sharing == PrivateSharingPolicy::Disabled {
-            false
-        } else {
-            match self
+        let mut private_allowed = self.config.private_sharing != PrivateSharingPolicy::Disabled
+            && identity.public_key.is_some();
+        if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
+            private_allowed = match self
                 .ensure_peer_allows_private_automation(&request.counterparty)
                 .await
             {
                 Ok(()) => true,
                 Err(PaykitSdkError::RecoveryRequired(_)) => false,
                 Err(err) => return Err(err),
-            }
-        };
+            };
+        }
         if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
             if let Err(err) = self
                 .observe_remote_recovery_marker_for_cached_private_state(
@@ -50,7 +50,7 @@ where
                 Err(err) => return Err(err),
             };
         }
-        let private_view = if private_allowed && identity.public_key.is_some() {
+        let private_view = if private_allowed {
             load_current_private_payment_list(&self.storage, &request.counterparty).await?
         } else {
             None

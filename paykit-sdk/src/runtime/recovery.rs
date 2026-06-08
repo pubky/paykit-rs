@@ -497,17 +497,14 @@ where
                 let existing_peer = tx.linked_peer(counterparty);
                 let link_state = tx.encrypted_link_state(counterparty);
                 if remote_recovery_marker_is_stale(link_state.as_ref(), marker_created_at) {
-                    tx.release_peer_link_operation(counterparty, lease.lease_id);
                     return Ok(false);
                 }
                 let has_link_state = link_state.is_some();
                 if !can_publish_recovery_marker(existing_peer.as_ref(), has_link_state) {
-                    tx.release_peer_link_operation(counterparty, lease.lease_id);
                     return Ok(false);
                 }
                 let mut peer = recovery_peer_or_default(existing_peer, counterparty);
                 if peer.remote_recovery_attempt_id.as_deref() == Some(attempt_id) {
-                    tx.release_peer_link_operation(counterparty, lease.lease_id);
                     return Ok(false);
                 }
                 if peer.state == LinkedPeerState::Blocked {
@@ -531,7 +528,6 @@ where
                         checkpointed_at: now,
                     });
                 }
-                tx.release_peer_link_operation(counterparty, lease.lease_id);
                 Ok(true)
             })
             .await
@@ -704,7 +700,7 @@ fn remote_recovery_marker_is_stale(
             (state.link_snapshot.is_some() || state.handshake_snapshot.is_some())
                 .then_some(state.checkpointed_at)
         })
-        .is_some_and(|checkpointed_at| marker_created_at <= checkpointed_at)
+        .is_some_and(|checkpointed_at| marker_created_at.timestamp() < checkpointed_at.timestamp())
 }
 
 pub(super) fn local_recovery_marker_belongs_to_current_episode(peer: &LinkedPeerRecord) -> bool {

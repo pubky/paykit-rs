@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     contacts::ContactRecord,
     endpoint_reservations::{reservation_payload_hash, validate_reservation_id},
+    endpoints::EndpointPublicationStatus,
     identity::{IdentityState, PubkyIdentityCapability, PubkyPublicKey},
     linked_peers::LinkedPeerState,
     outbound_private::validate_queued_outbound_private_message,
@@ -18,6 +19,7 @@ use crate::{
     },
     receipts::{
         receipt_access_key_hash, ReceiptAccessRecord, ReceiptBillingPeriodRecord, ReceiptRecord,
+        ReceiptRetrievalStatus,
     },
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
@@ -31,11 +33,11 @@ use paykit_lib::{
     PrivateMessageKind, ReceiptId,
 };
 
-/// Current SDK backup schema version.
 mod validation;
 
 use validation::*;
 
+/// Current SDK backup schema version.
 pub const SDK_BACKUP_VERSION: u32 = 1;
 
 /// Versioned SDK-managed backup payload.
@@ -81,7 +83,10 @@ impl fmt::Debug for SdkBackupState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SdkBackupState")
             .field("version", &self.version)
-            .field("identity_state", &self.identity_state)
+            .field(
+                "identity_state",
+                &self.identity_state.as_ref().map(|_| "<redacted>"),
+            )
             .field("linked_peers", &self.linked_peers.len())
             .field("contact_records", &self.contact_records.len())
             .field(
@@ -291,6 +296,7 @@ impl SdkBackupState {
         let mut identity_state = self.identity_state;
         preserve_current_sign_out_generation(&mut identity_state, current_identity);
         let mut linked_peers = keyed_by_counterparty(self.linked_peers, "Linked Peer")?;
+        validate_linked_peer_records(&linked_peers)?;
         let contact_records = keyed_by_tuple(
             self.contact_records,
             |record| record.public_key.clone(),
@@ -308,10 +314,11 @@ impl SdkBackupState {
             |record| (record.counterparty.clone(), record.reservation_id.clone()),
             "Payment Endpoint Reservation",
         )?;
-        let encrypted_link_states =
+        let mut encrypted_link_states =
             keyed_by_counterparty(self.encrypted_link_states, "Encrypted Link state")?;
         validate_encrypted_link_snapshots(&encrypted_link_states)?;
-        let outbound_private_messages = unique_outbound_messages(self.outbound_private_messages)?;
+        let mut outbound_private_messages =
+            unique_outbound_messages(self.outbound_private_messages)?;
         validate_outbound_private_messages(&outbound_private_messages)?;
         validate_payment_endpoint_reservations(
             &payment_endpoint_reservations,
@@ -362,6 +369,14 @@ impl SdkBackupState {
         });
         let recovery_required_peers =
             mark_restored_peers_recovery_required(&mut linked_peers, &recovery_counterparties);
+        clear_recovery_required_link_snapshots(
+            &mut encrypted_link_states,
+            &recovery_required_peers,
+        );
+        mark_restored_sending_outbound_recovery_required(
+            &mut outbound_private_messages,
+            &recovery_required_peers,
+        );
 
         let next_outbound_private_message_id = self
             .next_outbound_private_message_id

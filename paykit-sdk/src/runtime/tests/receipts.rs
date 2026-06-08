@@ -188,6 +188,59 @@ async fn test_retrieve_receipt_returns_cached_record_for_public_only_identity() 
 }
 
 #[tokio::test]
+async fn test_retrieve_receipt_rejects_clean_mismatched_access_for_cached_receipt() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let receipt_id = "receipt-1";
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let local_public_key = local_public_key.clone();
+            move |tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_public_key.clone()),
+                    capability: PubkyIdentityCapability::PublicOnly,
+                    local_secret_available: false,
+                    initialized_at: FixedClock.now(),
+                    sign_out_generation: 0,
+                });
+                let mut access = receipt_access_record(counterparty.clone(), receipt_id);
+                access.event_id = "750e8400-e29b-41d4-a716-446655440000".into();
+                access.stream_item_id = 2;
+                access.payment_reference = "other-invoice".into();
+                tx.save_receipt_access_record(access);
+                tx.save_receipt_record(receipt_record(counterparty, receipt_id, local_public_key));
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk.retrieve_receipt(counterparty.clone(), receipt_id).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    let access = storage
+        .transaction(|tx| {
+            Ok(tx
+                .receipt_access_records(&counterparty)
+                .into_iter()
+                .find(|record| record.receipt_id == receipt_id)
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!(access.retrieval_status, ReceiptRetrievalStatus::Failed);
+}
+
+#[tokio::test]
 async fn test_retrieve_receipt_rejects_conflicted_access_for_cached_receipt() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

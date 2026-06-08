@@ -21,8 +21,10 @@ where
         let desired = normalize_receiving_details(details)?;
         let now = self.clock.now();
         let mut report = EndpointSyncReport::default();
+        let mut desired_entries = desired.iter().collect::<Vec<_>>();
+        desired_entries.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
 
-        for (identifier, payload) in &desired {
+        for (identifier, payload) in desired_entries {
             self.storage
                 .transaction({
                     let record = desired_record(identifier, payload, now);
@@ -122,6 +124,8 @@ where
                                 .any(|identifier| identifier.as_str() == record.identifier)
                     })
                     .collect::<Vec<_>>();
+                let mut already_removed = already_removed;
+                already_removed.sort_by(|left, right| left.identifier.cmp(&right.identifier));
                 for record in already_removed {
                     self.storage
                         .transaction({
@@ -149,6 +153,8 @@ where
             }
         };
 
+        let mut removal_candidates = removal_candidates;
+        removal_candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
         for (identifier_text, previous_payload) in removal_candidates {
             let identifier = paykit_lib::PaymentEndpointIdentifier::new(&identifier_text)?;
             self.storage

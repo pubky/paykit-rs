@@ -66,13 +66,13 @@ Common workflows:
 - call `sign_out` when the app wants to clear live Pubky access and
   SDK-managed identity-scoped state
 
-Outbound private sends are retried from durable records. A crash after network
-send but before the SDK stores `Sent` status and the advanced Encrypted Link
-snapshot can cause the same payload to be retried. Event Messages keep the same
-Event ID across retries, so receivers dedupe by Event ID. Outbound status is
-local checkpoint state, not counterparty acknowledgement. Superseded
-reservation cleanup failures are reported separately and do not block delivery
-of current outbound messages.
+Outbound private sends are retried from durable records only while the local
+Encrypted Link checkpoint is trustworthy. If a worker may have sent a message
+but failed before storing `Sent` status and the advanced snapshot, the SDK marks
+the stale `Sending` record recovery-required instead of retrying from the old
+checkpoint. Outbound status is local checkpoint state, not counterparty
+acknowledgement. Superseded reservation cleanup failures are reported
+separately and do not block delivery of current outbound messages.
 
 Storage implementations must commit raw private stream items, derived indexes,
 and the advanced Encrypted Link snapshot atomically. If storage cannot provide
@@ -102,6 +102,6 @@ raw private payloads, Encrypted Link snapshots, and Receipt Decryption Keys so
 custom adapters can persist exact SDK state. App code should usually prefer the
 `PaykitSdk` runtime methods and app-facing record/view types.
 
-Backup restore preserves terminal invalid outbound private records for audit,
-while pending, sending, failed, sent, and superseded outbound records are
-validated before restore.
+Backup restore preserves terminal invalid and recovery-required outbound
+private records for audit, while pending, sending, failed, sent, and superseded
+outbound records are validated before restore.

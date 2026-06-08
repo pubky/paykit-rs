@@ -26,6 +26,8 @@ pub enum OutboundPrivateMessageStatus {
     Failed,
     /// The stored payload is invalid and must not be retried automatically.
     Invalid,
+    /// A previous send may have advanced the remote link without a durable local checkpoint.
+    RecoveryRequired,
     /// Newer latest-state data made this message unnecessary to send.
     Superseded,
 }
@@ -48,6 +50,15 @@ pub struct ReservationCleanupFailure {
     pub error: String,
 }
 
+/// Failed recovery marker publication during outbound private send recovery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryMarkerPublishFailure {
+    /// Outbound message id that triggered recovery, when available.
+    pub outbound_message_id: Option<u64>,
+    /// Recovery marker publication error.
+    pub error: String,
+}
+
 /// Summary returned after processing outbound private messages.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundPrivateSendReport {
@@ -59,6 +70,9 @@ pub struct OutboundPrivateSendReport {
     pub failed: Vec<OutboundPrivateSendFailure>,
     /// Superseded reservation cleanup failures observed in this run.
     pub reservation_cleanup_failures: Vec<ReservationCleanupFailure>,
+    /// Recovery marker publication failures observed after fail-closed recovery.
+    #[serde(default)]
+    pub recovery_marker_failures: Vec<RecoveryMarkerPublishFailure>,
 }
 
 /// Summary for processing outbound private messages for one counterparty.
@@ -211,6 +225,17 @@ pub(crate) fn mark_outbound_invalid(
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::Invalid;
+    record.updated_at = now;
+    record.last_error = Some(error);
+    record
+}
+
+pub(crate) fn mark_outbound_recovery_required(
+    mut record: OutboundPrivateMessageRecord,
+    error: String,
+    now: DateTime<Utc>,
+) -> OutboundPrivateMessageRecord {
+    record.status = OutboundPrivateMessageStatus::RecoveryRequired;
     record.updated_at = now;
     record.last_error = Some(error);
     record

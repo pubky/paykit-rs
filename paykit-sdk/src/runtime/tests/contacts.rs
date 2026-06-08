@@ -390,6 +390,72 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
 }
 
 #[tokio::test]
+async fn test_sync_public_contact_markers_fails_pending_publication_when_sharing_disabled() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let contact_public_key =
+        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local_public_key),
+            capability: PubkyIdentityCapability::PublicOnly,
+            local_secret_available: false,
+            initialized_at: FixedClock.now(),
+            sign_out_generation: 0,
+        })
+        .await
+        .unwrap();
+    storage
+        .transaction({
+            let contact_public_key = contact_public_key.clone();
+            move |tx| {
+                tx.save_contact_record(ContactRecord {
+                    public_key: contact_public_key,
+                    label: None,
+                    profile: None,
+                    profile_fetched_at: None,
+                    created_at: FixedClock.now(),
+                    updated_at: FixedClock.now(),
+                    public_contact_marker_status:
+                        crate::PublicContactMarkerStatus::PendingPublication,
+                    public_contact_published_at: None,
+                    public_contact_removed_at: None,
+                    public_contact_last_error: None,
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let records = sdk.sync_public_contact_markers().await.unwrap();
+
+    assert!(records.is_empty());
+    let record = storage
+        .snapshot()
+        .unwrap()
+        .contact_records
+        .get(&contact_public_key)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        record.public_contact_marker_status,
+        crate::PublicContactMarkerStatus::Failed
+    );
+    assert_eq!(
+        record.public_contact_last_error.as_deref(),
+        Some("public contact sharing is disabled")
+    );
+}
+
+#[tokio::test]
 async fn test_save_contact_requires_initialized_identity() {
     let storage = InMemoryStorage::new();
     let sdk = PaykitSdk::with_clock(

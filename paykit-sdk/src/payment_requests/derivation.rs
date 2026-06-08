@@ -382,15 +382,17 @@ fn derive_payment_request_records(
 }
 
 fn compare_stored_events(a: &StoredPaymentRequestEvent, b: &StoredPaymentRequestEvent) -> Ordering {
-    a.record_time().cmp(&b.record_time()).then_with(|| {
-        if a.source_rank() == b.source_rank() {
-            a.source_order().cmp(&b.source_order())
-        } else {
-            a.kind_order()
-                .cmp(&b.kind_order())
-                .then_with(|| a.source_rank().cmp(&b.source_rank()))
-        }
-    })
+    if a.source_rank() == b.source_rank() {
+        return a
+            .source_order()
+            .cmp(&b.source_order())
+            .then_with(|| a.record_time().cmp(&b.record_time()));
+    }
+
+    a.kind_order()
+        .cmp(&b.kind_order())
+        .then_with(|| a.record_time().cmp(&b.record_time()))
+        .then_with(|| a.source_rank().cmp(&b.source_rank()))
 }
 
 #[derive(Clone)]
@@ -741,6 +743,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 record.state,
                 PaymentRequestLifecycleState::Rejected
                     | PaymentRequestLifecycleState::Canceled
+                    | PaymentRequestLifecycleState::RecoveryRequired
                     | PaymentRequestLifecycleState::InvalidConflict
             ) {
                 mark_invalid_stored(
@@ -887,7 +890,14 @@ fn payer_action_source_allowed(
 fn touch_stored(record: &mut PaymentRequestRecord, stored: &StoredPaymentRequestEvent) {
     match stored {
         StoredPaymentRequestEvent::Received { item, .. } => record.touch(item),
-        StoredPaymentRequestEvent::Outbound { message, .. } => record.touch_outbound(message),
+        StoredPaymentRequestEvent::Outbound { message, .. } => {
+            record.touch_outbound(message);
+            if message.status == OutboundPrivateMessageStatus::RecoveryRequired
+                && record.state != PaymentRequestLifecycleState::InvalidConflict
+            {
+                record.state = PaymentRequestLifecycleState::RecoveryRequired;
+            }
+        }
     }
 }
 

@@ -272,8 +272,21 @@ where
                         )
                     })
                     .collect::<Vec<_>>();
-                records
-                    .sort_by(|left, right| left.public_key.as_str().cmp(right.public_key.as_str()));
+                records.sort_by(|left, right| {
+                    let left_status = match left.public_contact_marker_status {
+                        PublicContactMarkerStatus::PendingRemoval => 0,
+                        PublicContactMarkerStatus::PendingPublication => 1,
+                        _ => 2,
+                    };
+                    let right_status = match right.public_contact_marker_status {
+                        PublicContactMarkerStatus::PendingRemoval => 0,
+                        PublicContactMarkerStatus::PendingPublication => 1,
+                        _ => 2,
+                    };
+                    left_status
+                        .cmp(&right_status)
+                        .then_with(|| left.public_key.as_str().cmp(right.public_key.as_str()))
+                });
                 Ok(records)
             })
             .await?;
@@ -281,7 +294,17 @@ where
         for record in pending {
             match record.public_contact_marker_status {
                 PublicContactMarkerStatus::PendingPublication => {
-                    synced.push(self.publish_public_contact(record.public_key).await?);
+                    if self.config.public_contact_sharing
+                        == PublicContactSharingPolicy::PublicPaykitNamespace
+                    {
+                        synced.push(self.publish_public_contact(record.public_key).await?);
+                    } else {
+                        self.mark_public_contact_failed(
+                            &record.public_key,
+                            "public contact sharing is disabled".into(),
+                        )
+                        .await?;
+                    }
                 }
                 PublicContactMarkerStatus::PendingRemoval => {
                     if let Some(record) = self.remove_public_contact(record.public_key).await? {

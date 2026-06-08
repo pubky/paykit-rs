@@ -105,6 +105,98 @@ async fn test_pending_outbound_private_counterparties_waits_for_stale_sending() 
 }
 
 #[tokio::test]
+async fn test_pending_outbound_private_counterparties_skips_recovery_required_peer() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_linked_peer(LinkedPeerRecord {
+                    counterparty: counterparty.clone(),
+                    state: LinkedPeerState::RecoveryRequired,
+                    last_sync_at: Some(FixedClock.now()),
+                    last_private_receive_at: None,
+                    failure_count: 1,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    counterparty,
+                    "paykit.private_payment_list".into(),
+                    private_list_json(),
+                    FixedClock.now(),
+                ));
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    assert!(sdk
+        .pending_outbound_private_counterparties()
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_pending_outbound_private_counterparties_skips_linking_peer() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_linked_peer(LinkedPeerRecord {
+                    counterparty: counterparty.clone(),
+                    state: LinkedPeerState::Linking,
+                    last_sync_at: Some(FixedClock.now()),
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    counterparty,
+                    "paykit.private_payment_list".into(),
+                    private_list_json(),
+                    FixedClock.now(),
+                ));
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    assert!(sdk
+        .pending_outbound_private_counterparties()
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn test_pending_outbound_private_counterparties_waits_for_failed_backoff() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

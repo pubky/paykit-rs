@@ -286,6 +286,160 @@ async fn test_payment_request_records_merge_outbound_proof() {
 }
 
 #[tokio::test]
+async fn test_payment_request_records_preserve_outbound_fifo_when_clock_moves_backward() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![request_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            request_id,
+            "invoice-2026-0001",
+            None,
+            None,
+        )],
+    )
+    .await;
+    let PaymentRequestEvent::Acceptance(acceptance) = parsed_event(acceptance_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+        request_id,
+    )) else {
+        panic!("expected acceptance event");
+    };
+    enqueue_payment_request_acceptance(
+        &storage,
+        counterparty.clone(),
+        &acceptance,
+        timestamp() + ChronoDuration::minutes(5),
+    )
+    .await
+    .unwrap();
+    let PaymentRequestEvent::Proof(proof) = parsed_event(proof_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+        request_id,
+        "invoice-2026-0001",
+    )) else {
+        panic!("expected proof event");
+    };
+    enqueue_payment_proof(
+        &storage,
+        counterparty.clone(),
+        &proof,
+        timestamp() + ChronoDuration::minutes(1),
+    )
+    .await
+    .unwrap();
+
+    let records = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        records[0].state,
+        PaymentRequestLifecycleState::ProofSubmitted
+    );
+    assert_eq!(records[0].payment_proofs.len(), 1);
+}
+
+#[tokio::test]
+async fn test_payment_request_records_apply_mixed_sources_by_protocol_order() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    let PaymentRequestEvent::Request(request) = parsed_event(request_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+        request_id,
+        "invoice-2026-0001",
+        None,
+        None,
+    )) else {
+        panic!("expected request event");
+    };
+    enqueue_payment_request(
+        &storage,
+        counterparty.clone(),
+        &request,
+        timestamp() + ChronoDuration::minutes(5),
+    )
+    .await
+    .unwrap();
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![acceptance_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+            request_id,
+        )],
+    )
+    .await;
+
+    let records = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(records[0].local_role, Some(PaymentRequestLocalRole::Payee));
+    assert_eq!(records[0].state, PaymentRequestLifecycleState::Accepted);
+}
+
+#[tokio::test]
+async fn test_payment_request_records_surface_recovery_required_outbound_event() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![request_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            request_id,
+            "invoice-2026-0001",
+            None,
+            None,
+        )],
+    )
+    .await;
+    let PaymentRequestEvent::Acceptance(acceptance) = parsed_event(acceptance_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+        request_id,
+    )) else {
+        panic!("expected acceptance event");
+    };
+    enqueue_payment_request_acceptance(&storage, counterparty.clone(), &acceptance, timestamp())
+        .await
+        .unwrap();
+    storage
+        .transaction(|tx| {
+            let mut outbound = tx.outbound_private_messages(&counterparty)[0].clone();
+            outbound.status = OutboundPrivateMessageStatus::RecoveryRequired;
+            outbound.updated_at = timestamp() + ChronoDuration::minutes(1);
+            outbound.last_error = Some("Encrypted Link recovery is required".into());
+            tx.save_outbound_private_message(outbound);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let records = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        records[0].state,
+        PaymentRequestLifecycleState::RecoveryRequired
+    );
+    assert_eq!(
+        records[0].accepted_outbound_status,
+        Some(OutboundPrivateMessageStatus::RecoveryRequired)
+    );
+    assert_eq!(
+        records[0].last_outbound_status,
+        Some(OutboundPrivateMessageStatus::RecoveryRequired)
+    );
+}
+
+#[tokio::test]
 async fn test_payment_request_records_preserve_inbound_fifo_with_same_timestamp() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();

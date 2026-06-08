@@ -72,7 +72,9 @@ pub struct PaykitSdkConfig {
     pub public_contact_sharing: PublicContactSharingPolicy,
     /// Time after which an in-progress peer link operation can be retried.
     pub peer_link_operation_lease_timeout: Duration,
-    /// Time after which an in-progress outbound private send can be retried.
+    /// Time after which an in-progress outbound private send is considered stale.
+    ///
+    /// Stale `Sending` records require Encrypted Link recovery before retry.
     pub outbound_private_send_lease_timeout: Duration,
     /// Minimum delay before retrying a failed outbound private send.
     #[serde(default = "default_outbound_private_retry_backoff")]

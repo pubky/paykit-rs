@@ -110,6 +110,60 @@ async fn test_recovery_required_peer_allows_relink_attempt() {
 }
 
 #[tokio::test]
+async fn test_advance_link_handshake_rejects_recovery_required_peer() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_linked_peer(LinkedPeerRecord {
+                    counterparty: counterparty.clone(),
+                    state: LinkedPeerState::RecoveryRequired,
+                    last_sync_at: Some(FixedClock.now()),
+                    last_private_receive_at: None,
+                    failure_count: 1,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty,
+                    link_snapshot: Some(vec![1, 2, 3]),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 4,
+                    checkpointed_at: FixedClock.now(),
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk.advance_link_handshake(counterparty.clone()).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
+    assert_eq!(
+        crate::load_encrypted_link_state(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap()
+            .generation,
+        4
+    );
+}
+
+#[tokio::test]
 async fn test_advance_link_handshake_preserves_unusable_link_state_without_session() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

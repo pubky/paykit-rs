@@ -77,6 +77,33 @@ fn private_payment_list_outbound(
     }
 }
 
+async fn assert_restore_rejects_outbound_record(record: OutboundPrivateMessageRecord) {
+    let storage = InMemoryStorage::new();
+    let counterparty = record.counterparty.clone();
+    let next_id = record.outbound_message_id.saturating_add(1);
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        identity_state: Some(identity(counterparty)),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: vec![record],
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        next_outbound_private_message_id: next_id,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    };
+
+    let result = restore_backup_state(&storage, backup).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+}
+
 fn receipt_access_raw_with_context(
     event_id: &str,
     receipt_id: &str,

@@ -28,9 +28,32 @@ fn test_profile_json_rejects_wrong_kind() {
 }
 
 #[test]
+fn test_profile_json_ignores_unknown_fields() {
+    let parsed = parse_profile_json(
+        r#"{"version":1,"kind":"paykit.profile","display_name":"Alice","image_uri":null,"color":"blue"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(parsed.display_name.as_deref(), Some("Alice"));
+}
+
+#[test]
 fn test_profile_rejects_empty_display_name() {
     let profile = PaykitProfile {
         display_name: Some(" ".into()),
+        image_uri: None,
+    };
+
+    assert!(matches!(
+        profile.validate(),
+        Err(PaykitSdkError::Protocol(_))
+    ));
+}
+
+#[test]
+fn test_profile_rejects_control_characters() {
+    let profile = PaykitProfile {
+        display_name: Some("Alice\nAdmin".into()),
         image_uri: None,
     };
 
@@ -48,6 +71,19 @@ fn test_contact_update_allows_empty_label_to_clear_display_text() {
     };
 
     assert!(update.validate().is_ok());
+}
+
+#[test]
+fn test_contact_update_rejects_control_characters() {
+    let update = ContactUpdate {
+        public_key: public_key(),
+        label: Some("Alice\tLocal".into()),
+    };
+
+    assert!(matches!(
+        update.validate(),
+        Err(PaykitSdkError::Protocol(_))
+    ));
 }
 
 #[test]

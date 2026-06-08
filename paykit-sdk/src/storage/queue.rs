@@ -9,7 +9,7 @@ use crate::{
 
 pub(super) fn is_claimable_outbound_private_message(
     message: &OutboundPrivateMessageRecord,
-    stale_before: DateTime<Utc>,
+    _stale_before: DateTime<Utc>,
     failed_retry_after: DateTime<Utc>,
 ) -> bool {
     match message.status {
@@ -17,14 +17,22 @@ pub(super) fn is_claimable_outbound_private_message(
         OutboundPrivateMessageStatus::Failed => message
             .last_attempt_at
             .is_none_or(|last_attempt_at| last_attempt_at <= failed_retry_after),
-        OutboundPrivateMessageStatus::Sending => match message.last_attempt_at {
-            Some(last_attempt_at) => last_attempt_at <= stale_before,
-            None => true,
-        },
+        OutboundPrivateMessageStatus::Sending => false,
         OutboundPrivateMessageStatus::Sent
         | OutboundPrivateMessageStatus::Invalid
+        | OutboundPrivateMessageStatus::RecoveryRequired
         | OutboundPrivateMessageStatus::Superseded => false,
     }
+}
+
+pub(super) fn is_stale_sending_outbound_private_message(
+    message: &OutboundPrivateMessageRecord,
+    stale_before: DateTime<Utc>,
+) -> bool {
+    message.status == OutboundPrivateMessageStatus::Sending
+        && message
+            .last_attempt_at
+            .is_none_or(|last_attempt_at| last_attempt_at <= stale_before)
 }
 
 pub(crate) fn outbound_private_queue_head_is_claimable(
@@ -39,6 +47,7 @@ pub(crate) fn outbound_private_queue_head_is_claimable(
                 && !matches!(
                     message.status,
                     OutboundPrivateMessageStatus::Invalid
+                        | OutboundPrivateMessageStatus::RecoveryRequired
                         | OutboundPrivateMessageStatus::Superseded
                 )
         })
@@ -52,6 +61,7 @@ pub(crate) fn outbound_private_queue_head_is_claimable(
             message.status,
             OutboundPrivateMessageStatus::Sent
                 | OutboundPrivateMessageStatus::Invalid
+                | OutboundPrivateMessageStatus::RecoveryRequired
                 | OutboundPrivateMessageStatus::Superseded
         ) {
             continue;
@@ -64,7 +74,8 @@ pub(crate) fn outbound_private_queue_head_is_claimable(
         if is_supersedable_private_list {
             continue;
         }
-        return is_claimable_outbound_private_message(message, stale_before, failed_retry_after);
+        return is_claimable_outbound_private_message(message, stale_before, failed_retry_after)
+            || is_stale_sending_outbound_private_message(message, stale_before);
     }
 
     false
@@ -86,6 +97,7 @@ pub(super) fn supersede_outdated_private_payment_lists(
                 && !matches!(
                     message.status,
                     OutboundPrivateMessageStatus::Invalid
+                        | OutboundPrivateMessageStatus::RecoveryRequired
                         | OutboundPrivateMessageStatus::Superseded
                 )
         })

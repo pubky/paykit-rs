@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt};
 
-use crate::{identity::PubkyPublicKey, PubkySessionAccess, Result};
+use crate::{identity::PubkyPublicKey, PaykitSdkError, PubkySessionAccess, Result};
 
 /// Provides live Pubky session access to the SDK.
 ///
@@ -64,8 +64,13 @@ pub trait PaymentAdapter: Send + Sync {
     /// cleanup cannot silently succeed while backend reservations remain held.
     async fn release_receiving_detail_reservation(
         &self,
-        release: &PaymentEndpointReservationRelease,
-    ) -> Result<()>;
+        _release: &PaymentEndpointReservationRelease,
+    ) -> Result<()> {
+        Err(PaykitSdkError::PaymentAdapter {
+            context: "receiving-detail reservation release is not implemented".into(),
+            source: None,
+        })
+    }
 
     /// Rank and evaluate candidate endpoints for a payment.
     async fn select_payment_endpoint(

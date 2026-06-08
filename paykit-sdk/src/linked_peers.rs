@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     storage::{
         require_peer_link_operation_lease, EncryptedLinkStateRecord, LinkedPeerRecord,
-        PeerLinkOperationLease, StorageAdapter,
+        PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
     PaykitSdkError, PubkyPublicKey, Result,
 };
@@ -215,6 +215,38 @@ where
     mark_recovery_required_inner(storage, counterparty, Some(lease), now).await
 }
 
+pub(crate) fn mark_recovery_required_in_transaction<T>(
+    tx: &mut T,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+) -> Result<RecoveryRequiredMark>
+where
+    T: StorageTransaction + ?Sized,
+{
+    let mut record = tx
+        .linked_peer(counterparty)
+        .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
+    ensure_not_blocked(&record)?;
+    let new_episode = record.state != LinkedPeerState::RecoveryRequired;
+    record.state = LinkedPeerState::RecoveryRequired;
+    if new_episode || record.last_sync_at.is_none() {
+        record.last_sync_at = Some(now);
+    }
+    record.failure_count = record.failure_count.saturating_add(1);
+    tx.save_linked_peer(record);
+    if let Some(link_state) = tx.encrypted_link_state(counterparty) {
+        tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+            counterparty: counterparty.clone(),
+            link_snapshot: None,
+            handshake_snapshot: None,
+            handshake_role: None,
+            generation: link_state.generation.saturating_add(1),
+            checkpointed_at: now,
+        });
+    }
+    Ok(RecoveryRequiredMark { new_episode })
+}
+
 async fn mark_recovery_required_inner<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -233,28 +265,7 @@ where
                     "peer link operation already in progress for counterparty {counterparty}"
                 )));
             }
-            let mut record = tx
-                .linked_peer(&counterparty)
-                .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
-            ensure_not_blocked(&record)?;
-            let new_episode = record.state != LinkedPeerState::RecoveryRequired;
-            record.state = LinkedPeerState::RecoveryRequired;
-            if new_episode || record.last_sync_at.is_none() {
-                record.last_sync_at = Some(now);
-            }
-            record.failure_count = record.failure_count.saturating_add(1);
-            tx.save_linked_peer(record.clone());
-            if let Some(link_state) = tx.encrypted_link_state(&counterparty) {
-                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
-                    counterparty: counterparty.clone(),
-                    link_snapshot: None,
-                    handshake_snapshot: None,
-                    handshake_role: None,
-                    generation: link_state.generation.saturating_add(1),
-                    checkpointed_at: now,
-                });
-            }
-            Ok(RecoveryRequiredMark { new_episode })
+            mark_recovery_required_in_transaction(tx, &counterparty, now)
         })
         .await
 }
