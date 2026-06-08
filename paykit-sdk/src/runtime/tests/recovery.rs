@@ -734,7 +734,8 @@ async fn test_automatic_recovery_marker_remove_records_missing_session() {
     );
 
     sdk.remove_local_recovery_marker_if_recorded(&counterparty)
-        .await;
+        .await
+        .unwrap();
 
     let status = sdk
         .encrypted_link_recovery_marker_status(&counterparty)

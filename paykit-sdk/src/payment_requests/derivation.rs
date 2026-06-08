@@ -171,12 +171,13 @@ impl StoredPaymentRequestEvent {
         }
     }
 
-    fn kind_order(&self) -> u8 {
+    fn phase_order(&self) -> u8 {
         match self.event() {
             PaymentRequestEvent::Request(_) => 0,
-            PaymentRequestEvent::Acceptance(_) | PaymentRequestEvent::Rejection(_) => 1,
-            PaymentRequestEvent::Cancellation(_) => 2,
-            PaymentRequestEvent::Proof(_) => 3,
+            PaymentRequestEvent::Acceptance(_)
+            | PaymentRequestEvent::Rejection(_)
+            | PaymentRequestEvent::Cancellation(_)
+            | PaymentRequestEvent::Proof(_) => 1,
         }
     }
 
@@ -389,10 +390,15 @@ fn compare_stored_events(a: &StoredPaymentRequestEvent, b: &StoredPaymentRequest
             .then_with(|| a.record_time().cmp(&b.record_time()));
     }
 
-    a.kind_order()
-        .cmp(&b.kind_order())
-        .then_with(|| a.record_time().cmp(&b.record_time()))
+    let phase_order = a.phase_order().cmp(&b.phase_order());
+    if phase_order != Ordering::Equal {
+        return phase_order;
+    }
+
+    a.record_time()
+        .cmp(&b.record_time())
         .then_with(|| a.source_rank().cmp(&b.source_rank()))
+        .then_with(|| a.source_order().cmp(&b.source_order()))
 }
 
 #[derive(Clone)]

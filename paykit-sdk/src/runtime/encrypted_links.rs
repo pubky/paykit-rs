@@ -404,7 +404,7 @@ where
                 )
                 .await?;
                 self.remove_local_recovery_marker_if_recorded(&counterparty)
-                    .await;
+                    .await?;
                 Ok(report)
             }
         }

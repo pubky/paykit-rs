@@ -343,7 +343,10 @@ impl StorageTransaction for InMemoryStorageTransaction {
         Some(message.clone())
     }
 
-    fn save_outbound_private_message(&mut self, record: OutboundPrivateMessageRecord) {
+    fn save_outbound_private_message(
+        &mut self,
+        record: OutboundPrivateMessageRecord,
+    ) -> Result<()> {
         if let Some(existing) = self
             .state
             .outbound_private_messages
@@ -351,6 +354,15 @@ impl StorageTransaction for InMemoryStorageTransaction {
             .find(|message| message.outbound_message_id == record.outbound_message_id)
         {
             *existing = record;
+            Ok(())
+        } else {
+            Err(PaykitSdkError::Storage {
+                context: format!(
+                    "outbound private message {} does not exist",
+                    record.outbound_message_id
+                ),
+                source: None,
+            })
         }
     }
 

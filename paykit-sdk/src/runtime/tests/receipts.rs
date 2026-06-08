@@ -148,6 +148,35 @@ async fn test_retrieve_receipt_reports_conflicted_access_before_missing_public_s
 }
 
 #[tokio::test]
+async fn test_retrieve_receipt_reports_missing_access_before_public_storage() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let receipt_id = "receipt-1";
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local_public_key),
+            capability: PubkyIdentityCapability::PublicOnly,
+            local_secret_available: false,
+            initialized_at: FixedClock.now(),
+            sign_out_generation: 0,
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk.retrieve_receipt(counterparty, receipt_id).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
+}
+
+#[tokio::test]
 async fn test_retrieve_receipt_returns_cached_record_for_public_only_identity() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

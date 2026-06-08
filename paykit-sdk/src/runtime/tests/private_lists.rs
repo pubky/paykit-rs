@@ -252,7 +252,7 @@ async fn test_unattempted_superseded_reservation_cleanup_releases_without_claime
                     .find(|message| message.outbound_message_id == latest.outbound_message_id)
                     .unwrap();
                 sent.status = crate::OutboundPrivateMessageStatus::Sent;
-                tx.save_outbound_private_message(sent);
+                tx.save_outbound_private_message(sent)?;
                 let claimed = tx.claim_next_outbound_private_message(
                     &counterparty,
                     FixedClock.now(),
@@ -327,7 +327,7 @@ async fn test_terminal_private_list_reservation_cleanup_releases_invalid_message
                 invalid.status = crate::OutboundPrivateMessageStatus::Invalid;
                 invalid.last_error =
                     Some("Payment Endpoint Reservation expired before private list send".into());
-                tx.save_outbound_private_message(invalid);
+                tx.save_outbound_private_message(invalid)?;
                 Ok(())
             }
         })
@@ -676,7 +676,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
                     .find(|message| message.outbound_message_id == latest.outbound_message_id)
                     .unwrap();
                 sent.status = crate::OutboundPrivateMessageStatus::Sent;
-                tx.save_outbound_private_message(sent);
+                tx.save_outbound_private_message(sent)?;
                 Ok(())
             }
         })

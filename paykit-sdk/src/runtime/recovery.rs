@@ -564,7 +564,7 @@ where
     pub(super) async fn remove_local_recovery_marker_if_recorded(
         &self,
         counterparty: &PubkyPublicKey,
-    ) {
+    ) -> Result<()> {
         let (session_access, secret_key) = match self.private_link_session_access().await {
             Ok(value) => value,
             Err(err) => {
@@ -580,7 +580,7 @@ where
                         )
                         .await;
                 }
-                return;
+                return Ok(());
             }
         };
         let has_local_marker = self
@@ -588,7 +588,7 @@ where
             .await
             .unwrap_or(false);
         if !has_local_marker {
-            return;
+            return Ok(());
         }
 
         let Ok(remote_public_key) = counterparty.to_public_key() else {
@@ -598,7 +598,7 @@ where
                     Some("invalid counterparty Pubky public key".into()),
                 )
                 .await;
-            return;
+            return Ok(());
         };
         if let Err(err) = paykit_lib::remove_encrypted_link_recovery_marker(
             &session_access.session,
@@ -610,10 +610,9 @@ where
             let _ = self
                 .save_local_recovery_marker_last_error(counterparty, Some(err.to_string()))
                 .await;
-            return;
+            return Ok(());
         }
-        let _ = self
-            .storage
+        self.storage
             .transaction(|tx| {
                 if let Some(mut peer) = tx.linked_peer(counterparty) {
                     peer.local_recovery_attempt_id = None;
@@ -623,7 +622,7 @@ where
                 }
                 Ok(())
             })
-            .await;
+            .await
     }
 
     pub(super) async fn has_local_recovery_marker(

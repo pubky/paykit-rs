@@ -267,7 +267,7 @@ where
                             crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                             let mark =
                                 mark_recovery_required_in_transaction(tx, &counterparty, now)?;
-                            tx.save_outbound_private_message(failed.clone());
+                            tx.save_outbound_private_message(failed.clone())?;
                             Ok((failed, mark))
                         }
                     })
@@ -314,7 +314,7 @@ where
                         let lease = lease.clone();
                         move |tx| {
                             crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                            tx.save_outbound_private_message(failed);
+                            tx.save_outbound_private_message(failed)?;
                             Ok(())
                         }
                     })
@@ -349,7 +349,7 @@ where
                             let lease = lease.clone();
                             move |tx| {
                                 crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                                tx.save_outbound_private_message(failed);
+                                tx.save_outbound_private_message(failed)?;
                                 Ok(())
                             }
                         })
@@ -392,7 +392,7 @@ where
                             let lease = lease.clone();
                             move |tx| {
                                 crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                                tx.save_outbound_private_message(sent);
+                                tx.save_outbound_private_message(sent)?;
                                 tx.save_encrypted_link_state(link_state);
                                 Ok(())
                             }
@@ -419,7 +419,7 @@ where
                                         &counterparty,
                                         now,
                                     )?;
-                                    tx.save_outbound_private_message(failed.clone());
+                                    tx.save_outbound_private_message(failed.clone())?;
                                     Ok((failed, mark))
                                 }
                             })
@@ -444,7 +444,7 @@ where
                                 let lease = lease.clone();
                                 move |tx| {
                                     crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                                    tx.save_outbound_private_message(failed);
+                                    tx.save_outbound_private_message(failed)?;
                                     Ok(())
                                 }
                             })

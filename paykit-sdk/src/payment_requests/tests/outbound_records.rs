@@ -119,7 +119,7 @@ async fn test_payment_request_records_use_outbound_update_time_for_freshness() {
             outbound.status = OutboundPrivateMessageStatus::Sent;
             outbound.updated_at = updated_at;
             outbound.sent_at = Some(updated_at);
-            tx.save_outbound_private_message(outbound);
+            tx.save_outbound_private_message(outbound)?;
             Ok(())
         })
         .await
@@ -160,7 +160,7 @@ async fn test_payment_request_records_keep_latest_freshness_after_later_applied_
             outbound.status = OutboundPrivateMessageStatus::Sent;
             outbound.updated_at = updated_at;
             outbound.sent_at = Some(updated_at);
-            tx.save_outbound_private_message(outbound);
+            tx.save_outbound_private_message(outbound)?;
             Ok(())
         })
         .await
@@ -383,7 +383,7 @@ async fn test_payment_request_records_preserve_outbound_fifo_when_clock_moves_ba
 }
 
 #[tokio::test]
-async fn test_payment_request_records_apply_mixed_sources_by_protocol_order() {
+async fn test_payment_request_records_apply_proposal_before_cross_source_acceptance() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
@@ -423,6 +423,119 @@ async fn test_payment_request_records_apply_mixed_sources_by_protocol_order() {
 }
 
 #[tokio::test]
+async fn test_payment_request_records_flag_later_acceptance_after_local_cancellation() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    let PaymentRequestEvent::Request(request) = parsed_event(request_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+        request_id,
+        "invoice-2026-0001",
+        None,
+        None,
+    )) else {
+        panic!("expected request event");
+    };
+    enqueue_payment_request(&storage, counterparty.clone(), &request, timestamp())
+        .await
+        .unwrap();
+    let PaymentRequestEvent::Cancellation(cancellation) = parsed_event(cancellation_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+        request_id,
+    )) else {
+        panic!("expected cancellation event");
+    };
+    enqueue_payment_request_cancellation(
+        &storage,
+        counterparty.clone(),
+        &cancellation,
+        timestamp() + ChronoDuration::minutes(1),
+    )
+    .await
+    .unwrap();
+    persist_messages_at(
+        &storage,
+        counterparty.clone(),
+        vec![acceptance_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+            request_id,
+        )],
+        timestamp() + ChronoDuration::minutes(2),
+    )
+    .await;
+
+    let records = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        records[0].state,
+        PaymentRequestLifecycleState::InvalidConflict
+    );
+    assert!(records[0]
+        .invalid_reason
+        .as_ref()
+        .is_some_and(|reason| reason.contains("acceptance arrived after transition")));
+}
+
+#[tokio::test]
+async fn test_payment_request_records_apply_later_cancellation_after_acceptance() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    let PaymentRequestEvent::Request(request) = parsed_event(request_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+        request_id,
+        "invoice-2026-0001",
+        None,
+        None,
+    )) else {
+        panic!("expected request event");
+    };
+    enqueue_payment_request(&storage, counterparty.clone(), &request, timestamp())
+        .await
+        .unwrap();
+    persist_messages_at(
+        &storage,
+        counterparty.clone(),
+        vec![acceptance_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+            request_id,
+        )],
+        timestamp() + ChronoDuration::minutes(1),
+    )
+    .await;
+    let PaymentRequestEvent::Cancellation(cancellation) = parsed_event(cancellation_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+        request_id,
+    )) else {
+        panic!("expected cancellation event");
+    };
+    enqueue_payment_request_cancellation(
+        &storage,
+        counterparty.clone(),
+        &cancellation,
+        timestamp() + ChronoDuration::minutes(2),
+    )
+    .await
+    .unwrap();
+
+    let records = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(records[0].state, PaymentRequestLifecycleState::Canceled);
+    assert_eq!(
+        records[0].accepted_event_id.as_deref(),
+        Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102")
+    );
+    assert_eq!(
+        records[0].canceled_event_id.as_deref(),
+        Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103")
+    );
+}
+
+#[tokio::test]
 async fn test_payment_request_records_surface_recovery_required_outbound_event() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
@@ -454,7 +567,7 @@ async fn test_payment_request_records_surface_recovery_required_outbound_event()
             outbound.status = OutboundPrivateMessageStatus::RecoveryRequired;
             outbound.updated_at = timestamp() + ChronoDuration::minutes(1);
             outbound.last_error = Some("Encrypted Link recovery is required".into());
-            tx.save_outbound_private_message(outbound);
+            tx.save_outbound_private_message(outbound)?;
             Ok(())
         })
         .await

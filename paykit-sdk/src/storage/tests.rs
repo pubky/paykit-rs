@@ -281,35 +281,34 @@ async fn test_transaction_commits_records() {
 }
 
 #[tokio::test]
-async fn test_save_outbound_private_message_updates_existing_only() {
+async fn test_save_outbound_private_message_rejects_missing_record() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
 
-    storage
-            .transaction({
-                let counterparty = counterparty.clone();
-                move |tx| {
-                    tx.save_outbound_private_message(OutboundPrivateMessageRecord {
-                        outbound_message_id: 99,
-                        counterparty,
-                        kind: "paykit.private_payment_list".into(),
-                        raw_json:
-                            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
-                                .into(),
-                        status: OutboundPrivateMessageStatus::Pending,
-                        attempt_count: 0,
-                        created_at: timestamp(),
-                        updated_at: timestamp(),
-                        last_attempt_at: None,
-                        sent_at: None,
-                        last_error: None,
-                    });
-                    Ok(())
-                }
-            })
-            .await
-            .unwrap();
+    let result: Result<()> = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_outbound_private_message(OutboundPrivateMessageRecord {
+                    outbound_message_id: 99,
+                    counterparty,
+                    kind: "paykit.private_payment_list".into(),
+                    raw_json:
+                        r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
+                            .into(),
+                    status: OutboundPrivateMessageStatus::Pending,
+                    attempt_count: 0,
+                    created_at: timestamp(),
+                    updated_at: timestamp(),
+                    last_attempt_at: None,
+                    sent_at: None,
+                    last_error: None,
+                })
+            }
+        })
+        .await;
 
+    assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
     assert!(storage
         .snapshot()
         .unwrap()
@@ -341,7 +340,7 @@ async fn test_invalid_outbound_private_message_does_not_block_later_records() {
             let invalid =
                 mark_outbound_invalid(first, "invalid private message JSON".into(), timestamp());
             move |tx| {
-                tx.save_outbound_private_message(invalid);
+                tx.save_outbound_private_message(invalid)?;
                 Ok(())
             }
         })
@@ -424,7 +423,7 @@ async fn test_private_payment_list_queue_does_not_supersede_stale_sending() {
                 ));
                 first.status = OutboundPrivateMessageStatus::Sending;
                 first.last_attempt_at = Some(timestamp() - chrono::Duration::seconds(120));
-                tx.save_outbound_private_message(first.clone());
+                tx.save_outbound_private_message(first.clone())?;
                 let second =
                     tx.insert_outbound_private_message(outbound_private_message(counterparty));
                 Ok((first, second))
@@ -856,7 +855,7 @@ async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
             let active_lease = active_lease.clone();
             move |tx| {
                 require_peer_link_operation_lease(tx, &active_lease)?;
-                tx.save_outbound_private_message(sent);
+                tx.save_outbound_private_message(sent)?;
                 Ok(())
             }
         })
@@ -873,7 +872,7 @@ async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
             let failed = failed.clone();
             move |tx| {
                 require_peer_link_operation_lease(tx, &first_lease)?;
-                tx.save_outbound_private_message(failed);
+                tx.save_outbound_private_message(failed)?;
                 Ok(())
             }
         })

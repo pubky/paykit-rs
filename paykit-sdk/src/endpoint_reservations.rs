@@ -44,6 +44,9 @@ where
 }
 
 /// Load reservation releases for superseded Private Payment Lists that were never attempted.
+///
+/// Attempted private lists are left for adapter expiry or explicit cleanup because
+/// the SDK cannot prove the counterparty did not receive their reserved details.
 pub(crate) async fn unattempted_superseded_reservation_releases<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,

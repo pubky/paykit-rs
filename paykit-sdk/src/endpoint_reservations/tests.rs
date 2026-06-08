@@ -278,6 +278,62 @@ async fn test_unattempted_superseded_reservation_releases() {
 }
 
 #[tokio::test]
+async fn test_unattempted_superseded_reservation_releases_skip_attempted_lists() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let first = queue_private_payment_list_with_reservations(
+        &storage,
+        &request(counterparty.clone()),
+        vec![reservation("res-1", "one")],
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    queue_private_payment_list_with_reservations(
+        &storage,
+        &request(counterparty.clone()),
+        vec![reservation("res-2", "two")],
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let mut attempted = tx
+                    .outbound_private_messages(&counterparty)
+                    .into_iter()
+                    .find(|message| message.outbound_message_id == first.outbound_message_id)
+                    .unwrap();
+                attempted.status = crate::OutboundPrivateMessageStatus::Failed;
+                attempted.last_attempt_at = Some(timestamp() - ChronoDuration::seconds(2));
+                tx.save_outbound_private_message(attempted)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    crate::outbound_private::claim_next_outbound_private_message(
+        &storage,
+        &counterparty,
+        timestamp(),
+        timestamp() - chrono::Duration::seconds(1),
+        timestamp() - chrono::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+
+    let releases = unattempted_superseded_reservation_releases(&storage, &counterparty)
+        .await
+        .unwrap();
+
+    assert!(releases.is_empty());
+    let snapshot = storage.snapshot().unwrap();
+    assert_eq!(snapshot.payment_endpoint_reservations.len(), 2);
+}
+
+#[tokio::test]
 async fn test_expired_outbound_reservation_releases() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();

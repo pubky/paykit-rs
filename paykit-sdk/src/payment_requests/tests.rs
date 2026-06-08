@@ -96,12 +96,21 @@ async fn persist_messages(
     counterparty: PubkyPublicKey,
     messages: Vec<String>,
 ) {
+    persist_messages_at(storage, counterparty, messages, timestamp()).await
+}
+
+async fn persist_messages_at(
+    storage: &InMemoryStorage,
+    counterparty: PubkyPublicKey,
+    messages: Vec<String>,
+    received_at: DateTime<Utc>,
+) {
     persist_private_stream_batch(
         storage,
         counterparty,
         messages.into_iter().map(private_message).collect(),
         None,
-        timestamp(),
+        received_at,
     )
     .await
     .unwrap();

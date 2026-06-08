@@ -23,7 +23,7 @@ async fn test_pending_outbound_private_counterparties_dedupes_work() {
                     FixedClock.now(),
                 ));
                 sent.status = OutboundPrivateMessageStatus::Sent;
-                tx.save_outbound_private_message(sent);
+                tx.save_outbound_private_message(sent)?;
                 tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                     first,
                     "paykit.private_payment_list".into(),
@@ -65,7 +65,7 @@ async fn test_pending_outbound_private_counterparties_waits_for_stale_sending() 
                     ));
                 sending.status = OutboundPrivateMessageStatus::Sending;
                 sending.last_attempt_at = Some(FixedClock.now());
-                tx.save_outbound_private_message(sending);
+                tx.save_outbound_private_message(sending)?;
                 Ok(())
             }
         })
@@ -91,7 +91,7 @@ async fn test_pending_outbound_private_counterparties_waits_for_stale_sending() 
             move |tx| {
                 let mut sending = tx.outbound_private_messages(&counterparty)[0].clone();
                 sending.last_attempt_at = Some(FixedClock.now() - ChronoDuration::seconds(120));
-                tx.save_outbound_private_message(sending);
+                tx.save_outbound_private_message(sending)?;
                 Ok(())
             }
         })
@@ -213,7 +213,7 @@ async fn test_pending_outbound_private_counterparties_waits_for_failed_backoff()
                     ));
                 failed.status = OutboundPrivateMessageStatus::Failed;
                 failed.last_attempt_at = Some(FixedClock.now());
-                tx.save_outbound_private_message(failed);
+                tx.save_outbound_private_message(failed)?;
                 Ok(())
             }
         })
@@ -242,7 +242,7 @@ async fn test_pending_outbound_private_counterparties_waits_for_failed_backoff()
             move |tx| {
                 let mut failed = tx.outbound_private_messages(&counterparty)[0].clone();
                 failed.last_attempt_at = Some(FixedClock.now() - ChronoDuration::seconds(31));
-                tx.save_outbound_private_message(failed);
+                tx.save_outbound_private_message(failed)?;
                 Ok(())
             }
         })
@@ -277,7 +277,7 @@ async fn test_pending_outbound_private_counterparties_respects_queue_head() {
                     ));
                 failed_head.status = OutboundPrivateMessageStatus::Failed;
                 failed_head.last_attempt_at = Some(FixedClock.now());
-                tx.save_outbound_private_message(failed_head);
+                tx.save_outbound_private_message(failed_head)?;
                 tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                     counterparty,
                     "paykit.payment_request".into(),
@@ -317,7 +317,7 @@ async fn test_pending_outbound_private_counterparties_respects_queue_head() {
             move |tx| {
                 let mut failed_head = tx.outbound_private_messages(&counterparty)[0].clone();
                 failed_head.last_attempt_at = Some(FixedClock.now() - ChronoDuration::seconds(31));
-                tx.save_outbound_private_message(failed_head);
+                tx.save_outbound_private_message(failed_head)?;
                 Ok(())
             }
         })
@@ -419,7 +419,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
                     .find(|message| message.outbound_message_id == latest.outbound_message_id)
                     .unwrap();
                 sent.status = crate::OutboundPrivateMessageStatus::Sent;
-                tx.save_outbound_private_message(sent);
+                tx.save_outbound_private_message(sent)?;
                 Ok(())
             }
         })

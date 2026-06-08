@@ -14,36 +14,48 @@ where
 
     /// Restore SDK-managed backup state.
     pub async fn restore_backup_state(&self, mut backup: SdkBackupState) -> Result<RestoreReport> {
+        let _identity_guard = self.claim_identity_operation("restore backup")?;
         if backup.identity_public_key().is_some() || backup.has_identity_scoped_state() {
-            let session_access = self.pubky.load_session_access().await?.ok_or_else(|| {
-                PaykitSdkError::Identity {
-                    context:
-                        "cannot restore identity-scoped backup without an active Pubky identity"
-                            .into(),
-                    source: None,
-                }
-            })?;
-            let local_public_key = session_access.public_key()?;
-            if backup.identity_public_key() != Some(&local_public_key) {
-                return Err(PaykitSdkError::Identity {
-                    context: "backup identity does not match active Pubky identity".into(),
-                    source: None,
-                });
-            }
-            if backup.has_private_identity_scoped_state()
-                && session_access.capability() != PubkyIdentityCapability::PrivateLinkCapable
-            {
-                return Err(PaykitSdkError::Identity {
-                    context: "cannot restore private Paykit state without private-link capability"
-                        .into(),
-                    source: None,
-                });
-            }
+            let session_access = self.validate_backup_restore_session(&backup).await?;
             if let Some(identity_state) = backup.identity_state.as_mut() {
                 identity_state.capability = session_access.capability();
                 identity_state.local_secret_available = session_access.private_link_capable();
             }
+            self.validate_backup_restore_session(&backup).await?;
         }
         restore_sdk_backup_state(&self.storage, backup).await
+    }
+
+    async fn validate_backup_restore_session(
+        &self,
+        backup: &SdkBackupState,
+    ) -> Result<PubkySessionAccess> {
+        let session_access =
+            self.pubky
+                .load_session_access()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context:
+                        "cannot restore identity-scoped backup without an active Pubky identity"
+                            .into(),
+                    source: None,
+                })?;
+        let local_public_key = session_access.public_key()?;
+        if backup.identity_public_key() != Some(&local_public_key) {
+            return Err(PaykitSdkError::Identity {
+                context: "backup identity does not match active Pubky identity".into(),
+                source: None,
+            });
+        }
+        if backup.has_private_identity_scoped_state()
+            && session_access.capability() != PubkyIdentityCapability::PrivateLinkCapable
+        {
+            return Err(PaykitSdkError::Identity {
+                context: "cannot restore private Paykit state without private-link capability"
+                    .into(),
+                source: None,
+            });
+        }
+        Ok(session_access)
     }
 }

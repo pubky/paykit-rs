@@ -245,7 +245,8 @@ pub trait StorageTransaction {
     ) -> Option<OutboundPrivateMessageRecord>;
 
     /// Save updates for one existing outbound private message record.
-    fn save_outbound_private_message(&mut self, record: OutboundPrivateMessageRecord);
+    fn save_outbound_private_message(&mut self, record: OutboundPrivateMessageRecord)
+        -> Result<()>;
 
     /// Allocate a receive batch id.
     fn allocate_receive_batch_id(&mut self) -> u64;

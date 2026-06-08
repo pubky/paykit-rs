@@ -80,6 +80,11 @@ where
         if access_records.is_empty() && conflicted_access_count > 0 {
             return Err(Self::conflicted_receipt_access_error(receipt_id));
         }
+        if access_records.is_empty() {
+            return Err(PaykitSdkError::RecoveryRequired(format!(
+                "no Receipt Access record for receipt {receipt_id} from {counterparty}"
+            )));
+        }
         let public_storage =
             self.pubky
                 .load_public_storage()
@@ -88,11 +93,6 @@ where
                     context: "no Pubky public storage available for receipt retrieval".into(),
                     source: None,
                 })?;
-        if access_records.is_empty() {
-            return Err(PaykitSdkError::RecoveryRequired(format!(
-                "no Receipt Access record for receipt {receipt_id} from {counterparty}"
-            )));
-        }
         let now = self.clock.now();
         let all_access_records = access_records.clone();
         let mut last_error = None;
