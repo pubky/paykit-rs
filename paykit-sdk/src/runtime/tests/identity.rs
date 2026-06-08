@@ -222,6 +222,23 @@ async fn test_sign_out_clears_identity_scoped_state() {
 }
 
 #[tokio::test]
+async fn test_sign_out_rejects_concurrent_identity_operation() {
+    let storage = InMemoryStorage::new();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+    let _guard = sdk.claim_identity_operation("test operation").unwrap();
+
+    let result = sdk.sign_out().await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+}
+
+#[tokio::test]
 async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

@@ -695,6 +695,8 @@ fn remote_recovery_marker_is_stale(
     link_state: Option<&EncryptedLinkStateRecord>,
     marker_created_at: DateTime<Utc>,
 ) -> bool {
+    // Recovery marker timestamps are serialized with second precision, so
+    // same-second markers are treated as fresh and fail closed.
     link_state
         .and_then(|state| {
             (state.link_snapshot.is_some() || state.handshake_snapshot.is_some())

@@ -25,7 +25,12 @@ where
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty).await?;
-        derive_received_payment_request_records(&self.storage, counterparty, self.clock.now()).await
+        let mut records =
+            derive_received_payment_request_records(&self.storage, counterparty, self.clock.now())
+                .await?;
+        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
+            .await?;
+        Ok(records)
     }
 
     /// Return merged local Payment Request records for one counterparty.
@@ -42,7 +47,11 @@ where
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty).await?;
-        derive_payment_request_records(&self.storage, counterparty, self.clock.now()).await
+        let mut records =
+            derive_payment_request_records(&self.storage, counterparty, self.clock.now()).await?;
+        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
+            .await?;
+        Ok(records)
     }
 
     pub(super) async fn ensure_private_outbound_ready(
@@ -145,7 +154,10 @@ where
         require_payer_role(&record, "reject Payment Request")?;
         require_state(
             &record,
-            &[PaymentRequestLifecycleState::Proposed],
+            &[
+                PaymentRequestLifecycleState::Proposed,
+                PaymentRequestLifecycleState::ProposalExpired,
+            ],
             "reject Payment Request",
         )?;
         let event =
@@ -235,8 +247,11 @@ where
         counterparty: &PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
-        derive_payment_request_records(&self.storage, counterparty, self.clock.now())
-            .await?
+        let mut records =
+            derive_payment_request_records(&self.storage, counterparty, self.clock.now()).await?;
+        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
+            .await?;
+        records
             .into_iter()
             .find(|record| record.payment_request_id == payment_request_id.as_str())
             .ok_or_else(|| {
@@ -245,6 +260,37 @@ where
                     payment_request_id, counterparty
                 ))
             })
+    }
+
+    async fn mark_recovery_required_payment_request_records(
+        &self,
+        counterparty: &PubkyPublicKey,
+        records: &mut [PaymentRequestRecord],
+    ) -> Result<()> {
+        let recovery_required = self
+            .storage
+            .transaction(|tx| {
+                Ok(tx
+                    .linked_peer(counterparty)
+                    .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired))
+            })
+            .await?;
+        if !recovery_required {
+            return Ok(());
+        }
+        for record in records {
+            if matches!(
+                record.state,
+                PaymentRequestLifecycleState::Proposed
+                    | PaymentRequestLifecycleState::ProposalExpired
+                    | PaymentRequestLifecycleState::Accepted
+                    | PaymentRequestLifecycleState::ProofSubmitted
+                    | PaymentRequestLifecycleState::ActiveRecurring
+            ) {
+                record.state = PaymentRequestLifecycleState::RecoveryRequired;
+            }
+        }
+        Ok(())
     }
 
     /// Enqueue one raw Payment Request protocol event for outbound delivery.

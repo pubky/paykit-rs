@@ -48,6 +48,45 @@ async fn test_payment_request_records_merge_outbound_acceptance() {
 }
 
 #[tokio::test]
+async fn test_payment_request_records_allow_rejection_after_proposal_expiry() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![request_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            request_id,
+            "invoice-2026-0001",
+            Some("2026-06-03T11:59:59Z"),
+            None,
+        )],
+    )
+    .await;
+    let PaymentRequestEvent::Rejection(rejection) = parsed_event(rejection_raw(
+        "8a0d8b4c-913f-4e31-bfc9-2a6f5bb4d102",
+        request_id,
+    )) else {
+        panic!("expected rejection event");
+    };
+    enqueue_payment_request_rejection(&storage, counterparty.clone(), &rejection, timestamp())
+        .await
+        .unwrap();
+
+    let records = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(records[0].state, PaymentRequestLifecycleState::Rejected);
+    assert!(records[0].invalid_reason.is_none());
+    assert_eq!(
+        records[0].rejected_event_id.as_deref(),
+        Some("8a0d8b4c-913f-4e31-bfc9-2a6f5bb4d102")
+    );
+}
+
+#[tokio::test]
 async fn test_payment_request_records_use_outbound_update_time_for_freshness() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();

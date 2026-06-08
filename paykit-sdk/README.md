@@ -81,9 +81,10 @@ persisting a partial checkpoint.
 
 Apps should also serialize identity-scoped operations such as `initialize`,
 `sign_out`, backup restore, and public endpoint sync when multiple runtime
-instances share the same storage. The SDK uses storage-backed per-peer leases
-for Encrypted Link work, but it does not add a process-wide identity or public
-endpoint lock by itself.
+instances share the same storage. The SDK serializes `initialize`, `sign_out`,
+and public endpoint sync calls on one runtime instance and uses storage-backed
+per-peer leases for Encrypted Link work, but it does not add a process-wide
+identity or public endpoint lock by itself.
 
 `sign_out` clears live Pubky session access before clearing SDK-managed
 identity-scoped storage. If provider clearing fails, the SDK leaves local state

@@ -710,14 +710,6 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
             ) {
                 return;
             }
-            if proposal_expired(record, stored.record_time()) {
-                mark_invalid_stored(
-                    record,
-                    stored,
-                    "Payment Request rejection arrived after proposal expiry",
-                );
-                return;
-            }
             if !matches!(record.state, PaymentRequestLifecycleState::Proposed) {
                 mark_invalid_stored(
                     record,

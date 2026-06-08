@@ -644,9 +644,10 @@ writes still check the stored lease id so an earlier holder cannot commit after
 a newer lease has replaced it.
 
 The Rust SDK implementation provides storage-backed per-peer leases for
-Encrypted Link work. Integrators that run more than one runtime instance against
-the same storage must serialize identity-scoped operations and public endpoint
-sync with their own process or storage lock.
+Encrypted Link work and serializes `initialize`, `sign_out`, and public endpoint
+sync calls on one runtime instance. Integrators that run more than one runtime
+instance against the same storage must serialize identity-scoped operations and
+public endpoint sync with their own process or storage lock.
 
 ## Workflows
 

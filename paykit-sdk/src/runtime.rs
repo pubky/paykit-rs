@@ -1,6 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
@@ -134,6 +135,19 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     payment: P,
     config: PaykitSdkConfig,
     clock: C,
+    identity_operation_in_progress: Arc<Mutex<bool>>,
+}
+
+struct RuntimeOperationGuard {
+    in_progress: Arc<Mutex<bool>>,
+}
+
+impl Drop for RuntimeOperationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut in_progress) = self.in_progress.lock() {
+            *in_progress = false;
+        }
+    }
 }
 
 impl<S, K, P> PaykitSdk<S, K, P, SystemClock>
@@ -175,6 +189,23 @@ where
             payment,
             config,
             clock,
+            identity_operation_in_progress: Arc::new(Mutex::new(false)),
+        })
+    }
+
+    fn claim_identity_operation(&self, context: &str) -> Result<RuntimeOperationGuard> {
+        let mut in_progress = self
+            .identity_operation_in_progress
+            .lock()
+            .map_err(|_| PaykitSdkError::Policy("identity operation lock poisoned".into()))?;
+        if *in_progress {
+            return Err(PaykitSdkError::Policy(format!(
+                "cannot {context} while another identity-scoped operation is in progress"
+            )));
+        }
+        *in_progress = true;
+        Ok(RuntimeOperationGuard {
+            in_progress: Arc::clone(&self.identity_operation_in_progress),
         })
     }
 
@@ -186,6 +217,7 @@ where
 
     /// Initialize durable SDK identity state.
     pub async fn initialize(&self) -> Result<InitializationReport> {
+        let _identity_guard = self.claim_identity_operation("initialize")?;
         let (session, state) = self.load_session_access_and_refresh_identity().await?;
         let live_session_available = session.is_some();
         let private_link_capable = session
@@ -204,6 +236,7 @@ where
 
     /// Clear live Pubky session access and SDK-managed identity-scoped state.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
+        let _identity_guard = self.claim_identity_operation("sign out")?;
         self.pubky.clear_session_access().await?;
 
         let now = self.clock.now();

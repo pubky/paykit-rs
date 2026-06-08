@@ -49,6 +49,70 @@ async fn test_payment_request_records_allow_public_only_identity() {
 }
 
 #[tokio::test]
+async fn test_payment_request_records_mark_recovery_required_peer_state() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let local_public_key = local_public_key.clone();
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_public_key),
+                    capability: PubkyIdentityCapability::PublicOnly,
+                    local_secret_available: false,
+                    initialized_at: FixedClock.now(),
+                    sign_out_generation: 0,
+                });
+                tx.save_linked_peer(LinkedPeerRecord {
+                    counterparty,
+                    state: LinkedPeerState::RecoveryRequired,
+                    last_sync_at: None,
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![payment_request_message(
+            "650e8400-e29b-41d4-a716-446655440000",
+            "550e8400-e29b-41d4-a716-446655440000",
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let records = sdk.payment_request_records(&counterparty).await.unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].state,
+        PaymentRequestLifecycleState::RecoveryRequired
+    );
+}
+
+#[tokio::test]
 async fn test_enqueue_payment_request_event_requires_private_capable_identity() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -182,7 +246,7 @@ async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
 }
 
 #[tokio::test]
-async fn test_reject_payment_request_rejects_expired_proposal_before_enqueue() {
+async fn test_reject_payment_request_allows_expired_proposal_before_readiness_check() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
@@ -211,7 +275,7 @@ async fn test_reject_payment_request_rejects_expired_proposal_before_enqueue() {
         .reject_payment_request(counterparty, &request_id, None)
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     assert!(storage
         .snapshot()
         .unwrap()
