@@ -98,6 +98,12 @@ workflow calls, the SDK blocks Pubky-backed work but preserves the last
 identity-scoped state. Call `sign_out` when the app intentionally wants to clear
 that state.
 
+Read-only private views such as cached Private Payment Lists can still be
+returned for the initialized identity when live private-link capability is
+missing. These cached views are local state, not proof that the Encrypted Link is
+currently healthy; apps should surface linked-peer recovery status when using
+cached private endpoints for payment resolution.
+
 The `storage` module is the advanced adapter boundary. Its record types include
 raw private payloads, Encrypted Link snapshots, and Receipt Decryption Keys so
 custom adapters can persist exact SDK state. App code should usually prefer the

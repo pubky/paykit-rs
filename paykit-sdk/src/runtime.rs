@@ -17,7 +17,8 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::{
     backup::{
         export_backup_state as export_sdk_backup_state,
-        restore_backup_state as restore_sdk_backup_state, RestoreReport, SdkBackupState,
+        restore_backup_state_with_identity as restore_sdk_backup_state, RestoreReport,
+        SdkBackupState,
     },
     config::{
         EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,

@@ -982,6 +982,44 @@ async fn test_restore_backup_state_preserves_current_sign_out_generation() {
 }
 
 #[tokio::test]
+async fn test_restore_backup_state_allows_trusted_identity_switch() {
+    let storage = InMemoryStorage::new();
+    let stored_public_key = public_key();
+    let backup_public_key = public_key();
+    storage
+        .save_identity_state(identity(stored_public_key))
+        .await
+        .unwrap();
+    let mut trusted_identity = identity(backup_public_key.clone());
+    trusted_identity.sign_out_generation = 3;
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        identity_state: Some(identity(backup_public_key.clone())),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: Vec::new(),
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        next_outbound_private_message_id: 0,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    };
+
+    restore_backup_state_with_identity(&storage, backup, Some(trusted_identity))
+        .await
+        .unwrap();
+
+    let identity = storage.snapshot().unwrap().identity_state.unwrap();
+    assert_eq!(identity.public_key.as_ref(), Some(&backup_public_key));
+    assert_eq!(identity.sign_out_generation, 3);
+}
+
+#[tokio::test]
 async fn test_restore_identity_less_backup_preserves_signed_out_generation() {
     let storage = InMemoryStorage::new();
     storage

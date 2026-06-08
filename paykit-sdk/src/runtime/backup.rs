@@ -15,15 +15,17 @@ where
     /// Restore SDK-managed backup state.
     pub async fn restore_backup_state(&self, mut backup: SdkBackupState) -> Result<RestoreReport> {
         let _identity_guard = self.claim_identity_operation("restore backup")?;
+        let mut trusted_identity = None;
         if backup.identity_public_key().is_some() || backup.has_identity_scoped_state() {
             let session_access = self.validate_backup_restore_session(&backup).await?;
             if let Some(identity_state) = backup.identity_state.as_mut() {
                 identity_state.capability = session_access.capability();
                 identity_state.local_secret_available = session_access.private_link_capable();
             }
-            self.validate_backup_restore_session(&backup).await?;
+            let session_access = self.validate_backup_restore_session(&backup).await?;
+            trusted_identity = Some(self.restore_validation_identity(&session_access).await?);
         }
-        restore_sdk_backup_state(&self.storage, backup).await
+        restore_sdk_backup_state(&self.storage, backup, trusted_identity).await
     }
 
     async fn validate_backup_restore_session(
@@ -57,5 +59,31 @@ where
             });
         }
         Ok(session_access)
+    }
+
+    async fn restore_validation_identity(
+        &self,
+        session_access: &PubkySessionAccess,
+    ) -> Result<IdentityState> {
+        let public_key = session_access.public_key()?;
+        let capability = session_access.capability();
+        let local_secret_available = session_access.private_link_capable();
+        let initialized_at = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                if let Some(identity) = tx.load_identity_state() {
+                    if identity.public_key.as_ref() == Some(&public_key) {
+                        return Ok(identity);
+                    }
+                }
+                Ok(IdentityState {
+                    public_key: Some(public_key),
+                    capability,
+                    local_secret_available,
+                    initialized_at,
+                    sign_out_generation: 0,
+                })
+            })
+            .await
     }
 }

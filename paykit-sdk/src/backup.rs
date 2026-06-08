@@ -184,6 +184,7 @@ where
         .await
 }
 
+#[cfg(test)]
 pub(crate) async fn restore_backup_state<S>(
     storage: &S,
     backup: SdkBackupState,
@@ -191,15 +192,25 @@ pub(crate) async fn restore_backup_state<S>(
 where
     S: StorageAdapter,
 {
+    restore_backup_state_with_identity(storage, backup, None).await
+}
+
+pub(crate) async fn restore_backup_state_with_identity<S>(
+    storage: &S,
+    backup: SdkBackupState,
+    trusted_identity: Option<IdentityState>,
+) -> Result<RestoreReport>
+where
+    S: StorageAdapter,
+{
     storage
         .transaction(move |tx| {
-            let current_identity = tx.load_identity_state();
+            let stored_identity = tx.load_identity_state();
+            let current_identity = trusted_identity.as_ref().or(stored_identity.as_ref());
             let current_next_peer_link_operation_lease_id =
                 tx.export_storage_state().next_peer_link_operation_lease_id;
-            let (state, report) = backup.into_storage_state(
-                current_identity.as_ref(),
-                current_next_peer_link_operation_lease_id,
-            )?;
+            let (state, report) = backup
+                .into_storage_state(current_identity, current_next_peer_link_operation_lease_id)?;
             tx.replace_storage_state(state);
             Ok(report)
         })
