@@ -89,8 +89,8 @@ Module responsibilities:
 
 - `runtime`: owns `PaykitSdk`, coordinates adapters, storage, and workflow
   modules.
-- `config`: product-neutral policy knobs such as fallback behavior, retry
-  limits, stale cache rules, and message retention limits.
+- `config`: product-neutral policy knobs such as fallback behavior, recovery
+  timing, and retry limits.
 - `adapters`: payment-method adapter plus narrow platform hook for live Pubky
   session access.
 - `storage`: durable records, transaction interface, and in-memory test
@@ -213,6 +213,14 @@ client for counterparty homeserver access, and optional `PubkyLocalSecretKey`
 needed for Encrypted Links. The SDK derives and persists public `IdentityState`
 from that access during initialization.
 
+If `load_session_access` returns `None`, no live session access is currently
+available. Ordinary refreshes must preserve the last identity-scoped state and
+block Pubky-backed workflows until session access is available again. Explicit
+`sign_out` is the path that clears SDK-managed identity-scoped state.
+Sign-out should clear live session access before deleting SDK-managed local
+state. If local storage clearing fails after session access is cleared, the app
+must retry sign-out or clear SDK storage through its adapter.
+
 `load_public_storage` lets contact resolution fetch public Payment Endpoints
 without requiring authenticated session access. Implementations can reuse the
 Pubky client from `PubkySessionAccess` when they have one, or provide a separate
@@ -220,14 +228,16 @@ public-storage client when only unauthenticated reads are available.
 
 The SDK derives Paykit capability from the session access:
 
-- `SignedOut`
+- `SignedOut`: no identity is initialized, or explicit sign-out completed.
 - `PublicOnly`: public Pubky operations may work, but Encrypted Links cannot be
   established because the local secret key is unavailable.
 - `PrivateLinkCapable`: public operations and Encrypted Links can work.
 
 Ring-authenticated sessions often produce the `PublicOnly` case. The SDK should
 surface this as a clear state instead of retrying private operations that cannot
-succeed.
+succeed. A same-identity transition from `PrivateLinkCapable` to `PublicOnly`
+must preserve private SDK state; only explicit sign-out, identity change, or an
+explicit key-loss/key-rotation operation should delete it.
 
 The SDK should provide high-level import/export/sign-out APIs itself. The
 provider is the narrow platform hook for secure storage and auth-session handoff,
@@ -333,6 +343,8 @@ The payment adapter creates reservations before the SDK can persist linked
 records. Adapters should make reserved details idempotent, expiring, or safe to
 abandon if the process stops before durable queueing. The SDK releases returned
 reservations on SDK-side validation or queueing failure.
+Any adapter that returns reservations must explicitly implement reservation
+release; cleanup must not be silently treated as successful.
 
 Reservation IDs are counterparty-scoped idempotency keys for SDK reservation
 records, not for Private Payment List delivery. Requeueing the same reservation
@@ -340,6 +352,11 @@ details may queue another latest-state Private Payment List and update the
 record to the latest outbound message id. Idempotent repeats preserve the
 original reservation attribution, expiry, and creation time; adapters that want
 new metadata should use a new reservation id.
+
+When cleanup starts releasing a persisted reservation through the payment
+adapter, the SDK marks the reservation as release-started in storage before
+calling the adapter. Reservation IDs with release-started records must not be
+reused for new Private Payment Lists until cleanup removes the record.
 
 Single-use Payment Request reservations are outside the SDK shape until the
 request-specific context is defined.
@@ -408,7 +425,8 @@ Append-only raw private stream item:
 - counterparty
 - stream sequence number assigned by the SDK
 - receive batch id
-- raw UTF-8 payload
+- raw UTF-8 payload, or a retained invalid-frame marker when plaintext bytes
+  are not UTF-8
 - parsed `version`
 - parsed `kind`
 - known Paykit kind, when recognized
@@ -468,6 +486,7 @@ Tracks optional contact-scoped receiving details:
 - latest outbound message id used to queue the reservation for sharing
 - attribution metadata
 - reservation expiry, when provided by the payment adapter
+- release-started timestamp, when adapter cleanup is in progress
 
 ### PaymentRequestRecord
 
@@ -604,7 +623,8 @@ Recommended locks:
 - reservation transaction: stores reservation records and the outbound message
   that shares them atomically. Existing reservation IDs with the same
   counterparty, Payment Endpoint Identifier, and payload hash are idempotent;
-  conflicting existing details and duplicate IDs in the same batch are rejected.
+  release-started records, conflicting existing details, and duplicate IDs in
+  the same batch are rejected.
   The idempotency applies to reservation records, while Private Payment List
   delivery remains latest-state and may queue another outbound message.
 
@@ -630,7 +650,8 @@ sync with their own process or storage lock.
 4. Derive signed-out, public-only, or private-link-capable state.
 5. Load peer records and recovery markers.
 6. Start optional retry workers only after storage is ready.
-7. Return an initialization report with capability and recovery state.
+7. Return an initialization report with cached capability, recovery state, and
+   whether live Pubky session access was available.
 
 ### Import Or Restore Pubky Session
 
@@ -692,7 +713,11 @@ SDK behavior:
 
 1. Publish a local marker when a link is marked recovery-required and the local
    identity is private-link-capable.
-2. Observe the counterparty marker before trusting cached private payment state.
+2. Observe the counterparty marker before trusting cached private payment state
+   when the local identity is currently private-link-capable. Cached state can
+   still be listed for the same identity when only public session access is
+   available, but it should be treated as previously received local state rather
+   than freshly verified private state.
 3. If a new counterparty attempt ID is observed, mark the peer
    recovery-required, clear active link/handshake snapshots, and pause private
    automation.

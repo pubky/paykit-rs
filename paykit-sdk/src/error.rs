@@ -2,6 +2,7 @@ use thiserror::Error;
 
 /// Error type for stateful Paykit SDK workflows.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PaykitSdkError {
     /// Durable storage failed.
     #[error("storage error: {context}")]
@@ -33,6 +34,10 @@ pub enum PaykitSdkError {
         source: Option<anyhow::Error>,
     },
 
+    /// Requested Paykit or Pubky resource was not found.
+    #[error("not found: {0}")]
+    NotFound(String),
+
     /// Paykit protocol data is invalid, conflicting, or unsupported.
     #[error("protocol error: {0}")]
     Protocol(String),
@@ -63,10 +68,7 @@ impl From<paykit_lib::PaykitError> for PaykitSdkError {
                 context,
                 source: Some(source),
             },
-            paykit_lib::PaykitError::NotFound(msg) => Self::Transport {
-                context: msg,
-                source: None,
-            },
+            paykit_lib::PaykitError::NotFound(msg) => Self::NotFound(msg),
             paykit_lib::PaykitError::InvalidData { context, source } => Self::Protocol(
                 source
                     .map(|source| format!("{context}: {source}"))
@@ -76,3 +78,6 @@ impl From<paykit_lib::PaykitError> for PaykitSdkError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

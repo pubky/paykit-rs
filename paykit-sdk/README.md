@@ -51,7 +51,7 @@ if report.identity.private_link_capable {
 Common workflows:
 
 - call `initialize` on startup to refresh identity capability from the Pubky
-  provider
+  provider when live session access is available
 - call `sync_public_endpoints` after local receiving details change
 - call `receive_private_messages` before deriving private Payment Lists,
   Payment Requests, or Receipt Access state
@@ -85,10 +85,17 @@ instances share the same storage. The SDK uses storage-backed per-peer leases
 for Encrypted Link work, but it does not add a process-wide identity or public
 endpoint lock by itself.
 
-`sign_out` clears SDK-managed identity-scoped storage before clearing live Pubky
-session access. If the provider clear fails, callers should retry sign-out; the
-local SDK state has already been made signed-out so stale private state is not
-served through the SDK.
+`sign_out` clears live Pubky session access before clearing SDK-managed
+identity-scoped storage. If provider clearing fails, the SDK leaves local state
+intact so callers can retry without losing contacts, links, queues, or receipts.
+If provider clearing succeeds but local storage clearing fails, Pubky-backed
+workflows remain blocked because no live session is available; retry `sign_out`
+or clear SDK storage through the adapter.
+
+If the provider returns no live session access during ordinary startup or
+workflow calls, the SDK blocks Pubky-backed work but preserves the last
+identity-scoped state. Call `sign_out` when the app intentionally wants to clear
+that state.
 
 The `storage` module is the advanced adapter boundary. Its record types include
 raw private payloads, Encrypted Link snapshots, and Receipt Decryption Keys so

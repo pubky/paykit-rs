@@ -122,7 +122,7 @@ impl fmt::Debug for PaymentRequestTerms {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PaymentRequestTerms")
             .field("amount", &"<redacted>")
-            .field("payment_reference", &self.payment_reference)
+            .field("payment_reference", &"<redacted>")
             .field("proposal_expires_at", &self.proposal_expires_at)
             .field("recurrence", &self.recurrence)
             .field(
@@ -307,7 +307,7 @@ impl fmt::Debug for PaymentProof {
             .field("kind", &self.kind)
             .field("event_id", &self.event_id)
             .field("payment_request_id", &self.payment_request_id)
-            .field("payment_reference", &self.payment_reference)
+            .field("payment_reference", &"<redacted>")
             .field("billing_period", &self.billing_period)
             .field(
                 "payment_endpoint_identifier",
@@ -659,6 +659,8 @@ mod tests {
             event: Ok(PaymentRequestEvent::Proof(proof.clone())),
         };
 
+        assert!(!format!("{request:?}").contains("invoice-2026-0001"));
+        assert!(!format!("{proof:?}").contains("invoice-2026-0001"));
         assert!(!format!("{request:?}").contains("private request note"));
         assert!(!format!("{proof:?}").contains("private proof secret"));
         let debug = format!("{message:?}");

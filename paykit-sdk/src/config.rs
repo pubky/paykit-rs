@@ -3,6 +3,7 @@ use std::time::Duration;
 
 /// Policy for SDK-managed public Payment Endpoint cleanup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EndpointManagementScope {
     /// Manage only endpoints previously published by the SDK.
     ManagedOnly,
@@ -12,6 +13,7 @@ pub enum EndpointManagementScope {
 
 /// Policy for private Paykit workflows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PrivateSharingPolicy {
     /// Private Paykit workflows are enabled when the identity is private-link-capable.
     Enabled,
@@ -21,6 +23,7 @@ pub enum PrivateSharingPolicy {
 
 /// Policy for falling back to public Payment Endpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PublicFallbackPolicy {
     /// Never fall back to public endpoints.
     Disabled,
@@ -32,6 +35,7 @@ pub enum PublicFallbackPolicy {
 
 /// Policy for public Encrypted Link recovery markers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EncryptedLinkRecoveryMarkerPolicy {
     /// Publish and observe minimal public recovery markers.
     Enabled,
@@ -41,6 +45,7 @@ pub enum EncryptedLinkRecoveryMarkerPolicy {
 
 /// Policy for publishing saved contacts to public Pubky storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PublicContactSharingPolicy {
     /// Keep saved contacts only in local SDK storage. This is the default.
     LocalOnly,
@@ -135,26 +140,4 @@ fn default_outbound_private_retry_backoff() -> Duration {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_config_validate_rejects_zero_timeouts() {
-        let config = PaykitSdkConfig {
-            peer_link_operation_lease_timeout: Duration::ZERO,
-            ..PaykitSdkConfig::default()
-        };
-
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_validate_rejects_oversized_timeouts() {
-        let config = PaykitSdkConfig {
-            outbound_private_send_lease_timeout: Duration::MAX,
-            ..PaykitSdkConfig::default()
-        };
-
-        assert!(config.validate().is_err());
-    }
-}
+mod tests;

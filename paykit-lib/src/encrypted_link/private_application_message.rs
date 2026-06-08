@@ -1,6 +1,9 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use tracing::{debug, warn};
 
-use crate::{PaykitError, Result};
+use crate::{error::NonRetryablePrivateSendError, PaykitError, Result};
+
+const INVALID_UTF8_PRIVATE_MESSAGE_PREFIX: &str = "paykit.invalid_utf8_private_message:";
 
 /// Private Message Kind values understood by Paykit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,7 +74,8 @@ impl std::fmt::Display for PrivateMessageKind {
 ///
 /// This is the low-level receive item for the Private Application Message stream.
 /// It keeps the raw plaintext payload so callers can route and persist messages
-/// themselves, including malformed JSON payloads.
+/// themselves. If decrypted bytes are not UTF-8, `raw_json` contains an
+/// invalid-JSON marker with the bytes encoded as base64url.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PrivateApplicationMessage {
     /// Private Application Message version from the JSON `version` field, when
@@ -129,6 +133,13 @@ impl PrivateApplicationMessage {
                     .and_then(PrivateMessageKind::parse)
             })
     }
+
+    /// Return a parse error when this item represents non-UTF-8 plaintext bytes.
+    pub fn invalid_utf8_error(&self) -> Option<&'static str> {
+        self.raw_json
+            .starts_with(INVALID_UTF8_PRIVATE_MESSAGE_PREFIX)
+            .then_some("Private Application Message plaintext is not valid UTF-8")
+    }
 }
 
 fn decode_private_application_message(
@@ -138,21 +149,20 @@ fn decode_private_application_message(
     // Paykit application messages are JSON, so trailing NUL bytes are not valid
     // payload content.
     let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let plaintext = std::str::from_utf8(&raw[..end]).map_err(|err| PaykitError::InvalidData {
-        context: format!("Private Application Message plaintext is not valid UTF-8: {err}"),
-        source: Some(err.into()),
-    })?;
+    let plaintext = match std::str::from_utf8(&raw[..end]) {
+        Ok(plaintext) => plaintext.to_owned(),
+        Err(_) => format!(
+            "{INVALID_UTF8_PRIVATE_MESSAGE_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(&raw[..end])
+        ),
+    };
 
-    Ok(PrivateApplicationMessage::from_plaintext(
-        plaintext.to_owned(),
-    ))
+    Ok(PrivateApplicationMessage::from_plaintext(plaintext))
 }
 
 pub(super) async fn receive_private_application_messages(
     encryptor: &mut pubky_noise::PubkyNoiseEncryptor,
 ) -> Result<Vec<PrivateApplicationMessage>> {
-    let mut received = 0usize;
-    let mut malformed = 0usize;
     let mut messages = Vec::new();
 
     loop {
@@ -168,28 +178,11 @@ pub(super) async fn receive_private_application_messages(
             break;
         }
 
-        received += batch.len();
         for raw in batch {
-            match decode_private_application_message(&raw) {
-                Ok(message) => messages.push(message),
-                Err(err) => {
-                    malformed += 1;
-                    warn!(
-                        error = ?err,
-                        "dropping malformed Private Application Message"
-                    );
-                }
-            }
+            messages.push(decode_private_application_message(&raw)?);
         }
     }
 
-    if malformed > 0 {
-        warn!(
-            received,
-            malformed,
-            "ignored malformed Private Application Messages while preserving later messages"
-        );
-    }
     Ok(messages)
 }
 
@@ -245,11 +238,10 @@ pub(super) async fn send_private_application_message(
                 }
             }
             Err(err) => {
+                let context = format!("failed to send {context}: {err:?}");
                 return Err(PaykitError::Transport {
-                    context: format!("failed to send {context}: {err:?}"),
-                    source: anyhow::anyhow!(
-                        "pubky-noise send_message failed with non-retryable error: {err:?}"
-                    ),
+                    context,
+                    source: anyhow::Error::new(NonRetryablePrivateSendError(err)),
                 });
             }
         }
@@ -293,6 +285,18 @@ mod tests {
                 "{err:?} should not be retried"
             );
         }
+    }
+
+    #[test]
+    fn test_non_retryable_private_send_error_is_classified() {
+        let err = PaykitError::Transport {
+            context: "failed to send Private Application Message".into(),
+            source: anyhow::Error::new(NonRetryablePrivateSendError(
+                pubky_noise::PubkyNoiseError::EncryptionError,
+            )),
+        };
+
+        assert!(err.is_non_retryable_private_send_error());
     }
 
     #[test]
@@ -364,5 +368,24 @@ mod tests {
         assert_eq!(message.kind, None);
         assert_eq!(message.known_kind(), None);
         assert_eq!(message.raw_json, raw);
+    }
+
+    #[test]
+    fn test_decode_private_application_message_retains_invalid_utf8_marker() {
+        let mut raw = [0u8; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN];
+        raw[0] = 0xff;
+
+        let message = decode_private_application_message(&raw).unwrap();
+
+        assert_eq!(message.version, None);
+        assert_eq!(message.kind, None);
+        assert_eq!(message.known_kind(), None);
+        assert_eq!(
+            message.invalid_utf8_error(),
+            Some("Private Application Message plaintext is not valid UTF-8")
+        );
+        assert!(message
+            .raw_json
+            .starts_with(INVALID_UTF8_PRIVATE_MESSAGE_PREFIX));
     }
 }

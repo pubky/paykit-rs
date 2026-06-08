@@ -13,14 +13,24 @@ use crate::{
     endpoints::normalize_receiving_details,
     outbound_private::{validate_outbound_private_message, OutboundPrivateMessageStatus},
     storage::{
-        NewOutboundPrivateMessage, OutboundPrivateMessageRecord, PaymentEndpointReservationRecord,
-        StorageAdapter,
+        require_peer_link_operation_lease, NewOutboundPrivateMessage, OutboundPrivateMessageRecord,
+        PaymentEndpointReservationRecord, PeerLinkOperationLease, StorageAdapter,
     },
     PaykitSdkError, PubkyPublicKey, Result,
 };
 use paykit_lib::{serialize_private_payment_list_json, PrivateMessageKind, PrivatePaymentList};
 
+const MAX_RESERVATION_ID_LEN: usize = 128;
+
+/// SDK cleanup record for a reserved endpoint tied to a queued private list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaymentEndpointReservationReleaseRecord {
+    pub(crate) outbound_message_id: u64,
+    pub(crate) release: PaymentEndpointReservationRelease,
+}
+
 /// Load Payment Endpoint Reservation records for one counterparty.
+#[cfg(test)]
 pub(crate) async fn payment_endpoint_reservations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
@@ -37,7 +47,7 @@ where
 pub(crate) async fn unattempted_superseded_reservation_releases<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-) -> Result<Vec<PaymentEndpointReservationRelease>>
+) -> Result<Vec<PaymentEndpointReservationReleaseRecord>>
 where
     S: StorageAdapter,
 {
@@ -58,25 +68,139 @@ where
                 .payment_endpoint_reservations(counterparty)
                 .into_iter()
                 .filter(|record| superseded_unattempted.contains(&record.outbound_message_id))
-                .map(|record| PaymentEndpointReservationRelease {
-                    reservation_id: record.reservation_id,
-                    counterparty: record.counterparty,
-                    identifier: record.identifier,
-                    payload_hash: record.payload_hash,
-                    attribution: record.attribution,
-                })
+                .map(release_record_from_reservation_record)
                 .collect();
             Ok(releases)
         })
         .await
 }
 
+/// Load reservation releases for invalid Private Payment Lists that can no
+/// longer use their linked reservations.
+pub(crate) async fn invalid_private_list_reservation_releases<S>(
+    storage: &S,
+    counterparty: &PubkyPublicKey,
+) -> Result<Vec<PaymentEndpointReservationReleaseRecord>>
+where
+    S: StorageAdapter,
+{
+    storage
+        .transaction(|tx| {
+            let outbound = tx.outbound_private_messages(counterparty);
+            let invalid_private_lists = outbound
+                .iter()
+                .filter(|message| {
+                    message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+                        && message.status == OutboundPrivateMessageStatus::Invalid
+                })
+                .map(|message| message.outbound_message_id)
+                .collect::<std::collections::HashSet<_>>();
+
+            let releases = tx
+                .payment_endpoint_reservations(counterparty)
+                .into_iter()
+                .filter(|record| invalid_private_lists.contains(&record.outbound_message_id))
+                .map(release_record_from_reservation_record)
+                .collect();
+            Ok(releases)
+        })
+        .await
+}
+
+/// Load reservation releases for one outbound Private Payment List if any linked
+/// reservation expired before it was sent.
+pub(crate) async fn expired_outbound_reservation_releases<S>(
+    storage: &S,
+    counterparty: &PubkyPublicKey,
+    outbound_message_id: u64,
+    now: DateTime<Utc>,
+) -> Result<Vec<PaymentEndpointReservationReleaseRecord>>
+where
+    S: StorageAdapter,
+{
+    storage
+        .transaction(|tx| {
+            let records = tx
+                .payment_endpoint_reservations(counterparty)
+                .into_iter()
+                .filter(|record| record.outbound_message_id == outbound_message_id)
+                .collect::<Vec<_>>();
+            let has_expired = records.iter().any(|record| {
+                record
+                    .expires_at
+                    .is_some_and(|expires_at| expires_at <= now)
+            });
+            let releases = if has_expired {
+                records
+                    .into_iter()
+                    .map(release_record_from_reservation_record)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            Ok(releases)
+        })
+        .await
+}
+
+fn release_record_from_reservation_record(
+    record: PaymentEndpointReservationRecord,
+) -> PaymentEndpointReservationReleaseRecord {
+    PaymentEndpointReservationReleaseRecord {
+        outbound_message_id: record.outbound_message_id,
+        release: PaymentEndpointReservationRelease {
+            reservation_id: record.reservation_id,
+            counterparty: record.counterparty,
+            identifier: record.identifier,
+            payload_hash: record.payload_hash,
+            attribution: record.attribution,
+        },
+    }
+}
+
 /// Queue a Private Payment List and persist linked reservation records atomically.
+#[cfg(test)]
 pub(crate) async fn queue_private_payment_list_with_reservations<S>(
     storage: &S,
     request: &PaymentEndpointReservationRequest,
     reservations: Vec<PaymentEndpointReservation>,
     now: DateTime<Utc>,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
+    queue_private_payment_list_with_reservations_inner(storage, request, reservations, now, None)
+        .await
+}
+
+/// Queue a Private Payment List with linked reservations while a peer operation
+/// lease is active.
+pub(crate) async fn queue_private_payment_list_with_reservations_with_link_lease<S>(
+    storage: &S,
+    request: &PaymentEndpointReservationRequest,
+    reservations: Vec<PaymentEndpointReservation>,
+    now: DateTime<Utc>,
+    lease: &PeerLinkOperationLease,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
+    queue_private_payment_list_with_reservations_inner(
+        storage,
+        request,
+        reservations,
+        now,
+        Some(lease.clone()),
+    )
+    .await
+}
+
+async fn queue_private_payment_list_with_reservations_inner<S>(
+    storage: &S,
+    request: &PaymentEndpointReservationRequest,
+    reservations: Vec<PaymentEndpointReservation>,
+    now: DateTime<Utc>,
+    lease: Option<PeerLinkOperationLease>,
 ) -> Result<OutboundPrivateMessageRecord>
 where
     S: StorageAdapter,
@@ -90,11 +214,20 @@ where
 
     storage
         .transaction(move |tx| {
+            if let Some(lease) = lease.as_ref() {
+                require_peer_link_operation_lease(tx, lease)?;
+            }
             let mut checked_drafts = Vec::with_capacity(drafts.len());
             for draft in drafts {
                 let existing =
                     tx.payment_endpoint_reservation(&draft.counterparty, &draft.reservation_id);
                 if let Some(existing) = existing.as_ref() {
+                    if existing.release_started_at.is_some() {
+                        return Err(PaykitSdkError::Policy(format!(
+                            "Payment Endpoint Reservation id '{}' is being released",
+                            draft.reservation_id
+                        )));
+                    }
                     if !draft.matches_existing(existing) {
                         return Err(PaykitSdkError::Protocol(format!(
                             "Payment Endpoint Reservation id '{}' already exists with different details",
@@ -154,6 +287,7 @@ impl PaymentEndpointReservationRecordDraft {
             outbound_message_id,
             attribution,
             expires_at,
+            release_started_at: None,
             created_at,
         }
     }
@@ -190,10 +324,20 @@ fn build_reservation_records(
     Ok((receiving_details, records))
 }
 
-fn validate_reservation_id(reservation_id: &str) -> Result<()> {
+pub(crate) fn validate_reservation_id(reservation_id: &str) -> Result<()> {
     if reservation_id.trim().is_empty() {
         return Err(PaykitSdkError::Protocol(
             "Payment Endpoint Reservation id must not be empty".into(),
+        ));
+    }
+    if reservation_id.len() > MAX_RESERVATION_ID_LEN {
+        return Err(PaykitSdkError::Protocol(format!(
+            "Payment Endpoint Reservation id must be at most {MAX_RESERVATION_ID_LEN} bytes"
+        )));
+    }
+    if reservation_id.chars().any(char::is_control) {
+        return Err(PaykitSdkError::Protocol(
+            "Payment Endpoint Reservation id must not contain control characters".into(),
         ));
     }
     Ok(())
@@ -234,234 +378,11 @@ impl fmt::Debug for PaymentEndpointReservationRecord {
                 &format_args!("<redacted:{} fields>", self.attribution.len()),
             )
             .field("expires_at", &self.expires_at)
+            .field("release_started_at", &self.release_started_at)
             .field("created_at", &self.created_at)
             .finish()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::TimeZone;
-
-    use super::*;
-    use crate::storage::InMemoryStorage;
-    use paykit_lib::PaymentEndpointIdentifier;
-
-    fn timestamp() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
-    }
-
-    fn counterparty() -> PubkyPublicKey {
-        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
-    }
-
-    fn request(counterparty: PubkyPublicKey) -> PaymentEndpointReservationRequest {
-        PaymentEndpointReservationRequest { counterparty }
-    }
-
-    fn reservation(id: &str, payload: &str) -> PaymentEndpointReservation {
-        PaymentEndpointReservation {
-            reservation_id: id.into(),
-            receiving_detail: ReceivingDetail {
-                identifier: "btc-lightning-bolt11".into(),
-                payload: payload.into(),
-            },
-            expires_at: None,
-            attribution: HashMap::from([("contact".into(), "alice".into())]),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_queue_private_payment_list_with_reservations_stores_linked_records() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        let outbound = queue_private_payment_list_with_reservations(
-            &storage,
-            &request(counterparty.clone()),
-            vec![reservation("res-1", "ln-secret")],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        let list = paykit_lib::parse_private_payment_list_json(&outbound.raw_json).unwrap();
-        let records = payment_endpoint_reservations(&storage, &counterparty)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            list.get(&PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap())
-                .unwrap()
-                .as_str(),
-            "ln-secret"
-        );
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].outbound_message_id, outbound.outbound_message_id);
-        assert_ne!(records[0].payload_hash, "ln-secret");
-        assert!(!format!("{:?}", records[0]).contains("ln-secret"));
-        assert!(!format!("{:?}", records[0]).contains("alice"));
-    }
-
-    #[tokio::test]
-    async fn test_queue_private_payment_list_with_reservations_rejects_duplicate_identifiers() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        let result = queue_private_payment_list_with_reservations(
-            &storage,
-            &request(counterparty),
-            vec![reservation("res-1", "one"), reservation("res-2", "two")],
-            timestamp(),
-        )
-        .await;
-
-        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
-        assert!(storage
-            .snapshot()
-            .unwrap()
-            .payment_endpoint_reservations
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_queue_private_payment_list_with_reservations_reuses_existing_id() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        queue_private_payment_list_with_reservations(
-            &storage,
-            &request(counterparty.clone()),
-            vec![reservation("res-1", "one")],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        let outbound = queue_private_payment_list_with_reservations(
-            &storage,
-            &request(counterparty.clone()),
-            vec![PaymentEndpointReservation {
-                reservation_id: "res-1".into(),
-                receiving_detail: ReceivingDetail {
-                    identifier: "btc-lightning-bolt11".into(),
-                    payload: "one".into(),
-                },
-                expires_at: Some(timestamp()),
-                attribution: HashMap::from([("contact".into(), "bob".into())]),
-            }],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-        let snapshot = storage.snapshot().unwrap();
-
-        assert_eq!(snapshot.payment_endpoint_reservations.len(), 1);
-        assert_eq!(
-            snapshot
-                .payment_endpoint_reservations
-                .get(&(counterparty.clone(), "res-1".into()))
-                .unwrap()
-                .outbound_message_id,
-            outbound.outbound_message_id
-        );
-        let record = snapshot
-            .payment_endpoint_reservations
-            .get(&(counterparty.clone(), "res-1".into()))
-            .unwrap();
-        assert_eq!(record.attribution.get("contact").unwrap(), "alice");
-        assert!(record.expires_at.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_unattempted_superseded_reservation_releases() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        queue_private_payment_list_with_reservations(
-            &storage,
-            &request(counterparty.clone()),
-            vec![reservation("res-1", "one")],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-        queue_private_payment_list_with_reservations(
-            &storage,
-            &request(counterparty.clone()),
-            vec![reservation("res-2", "two")],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-        crate::outbound_private::claim_next_outbound_private_message(
-            &storage,
-            &counterparty,
-            timestamp(),
-            timestamp() - chrono::Duration::seconds(1),
-            timestamp() - chrono::Duration::seconds(1),
-        )
-        .await
-        .unwrap();
-
-        let releases = unattempted_superseded_reservation_releases(&storage, &counterparty)
-            .await
-            .unwrap();
-
-        assert_eq!(releases.len(), 1);
-        assert_eq!(releases[0].reservation_id, "res-1");
-    }
-
-    #[tokio::test]
-    async fn test_queue_private_payment_list_with_reservations_rejects_conflicting_existing_id() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        queue_private_payment_list_with_reservations(
-            &storage,
-            &request(counterparty.clone()),
-            vec![reservation("res-1", "one")],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        let result = queue_private_payment_list_with_reservations(
-            &storage,
-            &request(counterparty),
-            vec![reservation("res-1", "two")],
-            timestamp(),
-        )
-        .await;
-
-        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
-    }
-
-    #[tokio::test]
-    async fn test_queue_private_payment_list_with_reservations_scopes_ids_by_counterparty() {
-        let storage = InMemoryStorage::new();
-        let first = counterparty();
-        let second = counterparty();
-
-        queue_private_payment_list_with_reservations(
-            &storage,
-            &request(first),
-            vec![reservation("res-1", "one")],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-        queue_private_payment_list_with_reservations(
-            &storage,
-            &request(second),
-            vec![reservation("res-1", "two")],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            storage
-                .snapshot()
-                .unwrap()
-                .payment_endpoint_reservations
-                .len(),
-            2
-        );
-    }
-}
+mod tests;

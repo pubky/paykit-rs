@@ -53,6 +53,25 @@ pub enum PaykitError {
     Validation(String),
 }
 
+#[derive(Debug, Error)]
+#[error("pubky-noise send_message failed with non-retryable error: {0:?}")]
+pub(crate) struct NonRetryablePrivateSendError(pub(crate) pubky_noise::PubkyNoiseError);
+
+impl PaykitError {
+    /// Returns true when this error came from a deterministic Encrypted Link
+    /// private-message send failure that should trigger link recovery instead
+    /// of ordinary transport retry.
+    pub fn is_non_retryable_private_send_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Transport { source, .. }
+                if source
+                    .downcast_ref::<NonRetryablePrivateSendError>()
+                    .is_some()
+        )
+    }
+}
+
 pub(crate) fn map_error(label: &'static str, err: PaykitError) -> PaykitError {
     match err {
         PaykitError::Transport { context, source } => PaykitError::Transport {

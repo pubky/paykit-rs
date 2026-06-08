@@ -14,6 +14,7 @@ use crate::{
 
 /// Publication status for a SDK-managed Payment Endpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EndpointPublicationStatus {
     /// The endpoint should be published.
     Desired,
@@ -147,32 +148,4 @@ pub(crate) fn failed_record(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_receiving_details_rejects_invalid_identifier() {
-        let result = normalize_receiving_details(vec![ReceivingDetail {
-            identifier: "../bad".into(),
-            payload: "payload".into(),
-        }]);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_normalize_receiving_details_rejects_duplicates() {
-        let result = normalize_receiving_details(vec![
-            ReceivingDetail {
-                identifier: "btc-lightning-bolt11".into(),
-                payload: "one".into(),
-            },
-            ReceivingDetail {
-                identifier: "btc-lightning-bolt11".into(),
-                payload: "two".into(),
-            },
-        ]);
-
-        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
-    }
-}
+mod tests;

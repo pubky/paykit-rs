@@ -13,6 +13,10 @@ use crate::{identity::PubkyPublicKey, PubkySessionAccess, Result};
 #[async_trait]
 pub trait PubkySessionProvider: Send + Sync {
     /// Load live Pubky access for storage and Encrypted Link workflows.
+    ///
+    /// Returning `None` means no live session access is currently available. It
+    /// does not sign the SDK out or clear identity-scoped storage; call
+    /// [`PaykitSdk::sign_out`](crate::PaykitSdk::sign_out) for explicit sign-out.
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>>;
 
     /// Load public Pubky storage for unauthenticated counterparty reads.
@@ -43,6 +47,10 @@ pub trait PaymentAdapter: Send + Sync {
     /// linked records. Adapters that return reservations should make them
     /// idempotent, expiring, or otherwise safe to abandon if the process stops
     /// before the SDK queues a Private Payment List.
+    ///
+    /// The SDK releases reservations that become invalid before they are sent.
+    /// Once a reservation-backed detail has been shared, payment-specific
+    /// settlement, expiry, and cleanup remain adapter responsibilities.
     async fn reserve_receiving_details(
         &self,
         _request: &PaymentEndpointReservationRequest,
@@ -50,13 +58,14 @@ pub trait PaymentAdapter: Send + Sync {
         Ok(None)
     }
 
-    /// Release a previously reserved receiving detail, when supported.
+    /// Release a previously reserved receiving detail.
+    ///
+    /// Adapters that return reservations must implement this explicitly so
+    /// cleanup cannot silently succeed while backend reservations remain held.
     async fn release_receiving_detail_reservation(
         &self,
-        _release: &PaymentEndpointReservationRelease,
-    ) -> Result<()> {
-        Ok(())
-    }
+        release: &PaymentEndpointReservationRelease,
+    ) -> Result<()>;
 
     /// Rank and evaluate candidate endpoints for a payment.
     async fn select_payment_endpoint(
@@ -73,6 +82,7 @@ pub trait PaymentAdapter: Send + Sync {
 
 /// Scope used when asking for receiving details.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ReceivingDetailScope {
     /// Details intended for public Payment Endpoints.
     Public,
@@ -111,7 +121,7 @@ impl fmt::Debug for ReceivingDetail {
 /// Receiving detail reserved by the payment adapter.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentEndpointReservation {
-    /// Adapter-stable reservation id.
+    /// Adapter-stable reservation id; non-empty, at most 128 bytes, no control characters.
     pub reservation_id: String,
     /// Reserved receiving detail.
     pub receiving_detail: ReceivingDetail,
@@ -191,6 +201,7 @@ impl fmt::Debug for PaymentEndpointCandidate {
 
 /// Source of a discovered Payment Endpoint candidate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PaymentEndpointSource {
     /// Endpoint came from a counterparty-specific Private Payment List.
     PrivatePaymentList,
@@ -259,6 +270,7 @@ impl fmt::Debug for PaymentEndpointSelection {
 
 /// Compatibility result for one endpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EndpointCompatibility {
     /// The endpoint can be paid by the adapter.
     Payable,
@@ -299,38 +311,4 @@ fn redacted_payload(payload: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn counterparty() -> PubkyPublicKey {
-        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
-    }
-
-    #[test]
-    fn test_endpoint_debug_redacts_payloads() {
-        let candidate = PaymentEndpointCandidate {
-            counterparty: counterparty(),
-            source: PaymentEndpointSource::PrivatePaymentList,
-            identifier: "btc-lightning-bolt11".into(),
-            payload: "ln-private-secret".into(),
-        };
-        let selection = PaymentEndpointSelection {
-            selected: Some(candidate.clone()),
-            evaluations: vec![PaymentEndpointEvaluation {
-                candidate,
-                compatibility: EndpointCompatibility::Payable,
-                priority: Some(0),
-            }],
-        };
-        let target = PaymentTarget {
-            payload: "method-specific-target".into(),
-        };
-
-        let debug = format!("{selection:?} {target:?}");
-
-        assert!(!debug.contains("ln-private-secret"));
-        assert!(!debug.contains("method-specific-target"));
-        assert!(debug.contains("<redacted:17 bytes>"));
-        assert!(debug.contains("<redacted:22 bytes>"));
-    }
-}
+mod tests;

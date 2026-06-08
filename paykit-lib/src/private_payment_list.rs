@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt};
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use crate::{
@@ -76,6 +76,7 @@ impl PrivatePaymentList {
 struct PrivatePaymentListWire {
     version: u8,
     kind: String,
+    #[serde(deserialize_with = "deserialize_payment_endpoints")]
     payment_endpoints: HashMap<String, String>,
 }
 
@@ -84,6 +85,42 @@ struct PrivatePaymentListWireRef<'a> {
     version: u8,
     kind: &'static str,
     payment_endpoints: HashMap<&'a str, &'a str>,
+}
+
+fn deserialize_payment_endpoints<'de, D>(
+    deserializer: D,
+) -> std::result::Result<HashMap<String, String>, D::Error>
+where
+    D: de::Deserializer<'de>,
+{
+    struct PaymentEndpointsVisitor;
+
+    impl<'de> de::Visitor<'de> for PaymentEndpointsVisitor {
+        type Value = HashMap<String, String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a Payment Endpoint map without duplicate identifiers")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: de::MapAccess<'de>,
+        {
+            let mut payment_endpoints = HashMap::new();
+
+            while let Some((key, value)) = map.next_entry::<String, String>()? {
+                if payment_endpoints.insert(key.clone(), value).is_some() {
+                    return Err(de::Error::custom(format!(
+                        "duplicate Payment Endpoint identifier '{key}'"
+                    )));
+                }
+            }
+
+            Ok(payment_endpoints)
+        }
+    }
+
+    deserializer.deserialize_map(PaymentEndpointsVisitor)
 }
 
 /// Parse a versioned Private Payment List JSON message.
@@ -301,6 +338,18 @@ mod tests {
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
             "expected InvalidData for non-string values, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_private_payment_list_json_rejects_duplicate_identifiers() {
+        let err = parse_private_payment_list_json(
+            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"lightning":"ln-one","lightning":"ln-two"}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("duplicate Payment Endpoint identifier")),
+            "expected InvalidData for duplicate identifiers, got: {err}"
         );
     }
 
