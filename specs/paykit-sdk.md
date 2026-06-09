@@ -934,6 +934,8 @@ impl PaykitSdk {
 ## Platform Binding Shape
 
 The SDK should have first-class bindings for mobile and app integrations.
+See [paykit-sdk-bindings.md](paykit-sdk-bindings.md) for the binding-specific
+API plan.
 
 Recommended approach:
 

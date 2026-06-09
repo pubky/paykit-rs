@@ -31,10 +31,10 @@
 - **Related terms**: Paykit, Paykit Library, Language Bindings
 
 ### Language Bindings
-- **Definition**: Distribution/integration surfaces under Paykit Library for languages or platforms such as Swift, Kotlin, and React Native.
+- **Definition**: Distribution/integration surfaces for Paykit Library or Paykit SDK in languages or platforms such as Swift, Kotlin, and React Native.
 - **NOT**: First-class Paykit architecture components.
 - **Synonyms to AVOID**: Paykit SDK
-- **Related terms**: Paykit Library
+- **Related terms**: Paykit Library, Paykit SDK
 
 ## SDK Terms
 
