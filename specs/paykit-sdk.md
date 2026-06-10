@@ -528,6 +528,15 @@ SDK lifecycle states should be explicit and local:
 The SDK may expose product-friendly summaries, but it should not claim generic
 settlement finality unless the payment adapter confirms it.
 
+`PaymentRequestFilter` supports product screens without requiring callers to
+know every counterparty in advance:
+
+- optional counterparty
+- optional local role
+- optional lifecycle states, where an empty list means all states
+- optional recurring/one-time filter
+- inbound-only mode for received Payment Requests
+
 ### ReceiptAccessRecord And ReceiptRecord
 
 Receipt Access records:
@@ -951,6 +960,17 @@ impl PaykitSdk {
         &self,
         filter: PaymentRequestFilter,
     ) -> Result<Vec<PaymentRequestRecord>>;
+    async fn payment_requests(&self) -> Result<Vec<PaymentRequestRecord>>;
+    async fn payment_requests_with(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<PaymentRequestRecord>>;
+    async fn received_payment_requests_from(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<PaymentRequestRecord>>;
+    async fn active_recurring_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>>;
+    async fn actionable_received_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>>;
 
     async fn list_receipt_access(
         &self,

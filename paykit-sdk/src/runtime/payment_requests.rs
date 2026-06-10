@@ -7,19 +7,19 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
-    /// Return inbound-only Payment Request records for one counterparty.
+    /// Return inbound Payment Requests received from one counterparty.
     ///
     /// This view is useful for inspecting proposals received from a
     /// counterparty. For normal app state, including responses to locally
-    /// proposed requests, use [`Self::payment_request_records`], which merges
+    /// proposed requests, use [`Self::payment_requests_with`], which merges
     /// inbound events with local outbound context. Malformed recognized Payment
     /// Request events without a valid `payment_request_id` stay in the raw
     /// private stream log and cannot be attached to a request-scoped record.
-    pub async fn received_payment_request_records(
+    pub async fn received_payment_requests_from(
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        self.ensure_private_workflows_enabled("Payment Request record access")?;
+        self.ensure_private_workflows_enabled("Payment Request access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
@@ -33,15 +33,15 @@ where
         Ok(records)
     }
 
-    /// Return merged local Payment Request records for one counterparty.
+    /// Return Payment Requests involving one counterparty.
     ///
-    /// Records combine received private-stream events and local outbound
-    /// Payment Request events, returned newest-first.
-    pub async fn payment_request_records(
+    /// Results combine received private-stream events and local outbound
+    /// Payment Request events. They are returned newest-first.
+    pub async fn payment_requests_with(
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        self.ensure_private_workflows_enabled("Payment Request record access")?;
+        self.ensure_private_workflows_enabled("Payment Request access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
@@ -52,6 +52,114 @@ where
         self.mark_recovery_required_payment_request_records(counterparty, &mut records)
             .await?;
         Ok(records)
+    }
+
+    /// Return Payment Requests matching a local SDK filter.
+    ///
+    /// A filter without a counterparty lists across all non-blocked
+    /// counterparties that have inbound or outbound Payment Request activity.
+    /// Results are returned newest-first.
+    pub async fn list_payment_requests(
+        &self,
+        filter: PaymentRequestFilter,
+    ) -> Result<Vec<PaymentRequestRecord>> {
+        self.ensure_private_workflows_enabled("Payment Request access")?;
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.public_key.is_none() {
+            return Ok(Vec::new());
+        }
+        let now = self.clock.now();
+
+        let counterparties = if let Some(counterparty) = &filter.counterparty {
+            self.ensure_peer_not_blocked(counterparty).await?;
+            vec![counterparty.clone()]
+        } else {
+            self.payment_request_counterparties(filter.received_only)
+                .await?
+        };
+
+        let mut records = Vec::new();
+        for counterparty in counterparties {
+            let mut peer_records = if filter.received_only {
+                derive_received_payment_request_records(&self.storage, &counterparty, now).await?
+            } else {
+                derive_payment_request_records(&self.storage, &counterparty, now).await?
+            };
+            self.mark_recovery_required_payment_request_records(&counterparty, &mut peer_records)
+                .await?;
+            records.extend(
+                peer_records
+                    .into_iter()
+                    .filter(|record| filter.matches(record)),
+            );
+        }
+        sort_payment_requests_newest_first(&mut records);
+        Ok(records)
+    }
+
+    /// Return all Payment Requests across non-blocked counterparties.
+    pub async fn payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
+        self.list_payment_requests(PaymentRequestFilter::default())
+            .await
+    }
+
+    /// Return accepted recurring Payment Requests across non-blocked counterparties.
+    pub async fn active_recurring_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
+        self.list_payment_requests(PaymentRequestFilter {
+            states: vec![PaymentRequestLifecycleState::ActiveRecurring],
+            recurring: Some(true),
+            ..PaymentRequestFilter::default()
+        })
+        .await
+    }
+
+    /// Return received Payment Requests that need a local payer response.
+    pub async fn actionable_received_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
+        self.list_payment_requests(PaymentRequestFilter {
+            local_role: Some(PaymentRequestLocalRole::Payer),
+            states: vec![
+                PaymentRequestLifecycleState::Proposed,
+                PaymentRequestLifecycleState::ProposalExpired,
+            ],
+            received_only: true,
+            ..PaymentRequestFilter::default()
+        })
+        .await
+    }
+
+    async fn payment_request_counterparties(
+        &self,
+        received_only: bool,
+    ) -> Result<Vec<PubkyPublicKey>> {
+        self.storage
+            .transaction(move |tx| {
+                let snapshot = tx.export_storage_state();
+                let mut counterparties = HashSet::new();
+                for item in snapshot.private_stream_items {
+                    if is_payment_request_kind(item.parsed_kind.as_deref()) {
+                        counterparties.insert(item.counterparty);
+                    }
+                }
+                if !received_only {
+                    for outbound in snapshot.outbound_private_messages {
+                        if is_payment_request_kind(Some(&outbound.kind)) {
+                            counterparties.insert(outbound.counterparty);
+                        }
+                    }
+                }
+                let mut counterparties = counterparties
+                    .into_iter()
+                    .filter(|counterparty| {
+                        !snapshot
+                            .linked_peers
+                            .get(counterparty)
+                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                    })
+                    .collect::<Vec<_>>();
+                counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+                Ok(counterparties)
+            })
+            .await
     }
 
     pub(super) async fn ensure_private_outbound_ready(
@@ -434,4 +542,33 @@ fn require_state(
             record.payment_request_id, record.state
         )))
     }
+}
+
+fn is_payment_request_kind(kind: Option<&str>) -> bool {
+    matches!(
+        kind.and_then(PrivateMessageKind::parse),
+        Some(
+            PrivateMessageKind::PaymentRequest
+                | PrivateMessageKind::PaymentRequestAcceptance
+                | PrivateMessageKind::PaymentRequestRejection
+                | PrivateMessageKind::PaymentRequestCancellation
+                | PrivateMessageKind::PaymentProof
+        )
+    )
+}
+
+fn sort_payment_requests_newest_first(records: &mut [PaymentRequestRecord]) {
+    records.sort_by(|left, right| {
+        right
+            .last_event_at
+            .cmp(&left.last_event_at)
+            .then_with(|| right.last_stream_item_id.cmp(&left.last_stream_item_id))
+            .then_with(|| {
+                right
+                    .last_outbound_message_id
+                    .cmp(&left.last_outbound_message_id)
+            })
+            .then_with(|| left.counterparty.as_str().cmp(right.counterparty.as_str()))
+            .then_with(|| left.payment_request_id.cmp(&right.payment_request_id))
+    });
 }

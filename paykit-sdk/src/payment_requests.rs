@@ -73,6 +73,51 @@ pub enum PaymentRequestLifecycleState {
     InvalidConflict,
 }
 
+/// Filter for listing SDK-derived Payment Requests.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentRequestFilter {
+    /// Restrict results to one counterparty. `None` lists across all known
+    /// counterparties with Payment Request activity.
+    pub counterparty: Option<PubkyPublicKey>,
+    /// Restrict results to one local role.
+    pub local_role: Option<PaymentRequestLocalRole>,
+    /// Restrict results to lifecycle states. An empty list means all states.
+    pub states: Vec<PaymentRequestLifecycleState>,
+    /// Restrict results by whether the request has recurrence terms.
+    pub recurring: Option<bool>,
+    /// Include only inbound Payment Requests received from counterparties.
+    pub received_only: bool,
+}
+
+impl PaymentRequestFilter {
+    pub(crate) fn matches(&self, record: &PaymentRequestRecord) -> bool {
+        if let Some(counterparty) = &self.counterparty {
+            if &record.counterparty != counterparty {
+                return false;
+            }
+        }
+        if let Some(local_role) = self.local_role {
+            if record.local_role != Some(local_role) {
+                return false;
+            }
+        }
+        if !self.states.is_empty() && !self.states.contains(&record.state) {
+            return false;
+        }
+        if let Some(recurring) = self.recurring {
+            let record_recurring = record
+                .terms
+                .as_ref()
+                .and_then(|terms| terms.recurrence.as_ref())
+                .is_some();
+            if record_recurring != recurring {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Durable Payment Amount fields copied from Payment Request terms.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentRequestAmountRecord {

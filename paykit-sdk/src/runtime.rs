@@ -64,8 +64,8 @@ use crate::{
         enqueue_payment_request_rejection as enqueue_payment_request_rejection_message,
         payment_request_records as derive_payment_request_records,
         received_payment_request_records as derive_received_payment_request_records,
-        request_from_record, PaymentRequestLifecycleState, PaymentRequestLocalRole,
-        PaymentRequestRecord,
+        request_from_record, PaymentRequestFilter, PaymentRequestLifecycleState,
+        PaymentRequestLocalRole, PaymentRequestRecord,
     },
     private_lists::{
         current_private_payment_list as load_current_private_payment_list,

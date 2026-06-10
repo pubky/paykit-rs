@@ -73,8 +73,8 @@ pub use outbound_private::{
 #[doc(inline)]
 pub use payment_requests::{
     PaymentProofRecord, PaymentRequestAmountRecord, PaymentRequestBillingPeriodRecord,
-    PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
-    PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord,
+    PaymentRequestFilter, PaymentRequestLifecycleState, PaymentRequestLocalRole,
+    PaymentRequestRecord, PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord,
 };
 #[doc(inline)]
 pub use private_lists::PrivatePaymentListView;
