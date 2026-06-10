@@ -244,48 +244,6 @@ where
             })?;
             let stale_before = now - lease_timeout;
             let failed_retry_after = now - retry_backoff;
-            if let Some(stale_sending) = self
-                .stale_sending_outbound_private_queue_head(
-                    &counterparty,
-                    stale_before,
-                    lease.clone(),
-                )
-                .await?
-            {
-                let error = format!(
-                    "outbound private message {} was left sending after its send lease expired; Encrypted Link recovery is required before retry",
-                    stale_sending.outbound_message_id
-                );
-                let failed = mark_outbound_recovery_required(stale_sending, error.clone(), now);
-                let (failed, mark) = self
-                    .storage
-                    .transaction({
-                        let failed = failed.clone();
-                        let lease = lease.clone();
-                        let counterparty = counterparty.clone();
-                        move |tx| {
-                            crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                            let mark =
-                                mark_recovery_required_in_transaction(tx, &counterparty, now)?;
-                            tx.save_outbound_private_message(failed.clone())?;
-                            Ok((failed, mark))
-                        }
-                    })
-                    .await?;
-                report.failed.push(OutboundPrivateSendFailure {
-                    outbound_message_id: failed.outbound_message_id,
-                    error,
-                });
-                self.record_outbound_recovery_marker_result(
-                    &mut report,
-                    &counterparty,
-                    &session_access,
-                    mark.new_episode,
-                    Some(failed.outbound_message_id),
-                )
-                .await;
-                break;
-            }
             let sending = claim_next_outbound_private_message_with_peer_lease(
                 &self.storage,
                 &counterparty,
@@ -492,40 +450,5 @@ where
                     error: err.to_string(),
                 });
         }
-    }
-
-    async fn stale_sending_outbound_private_queue_head(
-        &self,
-        counterparty: &PubkyPublicKey,
-        stale_before: DateTime<Utc>,
-        lease: PeerLinkOperationLease,
-    ) -> Result<Option<OutboundPrivateMessageRecord>> {
-        self.storage
-            .transaction(move |tx| {
-                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                let mut messages = tx.outbound_private_messages(counterparty);
-                messages.sort_by_key(|message| message.outbound_message_id);
-                for message in messages {
-                    if matches!(
-                        message.status,
-                        OutboundPrivateMessageStatus::Sent
-                            | OutboundPrivateMessageStatus::Invalid
-                            | OutboundPrivateMessageStatus::RecoveryRequired
-                            | OutboundPrivateMessageStatus::Superseded
-                    ) {
-                        continue;
-                    }
-                    if message.status == OutboundPrivateMessageStatus::Sending
-                        && message
-                            .last_attempt_at
-                            .is_none_or(|last_attempt_at| last_attempt_at <= stale_before)
-                    {
-                        return Ok(Some(message));
-                    }
-                    return Ok(None);
-                }
-                Ok(None)
-            })
-            .await
     }
 }

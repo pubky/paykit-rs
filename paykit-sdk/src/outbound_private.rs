@@ -26,7 +26,7 @@ pub enum OutboundPrivateMessageStatus {
     Failed,
     /// The stored payload is invalid and must not be retried automatically.
     Invalid,
-    /// A previous send may have advanced the remote link without a durable local checkpoint.
+    /// Automatic retry is paused because local Encrypted Link state is not trustworthy.
     RecoveryRequired,
     /// Newer latest-state data made this message unnecessary to send.
     Superseded,

@@ -87,7 +87,7 @@ fn test_validate_queued_outbound_private_message_rejects_malformed_known_body() 
 }
 
 #[tokio::test]
-async fn test_claim_next_outbound_private_message_does_not_reclaim_sending() {
+async fn test_claim_next_outbound_private_message_reclaims_stale_sending() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
     enqueue_private_message(
@@ -131,8 +131,11 @@ async fn test_claim_next_outbound_private_message_does_not_reclaim_sending() {
         timestamp(),
     )
     .await
+    .unwrap()
     .unwrap();
-    assert!(stale_claim.is_none());
+    assert_eq!(stale_claim.outbound_message_id, claimed.outbound_message_id);
+    assert_eq!(stale_claim.status, OutboundPrivateMessageStatus::Sending);
+    assert_eq!(stale_claim.attempt_count, 2);
 }
 
 #[tokio::test]

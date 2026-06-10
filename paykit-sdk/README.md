@@ -68,13 +68,14 @@ Common workflows:
 - export and persist an SDK backup before `sign_out` if the app wants that
   sign-out to be reversible for the same user
 
-Outbound private sends are retried from durable records only while the local
-Encrypted Link checkpoint is trustworthy. If a worker may have sent a message
-but failed before storing `Sent` status and the advanced snapshot, the SDK marks
-the stale `Sending` record recovery-required instead of retrying from the old
-checkpoint. Outbound status is local checkpoint state, not counterparty
-acknowledgement. Superseded reservation cleanup failures are reported
-separately and do not block delivery of current outbound messages.
+Outbound private sends are retried from durable records while the local
+Encrypted Link checkpoint is trustworthy. If a worker may have sent the queue
+head but failed before storing `Sent` status and the advanced snapshot, the SDK
+retries the same stale `Sending` message before later messages can advance the
+link. Outbound status is local checkpoint state, not counterparty
+acknowledgement. Non-retryable link-state failures still pause the peer for
+recovery. Superseded reservation cleanup failures are reported separately and do
+not block delivery of current outbound messages.
 
 Storage implementations must commit raw private stream items, derived indexes,
 and the advanced Encrypted Link snapshot atomically. If storage cannot provide

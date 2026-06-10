@@ -402,7 +402,7 @@ Tracks local Pubky identity state:
 One record per counterparty:
 
 - counterparty public key
-- relationship state: unknown, known, linking, linked, recovery required, blocked
+- relationship state: not linked, linking, linked, recovery required, blocked
 - in-progress handshake role: initiator or responder
 - last sync time
 - last private receive time
@@ -575,20 +575,21 @@ for all Private Application Message kinds. Event Messages are processed as FIFO
 per counterparty/Encrypted Link. Private Payment Lists use latest-state
 semantics, so older unsent lists may be superseded by a newer complete list.
 Send workers must claim the next sendable message through storage before
-sending it. An in-progress `Sending` claim must not be retried automatically
-after the lease timeout, because the remote write may already have advanced the
-Encrypted Link while the local checkpoint was lost. The SDK should mark that
-outbound record and peer as recovery-required before any further automatic
-private sends.
+sending it. A stale `Sending` queue head can be reclaimed after the lease
+timeout, but the SDK must retry that same message before later private messages
+advance the Encrypted Link. Stale `Sending` messages must not be superseded by
+newer latest-state messages until the stale send is checkpointed or fails.
 
 Event Message retries must reuse the same Event ID and exact payload.
 
 Sending through Pubky is not atomic with local storage. If a worker sends a
 message and crashes before storing the `Sent` status and advanced Encrypted Link
-snapshot, the SDK must not retry from the previous checkpoint. It should mark
-the stale `Sending` record as recovery-required, clear the local Encrypted Link
-state, and require relink/recovery before automatic private sends continue. SDK
-records expose local outbound status so apps can distinguish queued intent from
+snapshot, the SDK retries the same stale `Sending` message from the previous
+checkpoint. Replaying the same queue head keeps the local checkpoint aligned
+with the message that may already have reached the counterparty; different
+messages must not skip ahead. Non-retryable link-state failures still mark the
+peer recovery-required before automatic private sends continue. SDK records
+expose local outbound status so apps can distinguish queued intent from
 checkpointed send state. The status is not an acknowledgement from the
 counterparty.
 Superseded reservation cleanup failures are reported as local cleanup failures;
@@ -700,8 +701,9 @@ configured to manage the whole Paykit public namespace.
 5. When the handshake is pending, replace the stored handshake snapshot.
 6. When the handshake completes, persist the active link snapshot, clear the
    handshake snapshot/role, and mark the peer `linked`.
-7. If restore or handshake advancement fails, mark the peer recovery-required
-   and stop private automation for that peer.
+7. If the stored handshake or link snapshot cannot be restored, mark the peer
+   recovery-required and stop private automation for that peer. If a restored
+   handshake fails to advance, keep the peer `linking` and retry later.
 
 ### Encrypted Link Recovery Markers
 

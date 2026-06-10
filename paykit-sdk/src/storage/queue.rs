@@ -9,7 +9,7 @@ use crate::{
 
 pub(super) fn is_claimable_outbound_private_message(
     message: &OutboundPrivateMessageRecord,
-    _stale_before: DateTime<Utc>,
+    stale_before: DateTime<Utc>,
     failed_retry_after: DateTime<Utc>,
 ) -> bool {
     match message.status {
@@ -17,7 +17,9 @@ pub(super) fn is_claimable_outbound_private_message(
         OutboundPrivateMessageStatus::Failed => message
             .last_attempt_at
             .is_none_or(|last_attempt_at| last_attempt_at <= failed_retry_after),
-        OutboundPrivateMessageStatus::Sending => false,
+        OutboundPrivateMessageStatus::Sending => {
+            is_stale_sending_outbound_private_message(message, stale_before)
+        }
         OutboundPrivateMessageStatus::Sent
         | OutboundPrivateMessageStatus::Invalid
         | OutboundPrivateMessageStatus::RecoveryRequired
@@ -69,6 +71,7 @@ pub(crate) fn outbound_private_queue_head_is_claimable(
         let is_supersedable_private_list = latest_private_list_id.is_some_and(|latest| {
             message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
                 && message.outbound_message_id < latest
+                && message.status != OutboundPrivateMessageStatus::Sending
                 && is_claimable_outbound_private_message(message, stale_before, failed_retry_after)
         });
         if is_supersedable_private_list {
@@ -111,6 +114,7 @@ pub(super) fn supersede_outdated_private_payment_lists(
         if &message.counterparty == counterparty
             && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
             && message.outbound_message_id < latest_private_list_id
+            && message.status != OutboundPrivateMessageStatus::Sending
             && is_claimable_outbound_private_message(message, stale_before, failed_retry_after)
         {
             message.status = OutboundPrivateMessageStatus::Superseded;

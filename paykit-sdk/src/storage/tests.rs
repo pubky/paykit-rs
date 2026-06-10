@@ -410,11 +410,11 @@ async fn test_private_payment_list_queue_sends_only_latest_state() {
 }
 
 #[tokio::test]
-async fn test_private_payment_list_queue_does_not_supersede_stale_sending() {
+async fn test_private_payment_list_queue_reclaims_stale_sending_before_newer_list() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
 
-    let (first, _second) = storage
+    let (first, second) = storage
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
@@ -442,7 +442,10 @@ async fn test_private_payment_list_queue_does_not_supersede_stale_sending() {
     .await
     .unwrap();
 
-    assert!(claimed.is_none());
+    let claimed = claimed.unwrap();
+    assert_eq!(claimed.outbound_message_id, first.outbound_message_id);
+    assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
+    assert_eq!(claimed.attempt_count, 1);
     let snapshot = storage.snapshot().unwrap();
     let first = snapshot
         .outbound_private_messages
@@ -450,6 +453,12 @@ async fn test_private_payment_list_queue_does_not_supersede_stale_sending() {
         .find(|message| message.outbound_message_id == first.outbound_message_id)
         .unwrap();
     assert_eq!(first.status, OutboundPrivateMessageStatus::Sending);
+    let second = snapshot
+        .outbound_private_messages
+        .iter()
+        .find(|message| message.outbound_message_id == second.outbound_message_id)
+        .unwrap();
+    assert_eq!(second.status, OutboundPrivateMessageStatus::Pending);
 }
 
 #[tokio::test]

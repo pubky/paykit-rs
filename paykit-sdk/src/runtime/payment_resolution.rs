@@ -306,15 +306,6 @@ fn private_candidates(
     candidates
 }
 
-pub(super) fn should_mark_link_recovery_required(err: &PaykitSdkError) -> bool {
-    matches!(
-        err,
-        PaykitSdkError::Transport { .. }
-            | PaykitSdkError::NotFound(_)
-            | PaykitSdkError::Protocol(_)
-            | PaykitSdkError::RecoveryRequired(_)
-    )
-}
 pub(super) enum PrivateRecoveryOutcome {
     NotNeeded,
     Pending,

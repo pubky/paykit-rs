@@ -233,9 +233,9 @@ pub trait StorageTransaction {
     /// Event Messages are claimed FIFO. Private Payment Lists are Latest-State
     /// Messages, so older claimable unsent lists should be marked
     /// [`crate::OutboundPrivateMessageStatus::Superseded`] before claiming.
-    /// Stale [`crate::OutboundPrivateMessageStatus::Sending`] records are not
-    /// retryable; the runtime marks them recovery-required before any further
-    /// automatic private sends.
+    /// Stale [`crate::OutboundPrivateMessageStatus::Sending`] records can be
+    /// reclaimed only at the queue head so the same message is retried before
+    /// later private messages advance the Encrypted Link.
     fn claim_next_outbound_private_message(
         &mut self,
         counterparty: &PubkyPublicKey,

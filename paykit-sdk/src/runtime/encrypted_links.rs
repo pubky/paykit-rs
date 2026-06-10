@@ -1,4 +1,3 @@
-use super::payment_resolution::should_mark_link_recovery_required;
 use super::*;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
@@ -146,58 +145,126 @@ where
         }
 
         let Some(handshake_role) = stored_link_state.handshake_role else {
-            let mark = mark_recovery_required_with_lease(
-                &self.storage,
-                counterparty.clone(),
-                lease.clone(),
-                self.clock.now(),
-            )
-            .await?;
-            self.publish_local_recovery_marker_if_possible(&counterparty, mark.new_episode)
-                .await;
+            self.mark_link_recovery_required(&counterparty, lease)
+                .await?;
             return Err(PaykitSdkError::RecoveryRequired(format!(
                 "missing Encrypted Link Handshake role for counterparty {counterparty}"
             )));
         };
         let Some(snapshot_bytes) = stored_link_state.handshake_snapshot.as_ref() else {
-            let mark = mark_recovery_required_with_lease(
-                &self.storage,
-                counterparty.clone(),
-                lease.clone(),
-                self.clock.now(),
-            )
-            .await?;
-            self.publish_local_recovery_marker_if_possible(&counterparty, mark.new_episode)
-                .await;
+            self.mark_link_recovery_required(&counterparty, lease)
+                .await?;
             return Err(PaykitSdkError::RecoveryRequired(format!(
                 "no in-progress Encrypted Link Handshake snapshot for counterparty {counterparty}"
             )));
         };
 
-        let result = self
-            .advance_link_handshake_from_snapshot(
-                counterparty.clone(),
-                snapshot_bytes,
-                handshake_role,
-                stored_link_state.generation,
-                lease.clone(),
-            )
-            .await;
-        if result
-            .as_ref()
-            .is_err_and(should_mark_link_recovery_required)
+        let handshake = match self
+            .restore_link_handshake_from_snapshot(counterparty.clone(), snapshot_bytes)
+            .await
         {
-            let mark = mark_recovery_required_with_lease(
-                &self.storage,
-                counterparty.clone(),
-                lease,
-                self.clock.now(),
-            )
-            .await?;
-            self.publish_local_recovery_marker_if_possible(&counterparty, mark.new_episode)
-                .await;
+            Ok(handshake) => handshake,
+            Err(err) => {
+                if Self::handshake_restore_error_requires_recovery(&err) {
+                    self.mark_link_recovery_required(&counterparty, lease)
+                        .await?;
+                }
+                return Err(err);
+            }
+        };
+
+        self.advance_restored_link_handshake(
+            counterparty,
+            handshake,
+            handshake_role,
+            stored_link_state.generation,
+            lease,
+        )
+        .await
+    }
+
+    async fn mark_link_recovery_required(
+        &self,
+        counterparty: &PubkyPublicKey,
+        lease: PeerLinkOperationLease,
+    ) -> Result<()> {
+        let mark = mark_recovery_required_with_lease(
+            &self.storage,
+            counterparty.clone(),
+            lease,
+            self.clock.now(),
+        )
+        .await?;
+        self.publish_local_recovery_marker_if_possible(counterparty, mark.new_episode)
+            .await;
+        Ok(())
+    }
+
+    async fn restore_link_handshake_from_snapshot(
+        &self,
+        counterparty: PubkyPublicKey,
+        snapshot_bytes: &[u8],
+    ) -> Result<paykit_lib::EncryptedLinkHandshake> {
+        let (session_access, secret_key) = self.private_link_session_access().await?;
+        let remote_public_key = counterparty.to_public_key()?;
+        let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot_bytes)?;
+        paykit_lib::restore_encrypted_link_handshake(
+            session_access.session,
+            secret_key,
+            &remote_public_key,
+            session_access.outbox_client,
+            snapshot,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    fn handshake_restore_error_requires_recovery(err: &PaykitSdkError) -> bool {
+        matches!(
+            err,
+            PaykitSdkError::Transport { .. }
+                | PaykitSdkError::NotFound(_)
+                | PaykitSdkError::Protocol(_)
+                | PaykitSdkError::RecoveryRequired(_)
+        )
+    }
+
+    async fn advance_restored_link_handshake(
+        &self,
+        counterparty: PubkyPublicKey,
+        handshake: paykit_lib::EncryptedLinkHandshake,
+        handshake_role: EncryptedLinkHandshakeRole,
+        expected_generation: u64,
+        lease: PeerLinkOperationLease,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        match paykit_lib::advance_handshake(handshake).await? {
+            paykit_lib::HandshakeProgress::Pending(handshake) => {
+                save_link_handshake_state_if_generation_with_lease(
+                    &self.storage,
+                    counterparty,
+                    handshake_role,
+                    handshake.serialize(),
+                    expected_generation,
+                    lease,
+                    self.clock.now(),
+                )
+                .await
+            }
+            paykit_lib::HandshakeProgress::Complete(link) => {
+                let report = save_linked_peer_link_state_if_generation_with_lease(
+                    &self.storage,
+                    counterparty.clone(),
+                    link.serialize(),
+                    expected_generation,
+                    lease,
+                    self.clock.now(),
+                )
+                .await?;
+                self.remove_local_recovery_marker_if_recorded(&counterparty)
+                    .await?;
+                Ok(report)
+            }
         }
-        result
     }
 
     async fn start_link_handshake(
@@ -357,56 +424,6 @@ where
             (Ok(value), Ok(())) => Ok(value),
             (Err(err), _) => Err(err),
             (Ok(_), Err(err)) => Err(err),
-        }
-    }
-
-    async fn advance_link_handshake_from_snapshot(
-        &self,
-        counterparty: PubkyPublicKey,
-        snapshot_bytes: &[u8],
-        handshake_role: EncryptedLinkHandshakeRole,
-        expected_generation: u64,
-        lease: PeerLinkOperationLease,
-    ) -> Result<LinkedPeerHandshakeReport> {
-        let (session_access, secret_key) = self.private_link_session_access().await?;
-        let remote_public_key = counterparty.to_public_key()?;
-        let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot_bytes)?;
-        let handshake = paykit_lib::restore_encrypted_link_handshake(
-            session_access.session,
-            secret_key,
-            &remote_public_key,
-            session_access.outbox_client,
-            snapshot,
-        )
-        .await?;
-
-        match paykit_lib::advance_handshake(handshake).await? {
-            paykit_lib::HandshakeProgress::Pending(handshake) => {
-                save_link_handshake_state_if_generation_with_lease(
-                    &self.storage,
-                    counterparty,
-                    handshake_role,
-                    handshake.serialize(),
-                    expected_generation,
-                    lease,
-                    self.clock.now(),
-                )
-                .await
-            }
-            paykit_lib::HandshakeProgress::Complete(link) => {
-                let report = save_linked_peer_link_state_if_generation_with_lease(
-                    &self.storage,
-                    counterparty.clone(),
-                    link.serialize(),
-                    expected_generation,
-                    lease,
-                    self.clock.now(),
-                )
-                .await?;
-                self.remove_local_recovery_marker_if_recorded(&counterparty)
-                    .await?;
-                Ok(report)
-            }
         }
     }
 
