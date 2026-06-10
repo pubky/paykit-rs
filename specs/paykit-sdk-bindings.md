@@ -127,6 +127,9 @@ The platform session provider should return one of:
 `None` or `null` means no live session is currently available. It does not mean
 explicit sign-out. Explicit sign-out should be a separate SDK call that clears
 session access first and then clears SDK-managed identity-scoped state.
+Bindings should document that apps must export and persist an SDK backup before
+explicit sign-out if they want to restore the same user's private Paykit state
+later.
 
 The binding-level session API should not ask Swift, Kotlin, or React Native to
 construct Rust `pubky::PubkySession` or `pubky::Pubky` values directly. For
@@ -274,6 +277,14 @@ blob is not app-encrypted, platform docs should require protected local storage:
 iOS Keychain or protected files with backup exclusion as appropriate, and
 Android encrypted storage or `noBackup` placement unless the app encrypts before
 backup.
+
+Platform docs should also make the durability consequence explicit: if the
+sensitive SDK state blob or exported SDK backup is lost, private Paykit runtime
+state cannot be safely reconstructed from homeserver data alone. Apps may
+recover by relinking peers and receiving fresh private data, but they should not
+promise restoration of old private links, Receipt Access keys, private stream
+history, local Contact Records, or Payment Request/Receipt history without SDK
+backup data.
 
 ## Default App Workflows
 

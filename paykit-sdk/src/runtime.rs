@@ -236,6 +236,14 @@ where
     }
 
     /// Clear live Pubky session access and SDK-managed identity-scoped state.
+    ///
+    /// This is an explicit destructive sign-out. Apps that want to restore the
+    /// same user's private Paykit state later should export and persist an SDK
+    /// backup before calling this method.
+    ///
+    /// Temporary session unavailability should be represented by
+    /// [`PubkySessionProvider::load_session_access`] returning `None`; that
+    /// preserves stored SDK state and only blocks Pubky-backed workflows.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
         self.pubky.clear_session_access().await?;

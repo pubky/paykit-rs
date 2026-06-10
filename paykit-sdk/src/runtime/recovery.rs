@@ -658,7 +658,7 @@ fn recovery_peer_or_default(
 ) -> LinkedPeerRecord {
     peer.unwrap_or_else(|| LinkedPeerRecord {
         counterparty: counterparty.clone(),
-        state: LinkedPeerState::Unknown,
+        state: LinkedPeerState::NotLinked,
         last_sync_at: None,
         last_private_receive_at: None,
         failure_count: 0,

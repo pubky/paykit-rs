@@ -25,10 +25,8 @@ pub enum EncryptedLinkHandshakeRole {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum LinkedPeerState {
-    /// The counterparty is not known locally.
-    Unknown,
-    /// The counterparty is known but no active Encrypted Link exists.
-    Known,
+    /// The SDK tracks this counterparty, but no active Encrypted Link exists.
+    NotLinked,
     /// An Encrypted Link Handshake is in progress.
     Linking,
     /// An Encrypted Link is established.
@@ -72,7 +70,7 @@ where
 fn default_linked_peer(counterparty: PubkyPublicKey) -> LinkedPeerRecord {
     LinkedPeerRecord {
         counterparty,
-        state: LinkedPeerState::Unknown,
+        state: LinkedPeerState::NotLinked,
         last_sync_at: None,
         last_private_receive_at: None,
         failure_count: 0,
@@ -192,7 +190,7 @@ where
             record.last_sync_at = Some(now);
             if matches!(
                 record.state,
-                LinkedPeerState::Known | LinkedPeerState::Linking | LinkedPeerState::Linked
+                LinkedPeerState::NotLinked | LinkedPeerState::Linking | LinkedPeerState::Linked
             ) {
                 record.failure_count = 0;
             }

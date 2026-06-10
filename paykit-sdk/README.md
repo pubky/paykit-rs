@@ -65,6 +65,8 @@ Common workflows:
   markers
 - call `sign_out` when the app wants to clear live Pubky access and
   SDK-managed identity-scoped state
+- export and persist an SDK backup before `sign_out` if the app wants that
+  sign-out to be reversible for the same user
 
 Outbound private sends are retried from durable records only while the local
 Encrypted Link checkpoint is trustworthy. If a worker may have sent a message
@@ -96,7 +98,8 @@ or clear SDK storage through the adapter.
 If the provider returns no live session access during ordinary startup or
 workflow calls, the SDK blocks Pubky-backed work but preserves the last
 identity-scoped state. Call `sign_out` when the app intentionally wants to clear
-that state.
+that state. If the app wants to restore private Paykit state after sign-out, it
+must keep a separate SDK backup and not delete it as part of sign-out.
 
 Read-only private views such as cached Private Payment Lists can still be
 returned for the initialized identity when live private-link capability is
@@ -112,3 +115,11 @@ custom adapters can persist exact SDK state. App code should usually prefer the
 Backup restore preserves terminal invalid and recovery-required outbound
 private records for audit, while pending, sending, failed, sent, and superseded
 outbound records are validated before restore.
+Restored Encrypted Link snapshots are not resumed automatically today; affected
+peers are marked recovery-required so private automation pauses until relink.
+
+Losing SDK-managed backup or state blob data means losing access to local
+private Paykit runtime state. Public Paykit data can be rediscovered from Pubky,
+but Encrypted Link snapshots, private stream history, Receipt Access keys,
+outbound queues, local Contact Records, and Payment Request/Receipt history
+cannot be safely reconstructed from homeserver data alone.

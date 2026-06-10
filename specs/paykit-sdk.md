@@ -220,6 +220,9 @@ block Pubky-backed workflows until session access is available again. Explicit
 Sign-out should clear live session access before deleting SDK-managed local
 state. If local storage clearing fails after session access is cleared, the app
 must retry sign-out or clear SDK storage through its adapter.
+Apps that want explicit sign-out to be reversible for the same user must export
+and persist an SDK backup before calling `sign_out`; sign-out must not be used
+for temporary session unavailability.
 
 `load_public_storage` lets contact resolution fetch public Payment Endpoints
 without requiring authenticated session access. Implementations can reuse the
@@ -878,6 +881,20 @@ Backup should include SDK-managed state:
 - outbound queue
 - recovery markers
 
+If SDK-managed backup or state blob data is lost, the SDK cannot safely
+reconstruct private runtime state from Pubky homeserver data alone. Public
+Payment Endpoints and Paykit Profiles can be rediscovered, but Encrypted Link
+snapshots/counters, private stream history, Event Message dedupe records,
+Receipt Access keys, outbound queues, local Contact Records, and local Payment
+Request/Receipt history are local SDK state. Without backup, recovery means
+fresh initialization, republishing public state, relinking peers, and receiving
+fresh private data from counterparties.
+
+Before explicit sign-out, an app that wants to restore the same user's private
+Paykit state later must keep a separate SDK backup. Sign-out clears the active
+SDK-managed identity-scoped storage; it should not delete caller-managed backup
+copies unless the user explicitly asks for permanent removal.
+
 Backup should not include:
 
 - app cloud transport details
@@ -891,6 +908,12 @@ Restore flow:
 2. Validate backup record shape and every link snapshot recipient.
 3. Load backup into storage under a restore transaction.
 4. Mark peers requiring resync before committing restored private state.
+
+Current behavior: restored Encrypted Link snapshots are not resumed
+automatically. Backup restore preserves private history and derived records, but
+marks affected peers recovery-required so private automation pauses until
+relink. Multi-app and multi-device synchronization of active Encrypted Link
+checkpoints is future work and must not be assumed by current restore behavior.
 5. Do not execute automatic payments until private stream and request state are
    consistent.
 
@@ -1073,3 +1096,6 @@ Platform tests:
   budgets.
 - SDK platform bindings as the primary mobile API, with `paykit-ffi` kept for
   low-level protocol integrations.
+- Multi-app and multi-device Paykit identity synchronization, including how
+  active Encrypted Link checkpoints, outbound queues, and recurring Payment
+  Request execution coordinate without rewinding private message counters.
