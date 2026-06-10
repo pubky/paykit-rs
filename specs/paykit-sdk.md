@@ -998,11 +998,15 @@ impl PaykitSdk {
     async fn active_recurring_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>>;
     async fn actionable_received_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>>;
 
-    async fn receipt_access_records(
+    async fn receipt_access(&self) -> Result<Vec<ReceiptAccessView>>;
+    async fn receipt_access_from(
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<ReceiptAccessView>>;
-    async fn receipt_issuance_records(
+    async fn receipts(&self) -> Result<Vec<ReceiptRecord>>;
+    async fn receipts_from(&self, issuer: &PubkyPublicKey) -> Result<Vec<ReceiptRecord>>;
+    async fn issued_receipts(&self) -> Result<Vec<ReceiptIssuanceView>>;
+    async fn issued_receipts_to(
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<ReceiptIssuanceView>>;
@@ -1028,6 +1032,11 @@ impl PaykitSdk {
     ) -> Result<ReceiptIssuanceView>;
 }
 ```
+
+`ReceiptDraftBuilder` is the ergonomic way to create `ReceiptDraft` values for
+SDK calls. It can generate a Receipt ID before `issue_receipt`, or leave it
+empty when callers want the two-step `prepare_receipt_issuance` flow to create
+and return the ID first.
 
 ## Platform Binding Shape
 

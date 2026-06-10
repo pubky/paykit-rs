@@ -59,11 +59,13 @@ Common workflows:
   the freshest private endpoints matter
 - call `resolve_contact_payment` to get both the selected endpoint and
   adapter-built `PaymentTarget`
-- call `prepare_receipt_issuance` before receipt network side effects, then
+- build receipt drafts with `ReceiptDraftBuilder`; call
+  `prepare_receipt_issuance` before receipt network side effects, then
   `process_receipt_issuance`; use `issue_receipt` only when the draft already
   has a caller-provided Receipt ID
-- call `linked_peers`, `pending_outbound_private_counterparties`, and
-  `receipt_access_records` to drive app-visible work queues
+- call `linked_peers`, `pending_outbound_private_counterparties`,
+  `receipt_access_from`, `receipts_from`, and `issued_receipts_to` to drive
+  app-visible work queues
 - call `process_outbound_private_messages` for one counterparty, or
   `process_pending_private_messages` from a broader retry worker
 - call `sync_public_contact_markers` on startup if the app uses public contact

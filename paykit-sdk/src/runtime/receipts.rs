@@ -182,11 +182,48 @@ where
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty).await?;
-        Ok(load_receipt_issuance_records(&self.storage, counterparty)
+        let mut records = load_receipt_issuance_records(&self.storage, counterparty)
             .await?
             .iter()
             .map(ReceiptIssuanceView::from)
-            .collect())
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| Reverse(record.created_at));
+        Ok(records)
+    }
+
+    /// List issued receipts for one counterparty, newest first.
+    pub async fn issued_receipts_to(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<ReceiptIssuanceView>> {
+        self.receipt_issuance_records(counterparty).await
+    }
+
+    /// List issued receipts across non-blocked counterparties, newest first.
+    pub async fn issued_receipts(&self) -> Result<Vec<ReceiptIssuanceView>> {
+        self.ensure_private_workflows_enabled("Receipt issuance access")?;
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.public_key.is_none() {
+            return Ok(Vec::new());
+        }
+        self.storage
+            .transaction(|tx| {
+                let snapshot = tx.export_storage_state();
+                let mut records = snapshot
+                    .receipt_issuance_records
+                    .into_values()
+                    .filter(|record| {
+                        !snapshot
+                            .linked_peers
+                            .get(&record.counterparty)
+                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                    })
+                    .map(|record| ReceiptIssuanceView::from(&record))
+                    .collect::<Vec<_>>();
+                records.sort_by_key(|record| Reverse(record.created_at));
+                Ok(records)
+            })
+            .await
     }
 
     /// Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
@@ -375,12 +412,49 @@ where
         self.ensure_peer_not_blocked(counterparty).await?;
         self.storage
             .transaction(|tx| {
-                let records = tx
+                let mut records = tx
                     .receipt_access_records(counterparty)
                     .into_iter()
                     .filter(|record| !Self::receipt_access_event_is_conflicted(tx, record))
                     .map(|record| ReceiptAccessView::from(&record))
                     .collect::<Vec<_>>();
+                records.sort_by_key(|record| Reverse(record.received_at));
+                Ok(records)
+            })
+            .await
+    }
+
+    /// List Receipt Access received from one counterparty.
+    pub async fn receipt_access_from(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<ReceiptAccessView>> {
+        self.receipt_access_records(counterparty).await
+    }
+
+    /// List Receipt Access across non-blocked counterparties, newest first.
+    pub async fn receipt_access(&self) -> Result<Vec<ReceiptAccessView>> {
+        self.ensure_private_workflows_enabled("Receipt Access")?;
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.public_key.is_none() {
+            return Ok(Vec::new());
+        }
+        self.storage
+            .transaction(|tx| {
+                let snapshot = tx.export_storage_state();
+                let mut records = snapshot
+                    .receipt_access_records
+                    .into_values()
+                    .filter(|record| {
+                        !snapshot
+                            .linked_peers
+                            .get(&record.counterparty)
+                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                    })
+                    .filter(|record| !Self::receipt_access_event_is_conflicted(tx, record))
+                    .map(|record| ReceiptAccessView::from(&record))
+                    .collect::<Vec<_>>();
+                records.sort_by_key(|record| Reverse(record.received_at));
                 Ok(records)
             })
             .await
@@ -402,6 +476,39 @@ where
                     .into_values()
                     .filter(|record| &record.issuer == issuer)
                     .filter(|record| record.recipient_public_key == local_public_key)
+                    .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
+                    .collect::<Vec<_>>();
+                records.sort_by_key(|record| Reverse(record.retrieved_at));
+                Ok(records)
+            })
+            .await
+    }
+
+    /// List decrypted receipts from one issuer, newest first.
+    pub async fn receipts_from(&self, issuer: &PubkyPublicKey) -> Result<Vec<ReceiptRecord>> {
+        self.receipt_records(issuer).await
+    }
+
+    /// List decrypted receipts across non-blocked issuers, newest first.
+    pub async fn receipts(&self) -> Result<Vec<ReceiptRecord>> {
+        self.ensure_private_workflows_enabled("Receipt access")?;
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        let Some(local_public_key) = identity.public_key else {
+            return Ok(Vec::new());
+        };
+        self.storage
+            .transaction(|tx| {
+                let snapshot = tx.export_storage_state();
+                let mut records = snapshot
+                    .receipt_records
+                    .into_values()
+                    .filter(|record| record.recipient_public_key == local_public_key)
+                    .filter(|record| {
+                        !snapshot
+                            .linked_peers
+                            .get(&record.issuer)
+                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                    })
                     .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.retrieved_at));

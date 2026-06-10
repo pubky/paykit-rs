@@ -61,6 +61,77 @@ async fn test_prepare_receipt_issuance_persists_pending_record() {
 }
 
 #[tokio::test]
+async fn test_receipt_listing_helpers_match_record_views() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let local_public_key = local_public_key.clone();
+            move |tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_public_key.clone()),
+                    capability: PubkyIdentityCapability::PublicOnly,
+                    local_secret_available: false,
+                    initialized_at: FixedClock.now(),
+                    sign_out_generation: 0,
+                });
+                tx.save_receipt_access_record(receipt_access_record(
+                    counterparty.clone(),
+                    "550e8400-e29b-41d4-a716-446655440000",
+                ));
+                tx.save_receipt_record(receipt_record(
+                    counterparty,
+                    "550e8400-e29b-41d4-a716-446655440000",
+                    local_public_key,
+                ));
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    assert_eq!(
+        sdk.receipt_access_from(&counterparty).await.unwrap(),
+        sdk.receipt_access_records(&counterparty).await.unwrap()
+    );
+    assert_eq!(
+        sdk.receipt_access().await.unwrap(),
+        sdk.receipt_access_from(&counterparty).await.unwrap()
+    );
+    assert_eq!(
+        sdk.receipts_from(&counterparty).await.unwrap(),
+        sdk.receipt_records(&counterparty).await.unwrap()
+    );
+    assert_eq!(
+        sdk.receipts().await.unwrap(),
+        sdk.receipts_from(&counterparty).await.unwrap()
+    );
+
+    let issuance = sdk
+        .prepare_receipt_issuance(
+            counterparty.clone(),
+            receipt_draft("650e8400-e29b-41d4-a716-446655440001"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sdk.issued_receipts_to(&counterparty).await.unwrap(),
+        sdk.receipt_issuance_records(&counterparty).await.unwrap()
+    );
+    assert_eq!(sdk.issued_receipts().await.unwrap(), vec![issuance]);
+}
+
+#[tokio::test]
 async fn test_prepare_receipt_issuance_rejects_conflicting_reused_receipt_id() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

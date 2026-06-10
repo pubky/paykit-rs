@@ -57,6 +57,67 @@ fn receipt(
 }
 
 #[test]
+fn test_receipt_draft_builder_creates_retry_safe_draft() {
+    let draft = ReceiptDraftBuilder::new("invoice-2026-0001")
+        .unwrap()
+        .with_new_receipt_id()
+        .with_payment_endpoint_identifier_text("btc-lightning-bolt11")
+        .unwrap()
+        .with_amount_text("0.001", "btc")
+        .unwrap()
+        .with_metadata(
+            serde_json::json!({"settlement_id": "abc-123"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+
+    assert!(draft.receipt_id.is_some());
+    assert_eq!(draft.payment_reference.as_str(), "invoice-2026-0001");
+    assert_eq!(
+        draft.payment_endpoint_identifier.unwrap().as_str(),
+        "btc-lightning-bolt11"
+    );
+    assert_eq!(draft.amount.unwrap().asset, "btc");
+    assert_eq!(draft.metadata["settlement_id"], "abc-123");
+}
+
+#[test]
+fn test_receipt_draft_builder_requires_request_id_for_billing_period() {
+    let result = ReceiptDraftBuilder::new("invoice-2026-0001")
+        .unwrap()
+        .with_billing_period(paykit_lib::BillingPeriod {
+            starts_at: "2026-06-01T00:00:00Z".into(),
+            ends_at: "2026-07-01T00:00:00Z".into(),
+        })
+        .build();
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+}
+
+#[test]
+fn test_receipt_draft_builder_debug_redacts_sensitive_fields() {
+    let builder = ReceiptDraftBuilder::new("invoice-2026-0001")
+        .unwrap()
+        .with_amount_text("0.001", "btc")
+        .unwrap()
+        .with_metadata(
+            serde_json::json!({"settlement_id": "abc-123"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+
+    let debug = format!("{builder:?}");
+
+    assert!(!debug.contains("invoice-2026-0001"));
+    assert!(!debug.contains("0.001"));
+    assert!(!debug.contains("abc-123"));
+}
+
+#[test]
 fn test_receipt_issuance_record_redacts_sensitive_fields() {
     let counterparty_key = public_key();
     let counterparty = PubkyPublicKey::from_public_key(&counterparty_key);
