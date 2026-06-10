@@ -143,15 +143,15 @@ async fn test_enqueue_private_payment_list_uses_reserved_details() {
 }
 
 #[tokio::test]
-async fn test_enqueue_private_payment_list_releases_invalid_reservations() {
+async fn test_enqueue_private_payment_list_cancels_invalid_reservations() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         InvalidReservedPrivateListPaymentAdapter {
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
@@ -163,7 +163,7 @@ async fn test_enqueue_private_payment_list_releases_invalid_reservations() {
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
     assert_eq!(
-        *released.lock().unwrap(),
+        *canceled.lock().unwrap(),
         vec!["reservation-1".to_string(), "reservation-2".to_string()]
     );
     let snapshot = storage.snapshot().unwrap();
@@ -172,17 +172,17 @@ async fn test_enqueue_private_payment_list_releases_invalid_reservations() {
 }
 
 #[tokio::test]
-async fn test_enqueue_private_payment_list_releases_unpersisted_reservations_after_lease_change() {
+async fn test_enqueue_private_payment_list_cancels_unpersisted_reservations_after_lease_change() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         LeaseChangingInvalidReservedPrivateListPaymentAdapter {
             storage: storage.clone(),
             counterparty: counterparty.clone(),
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
@@ -194,7 +194,7 @@ async fn test_enqueue_private_payment_list_releases_unpersisted_reservations_aft
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
     assert_eq!(
-        *released.lock().unwrap(),
+        *canceled.lock().unwrap(),
         vec!["reservation-1".to_string(), "reservation-2".to_string()]
     );
     let snapshot = storage.snapshot().unwrap();
@@ -203,7 +203,7 @@ async fn test_enqueue_private_payment_list_releases_unpersisted_reservations_aft
 }
 
 #[tokio::test]
-async fn test_unattempted_superseded_reservation_cleanup_releases_without_claimed_message() {
+async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed_message() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     queue_private_payment_list_with_reservations(
@@ -266,23 +266,23 @@ async fn test_unattempted_superseded_reservation_cleanup_releases_without_claime
         .await
         .unwrap();
 
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         InvalidReservedPrivateListPaymentAdapter {
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
     );
 
     let failures = sdk
-        .release_unattempted_superseded_reservations(&counterparty, None)
+        .cancel_unattempted_superseded_reservations(&counterparty, None)
         .await;
 
     assert!(failures.is_empty());
-    assert_eq!(*released.lock().unwrap(), vec!["reservation-1".to_string()]);
+    assert_eq!(*canceled.lock().unwrap(), vec!["reservation-1".to_string()]);
     let reservations = storage
         .snapshot()
         .unwrap()
@@ -294,7 +294,7 @@ async fn test_unattempted_superseded_reservation_cleanup_releases_without_claime
 }
 
 #[tokio::test]
-async fn test_terminal_private_list_reservation_cleanup_releases_invalid_message_reservations() {
+async fn test_terminal_private_list_reservation_cleanup_cancels_invalid_message_reservations() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let queued = queue_private_payment_list_with_reservations(
@@ -333,23 +333,23 @@ async fn test_terminal_private_list_reservation_cleanup_releases_invalid_message
         })
         .await
         .unwrap();
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         InvalidReservedPrivateListPaymentAdapter {
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
     );
 
     let failures = sdk
-        .release_terminal_private_list_reservations(&counterparty, None)
+        .cancel_terminal_private_list_reservations(&counterparty, None)
         .await;
 
     assert!(failures.is_empty());
-    assert_eq!(*released.lock().unwrap(), vec!["reservation-1".to_string()]);
+    assert_eq!(*canceled.lock().unwrap(), vec!["reservation-1".to_string()]);
     assert!(storage
         .snapshot()
         .unwrap()
@@ -374,7 +374,7 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
                         outbound_message_id: 2,
                         attribution: HashMap::new(),
                         expires_at: None,
-                        release_started_at: None,
+                        cancellation_started_at: None,
                         created_at: FixedClock.now(),
                     },
                 );
@@ -383,19 +383,19 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
         })
         .await
         .unwrap();
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         InvalidReservedPrivateListPaymentAdapter {
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
     );
-    let release = PaymentEndpointReservationReleaseRecord {
+    let cancellation = PaymentEndpointReservationCancellationRecord {
         outbound_message_id: 1,
-        release: PaymentEndpointReservationRelease {
+        cancellation: PaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
             identifier: "btc-lightning-bolt11".into(),
@@ -404,10 +404,12 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
         },
     };
 
-    let failures = sdk.release_reservation_records(vec![release], None).await;
+    let failures = sdk
+        .cancel_reservation_records(vec![cancellation], None)
+        .await;
 
     assert!(failures.is_empty());
-    assert!(released.lock().unwrap().is_empty());
+    assert!(canceled.lock().unwrap().is_empty());
     assert_eq!(
         storage
             .snapshot()
@@ -421,7 +423,7 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
 }
 
 #[tokio::test]
-async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adapter_release() {
+async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adapter_cancellation() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let stale_lease = storage
@@ -437,7 +439,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
                         outbound_message_id: 1,
                         attribution: HashMap::new(),
                         expires_at: None,
-                        release_started_at: None,
+                        cancellation_started_at: None,
                         created_at: FixedClock.now(),
                     },
                 );
@@ -466,19 +468,19 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
         })
         .await
         .unwrap();
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         InvalidReservedPrivateListPaymentAdapter {
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
     );
-    let release = PaymentEndpointReservationReleaseRecord {
+    let cancellation = PaymentEndpointReservationCancellationRecord {
         outbound_message_id: 1,
-        release: PaymentEndpointReservationRelease {
+        cancellation: PaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
             identifier: "btc-lightning-bolt11".into(),
@@ -488,11 +490,11 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
     };
 
     let failures = sdk
-        .release_reservation_records(vec![release], Some(&stale_lease))
+        .cancel_reservation_records(vec![cancellation], Some(&stale_lease))
         .await;
 
     assert_eq!(failures.len(), 1);
-    assert!(released.lock().unwrap().is_empty());
+    assert!(canceled.lock().unwrap().is_empty());
     assert!(storage
         .snapshot()
         .unwrap()
@@ -501,7 +503,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
 }
 
 #[tokio::test]
-async fn test_reservation_cleanup_failure_keeps_release_claim() {
+async fn test_reservation_cleanup_failure_keeps_cancellation_claim() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -517,7 +519,7 @@ async fn test_reservation_cleanup_failure_keeps_release_claim() {
                         outbound_message_id: 1,
                         attribution: HashMap::new(),
                         expires_at: None,
-                        release_started_at: None,
+                        cancellation_started_at: None,
                         created_at: FixedClock.now(),
                     },
                 );
@@ -529,13 +531,13 @@ async fn test_reservation_cleanup_failure_keeps_release_claim() {
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
-        FailingReleasePaymentAdapter,
+        FailingCancellationPaymentAdapter,
         PaykitSdkConfig::default(),
         FixedClock,
     );
-    let release = PaymentEndpointReservationReleaseRecord {
+    let cancellation = PaymentEndpointReservationCancellationRecord {
         outbound_message_id: 1,
-        release: PaymentEndpointReservationRelease {
+        cancellation: PaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
             identifier: "btc-lightning-bolt11".into(),
@@ -544,7 +546,9 @@ async fn test_reservation_cleanup_failure_keeps_release_claim() {
         },
     };
 
-    let failures = sdk.release_reservation_records(vec![release], None).await;
+    let failures = sdk
+        .cancel_reservation_records(vec![cancellation], None)
+        .await;
 
     assert_eq!(failures.len(), 1);
     let record = storage
@@ -554,7 +558,7 @@ async fn test_reservation_cleanup_failure_keeps_release_claim() {
         .get(&(counterparty, "reservation-1".into()))
         .unwrap()
         .clone();
-    assert_eq!(record.release_started_at, Some(FixedClock.now()));
+    assert_eq!(record.cancellation_started_at, Some(FixedClock.now()));
 }
 
 #[tokio::test]
@@ -574,7 +578,7 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
                         outbound_message_id: 1,
                         attribution: HashMap::new(),
                         expires_at: None,
-                        release_started_at: None,
+                        cancellation_started_at: None,
                         created_at: FixedClock.now(),
                     },
                 );
@@ -589,21 +593,21 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
         })
         .await
         .unwrap();
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
-        LeaseChangingReleasePaymentAdapter {
+        LeaseChangingCancellationPaymentAdapter {
             storage: storage.clone(),
             counterparty: counterparty.clone(),
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
     );
-    let release = PaymentEndpointReservationReleaseRecord {
+    let cancellation = PaymentEndpointReservationCancellationRecord {
         outbound_message_id: 1,
-        release: PaymentEndpointReservationRelease {
+        cancellation: PaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
             identifier: "btc-lightning-bolt11".into(),
@@ -613,11 +617,11 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
     };
 
     let failures = sdk
-        .release_reservation_records(vec![release], Some(&lease))
+        .cancel_reservation_records(vec![cancellation], Some(&lease))
         .await;
 
     assert!(failures.is_empty());
-    assert_eq!(*released.lock().unwrap(), vec!["reservation-1".to_string()]);
+    assert_eq!(*canceled.lock().unwrap(), vec!["reservation-1".to_string()]);
     assert!(!storage
         .snapshot()
         .unwrap()
@@ -682,12 +686,12 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         })
         .await
         .unwrap();
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         InvalidReservedPrivateListPaymentAdapter {
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
@@ -698,7 +702,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    assert!(released.lock().unwrap().is_empty());
+    assert!(canceled.lock().unwrap().is_empty());
     assert_eq!(
         storage
             .snapshot()
@@ -731,12 +735,12 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
     )
     .await
     .unwrap();
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         MixedExistingReservedPrivateListPaymentAdapter {
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
@@ -748,7 +752,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
     assert_eq!(
-        *released.lock().unwrap(),
+        *canceled.lock().unwrap(),
         vec!["conflicting-reservation".to_string()]
     );
     assert_eq!(

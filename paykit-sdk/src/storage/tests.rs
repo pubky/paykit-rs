@@ -99,7 +99,7 @@ fn payment_endpoint_reservation_record(
         outbound_message_id: 7,
         attribution: HashMap::from([("contact".into(), "alice".into())]),
         expires_at: None,
-        release_started_at: None,
+        cancellation_started_at: None,
         created_at: timestamp(),
     }
 }

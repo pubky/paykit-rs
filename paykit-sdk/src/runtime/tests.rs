@@ -14,7 +14,7 @@ use super::{
 use crate::{
     adapters::{
         EndpointCompatibility, PaymentEndpointCandidate, PaymentEndpointEvaluation,
-        PaymentEndpointReservation, PaymentEndpointReservationRelease,
+        PaymentEndpointReservation, PaymentEndpointReservationCancellation,
         PaymentEndpointReservationRequest, PaymentEndpointSelection,
         PaymentEndpointSelectionRequest, PaymentTarget, ReceivingDetail, ReceivingDetailScope,
     },
@@ -90,9 +90,9 @@ impl PaymentAdapter for TestPaymentAdapter {
         Ok(Vec::new())
     }
 
-    async fn release_receiving_detail_reservation(
+    async fn cancel_receiving_detail_reservation(
         &self,
-        _release: &PaymentEndpointReservationRelease,
+        _release: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
         Ok(())
     }
@@ -141,9 +141,9 @@ impl PaymentAdapter for PrivateListPaymentAdapter {
         }])
     }
 
-    async fn release_receiving_detail_reservation(
+    async fn cancel_receiving_detail_reservation(
         &self,
-        _release: &PaymentEndpointReservationRelease,
+        _release: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
         Ok(())
     }
@@ -195,9 +195,9 @@ impl PaymentAdapter for ReservedPrivateListPaymentAdapter {
         }]))
     }
 
-    async fn release_receiving_detail_reservation(
+    async fn cancel_receiving_detail_reservation(
         &self,
-        _release: &PaymentEndpointReservationRelease,
+        _release: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
         Ok(())
     }
@@ -223,7 +223,7 @@ impl PaymentAdapter for ReservedPrivateListPaymentAdapter {
 }
 
 struct InvalidReservedPrivateListPaymentAdapter {
-    released: Arc<Mutex<Vec<String>>>,
+    canceled: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -261,14 +261,14 @@ impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
         ]))
     }
 
-    async fn release_receiving_detail_reservation(
+    async fn cancel_receiving_detail_reservation(
         &self,
-        release: &PaymentEndpointReservationRelease,
+        cancellation: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
-        self.released
+        self.canceled
             .lock()
             .unwrap()
-            .push(release.reservation_id.clone());
+            .push(cancellation.reservation_id.clone());
         Ok(())
     }
 
@@ -292,10 +292,10 @@ impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
     }
 }
 
-struct FailingReleasePaymentAdapter;
+struct FailingCancellationPaymentAdapter;
 
 #[async_trait]
-impl PaymentAdapter for FailingReleasePaymentAdapter {
+impl PaymentAdapter for FailingCancellationPaymentAdapter {
     async fn current_receiving_details(
         &self,
         _scope: ReceivingDetailScope,
@@ -310,12 +310,12 @@ impl PaymentAdapter for FailingReleasePaymentAdapter {
         Ok(None)
     }
 
-    async fn release_receiving_detail_reservation(
+    async fn cancel_receiving_detail_reservation(
         &self,
-        _release: &PaymentEndpointReservationRelease,
+        _release: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
         Err(PaykitSdkError::PaymentAdapter {
-            context: "release failed".into(),
+            context: "cancellation failed".into(),
             source: None,
         })
     }
@@ -340,14 +340,14 @@ impl PaymentAdapter for FailingReleasePaymentAdapter {
     }
 }
 
-struct LeaseChangingReleasePaymentAdapter {
+struct LeaseChangingCancellationPaymentAdapter {
     storage: InMemoryStorage,
     counterparty: PubkyPublicKey,
-    released: Arc<Mutex<Vec<String>>>,
+    canceled: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
-impl PaymentAdapter for LeaseChangingReleasePaymentAdapter {
+impl PaymentAdapter for LeaseChangingCancellationPaymentAdapter {
     async fn current_receiving_details(
         &self,
         _scope: ReceivingDetailScope,
@@ -362,9 +362,9 @@ impl PaymentAdapter for LeaseChangingReleasePaymentAdapter {
         Ok(None)
     }
 
-    async fn release_receiving_detail_reservation(
+    async fn cancel_receiving_detail_reservation(
         &self,
-        release: &PaymentEndpointReservationRelease,
+        cancellation: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
         self.storage
             .transaction({
@@ -379,10 +379,10 @@ impl PaymentAdapter for LeaseChangingReleasePaymentAdapter {
                 }
             })
             .await?;
-        self.released
+        self.canceled
             .lock()
             .unwrap()
-            .push(release.reservation_id.clone());
+            .push(cancellation.reservation_id.clone());
         Ok(())
     }
 
@@ -409,7 +409,7 @@ impl PaymentAdapter for LeaseChangingReleasePaymentAdapter {
 struct LeaseChangingInvalidReservedPrivateListPaymentAdapter {
     storage: InMemoryStorage,
     counterparty: PubkyPublicKey,
-    released: Arc<Mutex<Vec<String>>>,
+    canceled: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -460,14 +460,14 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
         ]))
     }
 
-    async fn release_receiving_detail_reservation(
+    async fn cancel_receiving_detail_reservation(
         &self,
-        release: &PaymentEndpointReservationRelease,
+        cancellation: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
-        self.released
+        self.canceled
             .lock()
             .unwrap()
-            .push(release.reservation_id.clone());
+            .push(cancellation.reservation_id.clone());
         Ok(())
     }
 
@@ -492,7 +492,7 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
 }
 
 struct MixedExistingReservedPrivateListPaymentAdapter {
-    released: Arc<Mutex<Vec<String>>>,
+    canceled: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -530,14 +530,14 @@ impl PaymentAdapter for MixedExistingReservedPrivateListPaymentAdapter {
         ]))
     }
 
-    async fn release_receiving_detail_reservation(
+    async fn cancel_receiving_detail_reservation(
         &self,
-        release: &PaymentEndpointReservationRelease,
+        cancellation: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
-        self.released
+        self.canceled
             .lock()
             .unwrap()
-            .push(release.reservation_id.clone());
+            .push(cancellation.reservation_id.clone());
         Ok(())
     }
 

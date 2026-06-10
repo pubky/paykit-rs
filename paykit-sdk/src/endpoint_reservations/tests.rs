@@ -202,7 +202,7 @@ async fn test_queue_private_payment_list_with_reservations_preserves_existing_me
 }
 
 #[tokio::test]
-async fn test_queue_private_payment_list_with_reservations_rejects_release_claimed_id() {
+async fn test_queue_private_payment_list_with_reservations_rejects_cancellation_claimed_id() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
     queue_private_payment_list_with_reservations(
@@ -220,7 +220,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_release_claim
                 let mut record = tx
                     .payment_endpoint_reservation(&counterparty, "res-1")
                     .unwrap();
-                record.release_started_at = Some(timestamp());
+                record.cancellation_started_at = Some(timestamp());
                 tx.save_payment_endpoint_reservation(record);
                 Ok(())
             }
@@ -240,7 +240,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_release_claim
 }
 
 #[tokio::test]
-async fn test_unattempted_superseded_reservation_releases() {
+async fn test_unattempted_superseded_reservation_cancellations() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
     queue_private_payment_list_with_reservations(
@@ -269,16 +269,16 @@ async fn test_unattempted_superseded_reservation_releases() {
     .await
     .unwrap();
 
-    let releases = unattempted_superseded_reservation_releases(&storage, &counterparty)
+    let cancellations = unattempted_superseded_reservation_cancellations(&storage, &counterparty)
         .await
         .unwrap();
 
-    assert_eq!(releases.len(), 1);
-    assert_eq!(releases[0].release.reservation_id, "res-1");
+    assert_eq!(cancellations.len(), 1);
+    assert_eq!(cancellations[0].cancellation.reservation_id, "res-1");
 }
 
 #[tokio::test]
-async fn test_unattempted_superseded_reservation_releases_skip_attempted_lists() {
+async fn test_unattempted_superseded_reservation_cancellations_skip_attempted_lists() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
     let first = queue_private_payment_list_with_reservations(
@@ -324,17 +324,17 @@ async fn test_unattempted_superseded_reservation_releases_skip_attempted_lists()
     .await
     .unwrap();
 
-    let releases = unattempted_superseded_reservation_releases(&storage, &counterparty)
+    let cancellations = unattempted_superseded_reservation_cancellations(&storage, &counterparty)
         .await
         .unwrap();
 
-    assert!(releases.is_empty());
+    assert!(cancellations.is_empty());
     let snapshot = storage.snapshot().unwrap();
     assert_eq!(snapshot.payment_endpoint_reservations.len(), 2);
 }
 
 #[tokio::test]
-async fn test_expired_outbound_reservation_releases() {
+async fn test_expired_outbound_reservation_cancellations() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
     let outbound = queue_private_payment_list_with_reservations(
@@ -354,7 +354,7 @@ async fn test_expired_outbound_reservation_releases() {
     .await
     .unwrap();
 
-    assert!(expired_outbound_reservation_releases(
+    assert!(expired_outbound_reservation_cancellations(
         &storage,
         &counterparty,
         outbound.outbound_message_id,
@@ -363,7 +363,7 @@ async fn test_expired_outbound_reservation_releases() {
     .await
     .unwrap()
     .is_empty());
-    let releases = expired_outbound_reservation_releases(
+    let cancellations = expired_outbound_reservation_cancellations(
         &storage,
         &counterparty,
         outbound.outbound_message_id,
@@ -372,8 +372,8 @@ async fn test_expired_outbound_reservation_releases() {
     .await
     .unwrap();
 
-    assert_eq!(releases.len(), 1);
-    assert_eq!(releases[0].release.reservation_id, "res-1");
+    assert_eq!(cancellations.len(), 1);
+    assert_eq!(cancellations[0].cancellation.reservation_id, "res-1");
 }
 
 #[tokio::test]

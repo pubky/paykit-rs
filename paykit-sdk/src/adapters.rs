@@ -48,7 +48,7 @@ pub trait PaymentAdapter: Send + Sync {
     /// idempotent, expiring, or otherwise safe to abandon if the process stops
     /// before the SDK queues a Private Payment List.
     ///
-    /// The SDK releases reservations that become invalid before they are sent.
+    /// The SDK cancels reservations that become invalid before they are sent.
     /// Once a reservation-backed detail has been shared, payment-specific
     /// settlement, expiry, and cleanup remain adapter responsibilities.
     async fn reserve_receiving_details(
@@ -58,16 +58,16 @@ pub trait PaymentAdapter: Send + Sync {
         Ok(None)
     }
 
-    /// Release a previously reserved receiving detail.
+    /// Cancel a previously reserved receiving detail.
     ///
     /// Adapters that return reservations must implement this explicitly so
     /// cleanup cannot silently succeed while backend reservations remain held.
-    async fn release_receiving_detail_reservation(
+    async fn cancel_receiving_detail_reservation(
         &self,
-        _release: &PaymentEndpointReservationRelease,
+        _cancellation: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
         Err(PaykitSdkError::PaymentAdapter {
-            context: "receiving-detail reservation release is not implemented".into(),
+            context: "receiving-detail reservation cancellation is not implemented".into(),
             source: None,
         })
     }
@@ -136,9 +136,9 @@ pub struct PaymentEndpointReservation {
     pub attribution: HashMap<String, String>,
 }
 
-/// Request passed to release a receiving-detail reservation.
+/// Request passed to cancel a receiving-detail reservation.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentEndpointReservationRelease {
+pub struct PaymentEndpointReservationCancellation {
     /// Adapter-stable reservation id.
     pub reservation_id: String,
     /// Counterparty the reservation was intended for.
@@ -151,9 +151,9 @@ pub struct PaymentEndpointReservationRelease {
     pub attribution: HashMap<String, String>,
 }
 
-impl fmt::Debug for PaymentEndpointReservationRelease {
+impl fmt::Debug for PaymentEndpointReservationCancellation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PaymentEndpointReservationRelease")
+        f.debug_struct("PaymentEndpointReservationCancellation")
             .field("reservation_id", &self.reservation_id)
             .field("counterparty", &self.counterparty)
             .field("identifier", &self.identifier)

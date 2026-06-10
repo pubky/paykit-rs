@@ -31,9 +31,10 @@ use crate::{
         PublicContactMarkerStatus, PAYKIT_PROFILE_PATH,
     },
     endpoint_reservations::{
-        expired_outbound_reservation_releases, invalid_private_list_reservation_releases,
+        expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
         queue_private_payment_list_with_reservations_with_link_lease, reservation_payload_hash,
-        unattempted_superseded_reservation_releases, PaymentEndpointReservationReleaseRecord,
+        unattempted_superseded_reservation_cancellations,
+        PaymentEndpointReservationCancellationRecord,
     },
     endpoints::{
         desired_record, failed_record, normalize_receiving_details, pending_removal_record,
@@ -85,7 +86,7 @@ use crate::{
         OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter,
     },
     EndpointCompatibility, PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate,
-    PaymentEndpointEvaluation, PaymentEndpointReservation, PaymentEndpointReservationRelease,
+    PaymentEndpointEvaluation, PaymentEndpointReservation, PaymentEndpointReservationCancellation,
     PaymentEndpointReservationRequest, PaymentEndpointSelection, PaymentEndpointSelectionRequest,
     PaymentEndpointSource, PaymentTarget, PrivatePaymentListView, PubkyPublicKey,
     PubkySessionAccess, PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, Result,

@@ -425,12 +425,12 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         })
         .await
         .unwrap();
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         InvalidReservedPrivateListPaymentAdapter {
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
@@ -441,7 +441,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    assert!(released.lock().unwrap().is_empty());
+    assert!(canceled.lock().unwrap().is_empty());
     assert_eq!(
         storage
             .snapshot()
@@ -474,12 +474,12 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
     )
     .await
     .unwrap();
-    let released = Arc::new(Mutex::new(Vec::new()));
+    let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         MixedExistingReservedPrivateListPaymentAdapter {
-            released: released.clone(),
+            canceled: canceled.clone(),
         },
         PaykitSdkConfig::default(),
         FixedClock,
@@ -491,7 +491,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
     assert_eq!(
-        *released.lock().unwrap(),
+        *canceled.lock().unwrap(),
         vec!["conflicting-reservation".to_string()]
     );
     assert_eq!(

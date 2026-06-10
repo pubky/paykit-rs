@@ -27,7 +27,7 @@ where
         if queued.is_empty() {
             let lease = self.claim_peer_link_operation(&counterparty).await?;
             report.reservation_cleanup_failures.extend(
-                self.release_terminal_private_list_reservations(&counterparty, Some(&lease))
+                self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
                     .await,
             );
             return self.finish_peer_link_operation(lease, Ok(report)).await;
@@ -255,7 +255,7 @@ where
             .await?;
             let Some(sending) = sending else {
                 report.reservation_cleanup_failures.extend(
-                    self.release_terminal_private_list_reservations(&counterparty, Some(&lease))
+                    self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
                         .await,
                 );
                 break;
@@ -282,14 +282,14 @@ where
                     error,
                 });
                 report.reservation_cleanup_failures.extend(
-                    self.release_terminal_private_list_reservations(&counterparty, Some(&lease))
+                    self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
                         .await,
                 );
                 continue;
             }
 
             if sending.kind == PrivateMessageKind::PrivatePaymentList.as_str() {
-                let expired_releases = expired_outbound_reservation_releases(
+                let expired_releases = expired_outbound_reservation_cancellations(
                     &self.storage,
                     &counterparty,
                     sending.outbound_message_id,
@@ -317,15 +317,12 @@ where
                         error,
                     });
                     report.reservation_cleanup_failures.extend(
-                        self.release_reservation_records(expired_releases, Some(&lease))
+                        self.cancel_reservation_records(expired_releases, Some(&lease))
                             .await,
                     );
                     report.reservation_cleanup_failures.extend(
-                        self.release_terminal_private_list_reservations(
-                            &counterparty,
-                            Some(&lease),
-                        )
-                        .await,
+                        self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
+                            .await,
                     );
                     continue;
                 }
@@ -412,7 +409,7 @@ where
                             error,
                         });
                         report.reservation_cleanup_failures.extend(
-                            self.release_terminal_private_list_reservations(
+                            self.cancel_terminal_private_list_reservations(
                                 &counterparty,
                                 Some(&lease),
                             )
@@ -423,7 +420,7 @@ where
                 }
             }
             report.reservation_cleanup_failures.extend(
-                self.release_terminal_private_list_reservations(&counterparty, Some(&lease))
+                self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
                     .await,
             );
         }

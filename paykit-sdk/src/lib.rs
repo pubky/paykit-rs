@@ -30,7 +30,7 @@ mod endpoint_reservations;
 #[doc(inline)]
 pub use adapters::{
     EndpointCompatibility, PaymentAdapter, PaymentAmountContext, PaymentEndpointCandidate,
-    PaymentEndpointEvaluation, PaymentEndpointReservation, PaymentEndpointReservationRelease,
+    PaymentEndpointEvaluation, PaymentEndpointReservation, PaymentEndpointReservationCancellation,
     PaymentEndpointReservationRequest, PaymentEndpointSelection, PaymentEndpointSelectionRequest,
     PaymentEndpointSource, PaymentTarget, PubkySessionProvider, ReceivingDetail,
     ReceivingDetailScope,

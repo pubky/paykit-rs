@@ -302,9 +302,9 @@ pub trait PaymentAdapter {
         request: &PaymentEndpointReservationRequest,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>>;
 
-    async fn release_receiving_detail_reservation(
+    async fn cancel_receiving_detail_reservation(
         &self,
-        release: &PaymentEndpointReservationRelease,
+        cancellation: &PaymentEndpointReservationCancellation,
     ) -> Result<()>;
 
     async fn select_payment_endpoint(
@@ -348,10 +348,10 @@ reserved and ordinary entries should include both as returned reservations.
 
 The payment adapter creates reservations before the SDK can persist linked
 records. Adapters should make reserved details idempotent, expiring, or safe to
-abandon if the process stops before durable queueing. The SDK releases returned
+abandon if the process stops before durable queueing. The SDK cancels returned
 reservations on SDK-side validation or queueing failure.
 Any adapter that returns reservations must explicitly implement reservation
-release; cleanup must not be silently treated as successful.
+cancellation; cleanup must not be silently treated as successful.
 
 Reservation IDs are counterparty-scoped idempotency keys for SDK reservation
 records, not for Private Payment List delivery. Requeueing the same reservation
@@ -360,9 +360,9 @@ record to the latest outbound message id. Idempotent repeats preserve the
 original reservation attribution, expiry, and creation time; adapters that want
 new metadata should use a new reservation id.
 
-When cleanup starts releasing a persisted reservation through the payment
-adapter, the SDK marks the reservation as release-started in storage before
-calling the adapter. Reservation IDs with release-started records must not be
+When cleanup starts canceling a persisted reservation through the payment
+adapter, the SDK marks the reservation as cancellation-started in storage before
+calling the adapter. Reservation IDs with cancellation-started records must not be
 reused for new Private Payment Lists until cleanup removes the record.
 
 Single-use Payment Request reservations are outside the SDK shape until the
@@ -493,7 +493,7 @@ Tracks optional contact-scoped receiving details:
 - latest outbound message id used to queue the reservation for sharing
 - attribution metadata
 - reservation expiry, when provided by the payment adapter
-- release-started timestamp, when adapter cleanup is in progress
+- cancellation-started timestamp, when adapter cleanup is in progress
 
 ### PaymentRequestRecord
 
@@ -635,7 +635,7 @@ Recommended locks:
 - reservation transaction: stores reservation records and the outbound message
   that shares them atomically. Existing reservation IDs with the same
   counterparty, Payment Endpoint Identifier, and payload hash are idempotent;
-  release-started records, conflicting existing details, and duplicate IDs in
+  cancellation-started records, conflicting existing details, and duplicate IDs in
   the same batch are rejected.
   The idempotency applies to reservation records, while Private Payment List
   delivery remains latest-state and may queue another outbound message.
@@ -749,7 +749,7 @@ SDK behavior:
    persist the outbound record plus linked reservation records atomically.
 5. If reservations are not returned, ask `PaymentAdapter` for private receiving
    details scoped to the counterparty and queue the list normally.
-6. Release adapter reservations when SDK-side validation or queueing fails
+6. Cancel adapter reservations when SDK-side validation or queueing fails
    before durable queueing.
 7. Let the outbound Private Application Message worker send through Encrypted
    Link.

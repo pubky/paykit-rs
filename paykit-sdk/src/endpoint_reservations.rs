@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     adapters::{
-        PaymentEndpointReservation, PaymentEndpointReservationRelease,
+        PaymentEndpointReservation, PaymentEndpointReservationCancellation,
         PaymentEndpointReservationRequest, ReceivingDetail,
     },
     endpoints::normalize_receiving_details,
@@ -24,9 +24,9 @@ const MAX_RESERVATION_ID_LEN: usize = 128;
 
 /// SDK cleanup record for a reserved endpoint tied to a queued private list.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PaymentEndpointReservationReleaseRecord {
+pub(crate) struct PaymentEndpointReservationCancellationRecord {
     pub(crate) outbound_message_id: u64,
-    pub(crate) release: PaymentEndpointReservationRelease,
+    pub(crate) cancellation: PaymentEndpointReservationCancellation,
 }
 
 /// Load Payment Endpoint Reservation records for one counterparty.
@@ -43,14 +43,14 @@ where
         .await
 }
 
-/// Load reservation releases for superseded Private Payment Lists that were never attempted.
+/// Load reservation cancellations for superseded Private Payment Lists that were never attempted.
 ///
 /// Attempted private lists are left for adapter expiry or explicit cleanup because
 /// the SDK cannot prove the counterparty did not receive their reserved details.
-pub(crate) async fn unattempted_superseded_reservation_releases<S>(
+pub(crate) async fn unattempted_superseded_reservation_cancellations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-) -> Result<Vec<PaymentEndpointReservationReleaseRecord>>
+) -> Result<Vec<PaymentEndpointReservationCancellationRecord>>
 where
     S: StorageAdapter,
 {
@@ -67,23 +67,23 @@ where
                 .map(|message| message.outbound_message_id)
                 .collect::<std::collections::HashSet<_>>();
 
-            let releases = tx
+            let cancellations = tx
                 .payment_endpoint_reservations(counterparty)
                 .into_iter()
                 .filter(|record| superseded_unattempted.contains(&record.outbound_message_id))
-                .map(release_record_from_reservation_record)
+                .map(cancellation_record_from_reservation_record)
                 .collect();
-            Ok(releases)
+            Ok(cancellations)
         })
         .await
 }
 
-/// Load reservation releases for invalid Private Payment Lists that can no
+/// Load reservation cancellations for invalid Private Payment Lists that can no
 /// longer use their linked reservations.
-pub(crate) async fn invalid_private_list_reservation_releases<S>(
+pub(crate) async fn invalid_private_list_reservation_cancellations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-) -> Result<Vec<PaymentEndpointReservationReleaseRecord>>
+) -> Result<Vec<PaymentEndpointReservationCancellationRecord>>
 where
     S: StorageAdapter,
 {
@@ -99,25 +99,25 @@ where
                 .map(|message| message.outbound_message_id)
                 .collect::<std::collections::HashSet<_>>();
 
-            let releases = tx
+            let cancellations = tx
                 .payment_endpoint_reservations(counterparty)
                 .into_iter()
                 .filter(|record| invalid_private_lists.contains(&record.outbound_message_id))
-                .map(release_record_from_reservation_record)
+                .map(cancellation_record_from_reservation_record)
                 .collect();
-            Ok(releases)
+            Ok(cancellations)
         })
         .await
 }
 
-/// Load reservation releases for one outbound Private Payment List if any linked
+/// Load reservation cancellations for one outbound Private Payment List if any linked
 /// reservation expired before it was sent.
-pub(crate) async fn expired_outbound_reservation_releases<S>(
+pub(crate) async fn expired_outbound_reservation_cancellations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
     outbound_message_id: u64,
     now: DateTime<Utc>,
-) -> Result<Vec<PaymentEndpointReservationReleaseRecord>>
+) -> Result<Vec<PaymentEndpointReservationCancellationRecord>>
 where
     S: StorageAdapter,
 {
@@ -133,25 +133,25 @@ where
                     .expires_at
                     .is_some_and(|expires_at| expires_at <= now)
             });
-            let releases = if has_expired {
+            let cancellations = if has_expired {
                 records
                     .into_iter()
-                    .map(release_record_from_reservation_record)
+                    .map(cancellation_record_from_reservation_record)
                     .collect()
             } else {
                 Vec::new()
             };
-            Ok(releases)
+            Ok(cancellations)
         })
         .await
 }
 
-fn release_record_from_reservation_record(
+fn cancellation_record_from_reservation_record(
     record: PaymentEndpointReservationRecord,
-) -> PaymentEndpointReservationReleaseRecord {
-    PaymentEndpointReservationReleaseRecord {
+) -> PaymentEndpointReservationCancellationRecord {
+    PaymentEndpointReservationCancellationRecord {
         outbound_message_id: record.outbound_message_id,
-        release: PaymentEndpointReservationRelease {
+        cancellation: PaymentEndpointReservationCancellation {
             reservation_id: record.reservation_id,
             counterparty: record.counterparty,
             identifier: record.identifier,
@@ -225,9 +225,9 @@ where
                 let existing =
                     tx.payment_endpoint_reservation(&draft.counterparty, &draft.reservation_id);
                 if let Some(existing) = existing.as_ref() {
-                    if existing.release_started_at.is_some() {
+                    if existing.cancellation_started_at.is_some() {
                         return Err(PaykitSdkError::Policy(format!(
-                            "Payment Endpoint Reservation id '{}' is being released",
+                            "Payment Endpoint Reservation id '{}' is being canceled",
                             draft.reservation_id
                         )));
                     }
@@ -290,7 +290,7 @@ impl PaymentEndpointReservationRecordDraft {
             outbound_message_id,
             attribution,
             expires_at,
-            release_started_at: None,
+            cancellation_started_at: None,
             created_at,
         }
     }
@@ -381,7 +381,7 @@ impl fmt::Debug for PaymentEndpointReservationRecord {
                 &format_args!("<redacted:{} fields>", self.attribution.len()),
             )
             .field("expires_at", &self.expires_at)
-            .field("release_started_at", &self.release_started_at)
+            .field("cancellation_started_at", &self.cancellation_started_at)
             .field("created_at", &self.created_at)
             .finish()
     }

@@ -74,9 +74,9 @@ where
             counterparty: counterparty.clone(),
         };
         if let Some(reservations) = self.payment.reserve_receiving_details(&request).await? {
-            let releases = reservations
+            let cancellations = reservations
                 .iter()
-                .map(|reservation| reservation_release(&counterparty, reservation))
+                .map(|reservation| reservation_cancellation(&counterparty, reservation))
                 .collect::<Vec<_>>();
             let now = self.clock.now();
             let result = queue_private_payment_list_with_reservations_with_link_lease(
@@ -90,12 +90,12 @@ where
             match result {
                 Ok(record) => Ok(record),
                 Err(err) => {
-                    if let Err(release_err) = self
-                        .release_reservations_after_queue_error(&releases, &counterparty)
+                    if let Err(cancellation_err) = self
+                        .cancel_reservations_after_queue_error(&cancellations, &counterparty)
                         .await
                     {
                         return Err(PaykitSdkError::Policy(format!(
-                            "failed to queue reserved receiving details: {err}; reservation cleanup also failed: {release_err}"
+                            "failed to queue reserved receiving details: {err}; reservation cleanup also failed: {cancellation_err}"
                         )));
                     }
                     Err(err)
@@ -114,59 +114,64 @@ where
         }
     }
 
-    async fn release_reservations_after_queue_error(
+    async fn cancel_reservations_after_queue_error(
         &self,
-        releases: &[PaymentEndpointReservationRelease],
+        cancellations: &[PaymentEndpointReservationCancellation],
         counterparty: &PubkyPublicKey,
     ) -> Result<()> {
-        let mut release_errors = Vec::new();
-        for release in releases {
-            let can_release = self
+        let mut cancellation_errors = Vec::new();
+        for cancellation in cancellations {
+            let can_cancel = self
                 .storage
                 .transaction({
                     let counterparty = counterparty.clone();
-                    let release = release.clone();
+                    let cancellation = cancellation.clone();
                     move |tx| {
                         Ok(!tx
-                            .payment_endpoint_reservation(&counterparty, &release.reservation_id)
+                            .payment_endpoint_reservation(
+                                &counterparty,
+                                &cancellation.reservation_id,
+                            )
                             .is_some_and(|record| {
-                                record.reservation_id == release.reservation_id
-                                    && record.counterparty == release.counterparty
-                                    && record.identifier == release.identifier
-                                    && record.payload_hash == release.payload_hash
+                                record.reservation_id == cancellation.reservation_id
+                                    && record.counterparty == cancellation.counterparty
+                                    && record.identifier == cancellation.identifier
+                                    && record.payload_hash == cancellation.payload_hash
                             }))
                     }
                 })
                 .await?;
-            if !can_release {
+            if !can_cancel {
                 continue;
             }
             if let Err(err) = self
                 .payment
-                .release_receiving_detail_reservation(release)
+                .cancel_receiving_detail_reservation(cancellation)
                 .await
             {
-                release_errors.push(format!("{}: {err}", release.reservation_id));
+                cancellation_errors.push(format!("{}: {err}", cancellation.reservation_id));
             }
         }
-        if release_errors.is_empty() {
+        if cancellation_errors.is_empty() {
             Ok(())
         } else {
             Err(PaykitSdkError::Policy(format!(
-                "failed to release reserved receiving details: {}",
-                release_errors.join("; ")
+                "failed to cancel reserved receiving details: {}",
+                cancellation_errors.join("; ")
             )))
         }
     }
 
-    pub(super) async fn release_unattempted_superseded_reservations(
+    pub(super) async fn cancel_unattempted_superseded_reservations(
         &self,
         counterparty: &PubkyPublicKey,
         lease: Option<&PeerLinkOperationLease>,
     ) -> Vec<ReservationCleanupFailure> {
-        let releases =
-            match unattempted_superseded_reservation_releases(&self.storage, counterparty).await {
-                Ok(releases) => releases,
+        let cancellations =
+            match unattempted_superseded_reservation_cancellations(&self.storage, counterparty)
+                .await
+            {
+                Ok(cancellations) => cancellations,
                 Err(err) => {
                     return vec![ReservationCleanupFailure {
                         reservation_id: None,
@@ -174,20 +179,21 @@ where
                     }];
                 }
             };
-        self.release_reservation_records(releases, lease).await
+        self.cancel_reservation_records(cancellations, lease).await
     }
 
-    pub(super) async fn release_terminal_private_list_reservations(
+    pub(super) async fn cancel_terminal_private_list_reservations(
         &self,
         counterparty: &PubkyPublicKey,
         lease: Option<&PeerLinkOperationLease>,
     ) -> Vec<ReservationCleanupFailure> {
         let mut failures = self
-            .release_unattempted_superseded_reservations(counterparty, lease)
+            .cancel_unattempted_superseded_reservations(counterparty, lease)
             .await;
-        let releases =
-            match invalid_private_list_reservation_releases(&self.storage, counterparty).await {
-                Ok(releases) => releases,
+        let cancellations =
+            match invalid_private_list_reservation_cancellations(&self.storage, counterparty).await
+            {
+                Ok(cancellations) => cancellations,
                 Err(err) => {
                     failures.push(ReservationCleanupFailure {
                         reservation_id: None,
@@ -196,22 +202,22 @@ where
                     return failures;
                 }
             };
-        failures.extend(self.release_reservation_records(releases, lease).await);
+        failures.extend(self.cancel_reservation_records(cancellations, lease).await);
         failures
     }
 
-    pub(super) async fn release_reservation_records(
+    pub(super) async fn cancel_reservation_records(
         &self,
-        releases: Vec<PaymentEndpointReservationReleaseRecord>,
+        cancellations: Vec<PaymentEndpointReservationCancellationRecord>,
         lease: Option<&PeerLinkOperationLease>,
     ) -> Vec<ReservationCleanupFailure> {
         let mut failures = Vec::new();
-        for release_record in releases {
-            let release = release_record.release;
+        for cancellation_record in cancellations {
+            let cancellation = cancellation_record.cancellation;
             match self
-                .claim_reservation_release(
-                    &release,
-                    release_record.outbound_message_id,
+                .claim_reservation_cancellation(
+                    &cancellation,
+                    cancellation_record.outbound_message_id,
                     lease,
                     self.clock.now(),
                 )
@@ -221,7 +227,7 @@ where
                 Ok(false) => continue,
                 Err(err) => {
                     failures.push(ReservationCleanupFailure {
-                        reservation_id: Some(release.reservation_id),
+                        reservation_id: Some(cancellation.reservation_id),
                         error: err.to_string(),
                     });
                     continue;
@@ -229,31 +235,31 @@ where
             }
             match self
                 .payment
-                .release_receiving_detail_reservation(&release)
+                .cancel_receiving_detail_reservation(&cancellation)
                 .await
             {
                 Ok(()) => {
                     if let Err(err) = self
                         .storage
                         .transaction({
-                            let release = release.clone();
-                            let outbound_message_id = release_record.outbound_message_id;
+                            let cancellation = cancellation.clone();
+                            let outbound_message_id = cancellation_record.outbound_message_id;
                             move |tx| {
                                 if tx
                                     .payment_endpoint_reservation(
-                                        &release.counterparty,
-                                        &release.reservation_id,
+                                        &cancellation.counterparty,
+                                        &cancellation.reservation_id,
                                     )
                                     .is_some_and(|record| {
                                         record.outbound_message_id == outbound_message_id
-                                            && record.identifier == release.identifier
-                                            && record.payload_hash == release.payload_hash
-                                            && record.release_started_at.is_some()
+                                            && record.identifier == cancellation.identifier
+                                            && record.payload_hash == cancellation.payload_hash
+                                            && record.cancellation_started_at.is_some()
                                     })
                                 {
                                     tx.remove_payment_endpoint_reservation(
-                                        &release.counterparty,
-                                        &release.reservation_id,
+                                        &cancellation.counterparty,
+                                        &cancellation.reservation_id,
                                     );
                                 }
                                 Ok(())
@@ -262,13 +268,13 @@ where
                         .await
                     {
                         failures.push(ReservationCleanupFailure {
-                            reservation_id: Some(release.reservation_id.clone()),
+                            reservation_id: Some(cancellation.reservation_id.clone()),
                             error: err.to_string(),
                         });
                     }
                 }
                 Err(err) => failures.push(ReservationCleanupFailure {
-                    reservation_id: Some(release.reservation_id),
+                    reservation_id: Some(cancellation.reservation_id),
                     error: err.to_string(),
                 }),
             }
@@ -276,34 +282,34 @@ where
         failures
     }
 
-    async fn claim_reservation_release(
+    async fn claim_reservation_cancellation(
         &self,
-        release: &PaymentEndpointReservationRelease,
+        cancellation: &PaymentEndpointReservationCancellation,
         outbound_message_id: u64,
         lease: Option<&PeerLinkOperationLease>,
         now: DateTime<Utc>,
     ) -> Result<bool> {
         self.storage
             .transaction({
-                let release = release.clone();
+                let cancellation = cancellation.clone();
                 let lease = lease.cloned();
                 move |tx| {
                     if let Some(lease) = lease.as_ref() {
                         crate::storage::require_peer_link_operation_lease(tx, lease)?;
                     }
                     let Some(mut record) = tx.payment_endpoint_reservation(
-                        &release.counterparty,
-                        &release.reservation_id,
+                        &cancellation.counterparty,
+                        &cancellation.reservation_id,
                     ) else {
                         return Ok(false);
                     };
                     if record.outbound_message_id != outbound_message_id
-                        || record.identifier != release.identifier
-                        || record.payload_hash != release.payload_hash
+                        || record.identifier != cancellation.identifier
+                        || record.payload_hash != cancellation.payload_hash
                     {
                         return Ok(false);
                     }
-                    record.release_started_at = Some(now);
+                    record.cancellation_started_at = Some(now);
                     tx.save_payment_endpoint_reservation(record);
                     Ok(true)
                 }
@@ -323,11 +329,11 @@ where
     }
 }
 
-fn reservation_release(
+fn reservation_cancellation(
     counterparty: &PubkyPublicKey,
     reservation: &PaymentEndpointReservation,
-) -> PaymentEndpointReservationRelease {
-    PaymentEndpointReservationRelease {
+) -> PaymentEndpointReservationCancellation {
+    PaymentEndpointReservationCancellation {
         reservation_id: reservation.reservation_id.clone(),
         counterparty: counterparty.clone(),
         identifier: reservation.receiving_detail.identifier.clone(),

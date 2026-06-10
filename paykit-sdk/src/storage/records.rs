@@ -89,9 +89,9 @@ pub struct PaymentEndpointReservationRecord {
     pub attribution: HashMap<String, String>,
     /// Optional reservation expiry.
     pub expires_at: Option<DateTime<Utc>>,
-    /// Time at which adapter release was claimed for this reservation.
+    /// Time at which adapter cancellation was claimed for this reservation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release_started_at: Option<DateTime<Utc>>,
+    pub cancellation_started_at: Option<DateTime<Utc>>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
 }
