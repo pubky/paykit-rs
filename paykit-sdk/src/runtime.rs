@@ -26,10 +26,13 @@ use crate::{
         PrivateSharingPolicy, PublicContactSharingPolicy,
     },
     contacts::{
-        parse_profile_json, profile_json, public_contact_json, public_contact_path,
-        ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
-        ContactRecord, ContactUpdate, PaykitProfile, PaykitProfileRecord,
-        PublicContactMarkerStatus, PAYKIT_PROFILE_PATH,
+        parse_profile_json, parse_pubky_profile_json, paykit_blob_path,
+        paykit_blob_path_from_uri_or_path, paykit_blob_uri, profile_json,
+        pubky_follow_keys_from_follow_entries, public_contact_json, ContactPaymentResolution,
+        ContactPaymentResolutionRequest, ContactPaymentResolutionStatus, ContactProfileResolution,
+        ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
+        PubkyProfileRecord, PublicContactMarkerStatus, PUBKY_FOLLOWS_PATH_PREFIX,
+        PUBKY_PROFILE_PATH,
     },
     endpoint_reservations::{
         expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
@@ -483,9 +486,6 @@ async fn fetch_public_text(
                     context: context.into(),
                     source: Some(err.into()),
                 })?;
-            if bytes.is_empty() {
-                return Ok(None);
-            }
             String::from_utf8(bytes.to_vec())
                 .map(Some)
                 .map_err(|err| PaykitSdkError::Protocol(format!("{context}: invalid UTF-8: {err}")))
@@ -493,6 +493,68 @@ async fn fetch_public_text(
         Err(err) if is_pubky_not_found(&err) => Ok(None),
         Err(err) => Err(map_pubky_transport_error(context, err)),
     }
+}
+
+async fn fetch_public_file_uri(
+    storage: &pubky::PublicStorage,
+    uri: &str,
+    context: &'static str,
+) -> Result<Option<Vec<u8>>> {
+    let resource = uri
+        .parse::<pubky::PubkyResource>()
+        .map_err(|err| PaykitSdkError::Protocol(format!("{context}: invalid Pubky URI: {err}")))?;
+    match storage.get(resource).await {
+        Ok(resp) => resp
+            .bytes()
+            .await
+            .map(|bytes| Some(bytes.to_vec()))
+            .map_err(|err| PaykitSdkError::Transport {
+                context: context.into(),
+                source: Some(err.into()),
+            }),
+        Err(err) if is_pubky_not_found(&err) => Ok(None),
+        Err(err) => Err(map_pubky_transport_error(context, err)),
+    }
+}
+
+async fn list_public_resources(
+    storage: &pubky::PublicStorage,
+    public_key: &PubkyPublicKey,
+    path: &str,
+    context: &'static str,
+) -> Result<Vec<pubky::PubkyResource>> {
+    const LIST_PAGE_LIMIT: u16 = 100;
+
+    let addr = format!("{public_key}{path}");
+    let mut entries = Vec::new();
+    let mut cursor = None::<String>;
+    loop {
+        let mut builder = storage
+            .list(&addr)
+            .map_err(|err| map_pubky_transport_error(context, err))?
+            .shallow(true)
+            .limit(LIST_PAGE_LIMIT);
+        if let Some(cursor) = cursor.as_deref() {
+            builder = builder.cursor(cursor);
+        }
+        let page = match builder.send().await {
+            Ok(page) => page,
+            Err(err) if is_pubky_not_found(&err) => return Ok(entries),
+            Err(err) => return Err(map_pubky_transport_error(context, err)),
+        };
+        if page.is_empty() {
+            break;
+        }
+        let page_len = page.len();
+        cursor = page
+            .last()
+            .map(|entry| format!("{}{}", entry.owner.z32(), entry.path.as_str()));
+        entries.extend(page);
+        if page_len < LIST_PAGE_LIMIT as usize {
+            break;
+        }
+    }
+    Ok(entries)
 }
 
 fn map_pubky_transport_error(context: &'static str, err: PubkyError) -> PaykitSdkError {

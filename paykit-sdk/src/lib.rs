@@ -40,13 +40,15 @@ pub use backup::{export_backup_state, RestoreReport, SdkBackupState, SDK_BACKUP_
 #[doc(inline)]
 pub use config::{
     EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
-    PrivateSharingPolicy, PublicContactSharingPolicy,
+    PrivateSharingPolicy, PublicContactSharingPolicy, DEFAULT_PROFILE_NAMESPACE,
 };
 #[doc(inline)]
 pub use contacts::{
     ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
-    ContactRecord, ContactUpdate, PaykitProfile, PaykitProfileRecord, PublicContactMarkerStatus,
-    PAYKIT_PROFILE_BLOB_PATH_PREFIX, PAYKIT_PROFILE_PATH, PAYKIT_PUBLIC_CONTACT_PATH_PREFIX,
+    ContactProfileResolution, ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord,
+    PaykitProfile, PaykitProfileRecord, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
+    PublicContactMarkerStatus, PAYKIT_PROFILE_BLOB_PATH_PREFIX, PAYKIT_PROFILE_PATH,
+    PAYKIT_PUBLIC_CONTACT_PATH_PREFIX, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
 };
 #[doc(inline)]
 pub use endpoints::{

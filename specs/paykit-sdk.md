@@ -252,38 +252,70 @@ The SDK provides default Pubky-backed Paykit-facing profile metadata so
 different Paykit apps can interoperate. This belongs in the SDK, not in
 `paykit-lib` core protocol validation.
 
-The default public profile namespace is unversioned:
+The default public profile/contact namespace is unversioned:
 
 - profile record: `/pub/paykit/profile.json`
-- profile blobs: `/pub/paykit/blobs/...`
+- Paykit blobs: `/pub/paykit/blobs/...`
+- public contact markers: `/pub/paykit/contacts/...`
 
 Public Payment Endpoints remain under `/pub/paykit/v0/`, so SDK profile paths
 do not collide with Payment Endpoint Identifier files.
 
-`image_uri` may point at `/pub/paykit/blobs/...` or another public image
-location. The SDK profile API publishes `profile.json`; blob upload/delete
-helpers are caller-managed.
+Apps that already have a public product namespace can configure the SDK
+profile/contact namespace segment. For example, `profile_namespace =
+"bitkit.to"` makes Paykit Profile and contact marker helpers use
+`/pub/bitkit.to/profile.json`, `/pub/bitkit.to/blobs/...`, and
+`/pub/bitkit.to/contacts/...`. This does not change core Paykit Protocol paths
+such as public Payment Endpoints.
+
+`image_uri` may point at the configured blob prefix or another public image
+location. The SDK can publish/delete Paykit blobs under the configured blob
+prefix and can fetch public `pubky://` files referenced by profile metadata as
+bytes or UTF-8 text. Image decoding, resizing, platform cache integration, and
+UI rendering stay in the app/bindings layer. These helpers are not a generic
+Pubky file-management layer.
+
+Paykit Profile has a small shared display core plus an app-owned `extra` JSON
+object for product-specific public fields. The SDK always publishes and fetches
+the Paykit Profile document shape; existing product profile schemas remain
+app-owned unless the app maps the fields into `extra`. The SDK stores and
+returns `extra`, but does not assign protocol meaning to those app-specific
+fields.
+
+This is separate from the Pubky app profile namespace:
+
+- Pubky app profile: `/pub/pubky.app/profile.json`
+- Pubky app follows: `/pub/pubky.app/follows/`
+
+The SDK can expose read-only helpers for Pubky app profile and follows so
+Paykit apps do not reimplement basic Pubky reads. It must not write Pubky app
+profile or follows data; those remain owned by Pubky app/product flows.
+
+For contact display, the SDK should expose a resolver that tries Paykit Profile
+first and can fall back to Pubky Profile when no Paykit Profile exists. This
+lets apps reuse a common display fallback while keeping the two namespaces
+separate. Malformed Paykit Profile data should surface as an error instead of
+being silently hidden by fallback.
 
 Default profile records can be public because they are display metadata.
 Contacts need more care because they can reveal a social/payment graph. The SDK
 keeps saved contacts in local/private SDK storage by default. Public contact
-markers under `/pub/paykit/contacts/` are opt-in through SDK policy and explicit
-runtime calls.
+markers under the configured contact marker prefix are opt-in through SDK policy
+and explicit runtime calls.
 
 Profile JSON may ignore unknown fields so the public profile schema can grow
 without breaking older SDKs. Private Paykit protocol messages remain
 closed-world unless their spec says otherwise.
 
-Schemas should be small, versioned, and Paykit-facing:
+Paykit schemas should be small, versioned, and Paykit-facing:
 
 - profile display name and image pointer
 - normalized Pubky public key
 - contact public key
-- optional local display snapshot
 - optional public contact marker
 
-The SDK should not standardize product profile pages, social graph semantics,
-contact grouping, or UI behavior.
+The SDK should not standardize product profile pages, Pubky app follows
+semantics, contact grouping, or UI behavior.
 
 ### PaymentAdapter
 
@@ -963,8 +995,9 @@ checkpoints is future work and must not be assumed by current restore behavior.
 
 The Rust SDK exposes initialization, identity status, public endpoint
 sync, linked peer handshakes, private stream receive, Private Payment List
-derivation/publication, Paykit Profile publication/fetching, local Contact
-Record CRUD/profile refresh, contact payment resolution, outbound Private
+derivation/publication, Paykit Profile publication/fetching, read-only Pubky
+profile/follows helpers, local Contact Record CRUD/profile refresh, contact
+payment resolution, outbound Private
 Application Message processing, Receipt Access indexing/retrieval, Payment
 Request lifecycle derivation plus checked outbound lifecycle queueing, optional
 Payment Endpoint Reservation records, and backup/export/restore for SDK-managed
@@ -978,6 +1011,30 @@ impl PaykitSdk {
     async fn sign_out(&mut self) -> Result<()>;
 
     async fn clear_public_endpoints(&mut self) -> Result<EndpointSyncReport>;
+
+    async fn publish_paykit_profile(&self, profile: PaykitProfile) -> Result<PaykitProfileRecord>;
+    async fn fetch_paykit_profile(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<Option<PaykitProfileRecord>>;
+    async fn publish_paykit_blob(
+        &self,
+        blob_name: String,
+        bytes: Vec<u8>,
+    ) -> Result<PaykitBlobRecord>;
+    async fn delete_paykit_blob(&self, uri_or_path: &str) -> Result<()>;
+    async fn fetch_pubky_file(&self, uri: &str) -> Result<Option<Vec<u8>>>;
+    async fn fetch_pubky_text(&self, uri: &str) -> Result<Option<String>>;
+    async fn fetch_pubky_profile(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<Option<PubkyProfileRecord>>;
+    async fn fetch_pubky_follows(&self, public_key: PubkyPublicKey) -> Result<Vec<PubkyPublicKey>>;
+    async fn resolve_contact_profile(
+        &self,
+        public_key: PubkyPublicKey,
+        allow_pubky_profile_fallback: bool,
+    ) -> Result<Option<ContactProfileResolution>>;
 
     async fn sync_contact(&mut self, counterparty: PubkyPublicKey) -> Result<ContactSyncReport>;
     async fn sync_saved_contacts(&mut self, contacts: Vec<PubkyPublicKey>) -> Result<SyncReport>;

@@ -91,6 +91,67 @@ async fn test_save_contact_empty_label_clears_existing_label() {
 }
 
 #[tokio::test]
+async fn test_publish_paykit_blob_requires_session() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local_public_key),
+            capability: PubkyIdentityCapability::PublicOnly,
+            local_secret_available: false,
+            initialized_at: FixedClock.now(),
+            sign_out_generation: 0,
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .publish_paykit_blob("avatar.jpg".into(), vec![1, 2, 3])
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+}
+
+#[tokio::test]
+async fn test_delete_paykit_blob_requires_initialized_session() {
+    let sdk = PaykitSdk::with_clock(
+        InMemoryStorage::new(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk.delete_paykit_blob("/pub/paykit/blobs/avatar.jpg").await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+}
+
+#[tokio::test]
+async fn test_fetch_pubky_file_requires_public_storage() {
+    let sdk = PaykitSdk::with_clock(
+        InMemoryStorage::new(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .fetch_pubky_file("pubky://invalid/pub/paykit/blobs/avatar.jpg")
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+}
+
+#[tokio::test]
 async fn test_remove_contact_blocks_when_public_marker_may_exist() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -185,7 +246,7 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
         PaykitSdkConfig {
-            public_contact_sharing: PublicContactSharingPolicy::PublicPaykitNamespace,
+            public_contact_sharing: PublicContactSharingPolicy::ConfiguredPublicNamespace,
             ..PaykitSdkConfig::default()
         },
         FixedClock,
@@ -367,7 +428,7 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
         PaykitSdkConfig {
-            public_contact_sharing: PublicContactSharingPolicy::PublicPaykitNamespace,
+            public_contact_sharing: PublicContactSharingPolicy::ConfiguredPublicNamespace,
             ..PaykitSdkConfig::default()
         },
         FixedClock,

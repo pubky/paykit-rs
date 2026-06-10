@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::identity::PubkyPublicKey;
+
+/// Default namespace segment for SDK profile/contact public data.
+pub const DEFAULT_PROFILE_NAMESPACE: &str = "paykit";
+
 /// Policy for SDK-managed public Payment Endpoint cleanup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -37,13 +42,17 @@ pub enum EncryptedLinkRecoveryMarkerPolicy {
 pub enum PublicContactSharingPolicy {
     /// Keep saved contacts only in local SDK storage. This is the default.
     LocalOnly,
-    /// Allow explicit public contact marker publication under `/pub/paykit/contacts/`.
-    PublicPaykitNamespace,
+    /// Allow explicit public contact marker publication in the configured namespace.
+    #[serde(alias = "PublicPaykitNamespace")]
+    ConfiguredPublicNamespace,
 }
 
 /// Runtime configuration for Paykit SDK.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaykitSdkConfig {
+    /// Namespace segment for SDK profile/contact public data under `/pub/`.
+    #[serde(default = "default_profile_namespace")]
+    pub profile_namespace: String,
     /// Public endpoint management scope.
     pub endpoint_management_scope: EndpointManagementScope,
     /// Private Paykit message sharing policy.
@@ -70,6 +79,7 @@ pub struct PaykitSdkConfig {
 impl Default for PaykitSdkConfig {
     fn default() -> Self {
         Self {
+            profile_namespace: DEFAULT_PROFILE_NAMESPACE.into(),
             endpoint_management_scope: EndpointManagementScope::ManagedOnly,
             private_sharing: PrivateSharingPolicy::Enabled,
             public_fallback_enabled: true,
@@ -85,6 +95,7 @@ impl Default for PaykitSdkConfig {
 impl PaykitSdkConfig {
     /// Validate runtime configuration values.
     pub fn validate(&self) -> crate::Result<()> {
+        validate_profile_namespace(&self.profile_namespace)?;
         validate_runtime_duration(
             "peer link operation lease timeout",
             self.peer_link_operation_lease_timeout,
@@ -99,6 +110,62 @@ impl PaykitSdkConfig {
         )?;
         Ok(())
     }
+
+    /// Return the configured Paykit Profile path.
+    pub fn paykit_profile_path(&self) -> String {
+        format!("/pub/{}/profile.json", self.profile_namespace)
+    }
+
+    /// Return the configured Paykit Profile blob path prefix.
+    pub fn paykit_profile_blob_path_prefix(&self) -> String {
+        format!("/pub/{}/blobs/", self.profile_namespace)
+    }
+
+    /// Return the configured public contact marker path prefix.
+    pub fn public_contact_path_prefix(&self) -> String {
+        format!("/pub/{}/contacts/", self.profile_namespace)
+    }
+
+    /// Return the configured public contact marker path for one contact.
+    pub fn public_contact_path(&self, public_key: &PubkyPublicKey) -> String {
+        format!(
+            "{}{}.json",
+            self.public_contact_path_prefix(),
+            public_key.as_str()
+        )
+    }
+}
+
+fn validate_profile_namespace(namespace: &str) -> crate::Result<()> {
+    if namespace.is_empty() {
+        return Err(crate::PaykitSdkError::Policy(
+            "profile namespace must not be empty".into(),
+        ));
+    }
+    if namespace.len() > 128 {
+        return Err(crate::PaykitSdkError::Policy(
+            "profile namespace must not exceed 128 bytes".into(),
+        ));
+    }
+    if namespace.starts_with('.') || namespace.ends_with('.') {
+        return Err(crate::PaykitSdkError::Policy(
+            "profile namespace must not start or end with '.'".into(),
+        ));
+    }
+    if namespace == "pubky.app" {
+        return Err(crate::PaykitSdkError::Policy(
+            "profile namespace 'pubky.app' is reserved for Pubky app data".into(),
+        ));
+    }
+    if namespace
+        .chars()
+        .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_'))
+    {
+        return Err(crate::PaykitSdkError::Policy(
+            "profile namespace may only contain ASCII letters, digits, '.', '-' and '_'".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_runtime_duration(label: &str, duration: Duration) -> crate::Result<()> {
@@ -119,6 +186,10 @@ fn default_encrypted_link_recovery_marker_policy() -> EncryptedLinkRecoveryMarke
 
 fn default_public_contact_sharing_policy() -> PublicContactSharingPolicy {
     PublicContactSharingPolicy::LocalOnly
+}
+
+fn default_profile_namespace() -> String {
+    DEFAULT_PROFILE_NAMESPACE.into()
 }
 
 fn default_outbound_private_retry_backoff() -> Duration {

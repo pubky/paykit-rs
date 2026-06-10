@@ -10,12 +10,14 @@ use crate::{
 
 /// Default public Paykit profile path.
 pub const PAYKIT_PROFILE_PATH: &str = "/pub/paykit/profile.json";
-/// Default public Paykit profile blob prefix.
-///
-/// Profile image blob upload/delete helpers are caller-managed.
+/// Default public Paykit blob prefix.
 pub const PAYKIT_PROFILE_BLOB_PATH_PREFIX: &str = "/pub/paykit/blobs/";
 /// Default public Paykit contact marker prefix.
 pub const PAYKIT_PUBLIC_CONTACT_PATH_PREFIX: &str = "/pub/paykit/contacts/";
+/// Pubky app profile path used by read-only helper APIs.
+pub const PUBKY_PROFILE_PATH: &str = "/pub/pubky.app/profile.json";
+/// Pubky app follows path used by read-only helper APIs.
+pub const PUBKY_FOLLOWS_PATH_PREFIX: &str = "/pub/pubky.app/follows/";
 
 const PROFILE_KIND: &str = "paykit.profile";
 const PUBLIC_CONTACT_KIND: &str = "paykit.contact";
@@ -23,12 +25,18 @@ const PROFILE_VERSION: u32 = 1;
 const PUBLIC_CONTACT_VERSION: u32 = 1;
 const MAX_DISPLAY_NAME_CHARS: usize = 128;
 const MAX_IMAGE_URI_CHARS: usize = 2048;
+const MAX_PROFILE_EXTRA_BYTES: usize = 16 * 1024;
+const MAX_PAYKIT_BLOB_NAME_BYTES: usize = 128;
 const MAX_LOCAL_LABEL_CHARS: usize = 128;
+const MAX_PUBKY_PROFILE_NAME_CHARS: usize = 128;
+const MAX_PUBKY_PROFILE_TEXT_CHARS: usize = 4096;
+const MAX_PUBKY_PROFILE_URI_CHARS: usize = 2048;
+const MAX_PUBKY_PROFILE_LINKS: usize = 32;
 
 /// Public Paykit-facing profile metadata.
 ///
-/// This record is intentionally small and public. Keep product-specific profile
-/// data outside this SDK profile unless it is safe to publish.
+/// This record is public. Product-specific metadata can be carried in `extra`
+/// when it is safe to publish.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaykitProfile {
     /// Public display name.
@@ -37,6 +45,187 @@ pub struct PaykitProfile {
     /// Public image pointer such as a Pubky path or URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_uri: Option<String>,
+    /// App-specific public profile fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Public profile metadata from the Pubky app namespace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PubkyProfile {
+    /// Public display name.
+    pub name: String,
+    /// Optional profile bio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
+    /// Optional public image pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Optional public profile links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links: Option<Vec<PubkyProfileLink>>,
+    /// Optional public status text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+impl PubkyProfile {
+    /// Validate Pubky profile field bounds.
+    pub fn validate(&self) -> Result<()> {
+        validate_text(
+            &self.name,
+            "Pubky profile name",
+            MAX_PUBKY_PROFILE_NAME_CHARS,
+            false,
+        )?;
+        validate_optional_text(
+            self.bio.as_deref(),
+            "Pubky profile bio",
+            MAX_PUBKY_PROFILE_TEXT_CHARS,
+            true,
+        )?;
+        validate_optional_text(
+            self.image.as_deref(),
+            "Pubky profile image",
+            MAX_PUBKY_PROFILE_URI_CHARS,
+            false,
+        )?;
+        validate_optional_text(
+            self.status.as_deref(),
+            "Pubky profile status",
+            MAX_PUBKY_PROFILE_TEXT_CHARS,
+            true,
+        )?;
+        if let Some(links) = self.links.as_ref() {
+            if links.len() > MAX_PUBKY_PROFILE_LINKS {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "Pubky profile links must not exceed {MAX_PUBKY_PROFILE_LINKS} entries"
+                )));
+            }
+            for link in links {
+                link.validate()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Public profile link from the Pubky app namespace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PubkyProfileLink {
+    /// Link title.
+    pub title: String,
+    /// Link URL.
+    pub url: String,
+}
+
+impl PubkyProfileLink {
+    /// Validate Pubky profile link field bounds.
+    pub fn validate(&self) -> Result<()> {
+        validate_text(
+            &self.title,
+            "Pubky profile link title",
+            MAX_PUBKY_PROFILE_NAME_CHARS,
+            true,
+        )?;
+        validate_text(
+            &self.url,
+            "Pubky profile link URL",
+            MAX_PUBKY_PROFILE_URI_CHARS,
+            false,
+        )
+    }
+}
+
+/// Pubky profile record fetched through the SDK.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PubkyProfileRecord {
+    /// Profile owner.
+    pub public_key: PubkyPublicKey,
+    /// Public profile metadata.
+    pub profile: PubkyProfile,
+    /// Pubky path used for the profile.
+    pub path: String,
+    /// Local observation time.
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Source used for a resolved contact profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ContactProfileSource {
+    /// Resolved from the configured Paykit Profile path.
+    PaykitProfile,
+    /// Resolved from `/pub/pubky.app/profile.json`.
+    PubkyProfile,
+}
+
+/// Contact display profile resolved by trying Paykit Profile first.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactProfileResolution {
+    /// Profile owner.
+    pub public_key: PubkyPublicKey,
+    /// Source that produced this profile.
+    pub source: ContactProfileSource,
+    /// Normalized display name for app contact lists.
+    pub display_name: Option<String>,
+    /// Normalized image pointer for app contact lists.
+    pub image_uri: Option<String>,
+    /// Paykit Profile payload when the source is Paykit Profile.
+    pub paykit_profile: Option<PaykitProfile>,
+    /// Pubky Profile payload when the source is Pubky Profile.
+    pub pubky_profile: Option<PubkyProfile>,
+    /// Local observation time.
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl fmt::Debug for ContactProfileResolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContactProfileResolution")
+            .field("public_key", &"<redacted>")
+            .field("source", &self.source)
+            .field(
+                "display_name",
+                &self.display_name.as_ref().map(|_| "<redacted>"),
+            )
+            .field("image_uri", &self.image_uri.as_ref().map(|_| "<redacted>"))
+            .field(
+                "paykit_profile",
+                &self.paykit_profile.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "pubky_profile",
+                &self.pubky_profile.as_ref().map(|_| "<redacted>"),
+            )
+            .field("fetched_at", &self.fetched_at)
+            .finish()
+    }
+}
+
+impl ContactProfileResolution {
+    pub(crate) fn from_paykit(record: PaykitProfileRecord) -> Self {
+        Self {
+            public_key: record.public_key,
+            source: ContactProfileSource::PaykitProfile,
+            display_name: record.profile.display_name.clone(),
+            image_uri: record.profile.image_uri.clone(),
+            paykit_profile: Some(record.profile),
+            pubky_profile: None,
+            fetched_at: record.updated_at,
+        }
+    }
+
+    pub(crate) fn from_pubky(record: PubkyProfileRecord) -> Self {
+        Self {
+            public_key: record.public_key,
+            source: ContactProfileSource::PubkyProfile,
+            display_name: Some(record.profile.name.clone()),
+            image_uri: record.profile.image.clone(),
+            paykit_profile: None,
+            pubky_profile: Some(record.profile),
+            fetched_at: record.fetched_at,
+        }
+    }
 }
 
 impl PaykitProfile {
@@ -54,6 +243,16 @@ impl PaykitProfile {
             MAX_IMAGE_URI_CHARS,
             false,
         )?;
+        if let Some(extra) = self.extra.as_ref() {
+            let extra_json = serde_json::to_vec(extra).map_err(|err| {
+                PaykitSdkError::Protocol(format!("profile extra must be valid JSON: {err}"))
+            })?;
+            if extra_json.len() > MAX_PROFILE_EXTRA_BYTES {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "profile extra must not exceed {MAX_PROFILE_EXTRA_BYTES} bytes"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -68,6 +267,21 @@ pub struct PaykitProfileRecord {
     /// Pubky path used for the profile.
     pub path: String,
     /// Local observation/publication time.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Public blob published under the configured Paykit namespace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaykitBlobRecord {
+    /// Blob owner.
+    pub public_key: PubkyPublicKey,
+    /// Pubky path used for the blob.
+    pub path: String,
+    /// Canonical `pubky://` URI for the blob.
+    pub uri: String,
+    /// Blob size in bytes.
+    pub size_bytes: u64,
+    /// Local publication time.
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -333,11 +547,98 @@ pub(crate) fn parse_profile_json(raw_json: &str) -> Result<PaykitProfile> {
     Ok(document.profile)
 }
 
-pub(crate) fn public_contact_path(public_key: &PubkyPublicKey) -> String {
-    format!(
-        "{PAYKIT_PUBLIC_CONTACT_PATH_PREFIX}{}.json",
-        public_key.as_str()
-    )
+pub(crate) fn validate_paykit_blob_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(PaykitSdkError::Protocol(
+            "Paykit blob name must not be empty".into(),
+        ));
+    }
+    if name.len() > MAX_PAYKIT_BLOB_NAME_BYTES {
+        return Err(PaykitSdkError::Protocol(format!(
+            "Paykit blob name must not exceed {MAX_PAYKIT_BLOB_NAME_BYTES} bytes"
+        )));
+    }
+    if name == "." || name == ".." {
+        return Err(PaykitSdkError::Protocol(
+            "Paykit blob name must not be a path traversal segment".into(),
+        ));
+    }
+    if name
+        .chars()
+        .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_'))
+    {
+        return Err(PaykitSdkError::Protocol(
+            "Paykit blob name may only contain ASCII letters, digits, '.', '-' and '_'".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn paykit_blob_path(blob_prefix: &str, name: &str) -> Result<String> {
+    validate_paykit_blob_name(name)?;
+    Ok(format!("{blob_prefix}{name}"))
+}
+
+pub(crate) fn paykit_blob_uri(public_key: &PubkyPublicKey, path: &str) -> String {
+    format!("pubky://{}{}", public_key.as_str(), path)
+}
+
+pub(crate) fn paykit_blob_path_from_uri_or_path(
+    public_key: &PubkyPublicKey,
+    blob_prefix: &str,
+    uri_or_path: &str,
+) -> Result<String> {
+    if uri_or_path.starts_with("pubky://") || uri_or_path.starts_with("pubky") {
+        let resource = uri_or_path
+            .parse::<pubky::PubkyResource>()
+            .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky blob URI: {err}")))?;
+        let owner = PubkyPublicKey::from_public_key(&resource.owner);
+        if &owner != public_key {
+            return Err(PaykitSdkError::Protocol(
+                "Paykit blob URI owner does not match local identity".into(),
+            ));
+        }
+        return validate_paykit_blob_path(blob_prefix, resource.path.as_str());
+    }
+    validate_paykit_blob_path(blob_prefix, uri_or_path)
+}
+
+fn validate_paykit_blob_path(blob_prefix: &str, path: &str) -> Result<String> {
+    let name = path.strip_prefix(blob_prefix).ok_or_else(|| {
+        PaykitSdkError::Protocol("Paykit blob path is outside configured blob prefix".into())
+    })?;
+    validate_paykit_blob_name(name)?;
+    Ok(path.to_owned())
+}
+
+pub(crate) fn parse_pubky_profile_json(raw_json: &str) -> Result<PubkyProfile> {
+    let profile = serde_json::from_str::<PubkyProfile>(raw_json)
+        .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky profile JSON: {err}")))?;
+    profile.validate()?;
+    Ok(profile)
+}
+
+pub(crate) fn pubky_follow_keys_from_follow_entries(
+    entries: Vec<pubky::PubkyResource>,
+) -> Vec<PubkyPublicKey> {
+    let mut contacts = entries
+        .into_iter()
+        .filter_map(|entry| {
+            direct_pubky_follow_key(entry.path.as_str())
+                .and_then(|value| PubkyPublicKey::new(value.to_owned()).ok())
+        })
+        .collect::<Vec<_>>();
+    contacts.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    contacts.dedup_by(|left, right| left == right);
+    contacts
+}
+
+fn direct_pubky_follow_key(path: &str) -> Option<&str> {
+    let value = path.strip_prefix(PUBKY_FOLLOWS_PATH_PREFIX)?;
+    if value.is_empty() || value.contains('/') {
+        return None;
+    }
+    Some(value)
 }
 
 pub(crate) fn public_contact_json(public_key: &PubkyPublicKey) -> Result<String> {
@@ -431,6 +732,10 @@ fn validate_optional_text(
         )));
     }
     Ok(())
+}
+
+fn validate_text(value: &str, label: &str, max_chars: usize, allow_empty: bool) -> Result<()> {
+    validate_optional_text(Some(value), label, max_chars, allow_empty)
 }
 
 fn normalize_label(label: Option<String>) -> Option<String> {

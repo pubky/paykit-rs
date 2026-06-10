@@ -64,31 +64,35 @@ where
 
     /// Publish the local public Paykit profile.
     ///
-    /// This writes only `/pub/paykit/profile.json`. Profile image blob upload
-    /// and deletion are caller-managed.
-    pub async fn publish_profile(&self, profile: PaykitProfile) -> Result<PaykitProfileRecord> {
+    /// This writes only the configured Paykit Profile path. Use Paykit Blob
+    /// helpers for profile files stored under the configured blob prefix.
+    pub async fn publish_paykit_profile(
+        &self,
+        profile: PaykitProfile,
+    ) -> Result<PaykitProfileRecord> {
         let json = profile_json(&profile)?;
         let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available for profile publication".into(),
             source: None,
         })?;
+        let path = self.config.paykit_profile_path();
         session_access
             .session
             .storage()
-            .put(PAYKIT_PROFILE_PATH, json)
+            .put(path.as_str(), json)
             .await
             .map_err(|err| map_pubky_transport_error("publish Paykit profile", err))?;
         Ok(PaykitProfileRecord {
             public_key: session_access.public_key()?,
             profile,
-            path: PAYKIT_PROFILE_PATH.into(),
+            path,
             updated_at: self.clock.now(),
         })
     }
 
     /// Fetch a public Paykit profile.
-    pub async fn fetch_profile(
+    pub async fn fetch_paykit_profile(
         &self,
         public_key: PubkyPublicKey,
     ) -> Result<Option<PaykitProfileRecord>> {
@@ -100,32 +104,179 @@ where
                     context: "no Pubky public storage available for profile lookup".into(),
                     source: None,
                 })?;
-        let Some(raw_json) = fetch_public_text(
-            &public_storage,
-            &public_key,
-            PAYKIT_PROFILE_PATH,
-            "fetch profile",
-        )
-        .await?
+        let path = self.config.paykit_profile_path();
+        let Some(raw_json) =
+            fetch_public_text(&public_storage, &public_key, &path, "fetch profile").await?
         else {
             return Ok(None);
         };
         Ok(Some(PaykitProfileRecord {
             public_key,
             profile: parse_profile_json(&raw_json)?,
-            path: PAYKIT_PROFILE_PATH.into(),
+            path,
             updated_at: self.clock.now(),
         }))
     }
 
+    /// Publish a public blob under the configured Paykit blob prefix.
+    pub async fn publish_paykit_blob(
+        &self,
+        blob_name: String,
+        bytes: Vec<u8>,
+    ) -> Result<PaykitBlobRecord> {
+        let path = paykit_blob_path(&self.config.paykit_profile_blob_path_prefix(), &blob_name)?;
+        let size_bytes = bytes.len() as u64;
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available for Paykit blob publication".into(),
+            source: None,
+        })?;
+        session_access
+            .session
+            .storage()
+            .put(path.as_str(), bytes)
+            .await
+            .map_err(|err| map_pubky_transport_error("publish Paykit blob", err))?;
+        let public_key = session_access.public_key()?;
+        let uri = paykit_blob_uri(&public_key, &path);
+        Ok(PaykitBlobRecord {
+            public_key,
+            path,
+            uri,
+            size_bytes,
+            updated_at: self.clock.now(),
+        })
+    }
+
+    /// Delete a public blob from the configured Paykit blob prefix.
+    pub async fn delete_paykit_blob(&self, uri_or_path: &str) -> Result<()> {
+        let session_access = self
+            .load_session_access_for_initialized_identity("delete Paykit blob")
+            .await?;
+        let public_key = session_access.public_key()?;
+        let path = paykit_blob_path_from_uri_or_path(
+            &public_key,
+            &self.config.paykit_profile_blob_path_prefix(),
+            uri_or_path,
+        )?;
+        session_access
+            .session
+            .storage()
+            .delete(path.as_str())
+            .await
+            .map(|_| ())
+            .or_else(|err| {
+                if is_pubky_not_found(&err) {
+                    Ok(())
+                } else {
+                    Err(map_pubky_transport_error("delete Paykit blob", err))
+                }
+            })
+    }
+
+    /// Fetch a public `pubky://` file referenced by profile metadata.
+    pub async fn fetch_pubky_file(&self, uri: &str) -> Result<Option<Vec<u8>>> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for Pubky file fetch".into(),
+                    source: None,
+                })?;
+        fetch_public_file_uri(&public_storage, uri, "fetch Pubky file").await
+    }
+
+    /// Fetch a public `pubky://` text file referenced by profile metadata.
+    pub async fn fetch_pubky_text(&self, uri: &str) -> Result<Option<String>> {
+        let Some(bytes) = self.fetch_pubky_file(uri).await? else {
+            return Ok(None);
+        };
+        String::from_utf8(bytes).map(Some).map_err(|err| {
+            PaykitSdkError::Protocol(format!("fetch Pubky text: invalid UTF-8: {err}"))
+        })
+    }
+
+    /// Fetch a public Pubky app profile.
+    pub async fn fetch_pubky_profile(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<Option<PubkyProfileRecord>> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for Pubky profile lookup".into(),
+                    source: None,
+                })?;
+        let Some(raw_json) = fetch_public_text(
+            &public_storage,
+            &public_key,
+            PUBKY_PROFILE_PATH,
+            "fetch Pubky profile",
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PubkyProfileRecord {
+            public_key,
+            profile: parse_pubky_profile_json(&raw_json)?,
+            path: PUBKY_PROFILE_PATH.into(),
+            fetched_at: self.clock.now(),
+        }))
+    }
+
+    /// Fetch public Pubky app follows.
+    pub async fn fetch_pubky_follows(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<Vec<PubkyPublicKey>> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for Pubky follows lookup".into(),
+                    source: None,
+                })?;
+        let entries = list_public_resources(
+            &public_storage,
+            &public_key,
+            PUBKY_FOLLOWS_PATH_PREFIX,
+            "fetch Pubky follows",
+        )
+        .await?;
+        Ok(pubky_follow_keys_from_follow_entries(entries))
+    }
+
+    /// Resolve a contact display profile, preferring Paykit Profile.
+    pub async fn resolve_contact_profile(
+        &self,
+        public_key: PubkyPublicKey,
+        allow_pubky_profile_fallback: bool,
+    ) -> Result<Option<ContactProfileResolution>> {
+        if let Some(record) = self.fetch_paykit_profile(public_key.clone()).await? {
+            return Ok(Some(ContactProfileResolution::from_paykit(record)));
+        }
+        if allow_pubky_profile_fallback {
+            return self
+                .fetch_pubky_profile(public_key)
+                .await
+                .map(|record| record.map(ContactProfileResolution::from_pubky));
+        }
+        Ok(None)
+    }
+
     /// Fetch a contact's public profile and cache it in the local contact record.
-    pub async fn refresh_contact_profile(
+    pub async fn refresh_contact_paykit_profile(
         &self,
         public_key: PubkyPublicKey,
     ) -> Result<Option<ContactRecord>> {
-        self.require_initialized_identity("refresh contact profile")
+        self.require_initialized_identity("refresh contact Paykit profile")
             .await?;
-        let fetched = self.fetch_profile(public_key.clone()).await?;
+        let fetched = self.fetch_paykit_profile(public_key.clone()).await?;
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
@@ -142,12 +293,14 @@ where
     /// Publish a public contact marker for a saved local contact.
     ///
     /// This can reveal part of the local contact graph. It only runs when
-    /// `public_contact_sharing` is `PublicPaykitNamespace`.
+    /// `public_contact_sharing` is `ConfiguredPublicNamespace`.
     pub async fn publish_public_contact(
         &self,
         public_key: PubkyPublicKey,
     ) -> Result<ContactRecord> {
-        if self.config.public_contact_sharing != PublicContactSharingPolicy::PublicPaykitNamespace {
+        if self.config.public_contact_sharing
+            != PublicContactSharingPolicy::ConfiguredPublicNamespace
+        {
             return Err(PaykitSdkError::Policy(
                 "public contact sharing is disabled".into(),
             ));
@@ -169,11 +322,11 @@ where
                 Ok(())
             })
             .await?;
-        let path = public_contact_path(&public_key);
+        let path = self.config.public_contact_path(&public_key);
         let write_result = session_access
             .session
             .storage()
-            .put(path, public_contact_json(&public_key)?)
+            .put(path.as_str(), public_contact_json(&public_key)?)
             .await
             .map_err(|err| map_pubky_transport_error("publish public contact", err));
         if let Err(err) = write_result {
@@ -230,8 +383,8 @@ where
                 })
                 .await?;
         }
-        let path = public_contact_path(&public_key);
-        let delete_result = session_access.session.storage().delete(path).await;
+        let path = self.config.public_contact_path(&public_key);
+        let delete_result = session_access.session.storage().delete(path.as_str()).await;
         if let Err(err) = delete_result {
             if !is_pubky_not_found(&err) {
                 let err = map_pubky_transport_error("remove public contact", err);
@@ -295,7 +448,7 @@ where
             match record.public_contact_marker_status {
                 PublicContactMarkerStatus::PendingPublication => {
                     if self.config.public_contact_sharing
-                        == PublicContactSharingPolicy::PublicPaykitNamespace
+                        == PublicContactSharingPolicy::ConfiguredPublicNamespace
                     {
                         synced.push(self.publish_public_contact(record.public_key).await?);
                     } else {

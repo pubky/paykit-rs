@@ -174,6 +174,7 @@ fn test_sensitive_storage_debug_is_redacted() {
         profile: Some(crate::PaykitProfile {
             display_name: Some("profile-secret".into()),
             image_uri: None,
+            extra: None,
         }),
         profile_fetched_at: Some(timestamp()),
         created_at: timestamp(),

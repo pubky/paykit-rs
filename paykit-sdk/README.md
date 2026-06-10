@@ -54,6 +54,18 @@ Common workflows:
 - call `initialize` on startup to refresh identity capability from the Pubky
   provider when live session access is available
 - call `sync_public_endpoints` after local receiving details change
+- set `profile_namespace` to a namespace segment such as `bitkit.to` when
+  profile/contact helpers should publish under `/pub/bitkit.to/...`
+- use `publish_paykit_profile` / `fetch_paykit_profile` for configured
+  Paykit Profile metadata, including app-specific public fields in `extra`
+- use `publish_paykit_blob` / `delete_paykit_blob` for files under the
+  configured Paykit blob prefix
+- use `fetch_pubky_file` / `fetch_pubky_text` to load public `pubky://`
+  files referenced by profile metadata
+- use `fetch_pubky_profile` / `fetch_pubky_follows` for read-only Pubky app
+  profile and follows data
+- use `resolve_contact_profile` when contact display should prefer Paykit
+  Profile and fall back to Pubky Profile
 - call `receive_private_messages` before deriving private Payment Lists,
   Payment Requests, Receipt Access state, or resolving a contact payment when
   the freshest private endpoints matter
