@@ -57,6 +57,40 @@ fn receipt(
 }
 
 #[test]
+fn test_receipt_issuance_record_redacts_sensitive_fields() {
+    let counterparty_key = public_key();
+    let counterparty = PubkyPublicKey::from_public_key(&counterparty_key);
+    let prepared = paykit_lib::prepare_receipt_for_recipient(
+        counterparty_key,
+        paykit_lib::ReceiptDraft {
+            receipt_id: Some(
+                paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+            payment_reference: paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+            payment_request_id: None,
+            billing_period: None,
+            payment_endpoint_identifier: Some(
+                paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            ),
+            amount: Some(paykit_lib::PaymentAmount::new("0.001", "btc").unwrap()),
+            metadata: serde_json::Map::new(),
+        },
+    )
+    .unwrap();
+    let key = prepared.access.key.as_str().to_owned();
+    let encrypted_receipt = prepared.encrypted_receipt.clone();
+    let access_json = paykit_lib::serialize_receipt_access_json(&prepared.access).unwrap();
+    let record = ReceiptIssuanceRecord::from_prepared(counterparty, prepared, timestamp()).unwrap();
+
+    let debug = format!("{record:?}");
+
+    assert!(!debug.contains("invoice-2026-0001"));
+    assert!(!debug.contains(&key));
+    assert!(!debug.contains(&encrypted_receipt));
+    assert!(!debug.contains(&access_json));
+}
+
+#[test]
 fn test_decrypt_receipt_record_from_access_validates_and_redacts() {
     let receipt_id = paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
     let key = ReceiptDecryptionKey::generate();

@@ -7,8 +7,9 @@ identity status, public Payment Endpoint sync, Encrypted Link state, private
 stream intake, Private Payment List derivation, contact payment resolution, and
 outbound Private Application Message delivery. It also derives Payment Request
 state, indexes Receipt Access events, retrieves/decrypts Encrypted Receipts,
-tracks optional Payment Endpoint Reservations, manages Paykit-facing profile
-and local contact records, and exports/restores SDK-managed backup state.
+tracks local receipt issuance, tracks optional Payment Endpoint Reservations,
+manages Paykit-facing profile and local contact records, and exports/restores
+SDK-managed backup state.
 
 This crate is Rust-only. Platform bindings expose low-level `paykit-lib` APIs;
 SDK bindings are a separate integration surface.
@@ -58,6 +59,9 @@ Common workflows:
   the freshest private endpoints matter
 - call `resolve_contact_payment` to get both the selected endpoint and
   adapter-built `PaymentTarget`
+- call `prepare_receipt_issuance` before receipt network side effects, then
+  `process_receipt_issuance`; use `issue_receipt` only when the draft already
+  has a caller-provided Receipt ID
 - call `linked_peers`, `pending_outbound_private_counterparties`, and
   `receipt_access_records` to drive app-visible work queues
 - call `process_outbound_private_messages` for one counterparty, or

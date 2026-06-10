@@ -94,6 +94,7 @@ async fn assert_restore_rejects_outbound_record(record: OutboundPrivateMessageRe
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: next_id,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,

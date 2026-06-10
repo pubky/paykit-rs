@@ -90,6 +90,7 @@ impl StorageTransaction for InMemoryStorageTransaction {
         self.state.event_dedup_records.clear();
         self.state.receipt_access_records.clear();
         self.state.receipt_records.clear();
+        self.state.receipt_issuance_records.clear();
     }
 
     fn linked_peer(&self, counterparty: &PubkyPublicKey) -> Option<LinkedPeerRecord> {
@@ -452,6 +453,50 @@ impl StorageTransaction for InMemoryStorageTransaction {
         self.state
             .receipt_records
             .get(&(issuer.clone(), receipt_id.to_owned()))
+            .cloned()
+    }
+
+    fn save_receipt_issuance_record(&mut self, record: ReceiptIssuanceRecord) {
+        self.state.receipt_issuance_records.insert(
+            (record.counterparty.clone(), record.receipt_id.clone()),
+            record,
+        );
+    }
+
+    fn receipt_issuance_records(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Vec<ReceiptIssuanceRecord> {
+        let mut records = self
+            .state
+            .receipt_issuance_records
+            .values()
+            .filter(|record| &record.counterparty == counterparty)
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| record.created_at);
+        records
+    }
+
+    fn receipt_issuance_record(
+        &self,
+        counterparty: &PubkyPublicKey,
+        receipt_id: &str,
+    ) -> Option<ReceiptIssuanceRecord> {
+        self.state
+            .receipt_issuance_records
+            .get(&(counterparty.clone(), receipt_id.to_owned()))
+            .cloned()
+    }
+
+    fn receipt_issuance_record_by_receipt_id(
+        &self,
+        receipt_id: &str,
+    ) -> Option<ReceiptIssuanceRecord> {
+        self.state
+            .receipt_issuance_records
+            .values()
+            .find(|record| record.receipt_id == receipt_id)
             .cloned()
     }
 }

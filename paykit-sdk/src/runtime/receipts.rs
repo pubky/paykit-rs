@@ -7,6 +7,188 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
+    /// Prepare a receipt issuance and persist it before network side effects.
+    ///
+    /// This does not store the Encrypted Receipt or queue Receipt Access. Use
+    /// [`Self::process_receipt_issuance`] to continue the network steps, or
+    /// [`Self::issue_receipt`] when the draft already has a Receipt ID.
+    pub async fn prepare_receipt_issuance(
+        &self,
+        counterparty: PubkyPublicKey,
+        draft: ReceiptDraft,
+    ) -> Result<ReceiptIssuanceView> {
+        self.ensure_private_workflows_enabled("Receipt issuance")?;
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.public_key.is_none() {
+            return Err(PaykitSdkError::Identity {
+                context: "no local Pubky identity available for receipt issuance".into(),
+                source: None,
+            });
+        }
+        self.ensure_peer_not_blocked(&counterparty).await?;
+
+        if let Some(receipt_id) = draft.receipt_id.as_ref() {
+            if let Some(existing) =
+                load_receipt_issuance_record_by_receipt_id(&self.storage, receipt_id.as_str())
+                    .await?
+            {
+                if existing.counterparty != counterparty {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "Receipt issuance {} already exists for a different counterparty",
+                        existing.receipt_id
+                    )));
+                }
+                if !receipt_issuance_record_matches_draft(&existing, &draft)? {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "Receipt issuance {} for counterparty {} already exists with different fields",
+                        existing.receipt_id, counterparty
+                    )));
+                }
+                return Ok(ReceiptIssuanceView::from(&existing));
+            }
+        }
+
+        let now = self.clock.now();
+        let recipient = counterparty.to_public_key()?;
+        let prepared = paykit_lib::prepare_receipt_for_recipient(recipient, draft)?;
+        let record = ReceiptIssuanceRecord::from_prepared(counterparty, prepared, now)?;
+        self.storage
+            .transaction({
+                let record = record.clone();
+                move |tx| {
+                    if tx
+                        .receipt_issuance_record_by_receipt_id(&record.receipt_id)
+                        .is_some()
+                    {
+                        return Err(PaykitSdkError::Protocol(format!(
+                            "Receipt issuance {} already exists",
+                            record.receipt_id
+                        )));
+                    }
+                    tx.save_receipt_issuance_record(record);
+                    Ok(())
+                }
+            })
+            .await?;
+        Ok(ReceiptIssuanceView::from(&record))
+    }
+
+    /// Prepare, store, and queue Receipt Access for private delivery.
+    ///
+    /// The draft must include a Receipt ID so repeated calls are retry-safe.
+    /// The returned record reflects local issuance progress. Receipt Access
+    /// delivery still depends on processing the outbound private queue.
+    pub async fn issue_receipt(
+        &self,
+        counterparty: PubkyPublicKey,
+        draft: ReceiptDraft,
+    ) -> Result<ReceiptIssuanceView> {
+        if draft.receipt_id.is_none() {
+            return Err(PaykitSdkError::Protocol(
+                "issue_receipt requires a caller-provided Receipt ID for retry-safe issuance; use prepare_receipt_issuance first when the SDK should generate one".into(),
+            ));
+        }
+        let record = self
+            .prepare_receipt_issuance(counterparty.clone(), draft)
+            .await?;
+        self.process_receipt_issuance(counterparty, &record.receipt_id)
+            .await
+    }
+
+    /// Continue storage and Receipt Access queueing for a prepared issuance.
+    pub async fn process_receipt_issuance(
+        &self,
+        counterparty: PubkyPublicKey,
+        receipt_id: &str,
+    ) -> Result<ReceiptIssuanceView> {
+        self.ensure_private_outbound_ready(
+            &counterparty,
+            "private Receipt Access sharing is disabled",
+        )
+        .await?;
+        let (session_access, _) = self.private_link_session_access().await?;
+        let record = load_receipt_issuance_record(&self.storage, &counterparty, receipt_id)
+            .await?
+            .ok_or_else(|| {
+                PaykitSdkError::NotFound(format!(
+                    "Receipt issuance {receipt_id} for counterparty {counterparty} was not found"
+                ))
+            })?;
+        if record.status == ReceiptIssuanceStatus::AccessQueued {
+            return Ok(ReceiptIssuanceView::from(&record));
+        }
+
+        let record = if record.stored_at.is_some() {
+            record
+        } else {
+            match store_encrypted_receipt_json(&session_access.session, &record).await {
+                Ok(()) => {
+                    let stored = record.mark_stored(self.clock.now());
+                    self.storage
+                        .transaction({
+                            let stored = stored.clone();
+                            move |tx| {
+                                tx.save_receipt_issuance_record(stored);
+                                Ok(())
+                            }
+                        })
+                        .await?;
+                    stored
+                }
+                Err(err) => {
+                    let failed = record.mark_failed(self.clock.now(), err.to_string());
+                    self.storage
+                        .transaction({
+                            let failed = failed.clone();
+                            move |tx| {
+                                tx.save_receipt_issuance_record(failed);
+                                Ok(())
+                            }
+                        })
+                        .await?;
+                    return Err(err);
+                }
+            }
+        };
+
+        match enqueue_receipt_access_for_issuance(&self.storage, record.clone(), self.clock.now())
+            .await
+        {
+            Ok(queued) => Ok(ReceiptIssuanceView::from(&queued)),
+            Err(err) => {
+                let failed = record.mark_failed(self.clock.now(), err.to_string());
+                self.storage
+                    .transaction({
+                        let failed = failed.clone();
+                        move |tx| {
+                            tx.save_receipt_issuance_record(failed);
+                            Ok(())
+                        }
+                    })
+                    .await?;
+                Err(err)
+            }
+        }
+    }
+
+    /// List local receipt issuance records for one counterparty.
+    pub async fn receipt_issuance_records(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<ReceiptIssuanceView>> {
+        self.ensure_private_workflows_enabled("Receipt issuance record access")?;
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.public_key.is_none() {
+            return Ok(Vec::new());
+        }
+        self.ensure_peer_not_blocked(counterparty).await?;
+        Ok(load_receipt_issuance_records(&self.storage, counterparty)
+            .await?
+            .iter()
+            .map(ReceiptIssuanceView::from)
+            .collect())
+    }
+
     /// Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
     ///
     /// The decrypted Receipt is private SDK state. This returns an already

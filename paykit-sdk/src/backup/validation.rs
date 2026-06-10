@@ -223,6 +223,8 @@ pub(super) struct RecoverySources<'a> {
     pub(super) event_dedup_records: &'a HashMap<(PubkyPublicKey, String), EventDedupRecord>,
     pub(super) receipt_access_records: &'a HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
     pub(super) receipt_records: &'a HashMap<(PubkyPublicKey, String), ReceiptRecord>,
+    pub(super) receipt_issuance_records:
+        &'a HashMap<(PubkyPublicKey, String), ReceiptIssuanceRecord>,
 }
 
 pub(super) fn recovery_counterparties(sources: RecoverySources<'_>) -> HashSet<PubkyPublicKey> {
@@ -271,6 +273,12 @@ pub(super) fn recovery_counterparties(sources: RecoverySources<'_>) -> HashSet<P
             .receipt_records
             .values()
             .map(|record| record.issuer.clone()),
+    );
+    counterparties.extend(
+        sources
+            .receipt_issuance_records
+            .values()
+            .map(|record| record.counterparty.clone()),
     );
     counterparties
 }
@@ -968,6 +976,156 @@ pub(super) fn validate_receipt_records(
                 record.receipt_id
             )));
         }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_receipt_issuance_records(
+    records: &HashMap<(PubkyPublicKey, String), ReceiptIssuanceRecord>,
+    outbound_private_messages: &[OutboundPrivateMessageRecord],
+) -> Result<()> {
+    let outbound_by_id = outbound_private_messages
+        .iter()
+        .map(|record| (record.outbound_message_id, record))
+        .collect::<HashMap<_, _>>();
+    let mut receipt_ids = HashSet::new();
+
+    for record in records.values() {
+        if !receipt_ids.insert(record.receipt_id.clone()) {
+            return Err(PaykitSdkError::Protocol(format!(
+                "Receipt issuance record '{}' is duplicated across counterparties",
+                record.receipt_id
+            )));
+        }
+        validate_receipt_issuance_status(record)?;
+        ReceiptId::new(&record.receipt_id)?;
+        if let Some(identifier) = record.payment_endpoint_identifier.as_ref() {
+            PaymentEndpointIdentifier::new(identifier)?;
+        }
+
+        let access = paykit_lib::parse_receipt_access_json(&record.access_json)
+            .map_err(|err| PaykitSdkError::Protocol(err.to_string()))?;
+        if access.event_id.as_str() != record.receipt_access_event_id
+            || access.receipt_id.as_str() != record.receipt_id
+            || access.payment_reference.as_str() != record.payment_reference
+            || access
+                .payment_request_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+                != record.payment_request_id
+            || access
+                .billing_period
+                .as_ref()
+                .map(ReceiptBillingPeriodRecord::from)
+                != record.billing_period
+            || access.location != record.location
+        {
+            return Err(PaykitSdkError::Protocol(format!(
+                "Receipt issuance record '{}' does not match Receipt Access payload",
+                record.receipt_id
+            )));
+        }
+
+        let receipt =
+            paykit_lib::decrypt_receipt(&record.encrypted_receipt, &access.key, &access.location)
+                .map_err(|err| PaykitSdkError::Protocol(err.to_string()))?;
+        let recipient = PubkyPublicKey::from_public_key(&receipt.recipient_public_key);
+        if recipient != record.counterparty
+            || receipt.receipt_id.as_str() != record.receipt_id
+            || receipt.payment_reference.as_str() != record.payment_reference
+            || receipt
+                .payment_request_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+                != record.payment_request_id
+            || receipt
+                .billing_period
+                .as_ref()
+                .map(ReceiptBillingPeriodRecord::from)
+                != record.billing_period
+            || receipt
+                .payment_endpoint_identifier
+                .as_ref()
+                .map(|identifier| identifier.as_str().to_owned())
+                != record.payment_endpoint_identifier
+            || receipt.amount.as_ref().map(|amount| ReceiptAmountRecord {
+                value: amount.value.clone(),
+                asset: amount.asset.clone(),
+            }) != record.amount
+        {
+            return Err(PaykitSdkError::Protocol(format!(
+                "Receipt issuance record '{}' does not match encrypted Receipt",
+                record.receipt_id
+            )));
+        }
+
+        if let Some(outbound_message_id) = record.outbound_message_id {
+            let Some(outbound) = outbound_by_id.get(&outbound_message_id) else {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "Receipt issuance record '{}' references missing outbound message {}",
+                    record.receipt_id, outbound_message_id
+                )));
+            };
+            if outbound.counterparty != record.counterparty
+                || outbound.kind != PrivateMessageKind::ReceiptAccess.as_str()
+                || outbound.raw_json != record.access_json
+            {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "Receipt issuance record '{}' does not match outbound message {}",
+                    record.receipt_id, outbound_message_id
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_receipt_issuance_status(record: &ReceiptIssuanceRecord) -> Result<()> {
+    if record.updated_at < record.created_at
+        || record
+            .stored_at
+            .is_some_and(|stored_at| stored_at < record.created_at)
+        || record
+            .access_queued_at
+            .is_some_and(|queued_at| queued_at < record.created_at)
+    {
+        return Err(PaykitSdkError::Protocol(format!(
+            "Receipt issuance record '{}' has inconsistent timestamps",
+            record.receipt_id
+        )));
+    }
+
+    let invalid = match record.status {
+        ReceiptIssuanceStatus::PendingStorage => {
+            record.stored_at.is_some()
+                || record.access_queued_at.is_some()
+                || record.outbound_message_id.is_some()
+                || record.last_error.is_some()
+        }
+        ReceiptIssuanceStatus::Stored => {
+            record.stored_at.is_none()
+                || record.access_queued_at.is_some()
+                || record.outbound_message_id.is_some()
+                || record.last_error.is_some()
+        }
+        ReceiptIssuanceStatus::AccessQueued => {
+            record.stored_at.is_none()
+                || record.access_queued_at.is_none()
+                || record.outbound_message_id.is_none()
+                || record.last_error.is_some()
+        }
+        ReceiptIssuanceStatus::Failed => {
+            record.access_queued_at.is_some()
+                || record.outbound_message_id.is_some()
+                || record.last_error.is_none()
+        }
+    };
+    if invalid {
+        return Err(PaykitSdkError::Protocol(format!(
+            "Receipt issuance record '{}' has inconsistent {:?} status metadata",
+            record.receipt_id, record.status
+        )));
     }
     Ok(())
 }

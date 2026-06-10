@@ -10,7 +10,7 @@ use crate::{
     linked_peers::LinkedPeerState,
     outbound_private::OutboundPrivateMessageStatus,
     private_stream::PrivateStreamParseStatus,
-    receipts::{ReceiptAccessRecord, ReceiptRecord},
+    receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
 };
 
 /// Durable Linked Peer state.
@@ -508,6 +508,8 @@ pub struct StorageState {
     pub receipt_access_records: HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
     /// Decrypted Receipt records by issuer and Receipt ID.
     pub receipt_records: HashMap<(PubkyPublicKey, String), ReceiptRecord>,
+    /// Local receipt issuance records by counterparty and Receipt ID.
+    pub receipt_issuance_records: HashMap<(PubkyPublicKey, String), ReceiptIssuanceRecord>,
 }
 
 impl fmt::Debug for StorageState {
@@ -573,6 +575,10 @@ impl fmt::Debug for StorageState {
             .field(
                 "receipt_records",
                 &format_args!("{} records", self.receipt_records.len()),
+            )
+            .field(
+                "receipt_issuance_records",
+                &format_args!("{} records", self.receipt_issuance_records.len()),
             )
             .finish()
     }

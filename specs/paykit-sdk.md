@@ -109,8 +109,8 @@ Module responsibilities:
   latest-state derivation, and size policy.
 - `payment_requests`: Payment Request event state derivation, outbound event
   queueing, and proof correlation.
-- `receipts`: Receipt Access event indexing, Encrypted Receipt retrieval,
-  decryption, and retrieval state.
+- `receipts`: receipt issuance state, Receipt Access event indexing, Encrypted
+  Receipt retrieval, decryption, and retrieval state.
 - `endpoint_reservations`: optional receiving-detail reservation records for
   Private Payment List sharing.
 - `backup`: versioned export/import of SDK-managed state.
@@ -539,6 +539,15 @@ know every counterparty in advance:
 
 ### ReceiptAccessRecord And ReceiptRecord
 
+Receipt issuance records:
+
+- counterparty that should receive Receipt Access
+- receipt id and Receipt Access Event ID
+- payment reference and optional Payment Request correlation fields
+- Encrypted Receipt JSON
+- exact Receipt Access JSON
+- local issuance status, timestamps, outbound message id, and last error
+
 Receipt Access records:
 
 - event id
@@ -866,6 +875,23 @@ settlement confirmation.
 The SDK should not mark a payment as settled unless the payment adapter provides
 settlement confirmation.
 
+### Issue Receipts
+
+1. Prepare receipt issuance and persist the Encrypted Receipt payload plus exact
+   Receipt Access JSON before network side effects.
+2. Store the Encrypted Receipt at its Receipt Location on the issuer homeserver.
+3. Queue Receipt Access through the normal outbound private message queue.
+4. Retry from durable issuance state if storage or queueing fails.
+5. Treat outbound status as local delivery checkpoint state, not counterparty
+   acknowledgement.
+
+Receipt IDs are unique per issuer because Receipt Location is derived from only
+the Receipt ID. `prepare_receipt_issuance` may generate a Receipt ID and return
+it to the caller; retries should then call `process_receipt_issuance` with that
+ID. The one-call `issue_receipt` helper requires the draft to already contain a
+caller-provided Receipt ID so repeating the same call cannot create a second
+receipt after a partial failure.
+
 ### Retrieve Receipts
 
 1. Receive Receipt Access event.
@@ -972,12 +998,34 @@ impl PaykitSdk {
     async fn active_recurring_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>>;
     async fn actionable_received_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>>;
 
-    async fn list_receipt_access(
+    async fn receipt_access_records(
         &self,
-        filter: ReceiptAccessFilter,
-    ) -> Result<Vec<ReceiptAccessRecord>>;
-
-    async fn retrieve_receipt(&self, receipt_id: ReceiptId) -> Result<ReceiptRecord>;
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<ReceiptAccessView>>;
+    async fn receipt_issuance_records(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Vec<ReceiptIssuanceView>>;
+    async fn retrieve_receipt(
+        &self,
+        counterparty: PubkyPublicKey,
+        receipt_id: &str,
+    ) -> Result<ReceiptRecord>;
+    async fn prepare_receipt_issuance(
+        &self,
+        counterparty: PubkyPublicKey,
+        draft: ReceiptDraft,
+    ) -> Result<ReceiptIssuanceView>;
+    async fn issue_receipt(
+        &self,
+        counterparty: PubkyPublicKey,
+        draft: ReceiptDraft,
+    ) -> Result<ReceiptIssuanceView>;
+    async fn process_receipt_issuance(
+        &self,
+        counterparty: PubkyPublicKey,
+        receipt_id: &str,
+    ) -> Result<ReceiptIssuanceView>;
 }
 ```
 

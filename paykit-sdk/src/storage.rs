@@ -21,7 +21,7 @@ use crate::{
     backup::ValidatedStorageState,
     contacts::ContactRecord,
     identity::{IdentityState, PubkyPublicKey},
-    receipts::{ReceiptAccessRecord, ReceiptRecord},
+    receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
     PaykitSdkError, Result,
 };
 
@@ -285,6 +285,26 @@ pub trait StorageTransaction {
 
     /// Load one decrypted Receipt record.
     fn receipt_record(&self, issuer: &PubkyPublicKey, receipt_id: &str) -> Option<ReceiptRecord>;
+
+    /// Save one local receipt issuance record.
+    fn save_receipt_issuance_record(&mut self, record: ReceiptIssuanceRecord);
+
+    /// List receipt issuance records for one counterparty.
+    fn receipt_issuance_records(&self, counterparty: &PubkyPublicKey)
+        -> Vec<ReceiptIssuanceRecord>;
+
+    /// Load one receipt issuance record.
+    fn receipt_issuance_record(
+        &self,
+        counterparty: &PubkyPublicKey,
+        receipt_id: &str,
+    ) -> Option<ReceiptIssuanceRecord>;
+
+    /// Load one receipt issuance record by Receipt ID across counterparties.
+    fn receipt_issuance_record_by_receipt_id(
+        &self,
+        receipt_id: &str,
+    ) -> Option<ReceiptIssuanceRecord>;
 }
 
 pub(crate) fn require_peer_link_operation_lease(

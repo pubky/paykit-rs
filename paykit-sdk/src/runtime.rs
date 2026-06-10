@@ -9,6 +9,7 @@ use paykit_lib::{
     BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaymentEndpointIdentifier, PaymentProof,
     PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
     PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms, PrivateMessageKind,
+    ReceiptDraft,
 };
 use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -76,8 +77,13 @@ use crate::{
         PrivateStreamIntakeReport,
     },
     receipts::{
-        decrypt_receipt_record_from_access, fetch_encrypted_receipt_json,
-        receipt_record_matches_access, ReceiptAccessRecord, ReceiptAccessView, ReceiptRecord,
+        decrypt_receipt_record_from_access, enqueue_receipt_access_for_issuance,
+        fetch_encrypted_receipt_json, receipt_issuance_record as load_receipt_issuance_record,
+        receipt_issuance_record_by_receipt_id as load_receipt_issuance_record_by_receipt_id,
+        receipt_issuance_record_matches_draft,
+        receipt_issuance_records as load_receipt_issuance_records, receipt_record_matches_access,
+        store_encrypted_receipt_json, ReceiptAccessRecord, ReceiptAccessView,
+        ReceiptIssuanceRecord, ReceiptIssuanceStatus, ReceiptIssuanceView, ReceiptRecord,
         ReceiptRetrievalStatus,
     },
     recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},

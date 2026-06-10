@@ -1,21 +1,26 @@
 //! Receipt Access indexing helpers.
 //!
-//! Indexed Receipt Access records include Receipt Decryption Keys. Store them
-//! as private SDK state and avoid logging field values directly.
+//! Indexed Receipt Access and receipt issuance records include Receipt
+//! Decryption Keys or exact Receipt Access JSON. Store them as private SDK
+//! state and avoid logging field values directly.
 
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use paykit_lib::{Receipt, ReceiptAccess, ReceiptDecryptionKey};
+use paykit_lib::{
+    serialize_receipt_access_json, PreparedReceipt, Receipt, ReceiptAccess, ReceiptDecryptionKey,
+    ReceiptDraft,
+};
 use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
 
-use crate::{PaykitSdkError, PubkyPublicKey, Result};
-
-#[cfg(test)]
-use crate::storage::StorageAdapter;
+use crate::{
+    outbound_private::validate_outbound_private_message,
+    storage::{NewOutboundPrivateMessage, StorageAdapter},
+    PaykitSdkError, PubkyPublicKey, Result,
+};
 
 /// Durable Billing Period fields copied from a Receipt Access event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +53,258 @@ pub enum ReceiptRetrievalStatus {
     NotFound,
     /// Retrieval or decryption failed.
     Failed,
+}
+
+/// Local receipt issuance state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ReceiptIssuanceStatus {
+    /// Receipt was prepared locally, but the Encrypted Receipt has not been
+    /// stored on the issuer homeserver yet.
+    #[default]
+    PendingStorage,
+    /// Encrypted Receipt was stored, but Receipt Access has not been queued yet.
+    Stored,
+    /// Receipt Access was queued for private delivery.
+    AccessQueued,
+    /// Last storage or queueing attempt failed.
+    Failed,
+}
+
+/// Durable local state for issuing one receipt.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptIssuanceRecord {
+    /// Counterparty that should receive Receipt Access.
+    pub counterparty: PubkyPublicKey,
+    /// Receipt ID.
+    pub receipt_id: String,
+    /// Receipt Access Event ID.
+    pub receipt_access_event_id: String,
+    /// Payment Reference copied from the Receipt.
+    pub payment_reference: String,
+    /// Optional Payment Request ID copied from the Receipt.
+    pub payment_request_id: Option<String>,
+    /// Optional Billing Period copied from the Receipt.
+    pub billing_period: Option<ReceiptBillingPeriodRecord>,
+    /// Optional Payment Endpoint Identifier copied from the Receipt.
+    pub payment_endpoint_identifier: Option<String>,
+    /// Optional Payment Amount copied from the Receipt.
+    pub amount: Option<ReceiptAmountRecord>,
+    /// Receipt Location path on the issuer homeserver.
+    pub location: String,
+    /// Encrypted Receipt JSON to store at the Receipt Location.
+    pub encrypted_receipt: String,
+    /// Exact Receipt Access JSON to queue for private delivery.
+    pub access_json: String,
+    /// Current issuance status.
+    pub status: ReceiptIssuanceStatus,
+    /// Outbound private message id that carries Receipt Access, once queued.
+    pub outbound_message_id: Option<u64>,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+    /// Last status update time.
+    pub updated_at: DateTime<Utc>,
+    /// Time the Encrypted Receipt was stored.
+    pub stored_at: Option<DateTime<Utc>>,
+    /// Time Receipt Access was queued for private delivery.
+    pub access_queued_at: Option<DateTime<Utc>>,
+    /// Last storage or queueing error, when available.
+    pub last_error: Option<String>,
+}
+
+impl ReceiptIssuanceRecord {
+    pub(crate) fn from_prepared(
+        counterparty: PubkyPublicKey,
+        prepared: PreparedReceipt,
+        now: DateTime<Utc>,
+    ) -> Result<Self> {
+        let access_json = serialize_receipt_access_json(&prepared.access)?;
+        Ok(Self {
+            counterparty,
+            receipt_id: prepared.receipt.receipt_id.as_str().to_owned(),
+            receipt_access_event_id: prepared.access.event_id.as_str().to_owned(),
+            payment_reference: prepared.receipt.payment_reference.as_str().to_owned(),
+            payment_request_id: prepared
+                .receipt
+                .payment_request_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned()),
+            billing_period: prepared
+                .receipt
+                .billing_period
+                .as_ref()
+                .map(ReceiptBillingPeriodRecord::from),
+            payment_endpoint_identifier: prepared
+                .receipt
+                .payment_endpoint_identifier
+                .as_ref()
+                .map(|identifier| identifier.as_str().to_owned()),
+            amount: prepared
+                .receipt
+                .amount
+                .as_ref()
+                .map(|amount| ReceiptAmountRecord {
+                    value: amount.value.clone(),
+                    asset: amount.asset.clone(),
+                }),
+            location: prepared.access.location.clone(),
+            encrypted_receipt: prepared.encrypted_receipt,
+            access_json,
+            status: ReceiptIssuanceStatus::PendingStorage,
+            outbound_message_id: None,
+            created_at: now,
+            updated_at: now,
+            stored_at: None,
+            access_queued_at: None,
+            last_error: None,
+        })
+    }
+
+    pub(crate) fn mark_stored(&self, stored_at: DateTime<Utc>) -> Self {
+        let mut record = self.clone();
+        record.status = ReceiptIssuanceStatus::Stored;
+        record.updated_at = stored_at;
+        record.stored_at = Some(stored_at);
+        record.last_error = None;
+        record
+    }
+
+    pub(crate) fn mark_access_queued(
+        &self,
+        outbound_message_id: u64,
+        queued_at: DateTime<Utc>,
+    ) -> Self {
+        let mut record = self.clone();
+        record.status = ReceiptIssuanceStatus::AccessQueued;
+        record.updated_at = queued_at;
+        record.outbound_message_id = Some(outbound_message_id);
+        record.access_queued_at = Some(queued_at);
+        record.last_error = None;
+        record
+    }
+
+    pub(crate) fn mark_failed(&self, failed_at: DateTime<Utc>, error: String) -> Self {
+        let mut record = self.clone();
+        record.status = ReceiptIssuanceStatus::Failed;
+        record.updated_at = failed_at;
+        record.last_error = Some(error);
+        record
+    }
+}
+
+impl fmt::Debug for ReceiptIssuanceRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReceiptIssuanceRecord")
+            .field("counterparty", &self.counterparty)
+            .field("receipt_id", &self.receipt_id)
+            .field("receipt_access_event_id", &self.receipt_access_event_id)
+            .field("payment_reference", &"<redacted>")
+            .field("payment_request_id", &self.payment_request_id)
+            .field("billing_period", &self.billing_period)
+            .field(
+                "payment_endpoint_identifier",
+                &self.payment_endpoint_identifier,
+            )
+            .field("amount", &self.amount.as_ref().map(|_| "<redacted>"))
+            .field("location", &"<redacted>")
+            .field(
+                "encrypted_receipt",
+                &format_args!("<redacted:{} bytes>", self.encrypted_receipt.len()),
+            )
+            .field(
+                "access_json",
+                &format_args!("<redacted:{} bytes>", self.access_json.len()),
+            )
+            .field("status", &self.status)
+            .field("outbound_message_id", &self.outbound_message_id)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("stored_at", &self.stored_at)
+            .field("access_queued_at", &self.access_queued_at)
+            .field(
+                "last_error",
+                &self.last_error.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// App-facing view of local receipt issuance progress.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptIssuanceView {
+    /// Counterparty that should receive Receipt Access.
+    pub counterparty: PubkyPublicKey,
+    /// Receipt ID.
+    pub receipt_id: String,
+    /// Receipt Access Event ID.
+    pub receipt_access_event_id: String,
+    /// Payment Reference copied from the Receipt.
+    pub payment_reference: String,
+    /// Optional Payment Request ID copied from the Receipt.
+    pub payment_request_id: Option<String>,
+    /// Optional Billing Period copied from the Receipt.
+    pub billing_period: Option<ReceiptBillingPeriodRecord>,
+    /// Optional Payment Endpoint Identifier copied from the Receipt.
+    pub payment_endpoint_identifier: Option<String>,
+    /// Optional Payment Amount copied from the Receipt.
+    pub amount: Option<ReceiptAmountRecord>,
+    /// Current issuance status.
+    pub status: ReceiptIssuanceStatus,
+    /// Outbound private message id that carries Receipt Access, once queued.
+    pub outbound_message_id: Option<u64>,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+    /// Last status update time.
+    pub updated_at: DateTime<Utc>,
+    /// Time the Encrypted Receipt was stored.
+    pub stored_at: Option<DateTime<Utc>>,
+    /// Time Receipt Access was queued for private delivery.
+    pub access_queued_at: Option<DateTime<Utc>>,
+}
+
+impl fmt::Debug for ReceiptIssuanceView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReceiptIssuanceView")
+            .field("counterparty", &self.counterparty)
+            .field("receipt_id", &self.receipt_id)
+            .field("receipt_access_event_id", &self.receipt_access_event_id)
+            .field("payment_reference", &"<redacted>")
+            .field("payment_request_id", &self.payment_request_id)
+            .field("billing_period", &self.billing_period)
+            .field(
+                "payment_endpoint_identifier",
+                &self.payment_endpoint_identifier,
+            )
+            .field("amount", &self.amount.as_ref().map(|_| "<redacted>"))
+            .field("status", &self.status)
+            .field("outbound_message_id", &self.outbound_message_id)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("stored_at", &self.stored_at)
+            .field("access_queued_at", &self.access_queued_at)
+            .finish()
+    }
+}
+
+impl From<&ReceiptIssuanceRecord> for ReceiptIssuanceView {
+    fn from(record: &ReceiptIssuanceRecord) -> Self {
+        Self {
+            counterparty: record.counterparty.clone(),
+            receipt_id: record.receipt_id.clone(),
+            receipt_access_event_id: record.receipt_access_event_id.clone(),
+            payment_reference: record.payment_reference.clone(),
+            payment_request_id: record.payment_request_id.clone(),
+            billing_period: record.billing_period.clone(),
+            payment_endpoint_identifier: record.payment_endpoint_identifier.clone(),
+            amount: record.amount.clone(),
+            status: record.status,
+            outbound_message_id: record.outbound_message_id,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            stored_at: record.stored_at,
+            access_queued_at: record.access_queued_at,
+        }
+    }
 }
 
 /// Indexed Receipt Access event.
@@ -389,6 +646,109 @@ pub(crate) async fn fetch_encrypted_receipt_json(
             source: Some(err.into()),
         }),
     }
+}
+
+pub(crate) async fn store_encrypted_receipt_json(
+    session: &pubky::PubkySession,
+    record: &ReceiptIssuanceRecord,
+) -> Result<()> {
+    session
+        .storage()
+        .put(record.location.clone(), record.encrypted_receipt.clone())
+        .await
+        .map(|_| ())
+        .map_err(|err| PaykitSdkError::Transport {
+            context: format!("failed to store encrypted receipt at {}", record.location),
+            source: Some(err.into()),
+        })
+}
+
+pub(crate) fn receipt_issuance_record_matches_draft(
+    record: &ReceiptIssuanceRecord,
+    draft: &ReceiptDraft,
+) -> Result<bool> {
+    let access = paykit_lib::parse_receipt_access_json(&record.access_json)?;
+    let receipt =
+        paykit_lib::decrypt_receipt(&record.encrypted_receipt, &access.key, &access.location)?;
+    let expected_receipt_id = draft.receipt_id.as_ref().map(|id| id.as_str());
+    let expected_recipient = record.counterparty.to_public_key()?;
+    Ok(Some(receipt.receipt_id.as_str()) == expected_receipt_id
+        && receipt.payment_reference == draft.payment_reference
+        && receipt.payment_request_id == draft.payment_request_id
+        && receipt.billing_period == draft.billing_period
+        && receipt.recipient_public_key == expected_recipient
+        && receipt.payment_endpoint_identifier == draft.payment_endpoint_identifier
+        && receipt.amount == draft.amount
+        && receipt.metadata == draft.metadata)
+}
+
+pub(crate) async fn receipt_issuance_records<S>(
+    storage: &S,
+    counterparty: &PubkyPublicKey,
+) -> Result<Vec<ReceiptIssuanceRecord>>
+where
+    S: StorageAdapter,
+{
+    storage
+        .transaction(|tx| Ok(tx.receipt_issuance_records(counterparty)))
+        .await
+}
+
+pub(crate) async fn receipt_issuance_record<S>(
+    storage: &S,
+    counterparty: &PubkyPublicKey,
+    receipt_id: &str,
+) -> Result<Option<ReceiptIssuanceRecord>>
+where
+    S: StorageAdapter,
+{
+    storage
+        .transaction(|tx| Ok(tx.receipt_issuance_record(counterparty, receipt_id)))
+        .await
+}
+
+pub(crate) async fn receipt_issuance_record_by_receipt_id<S>(
+    storage: &S,
+    receipt_id: &str,
+) -> Result<Option<ReceiptIssuanceRecord>>
+where
+    S: StorageAdapter,
+{
+    storage
+        .transaction(|tx| Ok(tx.receipt_issuance_record_by_receipt_id(receipt_id)))
+        .await
+}
+
+pub(crate) async fn enqueue_receipt_access_for_issuance<S>(
+    storage: &S,
+    record: ReceiptIssuanceRecord,
+    now: DateTime<Utc>,
+) -> Result<ReceiptIssuanceRecord>
+where
+    S: StorageAdapter,
+{
+    if record.outbound_message_id.is_some() {
+        return Ok(record);
+    }
+    let kind = validate_outbound_private_message(&record.access_json)?;
+    if kind != paykit_lib::PrivateMessageKind::ReceiptAccess.as_str() {
+        return Err(PaykitSdkError::Protocol(
+            "receipt issuance access JSON is not Receipt Access".into(),
+        ));
+    }
+    storage
+        .transaction(move |tx| {
+            let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                record.counterparty.clone(),
+                kind,
+                record.access_json.clone(),
+                now,
+            ));
+            let queued = record.mark_access_queued(outbound.outbound_message_id, now);
+            tx.save_receipt_issuance_record(queued.clone());
+            Ok(queued)
+        })
+        .await
 }
 
 pub(crate) fn decrypt_receipt_record_from_access(

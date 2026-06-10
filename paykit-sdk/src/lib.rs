@@ -85,8 +85,8 @@ pub use private_stream::{
 };
 #[doc(inline)]
 pub use receipts::{
-    ReceiptAccessView, ReceiptAmountRecord, ReceiptBillingPeriodRecord, ReceiptRecord,
-    ReceiptRetrievalStatus,
+    ReceiptAccessView, ReceiptAmountRecord, ReceiptBillingPeriodRecord, ReceiptIssuanceStatus,
+    ReceiptIssuanceView, ReceiptRecord, ReceiptRetrievalStatus,
 };
 #[doc(inline)]
 pub use recovery::EncryptedLinkRecoveryMarkerReport;

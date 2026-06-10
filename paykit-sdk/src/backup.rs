@@ -18,7 +18,8 @@ use crate::{
         classify_private_application_message, payload_hash, PrivateStreamParseStatus,
     },
     receipts::{
-        receipt_access_key_hash, ReceiptAccessRecord, ReceiptBillingPeriodRecord, ReceiptRecord,
+        receipt_access_key_hash, ReceiptAccessRecord, ReceiptAmountRecord,
+        ReceiptBillingPeriodRecord, ReceiptIssuanceRecord, ReceiptIssuanceStatus, ReceiptRecord,
         ReceiptRetrievalStatus,
     },
     storage::{
@@ -71,6 +72,8 @@ pub struct SdkBackupState {
     pub receipt_access_records: Vec<ReceiptAccessRecord>,
     /// Decrypted Receipt records.
     pub receipt_records: Vec<ReceiptRecord>,
+    /// Local receipt issuance records.
+    pub receipt_issuance_records: Vec<ReceiptIssuanceRecord>,
     /// Next outbound Private Application Message id.
     pub next_outbound_private_message_id: u64,
     /// Next private receive batch id.
@@ -106,6 +109,10 @@ impl fmt::Debug for SdkBackupState {
             .field("event_dedup_records", &self.event_dedup_records.len())
             .field("receipt_access_records", &self.receipt_access_records.len())
             .field("receipt_records", &self.receipt_records.len())
+            .field(
+                "receipt_issuance_records",
+                &self.receipt_issuance_records.len(),
+            )
             .field(
                 "next_outbound_private_message_id",
                 &self.next_outbound_private_message_id,
@@ -146,6 +153,8 @@ pub struct RestoreReport {
     pub receipt_access_records: usize,
     /// Number of restored decrypted Receipt records.
     pub receipt_records: usize,
+    /// Number of restored local receipt issuance records.
+    pub receipt_issuance_records: usize,
     /// Counterparties marked recovery-required during restore.
     pub recovery_required_peers: Vec<PubkyPublicKey>,
 }
@@ -278,6 +287,17 @@ impl SdkBackupState {
                 .then(left.receipt_id.cmp(&right.receipt_id))
         });
 
+        let mut receipt_issuance_records = state
+            .receipt_issuance_records
+            .into_values()
+            .collect::<Vec<_>>();
+        receipt_issuance_records.sort_by(|left, right| {
+            left.counterparty
+                .as_str()
+                .cmp(right.counterparty.as_str())
+                .then(left.receipt_id.cmp(&right.receipt_id))
+        });
+
         Self {
             version: SDK_BACKUP_VERSION,
             identity_state: state.identity_state,
@@ -291,6 +311,7 @@ impl SdkBackupState {
             event_dedup_records,
             receipt_access_records,
             receipt_records,
+            receipt_issuance_records,
             next_outbound_private_message_id: state.next_outbound_private_message_id,
             next_receive_batch_id: state.next_receive_batch_id,
             next_private_stream_item_id: state.next_private_stream_item_id,
@@ -367,6 +388,12 @@ impl SdkBackupState {
             &receipt_access_records,
             expected_receipt_recipient,
         )?;
+        let receipt_issuance_records = keyed_by_tuple(
+            self.receipt_issuance_records,
+            |record| (record.counterparty.clone(), record.receipt_id.clone()),
+            "Receipt issuance",
+        )?;
+        validate_receipt_issuance_records(&receipt_issuance_records, &outbound_private_messages)?;
 
         let recovery_counterparties = recovery_counterparties(RecoverySources {
             linked_peers: &linked_peers,
@@ -377,6 +404,7 @@ impl SdkBackupState {
             event_dedup_records: &event_dedup_records,
             receipt_access_records: &receipt_access_records,
             receipt_records: &receipt_records,
+            receipt_issuance_records: &receipt_issuance_records,
         });
         let recovery_required_peers =
             mark_restored_peers_recovery_required(&mut linked_peers, &recovery_counterparties);
@@ -412,6 +440,7 @@ impl SdkBackupState {
             event_dedup_records: event_dedup_records.len(),
             receipt_access_records: receipt_access_records.len(),
             receipt_records: receipt_records.len(),
+            receipt_issuance_records: receipt_issuance_records.len(),
             recovery_required_peers,
         };
 
@@ -432,6 +461,7 @@ impl SdkBackupState {
             event_dedup_records,
             receipt_access_records,
             receipt_records,
+            receipt_issuance_records,
         };
 
         Ok((ValidatedStorageState::new(state), report))
@@ -490,6 +520,7 @@ impl SdkBackupState {
             || !self.event_dedup_records.is_empty()
             || !self.receipt_access_records.is_empty()
             || !self.receipt_records.is_empty()
+            || !self.receipt_issuance_records.is_empty()
     }
 
     pub(crate) fn has_private_identity_scoped_state(&self) -> bool {
@@ -501,6 +532,7 @@ impl SdkBackupState {
             || !self.event_dedup_records.is_empty()
             || !self.receipt_access_records.is_empty()
             || !self.receipt_records.is_empty()
+            || !self.receipt_issuance_records.is_empty()
     }
 }
 

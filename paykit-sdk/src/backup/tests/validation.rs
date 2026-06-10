@@ -25,6 +25,7 @@ async fn test_restore_backup_state_rejects_malformed_link_snapshot() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -87,6 +88,7 @@ async fn test_restore_backup_state_rejects_local_recovery_marker_without_created
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -125,6 +127,7 @@ async fn test_restore_backup_state_rejects_invalid_remote_recovery_attempt_id() 
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -157,6 +160,7 @@ async fn test_restore_backup_state_rejects_records_without_identity() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -190,6 +194,7 @@ async fn test_restore_backup_state_rejects_invalid_public_endpoint_record() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -223,6 +228,7 @@ async fn test_restore_backup_state_rejects_inconsistent_public_endpoint_status()
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -263,6 +269,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_metadata() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
@@ -303,6 +310,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_status() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
@@ -356,6 +364,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_error() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
@@ -403,6 +412,7 @@ async fn test_restore_backup_state_rejects_stale_dedupe_event_header() {
         }],
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
@@ -450,6 +460,7 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
         }],
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
@@ -523,6 +534,7 @@ async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
         }],
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 3,
@@ -560,6 +572,7 @@ async fn test_restore_backup_state_rejects_missing_event_dedupe_index() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
@@ -618,6 +631,7 @@ async fn test_restore_backup_state_rejects_missing_receipt_access_index() {
         }],
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
@@ -686,6 +700,7 @@ async fn test_restore_backup_state_rejects_receipt_access_context_mismatch() {
             received_at: timestamp(),
         }],
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
@@ -755,6 +770,7 @@ async fn test_restore_backup_state_rejects_inconsistent_receipt_access_status() 
             received_at: timestamp(),
         }],
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
@@ -786,6 +802,7 @@ async fn test_restore_backup_state_preserves_invalid_outbound_audit_record() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 8,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -824,6 +841,7 @@ async fn test_restore_backup_state_preserves_recovery_required_outbound_audit_re
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 8,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -861,6 +879,7 @@ async fn test_restore_backup_state_marks_sending_outbound_recovery_required() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 8,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -933,6 +952,7 @@ async fn test_restore_backup_state_rejects_wrong_identity() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -963,6 +983,7 @@ async fn test_restore_backup_state_preserves_current_sign_out_generation() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -1005,6 +1026,7 @@ async fn test_restore_backup_state_allows_trusted_identity_switch() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -1039,6 +1061,7 @@ async fn test_restore_identity_less_backup_preserves_signed_out_generation() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -1078,6 +1101,7 @@ async fn test_restore_backup_state_rejects_orphan_endpoint_reservation() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -1119,6 +1143,7 @@ async fn test_restore_backup_state_rejects_invalid_endpoint_reservation_id() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -1160,6 +1185,7 @@ async fn test_restore_backup_state_rejects_mismatched_endpoint_reservation_paylo
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
@@ -1220,6 +1246,7 @@ async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
         event_dedup_records: Vec::new(),
         receipt_access_records: vec![access],
         receipt_records: vec![receipt],
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 1,
@@ -1314,9 +1341,121 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
         }],
         receipt_access_records: vec![access],
         receipt_records: vec![receipt],
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+    };
+
+    let result = restore_backup_state(&storage, backup).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+}
+
+#[tokio::test]
+async fn test_restore_backup_state_rejects_receipt_issuance_access_mismatch() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = public_key();
+    let counterparty = public_key();
+    let prepared = paykit_lib::prepare_receipt_for_recipient(
+        counterparty.to_public_key().unwrap(),
+        paykit_lib::ReceiptDraft {
+            receipt_id: Some(
+                paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+            payment_reference: paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+            payment_request_id: None,
+            billing_period: None,
+            payment_endpoint_identifier: Some(
+                paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            ),
+            amount: Some(paykit_lib::PaymentAmount::new("0.001", "btc").unwrap()),
+            metadata: serde_json::Map::new(),
+        },
+    )
+    .unwrap();
+    let mut issuance =
+        ReceiptIssuanceRecord::from_prepared(counterparty, prepared, timestamp()).unwrap();
+    issuance.payment_reference = "different-reference".into();
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        identity_state: Some(identity(local_public_key)),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: Vec::new(),
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: vec![issuance],
+        next_outbound_private_message_id: 0,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    };
+
+    let result = restore_backup_state(&storage, backup).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+}
+
+#[tokio::test]
+async fn test_restore_backup_state_rejects_duplicate_receipt_issuance_ids() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = public_key();
+    let first_counterparty = public_key();
+    let second_counterparty = public_key();
+    let receipt_id = paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+    let draft = || paykit_lib::ReceiptDraft {
+        receipt_id: Some(receipt_id.clone()),
+        payment_reference: paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+        payment_request_id: None,
+        billing_period: None,
+        payment_endpoint_identifier: Some(
+            paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+        ),
+        amount: Some(paykit_lib::PaymentAmount::new("0.001", "btc").unwrap()),
+        metadata: serde_json::Map::new(),
+    };
+    let first = ReceiptIssuanceRecord::from_prepared(
+        first_counterparty.clone(),
+        paykit_lib::prepare_receipt_for_recipient(
+            first_counterparty.to_public_key().unwrap(),
+            draft(),
+        )
+        .unwrap(),
+        timestamp(),
+    )
+    .unwrap();
+    let second = ReceiptIssuanceRecord::from_prepared(
+        second_counterparty.clone(),
+        paykit_lib::prepare_receipt_for_recipient(
+            second_counterparty.to_public_key().unwrap(),
+            draft(),
+        )
+        .unwrap(),
+        timestamp(),
+    )
+    .unwrap();
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        identity_state: Some(identity(local_public_key)),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: Vec::new(),
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: vec![first, second],
+        next_outbound_private_message_id: 0,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
     };
 
     let result = restore_backup_state(&storage, backup).await;

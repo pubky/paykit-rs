@@ -42,6 +42,7 @@ async fn test_restore_backup_state_advances_counters() {
         event_dedup_records: Vec::new(),
         receipt_access_records: Vec::new(),
         receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
         next_outbound_private_message_id: 1,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 1,
