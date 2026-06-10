@@ -296,7 +296,7 @@ pub enum EndpointCompatibility {
     },
 }
 
-/// Payment target produced by an adapter.
+/// Payment-method-specific execution payload produced by an adapter.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentTarget {
     /// Method-specific target payload.

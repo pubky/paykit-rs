@@ -553,14 +553,6 @@ where
         ))
     }
 
-    pub(super) fn private_recovery_window_open(&self, started_at: DateTime<Utc>) -> Result<bool> {
-        let timeout =
-            ChronoDuration::from_std(self.config.private_recovery_timeout).map_err(|err| {
-                PaykitSdkError::Policy(format!("invalid private recovery timeout: {err}"))
-            })?;
-        Ok(self.clock.now() < started_at + timeout)
-    }
-
     pub(super) async fn remove_local_recovery_marker_if_recorded(
         &self,
         counterparty: &PubkyPublicKey,

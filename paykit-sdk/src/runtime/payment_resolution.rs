@@ -8,6 +8,10 @@ where
     C: Clock,
 {
     /// Resolve a payable endpoint for one counterparty.
+    ///
+    /// This uses cached private state first. Call
+    /// [`receive_private_messages`](Self::receive_private_messages) before
+    /// resolving when the app needs the freshest Private Payment List.
     pub async fn resolve_contact_payment(
         &self,
         request: ContactPaymentResolutionRequest,
@@ -34,7 +38,7 @@ where
                 )
                 .await
             {
-                if self.config.public_fallback == PublicFallbackPolicy::Disabled {
+                if !self.config.public_fallback_enabled {
                     return Err(err);
                 }
                 private_allowed = false;
@@ -74,8 +78,8 @@ where
             }
         }
 
-        let mut public_only_session = false;
-        if self.config.public_fallback != PublicFallbackPolicy::WhenPrivateUnavailable {
+        if !self.config.public_fallback_enabled {
+            let mut public_only_session = false;
             match self
                 .recover_private_candidates_for_resolution(&request.counterparty)
                 .await?
@@ -110,9 +114,6 @@ where
                 }
                 PrivateRecoveryOutcome::NotNeeded | PrivateRecoveryOutcome::Refreshed(_) => {}
             }
-        }
-
-        if self.config.public_fallback == PublicFallbackPolicy::Disabled {
             if public_only_session {
                 return Ok(status_resolution(
                     ContactPaymentResolutionStatus::PublicOnlySession,
@@ -131,13 +132,6 @@ where
             .public_payment_candidates(&request.counterparty)
             .await?;
         if public_candidates.is_empty() {
-            if public_only_session {
-                return Ok(status_resolution(
-                    ContactPaymentResolutionStatus::PublicOnlySession,
-                    evaluations,
-                    false,
-                ));
-            }
             return Ok(unresolved_resolution(
                 !private_candidates.is_empty(),
                 evaluations,
@@ -178,7 +172,7 @@ where
             return Ok(PrivateRecoveryOutcome::PublicOnly);
         }
 
-        let (peer_state, peer_last_sync_at, has_active_link, link_generation) = self
+        let (peer_state, has_active_link, link_generation) = self
             .storage
             .transaction(|tx| {
                 let peer = tx.linked_peer(counterparty);
@@ -190,7 +184,6 @@ where
                 let link_generation = link_state.as_ref().map(|state| state.generation);
                 Ok((
                     peer.as_ref().map(|peer| peer.state.clone()),
-                    peer.and_then(|peer| peer.last_sync_at),
                     has_active_link,
                     link_generation,
                 ))
@@ -201,29 +194,12 @@ where
             peer_state,
             Some(LinkedPeerState::Linking | LinkedPeerState::RecoveryRequired)
         ) {
-            if peer_last_sync_at
-                .map(|last_sync_at| self.private_recovery_window_open(last_sync_at))
-                .transpose()?
-                .unwrap_or(false)
-            {
-                return Ok(PrivateRecoveryOutcome::Pending);
-            }
-
-            if matches!(peer_state, Some(LinkedPeerState::RecoveryRequired)) {
-                return Ok(PrivateRecoveryOutcome::NotNeeded);
-            }
+            return Ok(PrivateRecoveryOutcome::Pending);
         }
 
         if has_active_link {
-            if let Err(err) = self
-                .observe_remote_recovery_marker_for_cached_private_state(counterparty, None)
-                .await
-            {
-                if self.config.public_fallback == PublicFallbackPolicy::Disabled {
-                    return Err(err);
-                }
-                return Ok(PrivateRecoveryOutcome::NotNeeded);
-            }
+            self.observe_remote_recovery_marker_for_cached_private_state(counterparty, None)
+                .await?;
 
             match self.receive_private_messages(counterparty.clone()).await {
                 Ok(_) => {

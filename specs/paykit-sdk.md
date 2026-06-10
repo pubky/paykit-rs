@@ -780,13 +780,16 @@ Input:
 - counterparty public key
 - desired amount/asset, if known
 - supported endpoint policy
-- fallback policy
+- whether public fallback is enabled
 
 Flow:
 
 1. Load contact/profile display metadata if configured.
-2. Check Linked Peer and cached private Payment List.
-3. If private state is stale and recovery is possible, run bounded recovery.
+2. Check Linked Peer and cached private Payment List. Callers that need the
+   freshest private endpoints should run private stream receive before
+   resolution.
+3. If no cached private endpoint is payable and public fallback is disabled,
+   try an immediate private refresh/recovery path when an active link exists.
 4. If private endpoints are available, pass them to `PaymentAdapter` as one
    batch with amount context when known.
 5. If no private endpoint is payable and public fallback is allowed, fetch
@@ -801,7 +804,9 @@ Flow:
 When the result is `Payable`, it includes the selected Payment Endpoint and the
 adapter-built `PaymentTarget` for that endpoint.
 
-The SDK should not block indefinitely waiting for private recovery.
+The SDK should not wait inside payment resolution for private linking/recovery
+to complete. Apps can retry receive/resolve from their own workflow when they
+want to keep waiting for private state.
 
 ### Send Payment Request
 
@@ -1009,8 +1014,7 @@ belongs to the app.
 
 - public endpoint management scope
 - private sharing enabled/disabled
-- public fallback policy
-- private recovery wait duration
+- public fallback enabled flag
 - Encrypted Link Recovery Marker policy
 - public contact sharing policy, defaulting to local-only Contact Records
 - peer link operation lease timeout
@@ -1035,7 +1039,7 @@ These are good candidates to move into Paykit SDK:
 - public Payment Endpoint sync and stale endpoint cleanup
 - Private Payment List publish/fetch/cache
 - Encrypted Link snapshot and handshake runtime
-- stale link recovery markers and bounded recovery policy
+- stale link recovery markers and private refresh/recovery policy
 - ordered private stream receive/persist/route
 - Paykit profile publishing/fetching and local contact records
 - contact payment resolution and payable endpoint checks
@@ -1089,8 +1093,7 @@ Platform tests:
 - Custom profile/contact path hooks for apps that already have product-specific
   Pubky namespaces.
 - Public contact marker discovery and richer contact-sharing policy.
-- Public fallback and private recovery timeout policies for saved contacts
-  versus unsaved counterparties.
+- Public fallback policies for saved contacts versus unsaved counterparties.
 - Reservation lifecycle hooks beyond Private Payment List queueing.
 - Recurring Payment Request scheduling ownership between the SDK and
   app/runtime schedulers.

@@ -361,7 +361,7 @@ pub enum ContactPaymentResolutionStatus {
     NoEndpoint,
     /// Endpoints exist but are unsupported.
     UnsupportedEndpoint,
-    /// Private recovery is still in progress.
+    /// Private linking/recovery prevents private-only resolution.
     PrivateRecoveryPending,
     /// The local identity cannot establish private links.
     PublicOnlySession,
@@ -384,6 +384,9 @@ pub struct ContactPaymentResolution {
     /// Selected endpoint, when one is payable.
     pub selected_endpoint: Option<PaymentEndpointCandidate>,
     /// Adapter-built payment target for the selected endpoint.
+    ///
+    /// The endpoint context is carried by `selected_endpoint`; callers should
+    /// keep both fields together when handing work to payment execution code.
     pub payment_target: Option<PaymentTarget>,
     /// Adapter evaluations from candidate checks.
     pub evaluations: Vec<PaymentEndpointEvaluation>,

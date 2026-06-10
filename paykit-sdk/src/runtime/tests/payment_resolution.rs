@@ -179,7 +179,10 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig {
+            public_fallback_enabled: false,
+            ..PaykitSdkConfig::default()
+        },
         FixedClock,
     );
 

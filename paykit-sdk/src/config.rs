@@ -21,18 +21,6 @@ pub enum PrivateSharingPolicy {
     Disabled,
 }
 
-/// Policy for falling back to public Payment Endpoints.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum PublicFallbackPolicy {
-    /// Never fall back to public endpoints.
-    Disabled,
-    /// Use public endpoints when no private endpoint is available.
-    WhenPrivateUnavailable,
-    /// Try bounded private recovery before falling back to public endpoints.
-    AfterPrivateRecoveryTimeout,
-}
-
 /// Policy for public Encrypted Link recovery markers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -60,10 +48,8 @@ pub struct PaykitSdkConfig {
     pub endpoint_management_scope: EndpointManagementScope,
     /// Private Paykit message sharing policy.
     pub private_sharing: PrivateSharingPolicy,
-    /// Public fallback behavior.
-    pub public_fallback: PublicFallbackPolicy,
-    /// Maximum time to spend on private recovery before returning/falling back.
-    pub private_recovery_timeout: Duration,
+    /// Whether contact payment resolution may fall back to public Payment Endpoints.
+    pub public_fallback_enabled: bool,
     /// Public recovery marker behavior.
     #[serde(default = "default_encrypted_link_recovery_marker_policy")]
     pub encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy,
@@ -86,8 +72,7 @@ impl Default for PaykitSdkConfig {
         Self {
             endpoint_management_scope: EndpointManagementScope::ManagedOnly,
             private_sharing: PrivateSharingPolicy::Enabled,
-            public_fallback: PublicFallbackPolicy::AfterPrivateRecoveryTimeout,
-            private_recovery_timeout: Duration::from_secs(3),
+            public_fallback_enabled: true,
             encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy::Enabled,
             public_contact_sharing: PublicContactSharingPolicy::LocalOnly,
             peer_link_operation_lease_timeout: Duration::from_secs(60),
@@ -100,7 +85,6 @@ impl Default for PaykitSdkConfig {
 impl PaykitSdkConfig {
     /// Validate runtime configuration values.
     pub fn validate(&self) -> crate::Result<()> {
-        validate_runtime_duration("private recovery timeout", self.private_recovery_timeout)?;
         validate_runtime_duration(
             "peer link operation lease timeout",
             self.peer_link_operation_lease_timeout,

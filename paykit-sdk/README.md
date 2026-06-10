@@ -54,7 +54,8 @@ Common workflows:
   provider when live session access is available
 - call `sync_public_endpoints` after local receiving details change
 - call `receive_private_messages` before deriving private Payment Lists,
-  Payment Requests, or Receipt Access state
+  Payment Requests, Receipt Access state, or resolving a contact payment when
+  the freshest private endpoints matter
 - call `resolve_contact_payment` to get both the selected endpoint and
   adapter-built `PaymentTarget`
 - call `linked_peers`, `pending_outbound_private_counterparties`, and

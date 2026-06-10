@@ -22,7 +22,7 @@ use crate::{
     },
     config::{
         EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
-        PrivateSharingPolicy, PublicContactSharingPolicy, PublicFallbackPolicy,
+        PrivateSharingPolicy, PublicContactSharingPolicy,
     },
     contacts::{
         parse_profile_json, profile_json, public_contact_json, public_contact_path,
