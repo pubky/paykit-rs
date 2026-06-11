@@ -156,11 +156,11 @@ Payment execution stays outside Paykit SDK, but bindings need a clear payment
 adapter surface.
 
 The payment adapter should work in batches. Given candidate Payment Endpoints
-and optional Payment Amount context, it should return compatibility and
-preference information for each candidate.
+and optional Payment Amount context, it should return the payable candidates in
+the order payment execution should try them.
 
 Candidate batches should use stable opaque candidate IDs. Adapter callbacks
-should return compatibility, selection, and errors by candidate ID instead of
+should return payable candidate IDs and errors by candidate ID instead of
 copying full endpoint payload records back and forth. Raw Payment Endpoint
 Payloads and payment targets should only be exposed through explicitly
 sensitive fields or helper types.
@@ -168,8 +168,8 @@ sensitive fields or helper types.
 Adapter callbacks should cover:
 
 - local Receiving Detail generation for public and private Payment Lists
-- batch endpoint compatibility checks
-- payment target construction for a selected endpoint
+- batch payable-endpoint ordering
+- payment target construction for payable endpoints
 - optional Payment Endpoint Reservation creation
 - Payment Endpoint Reservation release
 
@@ -195,7 +195,7 @@ Recommended shapes:
 - React Native: TypeScript discriminated unions.
 
 Platform enum/union wrappers that mirror SDK statuses, lifecycle states,
-compatibility results, recovery states, or error codes should include an
+payment resolution results, recovery states, or error codes should include an
 unknown case that preserves the raw code/value. New Rust SDK statuses should not
 silently deserialize into a misleading known platform value.
 
@@ -203,7 +203,7 @@ This applies especially to:
 
 - Payment Request lifecycle actions and events
 - payment resolution results
-- endpoint compatibility results
+- payable endpoint ordering results
 - Receipt retrieval status
 - recovery marker status
 - structured errors
@@ -265,7 +265,7 @@ Sensitive fields include:
 - Payment Endpoint Payloads
 - Payment Targets
 - Payment Endpoint Reservation IDs and attribution
-- endpoint compatibility reasons or provider metadata
+- payable endpoint ordering or provider metadata
 
 If a platform wrapper must expose sensitive data for backup/export or storage
 callbacks, that type should be clearly named and documented as sensitive.

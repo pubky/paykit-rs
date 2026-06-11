@@ -8,15 +8,14 @@ use std::{
 
 use super::*;
 use super::{
-    payment_resolution::{selected_from_batch, PrivateRecoveryOutcome},
+    payment_resolution::{payable_from_batch, PrivateRecoveryOutcome},
     recovery::{local_recovery_marker_belongs_to_current_episode, RecoveryRequiredUpdate},
 };
 use crate::{
     adapters::{
-        EndpointCompatibility, PaymentEndpointCandidate, PaymentEndpointEvaluation,
-        PaymentEndpointReservation, PaymentEndpointReservationCancellation,
-        PaymentEndpointReservationRequest, PaymentEndpointSelection,
-        PaymentEndpointSelectionRequest, PaymentTarget, ReceivingDetail, ReceivingDetailScope,
+        PaymentEndpointCandidate, PaymentEndpointReservation,
+        PaymentEndpointReservationCancellation, PaymentEndpointSelectionRequest, PaymentTarget,
+        ReceivingDetail, ReceivingDetailScope,
     },
     endpoint_reservations::queue_private_payment_list_with_reservations,
     private_stream::persist_private_stream_batch,
@@ -97,23 +96,11 @@ impl PaymentAdapter for TestPaymentAdapter {
         Ok(())
     }
 
-    async fn select_payment_endpoint(
+    async fn select_payment_endpoints(
         &self,
         request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection> {
-        Ok(PaymentEndpointSelection {
-            selected: request.candidates.first().cloned(),
-            evaluations: request
-                .candidates
-                .iter()
-                .enumerate()
-                .map(|(index, candidate)| PaymentEndpointEvaluation {
-                    candidate: candidate.clone(),
-                    compatibility: EndpointCompatibility::Payable,
-                    priority: Some(index as u32),
-                })
-                .collect(),
-        })
+    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        Ok(request.candidates.clone())
     }
 
     async fn build_payment_target(
@@ -148,14 +135,11 @@ impl PaymentAdapter for PrivateListPaymentAdapter {
         Ok(())
     }
 
-    async fn select_payment_endpoint(
+    async fn select_payment_endpoints(
         &self,
         _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection> {
-        Ok(PaymentEndpointSelection {
-            selected: None,
-            evaluations: Vec::new(),
-        })
+    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        Ok(Vec::new())
     }
 
     async fn build_payment_target(
@@ -181,9 +165,9 @@ impl PaymentAdapter for ReservedPrivateListPaymentAdapter {
 
     async fn reserve_receiving_details(
         &self,
-        request: &PaymentEndpointReservationRequest,
+        counterparty: &PubkyPublicKey,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
-        assert!(!request.counterparty.as_str().is_empty());
+        assert!(!counterparty.as_str().is_empty());
         Ok(Some(vec![PaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
             receiving_detail: ReceivingDetail {
@@ -202,14 +186,11 @@ impl PaymentAdapter for ReservedPrivateListPaymentAdapter {
         Ok(())
     }
 
-    async fn select_payment_endpoint(
+    async fn select_payment_endpoints(
         &self,
         request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection> {
-        Ok(PaymentEndpointSelection {
-            selected: request.candidates.first().cloned(),
-            evaluations: Vec::new(),
-        })
+    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        Ok(request.candidates.clone())
     }
 
     async fn build_payment_target(
@@ -237,7 +218,7 @@ impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
 
     async fn reserve_receiving_details(
         &self,
-        _request: &PaymentEndpointReservationRequest,
+        _counterparty: &PubkyPublicKey,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         Ok(Some(vec![
             PaymentEndpointReservation {
@@ -272,14 +253,11 @@ impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
         Ok(())
     }
 
-    async fn select_payment_endpoint(
+    async fn select_payment_endpoints(
         &self,
         _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection> {
-        Ok(PaymentEndpointSelection {
-            selected: None,
-            evaluations: Vec::new(),
-        })
+    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        Ok(Vec::new())
     }
 
     async fn build_payment_target(
@@ -305,7 +283,7 @@ impl PaymentAdapter for FailingCancellationPaymentAdapter {
 
     async fn reserve_receiving_details(
         &self,
-        _request: &PaymentEndpointReservationRequest,
+        _counterparty: &PubkyPublicKey,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         Ok(None)
     }
@@ -320,14 +298,11 @@ impl PaymentAdapter for FailingCancellationPaymentAdapter {
         })
     }
 
-    async fn select_payment_endpoint(
+    async fn select_payment_endpoints(
         &self,
         _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection> {
-        Ok(PaymentEndpointSelection {
-            selected: None,
-            evaluations: Vec::new(),
-        })
+    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        Ok(Vec::new())
     }
 
     async fn build_payment_target(
@@ -357,7 +332,7 @@ impl PaymentAdapter for LeaseChangingCancellationPaymentAdapter {
 
     async fn reserve_receiving_details(
         &self,
-        _request: &PaymentEndpointReservationRequest,
+        _counterparty: &PubkyPublicKey,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         Ok(None)
     }
@@ -386,14 +361,11 @@ impl PaymentAdapter for LeaseChangingCancellationPaymentAdapter {
         Ok(())
     }
 
-    async fn select_payment_endpoint(
+    async fn select_payment_endpoints(
         &self,
         _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection> {
-        Ok(PaymentEndpointSelection {
-            selected: None,
-            evaluations: Vec::new(),
-        })
+    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        Ok(Vec::new())
     }
 
     async fn build_payment_target(
@@ -423,7 +395,7 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
 
     async fn reserve_receiving_details(
         &self,
-        _request: &PaymentEndpointReservationRequest,
+        _counterparty: &PubkyPublicKey,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         self.storage
             .transaction({
@@ -471,14 +443,11 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
         Ok(())
     }
 
-    async fn select_payment_endpoint(
+    async fn select_payment_endpoints(
         &self,
         _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection> {
-        Ok(PaymentEndpointSelection {
-            selected: None,
-            evaluations: Vec::new(),
-        })
+    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        Ok(Vec::new())
     }
 
     async fn build_payment_target(
@@ -506,7 +475,7 @@ impl PaymentAdapter for MixedExistingReservedPrivateListPaymentAdapter {
 
     async fn reserve_receiving_details(
         &self,
-        _request: &PaymentEndpointReservationRequest,
+        _counterparty: &PubkyPublicKey,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         Ok(Some(vec![
             PaymentEndpointReservation {
@@ -541,14 +510,11 @@ impl PaymentAdapter for MixedExistingReservedPrivateListPaymentAdapter {
         Ok(())
     }
 
-    async fn select_payment_endpoint(
+    async fn select_payment_endpoints(
         &self,
         _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection> {
-        Ok(PaymentEndpointSelection {
-            selected: None,
-            evaluations: Vec::new(),
-        })
+    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        Ok(Vec::new())
     }
 
     async fn build_payment_target(

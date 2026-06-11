@@ -69,8 +69,8 @@ Common workflows:
 - call `receive_private_messages` before deriving private Payment Lists,
   Payment Requests, Receipt Access state, or resolving a contact payment when
   the freshest private endpoints matter
-- call `resolve_contact_payment` to get both the selected endpoint and
-  adapter-built `PaymentTarget`
+- call `resolve_contact_payment` to get ordered payable Payment Endpoints, each
+  with an adapter-built `PaymentTarget`
 - build receipt drafts with `ReceiptDraftBuilder`; call
   `prepare_receipt_issuance` before receipt network side effects, then
   `process_receipt_issuance`; use `issue_receipt` only when the draft already

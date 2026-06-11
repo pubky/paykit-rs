@@ -165,7 +165,7 @@ async fn test_restore_backup_state_rejects_dual_contact_marker_timestamps() {
         .mark_public_contact_published(timestamp())
         .mark_public_contact_removed(timestamp());
     contact.public_contact_published_at = Some(timestamp());
-    contact.public_contact_marker_status = crate::PublicContactMarkerStatus::Failed;
+    contact.public_contact_marker_status = crate::PublicationStatus::Failed;
     contact.public_contact_last_error = Some("failed".into());
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,

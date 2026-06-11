@@ -12,10 +12,6 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
-fn request(counterparty: PubkyPublicKey) -> PaymentEndpointReservationRequest {
-    PaymentEndpointReservationRequest { counterparty }
-}
-
 fn reservation(id: &str, payload: &str) -> PaymentEndpointReservation {
     PaymentEndpointReservation {
         reservation_id: id.into(),
@@ -34,7 +30,7 @@ async fn test_queue_private_payment_list_with_reservations_stores_linked_records
     let counterparty = counterparty();
     let outbound = queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![reservation("res-1", "ln-secret")],
         timestamp(),
     )
@@ -95,7 +91,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_stale_lease()
 
     let result = queue_private_payment_list_with_reservations_with_link_lease(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![reservation("res-1", "ln-secret")],
         timestamp(),
         &stale_lease,
@@ -114,7 +110,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_duplicate_ide
     let counterparty = counterparty();
     let result = queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty),
+        &counterparty,
         vec![reservation("res-1", "one"), reservation("res-2", "two")],
         timestamp(),
     )
@@ -137,7 +133,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_invalid_ids()
     for reservation_id in [" ", "res\n1", long_id.as_str()] {
         let result = queue_private_payment_list_with_reservations(
             &storage,
-            &request(counterparty.clone()),
+            &counterparty,
             vec![reservation(reservation_id, "one")],
             timestamp(),
         )
@@ -158,7 +154,7 @@ async fn test_queue_private_payment_list_with_reservations_preserves_existing_me
     let counterparty = counterparty();
     queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -167,7 +163,7 @@ async fn test_queue_private_payment_list_with_reservations_preserves_existing_me
 
     let outbound = queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![PaymentEndpointReservation {
             reservation_id: "res-1".into(),
             receiving_detail: ReceivingDetail {
@@ -207,7 +203,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_cancellation_
     let counterparty = counterparty();
     queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -230,7 +226,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_cancellation_
 
     let result = queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty),
+        &counterparty,
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -245,7 +241,7 @@ async fn test_unattempted_superseded_reservation_cancellations() {
     let counterparty = counterparty();
     queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -253,7 +249,7 @@ async fn test_unattempted_superseded_reservation_cancellations() {
     .unwrap();
     queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![reservation("res-2", "two")],
         timestamp(),
     )
@@ -283,7 +279,7 @@ async fn test_unattempted_superseded_reservation_cancellations_skip_attempted_li
     let counterparty = counterparty();
     let first = queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -291,7 +287,7 @@ async fn test_unattempted_superseded_reservation_cancellations_skip_attempted_li
     .unwrap();
     queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![reservation("res-2", "two")],
         timestamp(),
     )
@@ -339,7 +335,7 @@ async fn test_expired_outbound_reservation_cancellations() {
     let counterparty = counterparty();
     let outbound = queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![PaymentEndpointReservation {
             reservation_id: "res-1".into(),
             receiving_detail: ReceivingDetail {
@@ -382,7 +378,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_conflicting_e
     let counterparty = counterparty();
     queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty.clone()),
+        &counterparty,
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -391,7 +387,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_conflicting_e
 
     let result = queue_private_payment_list_with_reservations(
         &storage,
-        &request(counterparty),
+        &counterparty,
         vec![reservation("res-1", "two")],
         timestamp(),
     )
@@ -408,7 +404,7 @@ async fn test_queue_private_payment_list_with_reservations_scopes_ids_by_counter
 
     queue_private_payment_list_with_reservations(
         &storage,
-        &request(first),
+        &first,
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -416,7 +412,7 @@ async fn test_queue_private_payment_list_with_reservations_scopes_ids_by_counter
     .unwrap();
     queue_private_payment_list_with_reservations(
         &storage,
-        &request(second),
+        &second,
         vec![reservation("res-1", "two")],
         timestamp(),
     )

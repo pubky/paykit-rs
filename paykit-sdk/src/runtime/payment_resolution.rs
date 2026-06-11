@@ -1,4 +1,5 @@
 use super::*;
+use crate::PaymentAmountContext;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -7,7 +8,7 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
-    /// Resolve a payable endpoint for one counterparty.
+    /// Resolve payable endpoints for one counterparty.
     ///
     /// This uses cached private state first. Call
     /// [`receive_private_messages`](Self::receive_private_messages) before
@@ -17,16 +18,19 @@ where
         request: ContactPaymentResolutionRequest,
     ) -> Result<ContactPaymentResolution> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        let mut evaluations = Vec::new();
         let mut private_allowed = self.config.private_sharing != PrivateSharingPolicy::Disabled
             && identity.public_key.is_some();
+        let mut private_recovery_pending = false;
         if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
             private_allowed = match self
                 .ensure_peer_allows_private_automation(&request.counterparty)
                 .await
             {
                 Ok(()) => true,
-                Err(PaykitSdkError::RecoveryRequired(_)) => false,
+                Err(PaykitSdkError::RecoveryRequired(_)) => {
+                    private_recovery_pending = true;
+                    false
+                }
                 Err(err) => return Err(err),
             };
         }
@@ -38,7 +42,9 @@ where
                 )
                 .await
             {
-                if !self.config.public_fallback_enabled {
+                if matches!(err, PaykitSdkError::RecoveryRequired(_)) {
+                    private_recovery_pending = true;
+                } else if !request.include_public_endpoints {
                     return Err(err);
                 }
                 private_allowed = false;
@@ -50,7 +56,10 @@ where
                 .await
             {
                 Ok(()) => true,
-                Err(PaykitSdkError::RecoveryRequired(_)) => false,
+                Err(PaykitSdkError::RecoveryRequired(_)) => {
+                    private_recovery_pending = true;
+                    false
+                }
                 Err(err) => return Err(err),
             };
         }
@@ -59,26 +68,15 @@ where
         } else {
             None
         };
-        let private_candidates = private_candidates(&request.counterparty, private_view.as_ref());
+        let mut candidates = private_candidates(&request.counterparty, private_view.as_ref());
+        let had_private_candidates = !candidates.is_empty();
 
-        if !private_candidates.is_empty() {
-            let selection = self
-                .payment
-                .select_payment_endpoint(&PaymentEndpointSelectionRequest {
-                    counterparty: request.counterparty.clone(),
-                    amount: request.amount.clone(),
-                    candidates: private_candidates.clone(),
-                })
-                .await?;
-            let selected = selected_from_batch(&selection, &private_candidates)?;
-            evaluations.extend(selection.evaluations);
-            if let Some(selected) = selected {
-                let target = self.payment.build_payment_target(&selected).await?;
-                return Ok(payable_resolution(selected, target, evaluations, false));
+        if candidates.is_empty() && !request.include_public_endpoints {
+            if private_recovery_pending {
+                return Ok(status_resolution(
+                    ContactPaymentResolutionStatus::PrivateRecoveryPending,
+                ));
             }
-        }
-
-        if !self.config.public_fallback_enabled {
             let mut public_only_session = false;
             match self
                 .recover_private_candidates_for_resolution(&request.counterparty)
@@ -87,26 +85,11 @@ where
                 PrivateRecoveryOutcome::Refreshed(refreshed_candidates)
                     if !refreshed_candidates.is_empty() =>
                 {
-                    let selection = self
-                        .payment
-                        .select_payment_endpoint(&PaymentEndpointSelectionRequest {
-                            counterparty: request.counterparty.clone(),
-                            amount: request.amount.clone(),
-                            candidates: refreshed_candidates.clone(),
-                        })
-                        .await?;
-                    let selected = selected_from_batch(&selection, &refreshed_candidates)?;
-                    evaluations.extend(selection.evaluations);
-                    if let Some(selected) = selected {
-                        let target = self.payment.build_payment_target(&selected).await?;
-                        return Ok(payable_resolution(selected, target, evaluations, false));
-                    }
+                    candidates = refreshed_candidates;
                 }
                 PrivateRecoveryOutcome::Pending => {
                     return Ok(status_resolution(
                         ContactPaymentResolutionStatus::PrivateRecoveryPending,
-                        evaluations,
-                        false,
                     ));
                 }
                 PrivateRecoveryOutcome::PublicOnly => {
@@ -117,44 +100,26 @@ where
             if public_only_session {
                 return Ok(status_resolution(
                     ContactPaymentResolutionStatus::PublicOnlySession,
-                    evaluations,
-                    false,
                 ));
             }
+        }
+
+        if request.include_public_endpoints {
+            candidates.extend(
+                self.public_payment_candidates(&request.counterparty)
+                    .await?,
+            );
+        }
+
+        if candidates.is_empty() {
             return Ok(unresolved_resolution(
-                !private_candidates.is_empty(),
-                evaluations,
-                false,
+                had_private_candidates,
+                private_recovery_pending,
             ));
         }
 
-        let public_candidates = self
-            .public_payment_candidates(&request.counterparty)
-            .await?;
-        if public_candidates.is_empty() {
-            return Ok(unresolved_resolution(
-                !private_candidates.is_empty(),
-                evaluations,
-                false,
-            ));
-        }
-
-        let selection = self
-            .payment
-            .select_payment_endpoint(&PaymentEndpointSelectionRequest {
-                counterparty: request.counterparty,
-                amount: request.amount,
-                candidates: public_candidates.clone(),
-            })
-            .await?;
-        let selected = selected_from_batch(&selection, &public_candidates)?;
-        evaluations.extend(selection.evaluations);
-        if let Some(selected) = selected {
-            let target = self.payment.build_payment_target(&selected).await?;
-            return Ok(payable_resolution(selected, target, evaluations, true));
-        }
-
-        Ok(unresolved_resolution(true, evaluations, true))
+        self.resolve_candidate_batch(request.counterparty, request.amount, candidates)
+            .await
     }
 
     pub(super) async fn recover_private_candidates_for_resolution(
@@ -259,6 +224,41 @@ where
         endpoints.sort_by(|left, right| left.identifier.cmp(&right.identifier));
         Ok(endpoints)
     }
+
+    async fn build_payable_endpoints(
+        &self,
+        payable: Vec<PaymentEndpointCandidate>,
+    ) -> Result<Vec<ResolvedPaymentEndpoint>> {
+        let mut endpoints = Vec::with_capacity(payable.len());
+        for endpoint in payable {
+            let target = self.payment.build_payment_target(&endpoint).await?;
+            endpoints.push(ResolvedPaymentEndpoint { endpoint, target });
+        }
+        Ok(endpoints)
+    }
+
+    pub(super) async fn resolve_candidate_batch(
+        &self,
+        counterparty: PubkyPublicKey,
+        amount: Option<PaymentAmountContext>,
+        candidates: Vec<PaymentEndpointCandidate>,
+    ) -> Result<ContactPaymentResolution> {
+        let payable = self
+            .payment
+            .select_payment_endpoints(&PaymentEndpointSelectionRequest {
+                counterparty,
+                amount,
+                candidates: candidates.clone(),
+            })
+            .await?;
+        let payable = payable_from_batch(&payable, &candidates)?;
+        let payable_endpoints = self.build_payable_endpoints(payable).await?;
+        if !payable_endpoints.is_empty() {
+            return Ok(payable_resolution(payable_endpoints));
+        }
+
+        Ok(unresolved_resolution(true, false))
+    }
 }
 
 fn private_candidates(
@@ -288,89 +288,54 @@ pub(super) enum PrivateRecoveryOutcome {
     PublicOnly,
     Refreshed(Vec<PaymentEndpointCandidate>),
 }
-fn payable_resolution(
-    selected: PaymentEndpointCandidate,
-    payment_target: PaymentTarget,
-    evaluations: Vec<PaymentEndpointEvaluation>,
-    used_public_fallback: bool,
-) -> ContactPaymentResolution {
+fn payable_resolution(payable_endpoints: Vec<ResolvedPaymentEndpoint>) -> ContactPaymentResolution {
     ContactPaymentResolution {
         status: ContactPaymentResolutionStatus::Payable,
-        selected_endpoint: Some(selected),
-        payment_target: Some(payment_target),
-        evaluations,
-        used_public_fallback,
+        payable_endpoints,
     }
 }
 
-fn status_resolution(
-    status: ContactPaymentResolutionStatus,
-    evaluations: Vec<PaymentEndpointEvaluation>,
-    used_public_fallback: bool,
-) -> ContactPaymentResolution {
+fn status_resolution(status: ContactPaymentResolutionStatus) -> ContactPaymentResolution {
     ContactPaymentResolution {
         status,
-        selected_endpoint: None,
-        payment_target: None,
-        evaluations,
-        used_public_fallback,
+        payable_endpoints: Vec::new(),
     }
 }
 
 fn unresolved_resolution(
     had_candidates: bool,
-    evaluations: Vec<PaymentEndpointEvaluation>,
-    used_public_fallback: bool,
+    private_recovery_pending: bool,
 ) -> ContactPaymentResolution {
     ContactPaymentResolution {
-        status: if had_candidates {
+        status: if private_recovery_pending {
+            ContactPaymentResolutionStatus::PrivateRecoveryPending
+        } else if had_candidates {
             ContactPaymentResolutionStatus::UnsupportedEndpoint
         } else {
             ContactPaymentResolutionStatus::NoEndpoint
         },
-        selected_endpoint: None,
-        payment_target: None,
-        evaluations,
-        used_public_fallback,
+        payable_endpoints: Vec::new(),
     }
 }
 
-pub(super) fn selected_from_batch(
-    selection: &PaymentEndpointSelection,
+pub(super) fn payable_from_batch(
+    selected: &[PaymentEndpointCandidate],
     candidates: &[PaymentEndpointCandidate],
-) -> Result<Option<PaymentEndpointCandidate>> {
-    for evaluation in &selection.evaluations {
-        if !candidates.contains(&evaluation.candidate) {
+) -> Result<Vec<PaymentEndpointCandidate>> {
+    let mut payable = Vec::with_capacity(selected.len());
+    for candidate in selected {
+        if !candidates.contains(candidate) {
             return Err(PaykitSdkError::Protocol(
-                "PaymentAdapter evaluated an endpoint that was not in the candidate batch".into(),
+                "PaymentAdapter returned a payable endpoint that was not in the candidate batch"
+                    .into(),
             ));
         }
+        if payable.contains(candidate) {
+            return Err(PaykitSdkError::Protocol(
+                "PaymentAdapter returned duplicate payable endpoints".into(),
+            ));
+        }
+        payable.push(candidate.clone());
     }
-    let Some(selected) = selection.selected.as_ref() else {
-        return Ok(None);
-    };
-    if !candidates.contains(selected) {
-        return Err(PaykitSdkError::Protocol(
-            "PaymentAdapter selected an endpoint that was not in the candidate batch".into(),
-        ));
-    }
-    let selected_evaluations = selection
-        .evaluations
-        .iter()
-        .filter(|evaluation| evaluation.candidate == *selected)
-        .collect::<Vec<_>>();
-    if selected_evaluations.is_empty() {
-        return Err(PaykitSdkError::Protocol(
-            "PaymentAdapter selected an endpoint without a matching evaluation".into(),
-        ));
-    }
-    if selected_evaluations
-        .iter()
-        .any(|evaluation| evaluation.compatibility != EndpointCompatibility::Payable)
-    {
-        return Err(PaykitSdkError::Protocol(
-            "PaymentAdapter selected an endpoint that was not evaluated as payable".into(),
-        ));
-    }
-    Ok(Some(selected.clone()))
+    Ok(payable)
 }

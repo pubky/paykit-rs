@@ -70,10 +70,11 @@ where
         counterparty: PubkyPublicKey,
         lease: &PeerLinkOperationLease,
     ) -> Result<OutboundPrivateMessageRecord> {
-        let request = PaymentEndpointReservationRequest {
-            counterparty: counterparty.clone(),
-        };
-        if let Some(reservations) = self.payment.reserve_receiving_details(&request).await? {
+        if let Some(reservations) = self
+            .payment
+            .reserve_receiving_details(&counterparty)
+            .await?
+        {
             let cancellations = reservations
                 .iter()
                 .map(|reservation| reservation_cancellation(&counterparty, reservation))
@@ -81,7 +82,7 @@ where
             let now = self.clock.now();
             let result = queue_private_payment_list_with_reservations_with_link_lease(
                 &self.storage,
-                &request,
+                &counterparty,
                 reservations,
                 now,
                 lease,

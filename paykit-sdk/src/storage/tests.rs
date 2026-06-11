@@ -8,8 +8,7 @@ use crate::outbound_private::{
     mark_outbound_sent, queued_outbound_private_messages,
 };
 use crate::{
-    EndpointPublicationStatus, LinkedPeerState, OutboundPrivateMessageStatus,
-    PrivateStreamParseStatus,
+    LinkedPeerState, OutboundPrivateMessageStatus, PrivateStreamParseStatus, PublicationStatus,
 };
 
 fn timestamp() -> DateTime<Utc> {
@@ -24,7 +23,7 @@ fn public_endpoint_record(identifier: &str) -> PublicEndpointRecord {
     PublicEndpointRecord {
         identifier: identifier.into(),
         payload: Some("public-endpoint-secret".into()),
-        status: EndpointPublicationStatus::Published,
+        status: PublicationStatus::Published,
         updated_at: timestamp(),
         last_error: None,
     }
@@ -179,7 +178,7 @@ fn test_sensitive_storage_debug_is_redacted() {
         profile_fetched_at: Some(timestamp()),
         created_at: timestamp(),
         updated_at: timestamp(),
-        public_contact_marker_status: crate::PublicContactMarkerStatus::Published,
+        public_contact_marker_status: crate::PublicationStatus::Published,
         public_contact_published_at: Some(timestamp()),
         public_contact_removed_at: None,
         public_contact_last_error: Some("marker-secret".into()),

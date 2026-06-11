@@ -795,10 +795,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                     StoredPaymentRequestEvent::Outbound { .. } => None,
                 },
                 payment_reference: proof.payment_reference.as_str().to_owned(),
-                billing_period: proof
-                    .billing_period
-                    .as_ref()
-                    .map(PaymentRequestBillingPeriodRecord::from),
+                billing_period: proof.billing_period.as_ref().map(BillingPeriodRecord::from),
                 payment_endpoint_identifier: proof.payment_endpoint_identifier.as_str().to_owned(),
                 proof: proof.proof.clone(),
                 recorded_at: stored.record_time(),

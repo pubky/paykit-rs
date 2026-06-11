@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::{
-    PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate, PaymentEndpointEvaluation,
+    publication::PublicationStatus, PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate,
     PaymentTarget, PubkyPublicKey, Result,
 };
 
@@ -334,7 +334,7 @@ pub struct ContactRecord {
     /// Time the local contact record last changed.
     pub updated_at: chrono::DateTime<chrono::Utc>,
     /// Public Contact Marker publication state.
-    pub public_contact_marker_status: PublicContactMarkerStatus,
+    pub public_contact_marker_status: PublicationStatus,
     /// Time the contact was last published publicly by explicit opt-in.
     pub public_contact_published_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Time the public contact marker was last removed.
@@ -372,25 +372,6 @@ impl fmt::Debug for ContactRecord {
     }
 }
 
-/// Publication state for an optional Public Contact Marker.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum PublicContactMarkerStatus {
-    /// No Public Contact Marker is known to be published.
-    #[default]
-    NotPublished,
-    /// Marker publication was recorded locally before the remote write.
-    PendingPublication,
-    /// Marker is known to be published.
-    Published,
-    /// Marker removal was recorded locally before the remote delete.
-    PendingRemoval,
-    /// Marker is known to be removed.
-    Removed,
-    /// Last marker publication/removal attempt failed.
-    Failed,
-}
-
 impl ContactRecord {
     pub(crate) fn from_update(
         update: ContactUpdate,
@@ -411,7 +392,7 @@ impl ContactRecord {
                 profile_fetched_at: None,
                 created_at: now,
                 updated_at: now,
-                public_contact_marker_status: PublicContactMarkerStatus::NotPublished,
+                public_contact_marker_status: PublicationStatus::NotPublished,
                 public_contact_published_at: None,
                 public_contact_removed_at: None,
                 public_contact_last_error: None,
@@ -434,7 +415,7 @@ impl ContactRecord {
         mut self,
         updated_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
-        self.public_contact_marker_status = PublicContactMarkerStatus::PendingPublication;
+        self.public_contact_marker_status = PublicationStatus::PendingPublication;
         self.public_contact_last_error = None;
         self.updated_at = updated_at;
         self
@@ -444,7 +425,7 @@ impl ContactRecord {
         mut self,
         published_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
-        self.public_contact_marker_status = PublicContactMarkerStatus::Published;
+        self.public_contact_marker_status = PublicationStatus::Published;
         self.public_contact_published_at = Some(published_at);
         self.public_contact_removed_at = None;
         self.public_contact_last_error = None;
@@ -456,7 +437,7 @@ impl ContactRecord {
         mut self,
         updated_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
-        self.public_contact_marker_status = PublicContactMarkerStatus::PendingRemoval;
+        self.public_contact_marker_status = PublicationStatus::PendingRemoval;
         self.public_contact_last_error = None;
         self.updated_at = updated_at;
         self
@@ -466,7 +447,7 @@ impl ContactRecord {
         mut self,
         removed_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
-        self.public_contact_marker_status = PublicContactMarkerStatus::Removed;
+        self.public_contact_marker_status = PublicationStatus::Removed;
         self.public_contact_published_at = None;
         self.public_contact_removed_at = Some(removed_at);
         self.public_contact_last_error = None;
@@ -479,7 +460,7 @@ impl ContactRecord {
         error: String,
         failed_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
-        self.public_contact_marker_status = PublicContactMarkerStatus::Failed;
+        self.public_contact_marker_status = PublicationStatus::Failed;
         self.public_contact_last_error = Some(error);
         self.updated_at = failed_at;
         self
@@ -488,16 +469,16 @@ impl ContactRecord {
     pub(crate) fn can_remove_locally(&self) -> bool {
         matches!(
             self.public_contact_marker_status,
-            PublicContactMarkerStatus::NotPublished | PublicContactMarkerStatus::Removed
+            PublicationStatus::NotPublished | PublicationStatus::Removed
         )
     }
 
     pub(crate) fn may_have_public_marker(&self) -> bool {
         matches!(
             self.public_contact_marker_status,
-            PublicContactMarkerStatus::PendingPublication
-                | PublicContactMarkerStatus::PendingRemoval
-                | PublicContactMarkerStatus::Published
+            PublicationStatus::PendingPublication
+                | PublicationStatus::PendingRemoval
+                | PublicationStatus::Published
         ) || (self.public_contact_published_at.is_some()
             && self.public_contact_removed_at.is_none())
     }
@@ -668,41 +649,49 @@ pub enum ContactPaymentResolutionStatus {
     PublicOnlySession,
 }
 
-/// Request to resolve a payable endpoint for one counterparty.
+/// Request to resolve payable endpoints for one counterparty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactPaymentResolutionRequest {
     /// Counterparty to pay.
     pub counterparty: PubkyPublicKey,
     /// Optional amount context used by the payment adapter.
     pub amount: Option<PaymentAmountContext>,
+    /// Include public Payment Endpoints after private candidates.
+    pub include_public_endpoints: bool,
 }
 
-/// Result of resolving a contact payment endpoint.
+/// Payment Endpoint paired with the target needed to pay through it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPaymentEndpoint {
+    /// Payable endpoint returned by the payment adapter.
+    pub endpoint: PaymentEndpointCandidate,
+    /// Adapter-built target for executing payment through this endpoint.
+    pub target: PaymentTarget,
+}
+
+impl fmt::Debug for ResolvedPaymentEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvedPaymentEndpoint")
+            .field("endpoint", &self.endpoint)
+            .field("target", &self.target)
+            .finish()
+    }
+}
+
+/// Result of resolving contact Payment Endpoints.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactPaymentResolution {
     /// Resolution status.
     pub status: ContactPaymentResolutionStatus,
-    /// Selected endpoint, when one is payable.
-    pub selected_endpoint: Option<PaymentEndpointCandidate>,
-    /// Adapter-built payment target for the selected endpoint.
-    ///
-    /// The endpoint context is carried by `selected_endpoint`; callers should
-    /// keep both fields together when handing work to payment execution code.
-    pub payment_target: Option<PaymentTarget>,
-    /// Adapter evaluations from candidate checks.
-    pub evaluations: Vec<PaymentEndpointEvaluation>,
-    /// Whether public Payment Endpoints were used after private candidates.
-    pub used_public_fallback: bool,
+    /// Payable Payment Endpoints in adapter-preferred order.
+    pub payable_endpoints: Vec<ResolvedPaymentEndpoint>,
 }
 
 impl fmt::Debug for ContactPaymentResolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ContactPaymentResolution")
             .field("status", &self.status)
-            .field("selected_endpoint", &self.selected_endpoint)
-            .field("payment_target", &self.payment_target)
-            .field("evaluations", &self.evaluations)
-            .field("used_public_fallback", &self.used_public_fallback)
+            .field("payable_endpoints", &self.payable_endpoints)
             .finish()
     }
 }

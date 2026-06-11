@@ -375,9 +375,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     queue_private_payment_list_with_reservations(
         &storage,
-        &PaymentEndpointReservationRequest {
-            counterparty: counterparty.clone(),
-        },
+        &counterparty,
         vec![PaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
             receiving_detail: ReceivingDetail {
@@ -393,9 +391,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
     .unwrap();
     let latest = queue_private_payment_list_with_reservations(
         &storage,
-        &PaymentEndpointReservationRequest {
-            counterparty: counterparty.clone(),
-        },
+        &counterparty,
         vec![PaymentEndpointReservation {
             reservation_id: "reservation-2".into(),
             receiving_detail: ReceivingDetail {
@@ -458,9 +454,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     queue_private_payment_list_with_reservations(
         &storage,
-        &PaymentEndpointReservationRequest {
-            counterparty: counterparty.clone(),
-        },
+        &counterparty,
         vec![PaymentEndpointReservation {
             reservation_id: "existing-reservation".into(),
             receiving_detail: ReceivingDetail {

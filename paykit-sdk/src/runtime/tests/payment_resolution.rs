@@ -1,44 +1,74 @@
 use super::*;
 
 #[test]
-fn test_selected_from_batch_requires_payable_evaluation() {
+fn test_payable_from_batch_rejects_foreign_candidates() {
     let candidate = endpoint_candidate("ln-private");
-    let selection = PaymentEndpointSelection {
-        selected: Some(candidate.clone()),
-        evaluations: vec![PaymentEndpointEvaluation {
-            candidate: candidate.clone(),
-            compatibility: EndpointCompatibility::Unsupported {
-                reason: Some("unsupported".into()),
-            },
-            priority: None,
-        }],
-    };
+    let foreign = endpoint_candidate("ln-foreign");
 
-    let result = selected_from_batch(&selection, &[candidate]);
+    let result = payable_from_batch(&[foreign], &[candidate]);
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
 }
 
 #[test]
-fn test_selected_from_batch_rejects_foreign_evaluations() {
+fn test_payable_from_batch_rejects_duplicate_candidates() {
     let candidate = endpoint_candidate("ln-private");
-    let foreign = endpoint_candidate("ln-foreign");
-    let selection = PaymentEndpointSelection {
-        selected: None,
-        evaluations: vec![PaymentEndpointEvaluation {
-            candidate: foreign,
-            compatibility: EndpointCompatibility::Payable,
-            priority: None,
-        }],
-    };
 
-    let result = selected_from_batch(&selection, &[candidate]);
+    let result = payable_from_batch(&[candidate.clone(), candidate.clone()], &[candidate]);
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
 }
 
+#[test]
+fn test_payable_from_batch_preserves_adapter_order_for_private_and_public() {
+    let private = endpoint_candidate("ln-private");
+    let mut public = private.clone();
+    public.source = PaymentEndpointSource::PublicPaymentEndpoint;
+    public.payload = "ln-public".into();
+    let candidates = vec![private.clone(), public.clone()];
+
+    let result = payable_from_batch(&[public.clone(), private.clone()], &candidates).unwrap();
+
+    assert_eq!(result, vec![public, private]);
+}
+
 #[tokio::test]
-async fn test_resolve_contact_payment_requires_initialized_identity_for_cached_private_list() {
+async fn test_resolve_candidate_batch_returns_ordered_payable_endpoints() {
+    let storage = InMemoryStorage::new();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+    let private = endpoint_candidate("ln-private");
+    let mut public = private.clone();
+    public.source = PaymentEndpointSource::PublicPaymentEndpoint;
+    public.payload = "ln-public".into();
+
+    let result = sdk
+        .resolve_candidate_batch(
+            private.counterparty.clone(),
+            Some(crate::PaymentAmountContext {
+                value: "10.00".into(),
+                asset: "usd".into(),
+            }),
+            vec![private.clone(), public.clone()],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, ContactPaymentResolutionStatus::Payable);
+    assert_eq!(result.payable_endpoints.len(), 2);
+    assert_eq!(result.payable_endpoints[0].endpoint, private);
+    assert_eq!(result.payable_endpoints[0].target.payload, "ln-private");
+    assert_eq!(result.payable_endpoints[1].endpoint, public);
+    assert_eq!(result.payable_endpoints[1].target.payload, "ln-public");
+}
+
+#[tokio::test]
+async fn test_resolve_contact_payment_hides_cached_private_list_without_identity() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     persist_private_stream_batch(
@@ -66,10 +96,16 @@ async fn test_resolve_contact_payment_requires_initialized_identity_for_cached_p
                 value: "10.00".into(),
                 asset: "usd".into(),
             }),
+            include_public_endpoints: false,
         })
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    let result = result.unwrap();
+    assert_eq!(
+        result.status,
+        ContactPaymentResolutionStatus::PublicOnlySession
+    );
+    assert!(result.payable_endpoints.is_empty());
     assert!(sdk
         .current_private_payment_list(&counterparty)
         .await
@@ -120,16 +156,16 @@ async fn test_resolve_contact_payment_uses_cached_private_list_for_public_only_i
                 value: "10.00".into(),
                 asset: "usd".into(),
             }),
+            include_public_endpoints: false,
         })
         .await
         .unwrap();
 
     assert_eq!(result.status, ContactPaymentResolutionStatus::Payable);
     assert_eq!(
-        result.selected_endpoint.unwrap().source,
+        result.payable_endpoints[0].endpoint.source,
         PaymentEndpointSource::PrivatePaymentList
     );
-    assert!(!result.used_public_fallback);
 }
 
 #[tokio::test]
@@ -179,10 +215,7 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig {
-            public_fallback_enabled: false,
-            ..PaykitSdkConfig::default()
-        },
+        PaykitSdkConfig::default(),
         FixedClock,
     );
 
@@ -193,6 +226,7 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
                 value: "10.00".into(),
                 asset: "usd".into(),
             }),
+            include_public_endpoints: false,
         })
         .await
         .unwrap();
@@ -201,7 +235,7 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
         result.status,
         ContactPaymentResolutionStatus::PrivateRecoveryPending
     );
-    assert!(result.selected_endpoint.is_none());
+    assert!(result.payable_endpoints.is_empty());
 }
 
 #[tokio::test]

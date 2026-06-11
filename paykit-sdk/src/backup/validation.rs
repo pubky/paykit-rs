@@ -364,8 +364,13 @@ pub(super) fn validate_public_endpoint_records(
     for record in records.values() {
         PaymentEndpointIdentifier::new(&record.identifier)?;
         match record.status {
-            EndpointPublicationStatus::PendingPublication
-            | EndpointPublicationStatus::Published => {
+            PublicationStatus::NotPublished => {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "public endpoint record '{}' cannot be not-published",
+                    record.identifier
+                )));
+            }
+            PublicationStatus::PendingPublication | PublicationStatus::Published => {
                 if record.payload.is_none() {
                     return Err(PaykitSdkError::Protocol(format!(
                         "public endpoint record '{}' has no payload for status {:?}",
@@ -379,21 +384,21 @@ pub(super) fn validate_public_endpoint_records(
                     )));
                 }
             }
-            EndpointPublicationStatus::PendingRemoval | EndpointPublicationStatus::Removed => {
+            PublicationStatus::PendingRemoval | PublicationStatus::Removed => {
                 if record.last_error.is_some() {
                     return Err(PaykitSdkError::Protocol(format!(
                         "public endpoint record '{}' has an error for status {:?}",
                         record.identifier, record.status
                     )));
                 }
-                if record.status == EndpointPublicationStatus::Removed && record.payload.is_some() {
+                if record.status == PublicationStatus::Removed && record.payload.is_some() {
                     return Err(PaykitSdkError::Protocol(format!(
                         "removed public endpoint record '{}' still has a payload",
                         record.identifier
                     )));
                 }
             }
-            EndpointPublicationStatus::Failed => {
+            PublicationStatus::Failed => {
                 if record.last_error.is_none() {
                     return Err(PaykitSdkError::Protocol(format!(
                         "failed public endpoint record '{}' has no error",
@@ -426,7 +431,7 @@ pub(super) fn validate_contact_records(
 }
 
 fn validate_contact_marker_state(record: &ContactRecord) -> Result<()> {
-    use crate::PublicContactMarkerStatus::{
+    use crate::PublicationStatus::{
         Failed, NotPublished, PendingPublication, PendingRemoval, Published, Removed,
     };
 
@@ -819,7 +824,7 @@ pub(super) fn validate_receipt_access_records(
             || access
                 .billing_period
                 .as_ref()
-                .map(ReceiptBillingPeriodRecord::from)
+                .map(BillingPeriodRecord::from)
                 != record.billing_period
             || access.location != record.location
             || access.key.as_str() != record.key
@@ -1017,7 +1022,7 @@ pub(super) fn validate_receipt_issuance_records(
             || access
                 .billing_period
                 .as_ref()
-                .map(ReceiptBillingPeriodRecord::from)
+                .map(BillingPeriodRecord::from)
                 != record.billing_period
             || access.location != record.location
         {
@@ -1042,17 +1047,14 @@ pub(super) fn validate_receipt_issuance_records(
             || receipt
                 .billing_period
                 .as_ref()
-                .map(ReceiptBillingPeriodRecord::from)
+                .map(BillingPeriodRecord::from)
                 != record.billing_period
             || receipt
                 .payment_endpoint_identifier
                 .as_ref()
                 .map(|identifier| identifier.as_str().to_owned())
                 != record.payment_endpoint_identifier
-            || receipt.amount.as_ref().map(|amount| ReceiptAmountRecord {
-                value: amount.value.clone(),
-                asset: amount.asset.clone(),
-            }) != record.amount
+            || receipt.amount.as_ref().map(AmountRecord::from) != record.amount
         {
             return Err(PaykitSdkError::Protocol(format!(
                 "Receipt issuance record '{}' does not match encrypted Receipt",

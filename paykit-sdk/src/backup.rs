@@ -10,18 +10,18 @@ use serde::{Deserialize, Serialize};
 use crate::{
     contacts::ContactRecord,
     endpoint_reservations::{reservation_payload_hash, validate_reservation_id},
-    endpoints::EndpointPublicationStatus,
     identity::{IdentityState, PubkyIdentityCapability, PubkyPublicKey},
     linked_peers::LinkedPeerState,
     outbound_private::validate_queued_outbound_private_message,
     private_stream::{
         classify_private_application_message, payload_hash, PrivateStreamParseStatus,
     },
+    publication::PublicationStatus,
     receipts::{
-        receipt_access_key_hash, ReceiptAccessRecord, ReceiptAmountRecord,
-        ReceiptBillingPeriodRecord, ReceiptIssuanceRecord, ReceiptIssuanceStatus, ReceiptRecord,
-        ReceiptRetrievalStatus,
+        receipt_access_key_hash, ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptIssuanceStatus,
+        ReceiptRecord, ReceiptRetrievalStatus,
     },
+    records::{AmountRecord, BillingPeriodRecord},
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
         PaymentEndpointReservationRecord, PrivateStreamItemRecord, PublicEndpointRecord,

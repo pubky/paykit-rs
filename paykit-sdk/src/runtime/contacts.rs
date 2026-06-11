@@ -420,20 +420,20 @@ where
                     .filter(|record| {
                         matches!(
                             record.public_contact_marker_status,
-                            PublicContactMarkerStatus::PendingPublication
-                                | PublicContactMarkerStatus::PendingRemoval
+                            PublicationStatus::PendingPublication
+                                | PublicationStatus::PendingRemoval
                         )
                     })
                     .collect::<Vec<_>>();
                 records.sort_by(|left, right| {
                     let left_status = match left.public_contact_marker_status {
-                        PublicContactMarkerStatus::PendingRemoval => 0,
-                        PublicContactMarkerStatus::PendingPublication => 1,
+                        PublicationStatus::PendingRemoval => 0,
+                        PublicationStatus::PendingPublication => 1,
                         _ => 2,
                     };
                     let right_status = match right.public_contact_marker_status {
-                        PublicContactMarkerStatus::PendingRemoval => 0,
-                        PublicContactMarkerStatus::PendingPublication => 1,
+                        PublicationStatus::PendingRemoval => 0,
+                        PublicationStatus::PendingPublication => 1,
                         _ => 2,
                     };
                     left_status
@@ -446,7 +446,7 @@ where
         let mut synced = Vec::new();
         for record in pending {
             match record.public_contact_marker_status {
-                PublicContactMarkerStatus::PendingPublication => {
+                PublicationStatus::PendingPublication => {
                     if self.config.public_contact_sharing
                         == PublicContactSharingPolicy::ConfiguredPublicNamespace
                     {
@@ -459,7 +459,7 @@ where
                         .await?;
                     }
                 }
-                PublicContactMarkerStatus::PendingRemoval => {
+                PublicationStatus::PendingRemoval => {
                     if let Some(record) = self.remove_public_contact(record.public_key).await? {
                         synced.push(record);
                     }

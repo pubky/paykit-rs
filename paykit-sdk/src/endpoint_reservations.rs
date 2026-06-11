@@ -7,8 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     adapters::{
-        PaymentEndpointReservation, PaymentEndpointReservationCancellation,
-        PaymentEndpointReservationRequest, ReceivingDetail,
+        PaymentEndpointReservation, PaymentEndpointReservationCancellation, ReceivingDetail,
     },
     endpoints::normalize_receiving_details,
     outbound_private::{validate_outbound_private_message, OutboundPrivateMessageStatus},
@@ -165,22 +164,28 @@ fn cancellation_record_from_reservation_record(
 #[cfg(test)]
 pub(crate) async fn queue_private_payment_list_with_reservations<S>(
     storage: &S,
-    request: &PaymentEndpointReservationRequest,
+    counterparty: &PubkyPublicKey,
     reservations: Vec<PaymentEndpointReservation>,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
 where
     S: StorageAdapter,
 {
-    queue_private_payment_list_with_reservations_inner(storage, request, reservations, now, None)
-        .await
+    queue_private_payment_list_with_reservations_inner(
+        storage,
+        counterparty,
+        reservations,
+        now,
+        None,
+    )
+    .await
 }
 
 /// Queue a Private Payment List with linked reservations while a peer operation
 /// lease is active.
 pub(crate) async fn queue_private_payment_list_with_reservations_with_link_lease<S>(
     storage: &S,
-    request: &PaymentEndpointReservationRequest,
+    counterparty: &PubkyPublicKey,
     reservations: Vec<PaymentEndpointReservation>,
     now: DateTime<Utc>,
     lease: &PeerLinkOperationLease,
@@ -190,7 +195,7 @@ where
 {
     queue_private_payment_list_with_reservations_inner(
         storage,
-        request,
+        counterparty,
         reservations,
         now,
         Some(lease.clone()),
@@ -200,7 +205,7 @@ where
 
 async fn queue_private_payment_list_with_reservations_inner<S>(
     storage: &S,
-    request: &PaymentEndpointReservationRequest,
+    counterparty: &PubkyPublicKey,
     reservations: Vec<PaymentEndpointReservation>,
     now: DateTime<Utc>,
     lease: Option<PeerLinkOperationLease>,
@@ -208,12 +213,12 @@ async fn queue_private_payment_list_with_reservations_inner<S>(
 where
     S: StorageAdapter,
 {
-    let (receiving_details, drafts) = build_reservation_records(request, reservations, now)?;
+    let (receiving_details, drafts) = build_reservation_records(counterparty, reservations, now)?;
     let payment_endpoints = normalize_receiving_details(receiving_details)?;
     let list = PrivatePaymentList::new(payment_endpoints);
     let raw_json = serialize_private_payment_list_json(&list)?;
     let kind = validate_outbound_private_message(&raw_json)?;
-    let counterparty = request.counterparty.clone();
+    let counterparty = counterparty.clone();
 
     storage
         .transaction(move |tx| {
@@ -297,7 +302,7 @@ impl PaymentEndpointReservationRecordDraft {
 }
 
 fn build_reservation_records(
-    request: &PaymentEndpointReservationRequest,
+    counterparty: &PubkyPublicKey,
     reservations: Vec<PaymentEndpointReservation>,
     now: DateTime<Utc>,
 ) -> Result<(
@@ -320,7 +325,7 @@ fn build_reservation_records(
             )));
         }
         receiving_details.push(reservation.receiving_detail.clone());
-        records.push(record_from_reservation(request, reservation, now));
+        records.push(record_from_reservation(counterparty, reservation, now));
     }
 
     normalize_receiving_details(receiving_details.clone())?;
@@ -347,14 +352,14 @@ pub(crate) fn validate_reservation_id(reservation_id: &str) -> Result<()> {
 }
 
 fn record_from_reservation(
-    request: &PaymentEndpointReservationRequest,
+    counterparty: &PubkyPublicKey,
     reservation: PaymentEndpointReservation,
     now: DateTime<Utc>,
 ) -> PaymentEndpointReservationRecordDraft {
     let payload_hash = reservation_payload_hash(&reservation.receiving_detail.payload);
     PaymentEndpointReservationRecordDraft {
         reservation_id: reservation.reservation_id,
-        counterparty: request.counterparty.clone(),
+        counterparty: counterparty.clone(),
         identifier: reservation.receiving_detail.identifier,
         payload_hash,
         attribution: reservation.attribution,

@@ -42,7 +42,7 @@ fn contact_record(public_key: PubkyPublicKey) -> ContactRecord {
         profile_fetched_at: None,
         created_at: timestamp(),
         updated_at: timestamp(),
-        public_contact_marker_status: crate::PublicContactMarkerStatus::NotPublished,
+        public_contact_marker_status: crate::PublicationStatus::NotPublished,
         public_contact_published_at: None,
         public_contact_removed_at: None,
         public_contact_last_error: None,
@@ -110,7 +110,7 @@ fn receipt_access_raw_with_context(
     receipt_id: &str,
     payment_reference: &str,
     payment_request_id: &str,
-    billing_period: &ReceiptBillingPeriodRecord,
+    billing_period: &BillingPeriodRecord,
 ) -> (String, String, String) {
     let receipt_id = ReceiptId::new(receipt_id).unwrap();
     let location = paykit_lib::ReceiptAccess::location_for(&receipt_id);

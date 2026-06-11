@@ -53,7 +53,7 @@ pub trait PaymentAdapter: Send + Sync {
     /// settlement, expiry, and cleanup remain adapter responsibilities.
     async fn reserve_receiving_details(
         &self,
-        _request: &PaymentEndpointReservationRequest,
+        _counterparty: &PubkyPublicKey,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         Ok(None)
     }
@@ -72,13 +72,13 @@ pub trait PaymentAdapter: Send + Sync {
         })
     }
 
-    /// Rank and evaluate candidate endpoints for a payment.
-    async fn select_payment_endpoint(
+    /// Return payable candidates in adapter-preferred order.
+    async fn select_payment_endpoints(
         &self,
         request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection>;
+    ) -> Result<Vec<PaymentEndpointCandidate>>;
 
-    /// Build a payment target from a compatible endpoint.
+    /// Build a payment target from a payable endpoint.
     async fn build_payment_target(
         &self,
         endpoint: &PaymentEndpointCandidate,
@@ -96,13 +96,6 @@ pub enum ReceivingDetailScope {
         /// Counterparty that will receive the private details.
         counterparty: PubkyPublicKey,
     },
-}
-
-/// Request passed to the payment adapter for receiving-detail reservation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentEndpointReservationRequest {
-    /// Counterparty whose Private Payment List will receive the reserved details.
-    pub counterparty: PubkyPublicKey,
 }
 
 /// Payment-method-specific receiving detail returned by an adapter.
@@ -223,7 +216,7 @@ pub struct PaymentAmountContext {
     pub asset: String,
 }
 
-/// Request passed to the payment adapter for endpoint selection.
+/// Request passed to the payment adapter for payable endpoint ordering.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentEndpointSelectionRequest {
     /// Counterparty being paid.
@@ -232,68 +225,6 @@ pub struct PaymentEndpointSelectionRequest {
     pub amount: Option<PaymentAmountContext>,
     /// Candidate endpoints in SDK preference order.
     pub candidates: Vec<PaymentEndpointCandidate>,
-}
-
-/// Adapter evaluation for one candidate endpoint.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentEndpointEvaluation {
-    /// Candidate being evaluated.
-    pub candidate: PaymentEndpointCandidate,
-    /// Compatibility status.
-    pub compatibility: EndpointCompatibility,
-    /// Adapter priority, where lower values are preferred.
-    pub priority: Option<u32>,
-}
-
-impl fmt::Debug for PaymentEndpointEvaluation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PaymentEndpointEvaluation")
-            .field("candidate", &self.candidate)
-            .field("compatibility", &self.compatibility)
-            .field("priority", &self.priority)
-            .finish()
-    }
-}
-
-/// Adapter endpoint selection result.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentEndpointSelection {
-    /// Selected payable candidate, when one is available.
-    pub selected: Option<PaymentEndpointCandidate>,
-    /// Evaluations for candidates considered by the adapter.
-    pub evaluations: Vec<PaymentEndpointEvaluation>,
-}
-
-impl fmt::Debug for PaymentEndpointSelection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PaymentEndpointSelection")
-            .field("selected", &self.selected)
-            .field("evaluations", &self.evaluations)
-            .finish()
-    }
-}
-
-/// Compatibility result for one endpoint.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum EndpointCompatibility {
-    /// The endpoint can be paid by the adapter.
-    Payable,
-    /// The endpoint kind is unsupported.
-    Unsupported {
-        /// Optional adapter-specific reason.
-        reason: Option<String>,
-    },
-    /// The endpoint is recognized but stale/unusable.
-    Stale {
-        /// Optional adapter-specific reason.
-        reason: Option<String>,
-    },
-    /// The endpoint cannot be used for the requested amount.
-    AmountIncompatible {
-        /// Optional adapter-specific reason.
-        reason: Option<String>,
-    },
 }
 
 /// Payment-method-specific execution payload produced by an adapter.

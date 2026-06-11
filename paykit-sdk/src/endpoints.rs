@@ -8,25 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     adapters::ReceivingDetail,
+    publication::PublicationStatus,
     storage::{PublicEndpointRecord, StorageAdapter},
     PaykitSdkError, Result,
 };
-
-/// Publication status for a SDK-managed Payment Endpoint.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum EndpointPublicationStatus {
-    /// The endpoint is waiting to be published.
-    PendingPublication,
-    /// The endpoint is confirmed as published.
-    Published,
-    /// The endpoint should be removed.
-    PendingRemoval,
-    /// The endpoint is confirmed removed.
-    Removed,
-    /// The last publication attempt failed.
-    Failed,
-}
 
 /// One public endpoint changed during sync.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,7 +19,7 @@ pub struct EndpointSyncChange {
     /// Payment Endpoint Identifier.
     pub identifier: String,
     /// Resulting local publication status.
-    pub status: EndpointPublicationStatus,
+    pub status: PublicationStatus,
     /// Error text for failed changes.
     pub error: Option<String>,
 }
@@ -88,7 +73,7 @@ pub(crate) fn published_record(
     PublicEndpointRecord {
         identifier: identifier.as_str().to_owned(),
         payload: Some(payload.as_str().to_owned()),
-        status: EndpointPublicationStatus::Published,
+        status: PublicationStatus::Published,
         updated_at: now,
         last_error: None,
     }
@@ -102,7 +87,7 @@ pub(crate) fn pending_publication_record(
     PublicEndpointRecord {
         identifier: identifier.as_str().to_owned(),
         payload: Some(payload.as_str().to_owned()),
-        status: EndpointPublicationStatus::PendingPublication,
+        status: PublicationStatus::PendingPublication,
         updated_at: now,
         last_error: None,
     }
@@ -116,7 +101,7 @@ pub(crate) fn pending_removal_record(
     PublicEndpointRecord {
         identifier,
         payload,
-        status: EndpointPublicationStatus::PendingRemoval,
+        status: PublicationStatus::PendingRemoval,
         updated_at: now,
         last_error: None,
     }
@@ -126,7 +111,7 @@ pub(crate) fn removed_record(identifier: String, now: DateTime<Utc>) -> PublicEn
     PublicEndpointRecord {
         identifier,
         payload: None,
-        status: EndpointPublicationStatus::Removed,
+        status: PublicationStatus::Removed,
         updated_at: now,
         last_error: None,
     }
@@ -141,7 +126,7 @@ pub(crate) fn failed_record(
     PublicEndpointRecord {
         identifier,
         payload,
-        status: EndpointPublicationStatus::Failed,
+        status: PublicationStatus::Failed,
         updated_at: now,
         last_error: Some(error),
     }

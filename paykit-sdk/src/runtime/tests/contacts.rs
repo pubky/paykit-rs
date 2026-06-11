@@ -178,7 +178,7 @@ async fn test_remove_contact_blocks_when_public_marker_may_exist() {
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
-                    public_contact_marker_status: crate::PublicContactMarkerStatus::Published,
+                    public_contact_marker_status: crate::PublicationStatus::Published,
                     public_contact_published_at: Some(FixedClock.now()),
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -231,7 +231,7 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
-                    public_contact_marker_status: crate::PublicContactMarkerStatus::NotPublished,
+                    public_contact_marker_status: crate::PublicationStatus::NotPublished,
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -264,7 +264,7 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
         .clone();
     assert_eq!(
         record.public_contact_marker_status,
-        crate::PublicContactMarkerStatus::NotPublished
+        crate::PublicationStatus::NotPublished
     );
 }
 
@@ -295,7 +295,7 @@ async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
-                    public_contact_marker_status: crate::PublicContactMarkerStatus::Published,
+                    public_contact_marker_status: crate::PublicationStatus::Published,
                     public_contact_published_at: Some(FixedClock.now()),
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -325,7 +325,7 @@ async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
         .clone();
     assert_eq!(
         record.public_contact_marker_status,
-        crate::PublicContactMarkerStatus::Published
+        crate::PublicationStatus::Published
     );
 }
 
@@ -412,8 +412,7 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
-                    public_contact_marker_status:
-                        crate::PublicContactMarkerStatus::PendingPublication,
+                    public_contact_marker_status: crate::PublicationStatus::PendingPublication,
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -446,7 +445,7 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
         .clone();
     assert_eq!(
         record.public_contact_marker_status,
-        crate::PublicContactMarkerStatus::PendingPublication
+        crate::PublicationStatus::PendingPublication
     );
 }
 
@@ -477,8 +476,7 @@ async fn test_sync_public_contact_markers_fails_pending_publication_when_sharing
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
-                    public_contact_marker_status:
-                        crate::PublicContactMarkerStatus::PendingPublication,
+                    public_contact_marker_status: crate::PublicationStatus::PendingPublication,
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -508,7 +506,7 @@ async fn test_sync_public_contact_markers_fails_pending_publication_when_sharing
         .clone();
     assert_eq!(
         record.public_contact_marker_status,
-        crate::PublicContactMarkerStatus::Failed
+        crate::PublicationStatus::Failed
     );
     assert_eq!(
         record.public_contact_last_error.as_deref(),

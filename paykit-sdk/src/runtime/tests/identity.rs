@@ -54,7 +54,7 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
                 tx.save_public_endpoint_record(PublicEndpointRecord {
                     identifier: "btc-lightning-bolt11".into(),
                     payload: Some("payload".into()),
-                    status: EndpointPublicationStatus::Published,
+                    status: PublicationStatus::Published,
                     updated_at: FixedClock.now(),
                     last_error: None,
                 });
@@ -65,7 +65,7 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
-                    public_contact_marker_status: crate::PublicContactMarkerStatus::NotPublished,
+                    public_contact_marker_status: crate::PublicationStatus::NotPublished,
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -170,7 +170,7 @@ async fn test_sign_out_clears_identity_scoped_state() {
                 tx.save_public_endpoint_record(PublicEndpointRecord {
                     identifier: "btc-lightning-bolt11".into(),
                     payload: Some("payload".into()),
-                    status: EndpointPublicationStatus::Published,
+                    status: PublicationStatus::Published,
                     updated_at: FixedClock.now(),
                     last_error: None,
                 });
@@ -181,7 +181,7 @@ async fn test_sign_out_clears_identity_scoped_state() {
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
-                    public_contact_marker_status: crate::PublicContactMarkerStatus::NotPublished,
+                    public_contact_marker_status: crate::PublicationStatus::NotPublished,
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -260,7 +260,7 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
-                    public_contact_marker_status: crate::PublicContactMarkerStatus::NotPublished,
+                    public_contact_marker_status: crate::PublicationStatus::NotPublished,
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,

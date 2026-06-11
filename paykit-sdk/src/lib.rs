@@ -18,7 +18,9 @@ pub mod outbound_private;
 pub mod payment_requests;
 pub mod private_lists;
 pub mod private_stream;
+pub mod publication;
 pub mod receipts;
+pub mod records;
 pub mod recovery;
 /// SDK runtime facade.
 pub mod runtime;
@@ -29,11 +31,9 @@ mod endpoint_reservations;
 
 #[doc(inline)]
 pub use adapters::{
-    EndpointCompatibility, PaymentAdapter, PaymentAmountContext, PaymentEndpointCandidate,
-    PaymentEndpointEvaluation, PaymentEndpointReservation, PaymentEndpointReservationCancellation,
-    PaymentEndpointReservationRequest, PaymentEndpointSelection, PaymentEndpointSelectionRequest,
-    PaymentEndpointSource, PaymentTarget, PubkySessionProvider, ReceivingDetail,
-    ReceivingDetailScope,
+    PaymentAdapter, PaymentAmountContext, PaymentEndpointCandidate, PaymentEndpointReservation,
+    PaymentEndpointReservationCancellation, PaymentEndpointSelectionRequest, PaymentEndpointSource,
+    PaymentTarget, PubkySessionProvider, ReceivingDetail, ReceivingDetailScope,
 };
 #[doc(inline)]
 pub use backup::{export_backup_state, RestoreReport, SdkBackupState, SDK_BACKUP_VERSION};
@@ -47,13 +47,11 @@ pub use contacts::{
     ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
     ContactProfileResolution, ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord,
     PaykitProfile, PaykitProfileRecord, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
-    PublicContactMarkerStatus, PAYKIT_PROFILE_BLOB_PATH_PREFIX, PAYKIT_PROFILE_PATH,
+    ResolvedPaymentEndpoint, PAYKIT_PROFILE_BLOB_PATH_PREFIX, PAYKIT_PROFILE_PATH,
     PAYKIT_PUBLIC_CONTACT_PATH_PREFIX, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
 };
 #[doc(inline)]
-pub use endpoints::{
-    load_public_endpoint_records, EndpointPublicationStatus, EndpointSyncChange, EndpointSyncReport,
-};
+pub use endpoints::{load_public_endpoint_records, EndpointSyncChange, EndpointSyncReport};
 #[doc(inline)]
 pub use error::PaykitSdkError;
 #[doc(inline)]
@@ -74,9 +72,9 @@ pub use outbound_private::{
 };
 #[doc(inline)]
 pub use payment_requests::{
-    PaymentProofRecord, PaymentRequestAmountRecord, PaymentRequestBillingPeriodRecord,
-    PaymentRequestFilter, PaymentRequestLifecycleState, PaymentRequestLocalRole,
-    PaymentRequestRecord, PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord,
+    PaymentProofRecord, PaymentRequestFilter, PaymentRequestLifecycleState,
+    PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
+    PaymentRequestTermsRecord,
 };
 #[doc(inline)]
 pub use private_lists::PrivatePaymentListView;
@@ -86,10 +84,14 @@ pub use private_stream::{
     PrivateStreamParseStatus,
 };
 #[doc(inline)]
+pub use publication::PublicationStatus;
+#[doc(inline)]
 pub use receipts::{
-    ReceiptAccessView, ReceiptAmountRecord, ReceiptBillingPeriodRecord, ReceiptDraftBuilder,
-    ReceiptIssuanceStatus, ReceiptIssuanceView, ReceiptRecord, ReceiptRetrievalStatus,
+    ReceiptAccessView, ReceiptDraftBuilder, ReceiptIssuanceStatus, ReceiptIssuanceView,
+    ReceiptRecord, ReceiptRetrievalStatus,
 };
+#[doc(inline)]
+pub use records::{AmountRecord, BillingPeriodRecord};
 #[doc(inline)]
 pub use recovery::EncryptedLinkRecoveryMarkerReport;
 #[doc(inline)]

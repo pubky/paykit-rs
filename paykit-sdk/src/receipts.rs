@@ -19,27 +19,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     outbound_private::validate_outbound_private_message,
+    records::{AmountRecord, BillingPeriodRecord},
     storage::{NewOutboundPrivateMessage, StorageAdapter},
     PaykitSdkError, PubkyPublicKey, Result,
 };
-
-/// Durable Billing Period fields copied from a Receipt Access event.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiptBillingPeriodRecord {
-    /// RFC3339 UTC timestamp using `Z`.
-    pub starts_at: String,
-    /// RFC3339 UTC timestamp using `Z`.
-    pub ends_at: String,
-}
-
-impl From<&paykit_lib::BillingPeriod> for ReceiptBillingPeriodRecord {
-    fn from(period: &paykit_lib::BillingPeriod) -> Self {
-        Self {
-            starts_at: period.starts_at.clone(),
-            ends_at: period.ends_at.clone(),
-        }
-    }
-}
 
 /// Builder for caller-provided receipt fields.
 #[derive(Clone)]
@@ -223,11 +206,11 @@ pub struct ReceiptIssuanceRecord {
     /// Optional Payment Request ID copied from the Receipt.
     pub payment_request_id: Option<String>,
     /// Optional Billing Period copied from the Receipt.
-    pub billing_period: Option<ReceiptBillingPeriodRecord>,
+    pub billing_period: Option<BillingPeriodRecord>,
     /// Optional Payment Endpoint Identifier copied from the Receipt.
     pub payment_endpoint_identifier: Option<String>,
     /// Optional Payment Amount copied from the Receipt.
-    pub amount: Option<ReceiptAmountRecord>,
+    pub amount: Option<AmountRecord>,
     /// Receipt Location path on the issuer homeserver.
     pub location: String,
     /// Encrypted Receipt JSON to store at the Receipt Location.
@@ -271,20 +254,13 @@ impl ReceiptIssuanceRecord {
                 .receipt
                 .billing_period
                 .as_ref()
-                .map(ReceiptBillingPeriodRecord::from),
+                .map(BillingPeriodRecord::from),
             payment_endpoint_identifier: prepared
                 .receipt
                 .payment_endpoint_identifier
                 .as_ref()
                 .map(|identifier| identifier.as_str().to_owned()),
-            amount: prepared
-                .receipt
-                .amount
-                .as_ref()
-                .map(|amount| ReceiptAmountRecord {
-                    value: amount.value.clone(),
-                    asset: amount.asset.clone(),
-                }),
+            amount: prepared.receipt.amount.as_ref().map(AmountRecord::from),
             location: prepared.access.location.clone(),
             encrypted_receipt: prepared.encrypted_receipt,
             access_json,
@@ -381,11 +357,11 @@ pub struct ReceiptIssuanceView {
     /// Optional Payment Request ID copied from the Receipt.
     pub payment_request_id: Option<String>,
     /// Optional Billing Period copied from the Receipt.
-    pub billing_period: Option<ReceiptBillingPeriodRecord>,
+    pub billing_period: Option<BillingPeriodRecord>,
     /// Optional Payment Endpoint Identifier copied from the Receipt.
     pub payment_endpoint_identifier: Option<String>,
     /// Optional Payment Amount copied from the Receipt.
-    pub amount: Option<ReceiptAmountRecord>,
+    pub amount: Option<AmountRecord>,
     /// Current issuance status.
     pub status: ReceiptIssuanceStatus,
     /// Outbound private message id that carries Receipt Access, once queued.
@@ -463,7 +439,7 @@ pub struct ReceiptAccessRecord {
     /// Optional Payment Request ID copied from Receipt Access.
     pub payment_request_id: Option<String>,
     /// Optional Billing Period copied from Receipt Access.
-    pub billing_period: Option<ReceiptBillingPeriodRecord>,
+    pub billing_period: Option<BillingPeriodRecord>,
     /// Receipt Location path on the issuer homeserver.
     pub location: String,
     /// Receipt Decryption Key material. Treat as secret storage data.
@@ -498,7 +474,7 @@ pub struct ReceiptAccessView {
     /// Optional Payment Request ID copied from Receipt Access.
     pub payment_request_id: Option<String>,
     /// Optional Billing Period copied from Receipt Access.
-    pub billing_period: Option<ReceiptBillingPeriodRecord>,
+    pub billing_period: Option<BillingPeriodRecord>,
     /// Current retrieval state for the referenced receipt.
     pub retrieval_status: ReceiptRetrievalStatus,
     /// Last retrieval attempt time.
@@ -565,7 +541,7 @@ impl ReceiptAccessRecord {
             billing_period: access
                 .billing_period
                 .as_ref()
-                .map(ReceiptBillingPeriodRecord::from),
+                .map(BillingPeriodRecord::from),
             location: access.location.clone(),
             key: access.key.as_str().to_owned(),
             retrieval_status: ReceiptRetrievalStatus::Pending,
@@ -625,15 +601,6 @@ impl fmt::Debug for ReceiptAccessRecord {
     }
 }
 
-/// Durable Payment Amount fields copied from a decrypted Receipt.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiptAmountRecord {
-    /// Decimal amount text.
-    pub value: String,
-    /// Asset code or unit.
-    pub asset: String,
-}
-
 /// Decrypted Receipt record stored by the SDK.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptRecord {
@@ -651,13 +618,13 @@ pub struct ReceiptRecord {
     /// Optional Payment Request ID copied from the decrypted Receipt.
     pub payment_request_id: Option<String>,
     /// Optional Billing Period copied from the decrypted Receipt.
-    pub billing_period: Option<ReceiptBillingPeriodRecord>,
+    pub billing_period: Option<BillingPeriodRecord>,
     /// Recipient public key from the decrypted Receipt.
     pub recipient_public_key: PubkyPublicKey,
     /// Optional Payment Endpoint Identifier copied from the decrypted Receipt.
     pub payment_endpoint_identifier: Option<String>,
     /// Optional Payment Amount copied from the decrypted Receipt.
-    pub amount: Option<ReceiptAmountRecord>,
+    pub amount: Option<AmountRecord>,
     /// Caller-defined Receipt Metadata.
     pub metadata: JsonMap<String, JsonValue>,
     /// Receipt Location path used for retrieval.
@@ -686,16 +653,13 @@ impl ReceiptRecord {
             billing_period: receipt
                 .billing_period
                 .as_ref()
-                .map(ReceiptBillingPeriodRecord::from),
+                .map(BillingPeriodRecord::from),
             recipient_public_key: PubkyPublicKey::from_public_key(&receipt.recipient_public_key),
             payment_endpoint_identifier: receipt
                 .payment_endpoint_identifier
                 .as_ref()
                 .map(|identifier| identifier.as_str().to_owned()),
-            amount: receipt.amount.as_ref().map(|amount| ReceiptAmountRecord {
-                value: amount.value.clone(),
-                asset: amount.asset.clone(),
-            }),
+            amount: receipt.amount.as_ref().map(AmountRecord::from),
             metadata: receipt.metadata,
             location: access.location.clone(),
             retrieved_at,
@@ -957,7 +921,7 @@ fn validate_receipt_matches_access(
     let receipt_billing_period = receipt
         .billing_period
         .as_ref()
-        .map(ReceiptBillingPeriodRecord::from);
+        .map(BillingPeriodRecord::from);
     if receipt_billing_period != access.billing_period {
         return Err(PaykitSdkError::Protocol(
             "decrypted Receipt Billing Period does not match Receipt Access".into(),

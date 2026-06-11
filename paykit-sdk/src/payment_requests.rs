@@ -22,6 +22,7 @@ use crate::{
     outbound_private::enqueue_private_message,
     outbound_private::OutboundPrivateMessageStatus,
     private_stream::payload_hash,
+    records::{AmountRecord, BillingPeriodRecord},
     storage::{
         EventDedupRecord, OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageAdapter,
     },
@@ -118,15 +119,6 @@ impl PaymentRequestFilter {
     }
 }
 
-/// Durable Payment Amount fields copied from Payment Request terms.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentRequestAmountRecord {
-    /// Decimal amount text.
-    pub value: String,
-    /// Asset code or unit.
-    pub asset: String,
-}
-
 /// Recurrence fields copied from Payment Request terms.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentRequestRecurrenceRecord {
@@ -146,7 +138,7 @@ pub struct PaymentRequestRecurrenceRecord {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaymentRequestTermsRecord {
     /// Requested amount.
-    pub amount: PaymentRequestAmountRecord,
+    pub amount: AmountRecord,
     /// Payee-provided payment correlation value.
     pub payment_reference: String,
     /// Proposal expiry before acceptance.
@@ -181,10 +173,7 @@ impl fmt::Debug for PaymentRequestTermsRecord {
 impl From<&paykit_lib::PaymentRequestTerms> for PaymentRequestTermsRecord {
     fn from(terms: &paykit_lib::PaymentRequestTerms) -> Self {
         Self {
-            amount: PaymentRequestAmountRecord {
-                value: terms.amount.value.clone(),
-                asset: terms.amount.asset.clone(),
-            },
+            amount: AmountRecord::from(&terms.amount),
             payment_reference: terms.payment_reference.as_str().to_owned(),
             proposal_expires_at: terms.proposal_expires_at.clone(),
             recurrence: terms.recurrence.as_ref().map(|recurrence| {
@@ -206,24 +195,6 @@ impl From<&paykit_lib::PaymentRequestTerms> for PaymentRequestTermsRecord {
     }
 }
 
-/// Billing Period fields copied from a Payment Proof.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentRequestBillingPeriodRecord {
-    /// RFC3339 UTC timestamp using `Z`.
-    pub starts_at: String,
-    /// RFC3339 UTC timestamp using `Z`.
-    pub ends_at: String,
-}
-
-impl From<&paykit_lib::BillingPeriod> for PaymentRequestBillingPeriodRecord {
-    fn from(period: &paykit_lib::BillingPeriod) -> Self {
-        Self {
-            starts_at: period.starts_at.clone(),
-            ends_at: period.ends_at.clone(),
-        }
-    }
-}
-
 /// Payment Proof captured in a derived Payment Request record.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaymentProofRecord {
@@ -238,7 +209,7 @@ pub struct PaymentProofRecord {
     /// Payment Reference copied from the proof.
     pub payment_reference: String,
     /// Optional Billing Period copied from the proof.
-    pub billing_period: Option<PaymentRequestBillingPeriodRecord>,
+    pub billing_period: Option<BillingPeriodRecord>,
     /// Payment Endpoint Identifier used for payment.
     pub payment_endpoint_identifier: String,
     /// Method-specific proof object.

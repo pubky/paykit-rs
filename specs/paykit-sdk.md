@@ -29,7 +29,7 @@ payment methods through adapters without baking any one method into the SDK.
   profile/contact records and shared paths, but it should not own app screens,
   social graph semantics, or product-specific profile schemas.
 - Keep payment execution separate. Payment adapters provide receiving details,
-  endpoint compatibility, payment-target construction, and method-specific
+  payable endpoint ordering, payment-target construction, and method-specific
   endpoint state.
 - Prefer typed records at the SDK boundary. Apps should not have to parse raw
   JSON or reason about Encrypted Link snapshots directly for normal workflows.
@@ -47,8 +47,9 @@ The system should have three main layers:
   derivation, endpoint publication, contact payment resolution, retries,
   recovery, Pubky session/capability handling, Pubky-backed Paykit
   profile/contact metadata, and app-facing APIs.
-- Payment adapter layer: receiving-detail generation, endpoint compatibility,
-  payment-target construction, method/provider state, and activity records.
+- Payment adapter layer: receiving-detail generation, payable endpoint
+  ordering, payment-target construction, method/provider state, and activity
+  records.
 
 The SDK may still accept narrow platform hooks for secure session persistence,
 auth UI/Ring session handoff, custom profile/contact storage, scheduling, and
@@ -73,8 +74,10 @@ paykit-sdk/
     runtime.rs
     adapters.rs
     storage.rs
+    records.rs
     identity.rs
     endpoints.rs
+    publication.rs
     contacts.rs
     linked_peers.rs
     private_stream.rs
@@ -89,16 +92,19 @@ Module responsibilities:
 
 - `runtime`: owns `PaykitSdk`, coordinates adapters, storage, and workflow
   modules.
-- `config`: product-neutral policy knobs such as fallback behavior, recovery
-  timing, and retry limits.
+- `config`: product-neutral policy knobs such as private sharing, recovery
+  behavior, and retry limits.
 - `adapters`: payment-method adapter plus narrow platform hook for live Pubky
   session access.
 - `storage`: durable records, transaction interface, and in-memory test
   storage.
+- `records`: shared durable record field types.
 - `identity`: SDK-owned Pubky session capability state and identity
   refresh/import/export workflows.
 - `endpoints`: public Payment Endpoint publication, cleanup, and remote public
   Payment List reads.
+- `publication`: shared local publication status values for SDK-managed public
+  data.
 - `contacts`: SDK-owned Paykit-facing profile records, local contact records,
   optional public contact markers, and contact payment resolution types.
 - `linked_peers`: Encrypted Link establishment, restore, recovery, and
@@ -331,7 +337,7 @@ pub trait PaymentAdapter {
 
     async fn reserve_receiving_details(
         &self,
-        request: &PaymentEndpointReservationRequest,
+        counterparty: &PubkyPublicKey,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>>;
 
     async fn cancel_receiving_detail_reservation(
@@ -339,10 +345,10 @@ pub trait PaymentAdapter {
         cancellation: &PaymentEndpointReservationCancellation,
     ) -> Result<()>;
 
-    async fn select_payment_endpoint(
+    async fn select_payment_endpoints(
         &self,
         request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection>;
+    ) -> Result<Vec<PaymentEndpointCandidate>>;
 
     async fn build_payment_target(
         &self,
@@ -352,8 +358,8 @@ pub trait PaymentAdapter {
 ```
 
 Endpoint selection requests include all discovered candidates, each candidate's
-source, and optional amount context. The adapter returns evaluations and may
-select one candidate from that batch.
+source, and optional amount context. The adapter returns payable candidates in
+the order it wants payment execution to try them.
 
 The adapter owns payment-method-specific endpoint details:
 
@@ -507,7 +513,8 @@ Tracks SDK-managed public Payment Endpoint publication:
 
 - Payment Endpoint Identifier
 - last payload the SDK tried to publish
-- publication status: desired, published, pending removal, removed, failed
+- shared `PublicationStatus`: pending publication, published, pending removal,
+  removed, failed
 - last status update time
 - last error, when available
 
@@ -829,8 +836,8 @@ Input:
 
 - counterparty public key
 - desired amount/asset, if known
-- supported endpoint policy
-- whether public fallback is enabled
+- payment adapter support policy
+- whether public Payment Endpoints should be included
 
 Flow:
 
@@ -838,12 +845,13 @@ Flow:
 2. Check Linked Peer and cached private Payment List. Callers that need the
    freshest private endpoints should run private stream receive before
    resolution.
-3. If no cached private endpoint is payable and public fallback is disabled,
-   try an immediate private refresh/recovery path when an active link exists.
-4. If private endpoints are available, pass them to `PaymentAdapter` as one
-   batch with amount context when known.
-5. If no private endpoint is payable and public fallback is allowed, fetch
-   public Payment List and pass those candidates as a second batch.
+3. If no cached private endpoint is available and public endpoints are not
+   included, try an immediate private refresh/recovery path when an active link
+   exists.
+4. If public endpoints are included, fetch the counterparty's public Payment
+   List and append those candidates after private candidates.
+5. Pass the full candidate list to `PaymentAdapter` as one batch with amount
+   context when known.
 6. Return a structured result:
    - `Payable`
    - `NoEndpoint`
@@ -851,8 +859,10 @@ Flow:
    - `PrivateRecoveryPending`
    - `PublicOnlySession`
 
-When the result is `Payable`, it includes the selected Payment Endpoint and the
-adapter-built `PaymentTarget` for that endpoint.
+When the result is `Payable`, it includes ordered payable Payment Endpoints.
+Each entry contains the Payment Endpoint and adapter-built `PaymentTarget` for
+that endpoint. Payment execution can try the entries in order until one
+succeeds.
 
 The SDK should not wait inside payment resolution for private linking/recovery
 to complete. Apps can retry receive/resolve from their own workflow when they
@@ -1134,7 +1144,7 @@ SDK errors should be structured:
 - `Identity`: Pubky session/key/capability failure
 - `Transport`: Pubky or Encrypted Link transport failure
 - `Protocol`: invalid Paykit message, conflict, or unsupported version
-- `Policy`: operation blocked by configured fallback or privacy policy
+- `Policy`: operation blocked by configuration or privacy policy
 - `PaymentAdapter`: payment adapter failure
 - `RecoveryRequired`: local state is inconsistent and automatic execution is
   paused
@@ -1148,7 +1158,6 @@ belongs to the app.
 
 - public endpoint management scope
 - private sharing enabled/disabled
-- public fallback enabled flag
 - Encrypted Link Recovery Marker policy
 - public contact sharing policy, defaulting to local-only Contact Records
 - peer link operation lease timeout
@@ -1204,7 +1213,8 @@ Core tests:
 - malformed recognized messages remain auditable
 - unknown valid Private Application Messages are retained
 - Private Payment List latest valid message wins
-- stale private link falls back according to policy
+- stale private link reports recovery or uses public endpoints only when the
+  resolution request includes them
 - public-only identity blocks private link operations clearly
 - outbound retries reuse exact Event ID and payload
 - Payment Request role/lifecycle checks
@@ -1227,7 +1237,8 @@ Platform tests:
 - Custom profile/contact path hooks for apps that already have product-specific
   Pubky namespaces.
 - Public contact marker discovery and richer contact-sharing policy.
-- Public fallback policies for saved contacts versus unsaved counterparties.
+- App-level policies for when payment resolution should include public Payment
+  Endpoints.
 - Reservation lifecycle hooks beyond Private Payment List queueing.
 - Recurring Payment Request scheduling ownership between the SDK and
   app/runtime schedulers.

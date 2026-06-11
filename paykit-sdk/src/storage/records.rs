@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     contacts::ContactRecord,
-    endpoints::EndpointPublicationStatus,
     identity::{IdentityState, PubkyPublicKey},
     linked_peers::LinkedPeerState,
     outbound_private::OutboundPrivateMessageStatus,
     private_stream::PrivateStreamParseStatus,
+    publication::PublicationStatus,
     receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
 };
 
@@ -47,7 +47,7 @@ pub struct PublicEndpointRecord {
     /// Last payload the SDK tried to publish.
     pub payload: Option<String>,
     /// Current publication status.
-    pub status: EndpointPublicationStatus,
+    pub status: PublicationStatus,
     /// Last status update time.
     pub updated_at: DateTime<Utc>,
     /// Last sync error, when available.

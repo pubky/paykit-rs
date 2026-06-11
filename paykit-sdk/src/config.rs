@@ -57,8 +57,6 @@ pub struct PaykitSdkConfig {
     pub endpoint_management_scope: EndpointManagementScope,
     /// Private Paykit message sharing policy.
     pub private_sharing: PrivateSharingPolicy,
-    /// Whether contact payment resolution may fall back to public Payment Endpoints.
-    pub public_fallback_enabled: bool,
     /// Public recovery marker behavior.
     #[serde(default = "default_encrypted_link_recovery_marker_policy")]
     pub encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy,
@@ -82,7 +80,6 @@ impl Default for PaykitSdkConfig {
             profile_namespace: DEFAULT_PROFILE_NAMESPACE.into(),
             endpoint_management_scope: EndpointManagementScope::ManagedOnly,
             private_sharing: PrivateSharingPolicy::Enabled,
-            public_fallback_enabled: true,
             encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy::Enabled,
             public_contact_sharing: PublicContactSharingPolicy::LocalOnly,
             peer_link_operation_lease_timeout: Duration::from_secs(60),

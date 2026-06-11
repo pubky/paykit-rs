@@ -54,7 +54,7 @@ where
                         .await?;
                     report.published.push(EndpointSyncChange {
                         identifier: identifier.as_str().to_owned(),
-                        status: EndpointPublicationStatus::Published,
+                        status: PublicationStatus::Published,
                         error: None,
                     });
                 }
@@ -76,7 +76,7 @@ where
                         .await?;
                     report.failed.push(EndpointSyncChange {
                         identifier: identifier.as_str().to_owned(),
-                        status: EndpointPublicationStatus::Failed,
+                        status: PublicationStatus::Failed,
                         error: Some(error),
                     });
                 }
@@ -90,7 +90,7 @@ where
                 .await?
                 .into_iter()
                 .filter(|record| {
-                    record.status != EndpointPublicationStatus::Removed
+                    record.status != PublicationStatus::Removed
                         && !desired
                             .keys()
                             .any(|identifier| identifier.as_str() == record.identifier)
@@ -117,8 +117,7 @@ where
                     .filter(|record| {
                         matches!(
                             record.status,
-                            EndpointPublicationStatus::PendingRemoval
-                                | EndpointPublicationStatus::Failed
+                            PublicationStatus::PendingRemoval | PublicationStatus::Failed
                         ) && !remote_identifiers.contains(&record.identifier)
                             && !desired
                                 .keys()
@@ -139,7 +138,7 @@ where
                         .await?;
                     report.removed.push(EndpointSyncChange {
                         identifier: record.identifier,
-                        status: EndpointPublicationStatus::Removed,
+                        status: PublicationStatus::Removed,
                         error: None,
                     });
                 }
@@ -184,7 +183,7 @@ where
                         .await?;
                     report.removed.push(EndpointSyncChange {
                         identifier: identifier_text,
-                        status: EndpointPublicationStatus::Removed,
+                        status: PublicationStatus::Removed,
                         error: None,
                     });
                 }
@@ -206,7 +205,7 @@ where
                         .await?;
                     report.failed.push(EndpointSyncChange {
                         identifier: identifier_text,
-                        status: EndpointPublicationStatus::Failed,
+                        status: PublicationStatus::Failed,
                         error: Some(error),
                     });
                 }

@@ -149,7 +149,7 @@ async fn test_restore_backup_state_rejects_records_without_identity() {
         public_endpoint_records: vec![PublicEndpointRecord {
             identifier: "btc-lightning-bolt11".into(),
             payload: Some("ln".into()),
-            status: crate::EndpointPublicationStatus::Published,
+            status: crate::PublicationStatus::Published,
             updated_at: timestamp(),
             last_error: None,
         }],
@@ -183,7 +183,7 @@ async fn test_restore_backup_state_rejects_invalid_public_endpoint_record() {
         public_endpoint_records: vec![PublicEndpointRecord {
             identifier: "private".into(),
             payload: Some("ln".into()),
-            status: crate::EndpointPublicationStatus::Published,
+            status: crate::PublicationStatus::Published,
             updated_at: timestamp(),
             last_error: None,
         }],
@@ -217,7 +217,7 @@ async fn test_restore_backup_state_rejects_inconsistent_public_endpoint_status()
         public_endpoint_records: vec![PublicEndpointRecord {
             identifier: "btc-lightning-bolt11".into(),
             payload: None,
-            status: crate::EndpointPublicationStatus::Published,
+            status: crate::PublicationStatus::Published,
             updated_at: timestamp(),
             last_error: None,
         }],
@@ -325,7 +325,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_status() {
 async fn test_restore_backup_state_rejects_stale_private_stream_parse_error() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
-    let period = ReceiptBillingPeriodRecord {
+    let period = BillingPeriodRecord {
         starts_at: "2026-06-01T00:00:00Z".into(),
         ends_at: "2026-07-01T00:00:00Z".into(),
     };
@@ -477,7 +477,7 @@ async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
     let counterparty = public_key();
     let event_id = "650e8400-e29b-41d4-a716-446655440000";
     let request_json = payment_request_json(event_id);
-    let period = ReceiptBillingPeriodRecord {
+    let period = BillingPeriodRecord {
         starts_at: "2026-06-01T00:00:00Z".into(),
         ends_at: "2026-07-01T00:00:00Z".into(),
     };
@@ -588,7 +588,7 @@ async fn test_restore_backup_state_rejects_missing_receipt_access_index() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let event_id = "650e8400-e29b-41d4-a716-446655440000";
-    let period = ReceiptBillingPeriodRecord {
+    let period = BillingPeriodRecord {
         starts_at: "2026-06-01T00:00:00Z".into(),
         ends_at: "2026-07-01T00:00:00Z".into(),
     };
@@ -649,7 +649,7 @@ async fn test_restore_backup_state_rejects_receipt_access_context_mismatch() {
     let event_id = "650e8400-e29b-41d4-a716-446655440000";
     let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     let payment_reference = "invoice-2026-0001";
-    let period = ReceiptBillingPeriodRecord {
+    let period = BillingPeriodRecord {
         starts_at: "2026-06-01T00:00:00Z".into(),
         ends_at: "2026-07-01T00:00:00Z".into(),
     };
@@ -718,7 +718,7 @@ async fn test_restore_backup_state_rejects_inconsistent_receipt_access_status() 
     let event_id = "650e8400-e29b-41d4-a716-446655440000";
     let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     let payment_reference = "invoice-2026-0001";
-    let period = ReceiptBillingPeriodRecord {
+    let period = BillingPeriodRecord {
         starts_at: "2026-06-01T00:00:00Z".into(),
         ends_at: "2026-07-01T00:00:00Z".into(),
     };
@@ -1266,7 +1266,7 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
     let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     let event_id = "650e8400-e29b-41d4-a716-446655440000";
     let payment_request_id = "750e8400-e29b-41d4-a716-446655440000";
-    let period = ReceiptBillingPeriodRecord {
+    let period = BillingPeriodRecord {
         starts_at: "2026-06-01T00:00:00Z".into(),
         ends_at: "2026-07-01T00:00:00Z".into(),
     };

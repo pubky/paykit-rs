@@ -12,19 +12,11 @@ fn test_endpoint_debug_redacts_payloads() {
         identifier: "btc-lightning-bolt11".into(),
         payload: "ln-private-secret".into(),
     };
-    let selection = PaymentEndpointSelection {
-        selected: Some(candidate.clone()),
-        evaluations: vec![PaymentEndpointEvaluation {
-            candidate,
-            compatibility: EndpointCompatibility::Payable,
-            priority: Some(0),
-        }],
-    };
     let target = PaymentTarget {
         payload: "method-specific-target".into(),
     };
 
-    let debug = format!("{selection:?} {target:?}");
+    let debug = format!("{:?} {target:?}", vec![candidate]);
 
     assert!(!debug.contains("ln-private-secret"));
     assert!(!debug.contains("method-specific-target"));
