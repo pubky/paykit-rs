@@ -364,7 +364,8 @@ pub(super) fn validate_public_endpoint_records(
     for record in records.values() {
         PaymentEndpointIdentifier::new(&record.identifier)?;
         match record.status {
-            EndpointPublicationStatus::Desired | EndpointPublicationStatus::Published => {
+            EndpointPublicationStatus::PendingPublication
+            | EndpointPublicationStatus::Published => {
                 if record.payload.is_none() {
                     return Err(PaykitSdkError::Protocol(format!(
                         "public endpoint record '{}' has no payload for status {:?}",

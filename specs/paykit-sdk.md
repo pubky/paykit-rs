@@ -732,8 +732,8 @@ public endpoint sync with their own process or storage lock.
 1. Ask `PaymentAdapter` for current public receiving details.
 2. Convert receiving details into Payment Endpoint payloads.
 3. Validate identifiers and payloads through `paykit-lib`.
-4. Persist desired endpoint state.
-5. Publish desired endpoints.
+4. Persist pending-publication endpoint state.
+5. Publish pending endpoints.
 6. Remove stale managed endpoints.
 7. Persist confirmed/pending/failed state.
 8. Return an `EndpointSyncReport`.

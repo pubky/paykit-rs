@@ -41,9 +41,9 @@ use crate::{
         PaymentEndpointReservationCancellationRecord,
     },
     endpoints::{
-        desired_record, failed_record, normalize_receiving_details, pending_removal_record,
-        published_record, removed_record, EndpointPublicationStatus, EndpointSyncChange,
-        EndpointSyncReport,
+        failed_record, normalize_receiving_details, pending_publication_record,
+        pending_removal_record, published_record, removed_record, EndpointPublicationStatus,
+        EndpointSyncChange, EndpointSyncReport,
     },
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
     linked_peers::{

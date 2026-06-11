@@ -16,8 +16,8 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum EndpointPublicationStatus {
-    /// The endpoint should be published.
-    Desired,
+    /// The endpoint is waiting to be published.
+    PendingPublication,
     /// The endpoint is confirmed as published.
     Published,
     /// The endpoint should be removed.
@@ -94,7 +94,7 @@ pub(crate) fn published_record(
     }
 }
 
-pub(crate) fn desired_record(
+pub(crate) fn pending_publication_record(
     identifier: &PaymentEndpointIdentifier,
     payload: &PaymentEndpointPayload,
     now: DateTime<Utc>,
@@ -102,7 +102,7 @@ pub(crate) fn desired_record(
     PublicEndpointRecord {
         identifier: identifier.as_str().to_owned(),
         payload: Some(payload.as_str().to_owned()),
-        status: EndpointPublicationStatus::Desired,
+        status: EndpointPublicationStatus::PendingPublication,
         updated_at: now,
         last_error: None,
     }

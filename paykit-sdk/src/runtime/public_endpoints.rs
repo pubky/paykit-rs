@@ -28,7 +28,7 @@ where
         for (identifier, payload) in desired_entries {
             self.storage
                 .transaction({
-                    let record = desired_record(identifier, payload, now);
+                    let record = pending_publication_record(identifier, payload, now);
                     move |tx| {
                         tx.save_public_endpoint_record(record);
                         Ok(())
