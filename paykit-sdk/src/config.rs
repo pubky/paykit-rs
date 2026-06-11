@@ -16,16 +16,6 @@ pub enum EndpointManagementScope {
     FullPaykitNamespace,
 }
 
-/// Policy for private Paykit workflows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum PrivateSharingPolicy {
-    /// Private Paykit workflows are enabled when the identity is private-link-capable.
-    Enabled,
-    /// Private Paykit workflows are disabled by local policy.
-    Disabled,
-}
-
 /// Policy for public Encrypted Link recovery markers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -55,8 +45,6 @@ pub struct PaykitSdkConfig {
     pub profile_namespace: String,
     /// Public endpoint management scope.
     pub endpoint_management_scope: EndpointManagementScope,
-    /// Private Paykit message sharing policy.
-    pub private_sharing: PrivateSharingPolicy,
     /// Public recovery marker behavior.
     #[serde(default = "default_encrypted_link_recovery_marker_policy")]
     pub encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy,
@@ -79,7 +67,6 @@ impl Default for PaykitSdkConfig {
         Self {
             profile_namespace: DEFAULT_PROFILE_NAMESPACE.into(),
             endpoint_management_scope: EndpointManagementScope::ManagedOnly,
-            private_sharing: PrivateSharingPolicy::Enabled,
             encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy::Enabled,
             public_contact_sharing: PublicContactSharingPolicy::LocalOnly,
             peer_link_operation_lease_timeout: Duration::from_secs(60),

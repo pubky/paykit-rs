@@ -92,8 +92,8 @@ Module responsibilities:
 
 - `runtime`: owns `PaykitSdk`, coordinates adapters, storage, and workflow
   modules.
-- `config`: product-neutral policy knobs such as private sharing, recovery
-  behavior, and retry limits.
+- `config`: product-neutral policy knobs such as recovery behavior, endpoint
+  publication scope, and retry limits.
 - `adapters`: payment-method adapter plus narrow platform hook for live Pubky
   session access.
 - `storage`: durable records, transaction interface, and in-memory test
@@ -1157,7 +1157,6 @@ belongs to the app.
 `PaykitSdkConfig` includes:
 
 - public endpoint management scope
-- private sharing enabled/disabled
 - Encrypted Link Recovery Marker policy
 - public contact sharing policy, defaulting to local-only Contact Records
 - peer link operation lease timeout

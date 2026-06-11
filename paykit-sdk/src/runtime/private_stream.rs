@@ -15,7 +15,6 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<PrivateStreamIntakeReport> {
-        self.ensure_private_workflows_enabled("private message receive")?;
         let (session_access, _) = self.private_link_session_access().await?;
         self.ensure_peer_allows_private_automation(&counterparty)
             .await?;

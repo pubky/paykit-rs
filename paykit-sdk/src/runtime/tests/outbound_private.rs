@@ -353,10 +353,7 @@ async fn test_process_pending_private_messages_reports_counterparty_errors() {
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig {
-            private_sharing: PrivateSharingPolicy::Disabled,
-            ..PaykitSdkConfig::default()
-        },
+        PaykitSdkConfig::default(),
         FixedClock,
     );
 
@@ -519,37 +516,6 @@ async fn test_enqueue_payment_request_event_requires_private_capable_identity() 
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-}
-
-#[tokio::test]
-async fn test_enqueue_payment_request_event_respects_private_sharing_policy() {
-    let storage = InMemoryStorage::new();
-    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let sdk = PaykitSdk::with_clock(
-        storage.clone(),
-        TestPubkySessionProvider { session: None },
-        TestPaymentAdapter,
-        PaykitSdkConfig {
-            private_sharing: PrivateSharingPolicy::Disabled,
-            ..PaykitSdkConfig::default()
-        },
-        FixedClock,
-    );
-    let event = PaymentRequestAcceptance::new(
-        paykit_lib::EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102").unwrap(),
-        paykit_lib::PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap(),
-    );
-
-    let result = sdk
-        .enqueue_raw_payment_request_acceptance(counterparty, &event)
-        .await;
-
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-    assert!(storage
-        .snapshot()
-        .unwrap()
-        .outbound_private_messages
-        .is_empty());
 }
 
 #[tokio::test]

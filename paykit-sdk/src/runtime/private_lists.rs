@@ -12,7 +12,6 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Option<crate::PrivatePaymentListView>> {
-        self.ensure_private_workflows_enabled("private Payment List access")?;
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(None);
@@ -38,11 +37,7 @@ where
     ) -> Result<OutboundPrivateMessageRecord> {
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = async {
-            self.ensure_private_outbound_ready(
-                &counterparty,
-                "private Payment List sharing is disabled",
-            )
-            .await?;
+            self.ensure_private_outbound_ready(&counterparty).await?;
             self.enqueue_private_payment_list_from_receiving_details_with_claim(
                 counterparty,
                 &lease,

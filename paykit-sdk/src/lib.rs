@@ -40,7 +40,7 @@ pub use backup::{export_backup_state, RestoreReport, SdkBackupState, SDK_BACKUP_
 #[doc(inline)]
 pub use config::{
     EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
-    PrivateSharingPolicy, PublicContactSharingPolicy, DEFAULT_PROFILE_NAMESPACE,
+    PublicContactSharingPolicy, DEFAULT_PROFILE_NAMESPACE,
 };
 #[doc(inline)]
 pub use contacts::{

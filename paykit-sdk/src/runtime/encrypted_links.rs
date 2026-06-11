@@ -80,7 +80,6 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<LinkedPeerHandshakeReport> {
-        self.ensure_private_workflows_enabled("Encrypted Link initiation")?;
         self.start_link_handshake(counterparty, EncryptedLinkHandshakeRole::Initiator)
             .await
     }
@@ -90,7 +89,6 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<LinkedPeerHandshakeReport> {
-        self.ensure_private_workflows_enabled("Encrypted Link acceptance")?;
         self.start_link_handshake(counterparty, EncryptedLinkHandshakeRole::Responder)
             .await
     }
@@ -100,7 +98,6 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<LinkedPeerHandshakeReport> {
-        self.ensure_private_workflows_enabled("Encrypted Link Handshake advancement")?;
         self.ensure_peer_not_recovery_required_or_blocked(&counterparty)
             .await?;
         let _ = self.private_link_session_access().await?;

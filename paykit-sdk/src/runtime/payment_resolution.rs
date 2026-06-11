@@ -18,8 +18,7 @@ where
         request: ContactPaymentResolutionRequest,
     ) -> Result<ContactPaymentResolution> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        let mut private_allowed = self.config.private_sharing != PrivateSharingPolicy::Disabled
-            && identity.public_key.is_some();
+        let mut private_allowed = identity.public_key.is_some();
         let mut private_recovery_pending = false;
         if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
             private_allowed = match self
@@ -126,10 +125,6 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<PrivateRecoveryOutcome> {
-        if self.config.private_sharing == PrivateSharingPolicy::Disabled {
-            return Ok(PrivateRecoveryOutcome::NotNeeded);
-        }
-
         let Some(identity) = self.storage.load_identity_state().await? else {
             return Ok(PrivateRecoveryOutcome::PublicOnly);
         };

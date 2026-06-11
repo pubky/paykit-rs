@@ -192,10 +192,7 @@ async fn test_remove_contact_blocks_when_public_marker_may_exist() {
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig {
-            private_sharing: PrivateSharingPolicy::Disabled,
-            ..PaykitSdkConfig::default()
-        },
+        PaykitSdkConfig::default(),
         FixedClock,
     );
 

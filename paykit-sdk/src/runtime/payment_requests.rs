@@ -19,7 +19,6 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        self.ensure_private_workflows_enabled("Payment Request access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
@@ -41,7 +40,6 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        self.ensure_private_workflows_enabled("Payment Request access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
@@ -63,7 +61,6 @@ where
         &self,
         filter: PaymentRequestFilter,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        self.ensure_private_workflows_enabled("Payment Request access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
@@ -165,10 +162,7 @@ where
     pub(super) async fn ensure_private_outbound_ready(
         &self,
         counterparty: &PubkyPublicKey,
-        disabled_message: &str,
     ) -> Result<()> {
-        self.ensure_private_workflows_enabled(disabled_message)?;
-
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
             return Err(PaykitSdkError::Identity {
@@ -410,11 +404,7 @@ where
         counterparty: PubkyPublicKey,
         event: &PaymentRequestEvent,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(
-            &counterparty,
-            "private Payment Request messaging is disabled",
-        )
-        .await?;
+        self.ensure_private_outbound_ready(&counterparty).await?;
         enqueue_payment_request_event_message(&self.storage, counterparty, event, self.clock.now())
             .await
     }
@@ -427,11 +417,7 @@ where
         counterparty: PubkyPublicKey,
         event: &PaymentRequest,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(
-            &counterparty,
-            "private Payment Request messaging is disabled",
-        )
-        .await?;
+        self.ensure_private_outbound_ready(&counterparty).await?;
         enqueue_payment_request_message(&self.storage, counterparty, event, self.clock.now()).await
     }
 
@@ -443,11 +429,7 @@ where
         counterparty: PubkyPublicKey,
         event: &PaymentRequestAcceptance,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(
-            &counterparty,
-            "private Payment Request messaging is disabled",
-        )
-        .await?;
+        self.ensure_private_outbound_ready(&counterparty).await?;
         enqueue_payment_request_acceptance_message(
             &self.storage,
             counterparty,
@@ -465,11 +447,7 @@ where
         counterparty: PubkyPublicKey,
         event: &PaymentRequestRejection,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(
-            &counterparty,
-            "private Payment Request messaging is disabled",
-        )
-        .await?;
+        self.ensure_private_outbound_ready(&counterparty).await?;
         enqueue_payment_request_rejection_message(
             &self.storage,
             counterparty,
@@ -487,11 +465,7 @@ where
         counterparty: PubkyPublicKey,
         event: &PaymentRequestCancellation,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(
-            &counterparty,
-            "private Payment Request messaging is disabled",
-        )
-        .await?;
+        self.ensure_private_outbound_ready(&counterparty).await?;
         enqueue_payment_request_cancellation_message(
             &self.storage,
             counterparty,
@@ -510,11 +484,7 @@ where
         counterparty: PubkyPublicKey,
         event: &PaymentProof,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(
-            &counterparty,
-            "private Payment Request messaging is disabled",
-        )
-        .await?;
+        self.ensure_private_outbound_ready(&counterparty).await?;
         enqueue_payment_proof_message(&self.storage, counterparty, event, self.clock.now()).await
     }
 }

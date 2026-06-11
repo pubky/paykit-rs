@@ -20,7 +20,6 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
-        self.ensure_private_workflows_enabled("Encrypted Link recovery marker publishing")?;
         self.ensure_recovery_marker_publishing_enabled()?;
         let (session_access, _) = self.private_link_session_access().await?;
         let lease = self.claim_peer_link_operation(&counterparty).await?;
@@ -39,7 +38,6 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
-        self.ensure_private_workflows_enabled("Encrypted Link recovery marker observation")?;
         let (session_access, _) = self.private_link_session_access().await?;
         self.observe_remote_recovery_marker_with_session(&counterparty, &session_access)
             .await

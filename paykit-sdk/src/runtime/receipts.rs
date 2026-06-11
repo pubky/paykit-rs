@@ -17,7 +17,6 @@ where
         counterparty: PubkyPublicKey,
         draft: ReceiptDraft,
     ) -> Result<ReceiptIssuanceView> {
-        self.ensure_private_workflows_enabled("Receipt issuance")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Err(PaykitSdkError::Identity {
@@ -101,11 +100,7 @@ where
         counterparty: PubkyPublicKey,
         receipt_id: &str,
     ) -> Result<ReceiptIssuanceView> {
-        self.ensure_private_outbound_ready(
-            &counterparty,
-            "private Receipt Access sharing is disabled",
-        )
-        .await?;
+        self.ensure_private_outbound_ready(&counterparty).await?;
         let (session_access, _) = self.private_link_session_access().await?;
         let record = load_receipt_issuance_record(&self.storage, &counterparty, receipt_id)
             .await?
@@ -176,7 +171,6 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<ReceiptIssuanceView>> {
-        self.ensure_private_workflows_enabled("Receipt issuance record access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
@@ -201,7 +195,6 @@ where
 
     /// List issued receipts across non-blocked counterparties, newest first.
     pub async fn issued_receipts(&self) -> Result<Vec<ReceiptIssuanceView>> {
-        self.ensure_private_workflows_enabled("Receipt issuance access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
@@ -237,7 +230,6 @@ where
         counterparty: PubkyPublicKey,
         receipt_id: &str,
     ) -> Result<ReceiptRecord> {
-        self.ensure_private_workflows_enabled("Receipt retrieval")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         let local_public_key = identity
             .public_key
@@ -404,7 +396,6 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<ReceiptAccessView>> {
-        self.ensure_private_workflows_enabled("Receipt Access record access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
@@ -434,7 +425,6 @@ where
 
     /// List Receipt Access across non-blocked counterparties, newest first.
     pub async fn receipt_access(&self) -> Result<Vec<ReceiptAccessView>> {
-        self.ensure_private_workflows_enabled("Receipt Access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
@@ -462,7 +452,6 @@ where
 
     /// List decrypted Receipt records for one issuer, newest first.
     pub async fn receipt_records(&self, issuer: &PubkyPublicKey) -> Result<Vec<ReceiptRecord>> {
-        self.ensure_private_workflows_enabled("Receipt record access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         let Some(local_public_key) = identity.public_key else {
             return Ok(Vec::new());
@@ -491,7 +480,6 @@ where
 
     /// List decrypted receipts across non-blocked issuers, newest first.
     pub async fn receipts(&self) -> Result<Vec<ReceiptRecord>> {
-        self.ensure_private_workflows_enabled("Receipt access")?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         let Some(local_public_key) = identity.public_key else {
             return Ok(Vec::new());

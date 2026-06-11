@@ -13,11 +13,6 @@ where
         counterparty: PubkyPublicKey,
     ) -> Result<OutboundPrivateSendReport> {
         let mut report = OutboundPrivateSendReport::default();
-        if self.config.private_sharing == PrivateSharingPolicy::Disabled {
-            return Err(PaykitSdkError::Policy(
-                "private Paykit message sending is disabled".into(),
-            ));
-        }
         self.ensure_peer_not_recovery_required_or_blocked(&counterparty)
             .await?;
         let (session_access, _) = self.private_link_session_access().await?;

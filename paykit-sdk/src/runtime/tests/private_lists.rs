@@ -754,35 +754,6 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
 }
 
 #[tokio::test]
-async fn test_current_private_payment_list_respects_private_sharing_policy() {
-    let storage = InMemoryStorage::new();
-    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    persist_private_stream_batch(
-        &storage,
-        counterparty.clone(),
-        vec![private_list_message("ln-private")],
-        None,
-        FixedClock.now(),
-    )
-    .await
-    .unwrap();
-    let sdk = PaykitSdk::with_clock(
-        storage,
-        TestPubkySessionProvider { session: None },
-        TestPaymentAdapter,
-        PaykitSdkConfig {
-            private_sharing: PrivateSharingPolicy::Disabled,
-            ..PaykitSdkConfig::default()
-        },
-        FixedClock,
-    );
-
-    let result = sdk.current_private_payment_list(&counterparty).await;
-
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-}
-
-#[tokio::test]
 async fn test_current_private_payment_list_reads_cached_view_for_public_only_identity() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

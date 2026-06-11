@@ -23,7 +23,7 @@ use crate::{
     },
     config::{
         EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
-        PrivateSharingPolicy, PublicContactSharingPolicy,
+        PublicContactSharingPolicy,
     },
     contacts::{
         parse_profile_json, parse_pubky_profile_json, paykit_blob_path,
@@ -444,16 +444,6 @@ where
     /// Access the Pubky session provider.
     pub fn pubky_session_provider(&self) -> &K {
         &self.pubky
-    }
-
-    fn ensure_private_workflows_enabled(&self, context: &str) -> Result<()> {
-        if self.config.private_sharing == PrivateSharingPolicy::Disabled {
-            Err(PaykitSdkError::Policy(format!(
-                "{context} is disabled by local private sharing policy"
-            )))
-        } else {
-            Ok(())
-        }
     }
 
     fn ensure_recovery_marker_publishing_enabled(&self) -> Result<()> {
