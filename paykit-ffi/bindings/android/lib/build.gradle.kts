@@ -203,8 +203,8 @@ val validateReleaseNativeLibraries by tasks.registering {
             }
 
             val (sectionsExit, sections) = runReadelf(readelf, "-S", lib.absolutePath)
-            if (sectionsExit != 0 || !Regex("""\.debug_""").containsMatchIn(sections)) {
-                throw GradleException("Android native library has no full DWARF debug metadata: '${lib.path}'")
+            if (sectionsExit != 0 || !Regex("""\.debug_info""").containsMatchIn(sections)) {
+                throw GradleException("Android native library has no .debug_info DWARF metadata: '${lib.path}'")
             }
 
             val wideHeaders = runReadelf(readelf, "-W", "-l", lib.absolutePath)
