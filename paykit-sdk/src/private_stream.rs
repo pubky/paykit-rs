@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    receipts::ReceiptAccessRecord,
     storage::{
         require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
         NewPrivateStreamItem, NewPrivateStreamItemDetails, PeerLinkOperationLease, StorageAdapter,
@@ -15,6 +16,7 @@ use crate::{
 use paykit_lib::{
     parse_payment_request_event_message, parse_private_payment_list_json,
     parse_receipt_access_event_message, PrivateApplicationMessage, PrivateMessageKind,
+    ReceiptAccess,
 };
 
 /// Parse status for one received Private Application Message.
@@ -97,7 +99,12 @@ where
             };
 
             for message in messages {
-                let classification = classify_message(&message);
+                let MessageClassification {
+                    status,
+                    parse_error,
+                    event,
+                    receipt_access,
+                } = classify_message(&message);
                 let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
                     NewPrivateStreamItemDetails {
                         counterparty: counterparty.clone(),
@@ -108,13 +115,13 @@ where
                         known_paykit_kind: message
                             .known_kind()
                             .map(|kind| kind.as_str().to_owned()),
-                        parse_status: classification.status,
-                        parse_error: classification.parse_error,
+                        parse_status: status,
+                        parse_error,
                         received_at,
                     },
                 ));
 
-                if let Some(event) = classification.event {
+                let dedupe_outcome = event.map(|event| {
                     update_event_dedupe(
                         tx,
                         &counterparty,
@@ -123,7 +130,19 @@ where
                         payload_hash(&message.raw_json),
                         stream_item_id,
                         &mut report,
-                    );
+                    )
+                });
+
+                if matches!(dedupe_outcome, Some(EventDedupeOutcome::First)) {
+                    if let Some(access) = receipt_access.as_ref() {
+                        tx.save_receipt_access_record(ReceiptAccessRecord::from_access(
+                            counterparty.clone(),
+                            stream_item_id,
+                            receive_batch_id,
+                            received_at,
+                            access,
+                        ));
+                    }
                 }
 
                 report.stream_item_ids.push(stream_item_id);
@@ -145,6 +164,7 @@ struct MessageClassification {
     status: PrivateStreamParseStatus,
     parse_error: Option<String>,
     event: Option<EventHeader>,
+    receipt_access: Option<ReceiptAccess>,
 }
 
 struct EventHeader {
@@ -162,6 +182,7 @@ fn classify_message(message: &PrivateApplicationMessage) -> MessageClassificatio
             },
             parse_error: None,
             event: None,
+            receipt_access: None,
         };
     };
 
@@ -172,11 +193,13 @@ fn classify_message(message: &PrivateApplicationMessage) -> MessageClassificatio
                     status: PrivateStreamParseStatus::Valid,
                     parse_error: None,
                     event: None,
+                    receipt_access: None,
                 },
                 Err(err) => MessageClassification {
                     status: PrivateStreamParseStatus::MalformedRecognized,
                     parse_error: Some(err.to_string()),
                     event: None,
+                    receipt_access: None,
                 },
             }
         }
@@ -198,6 +221,7 @@ fn classify_message(message: &PrivateApplicationMessage) -> MessageClassificatio
                     .and_then(|parsed| parsed.validation_error())
                     .map(str::to_owned),
                 event,
+                receipt_access: parsed.and_then(|parsed| parsed.parsed_access().cloned()),
             }
         }
         PrivateMessageKind::PaymentRequest
@@ -222,6 +246,7 @@ fn classify_message(message: &PrivateApplicationMessage) -> MessageClassificatio
                     .and_then(|parsed| parsed.validation_error())
                     .map(str::to_owned),
                 event,
+                receipt_access: None,
             }
         }
     }
@@ -235,6 +260,13 @@ fn status_from_event_validity(is_valid: bool) -> PrivateStreamParseStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventDedupeOutcome {
+    First,
+    Duplicate,
+    Conflict,
+}
+
 fn update_event_dedupe(
     tx: &mut dyn crate::storage::StorageTransaction,
     counterparty: &PubkyPublicKey,
@@ -243,7 +275,7 @@ fn update_event_dedupe(
     payload_hash: String,
     stream_item_id: u64,
     report: &mut PrivateStreamIntakeReport,
-) {
+) -> EventDedupeOutcome {
     let Some(mut record) = tx.event_dedup_record(counterparty, &event_id) else {
         tx.save_event_dedup_record(EventDedupRecord {
             counterparty: counterparty.clone(),
@@ -254,11 +286,12 @@ fn update_event_dedupe(
             duplicate_stream_item_ids: Vec::new(),
             conflicting_stream_item_ids: Vec::new(),
         });
-        return;
+        return EventDedupeOutcome::First;
     };
 
-    if record.payload_hash == payload_hash {
+    let outcome = if record.payload_hash == payload_hash {
         record.duplicate_stream_item_ids.push(stream_item_id);
+        EventDedupeOutcome::Duplicate
     } else {
         record.conflicting_stream_item_ids.push(stream_item_id);
         report.event_conflicts.push(EventIdConflict {
@@ -266,9 +299,11 @@ fn update_event_dedupe(
             first_stream_item_id: record.first_stream_item_id,
             conflicting_stream_item_id: stream_item_id,
         });
-    }
+        EventDedupeOutcome::Conflict
+    };
 
     tx.save_event_dedup_record(record);
+    outcome
 }
 
 pub(crate) fn payload_hash(raw_json: &str) -> String {
@@ -315,6 +350,29 @@ mod tests {
         )
     }
 
+    fn receipt_access_raw(event_id: &str, receipt_id: &str, reference: &str) -> String {
+        let receipt_id = paykit_lib::ReceiptId::new(receipt_id).unwrap();
+        receipt_access_raw_with_location(
+            event_id,
+            receipt_id.as_str(),
+            reference,
+            &paykit_lib::ReceiptAccess::location_for(&receipt_id),
+        )
+    }
+
+    fn receipt_access_raw_with_location(
+        event_id: &str,
+        receipt_id: &str,
+        reference: &str,
+        location: &str,
+    ) -> String {
+        let key = paykit_lib::ReceiptDecryptionKey::generate();
+        format!(
+            r#"{{"version":1,"kind":"paykit.receipt_access","event_id":"{event_id}","receipt_id":"{receipt_id}","payment_reference":"{reference}","location":"{location}","key":"{}"}}"#,
+            key.as_str()
+        )
+    }
+
     #[tokio::test]
     async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
         let storage = InMemoryStorage::new();
@@ -356,6 +414,124 @@ mod tests {
         );
         assert_eq!(snapshot.encrypted_link_states[&counterparty], link_state);
         assert_eq!(snapshot.event_dedup_records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_persist_private_stream_batch_indexes_receipt_access() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        let event_id = "650e8400-e29b-41d4-a716-446655440000";
+        let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
+        let raw = receipt_access_raw(event_id, receipt_id, "invoice-2026-0001");
+
+        persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![private_message(&raw)],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        let records = crate::receipt_access_records(&storage, &counterparty)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].stream_item_id, 0);
+        assert_eq!(records[0].receive_batch_id, 0);
+        assert_eq!(records[0].event_id, event_id);
+        assert_eq!(records[0].receipt_id, receipt_id);
+        assert_eq!(records[0].payment_reference, "invoice-2026-0001");
+        assert!(records[0].payment_request_id.is_none());
+        assert!(records[0].billing_period.is_none());
+        assert!(records[0].location.ends_with(receipt_id));
+        let debug = format!("{:?}", records[0]);
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(&records[0].key));
+
+        let indexed =
+            crate::receipt_access_record_by_receipt_id(&storage, &counterparty, receipt_id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(indexed.event_id, event_id);
+    }
+
+    #[tokio::test]
+    async fn test_persist_private_stream_batch_dedupes_receipt_access_index() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        let event_id = "650e8400-e29b-41d4-a716-446655440000";
+        let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
+        let duplicate_raw = receipt_access_raw(event_id, receipt_id, "invoice-2026-0001");
+        let conflicting_raw = receipt_access_raw(
+            event_id,
+            "750e8400-e29b-41d4-a716-446655440000",
+            "invoice-2026-0002",
+        );
+
+        let report = persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![
+                private_message(&duplicate_raw),
+                private_message(&duplicate_raw),
+                private_message(&conflicting_raw),
+            ],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        let records = crate::receipt_access_records(&storage, &counterparty)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].stream_item_id, 0);
+        assert_eq!(records[0].receipt_id, receipt_id);
+        assert_eq!(report.event_conflicts.len(), 1);
+        assert_eq!(report.event_conflicts[0].conflicting_stream_item_id, 2);
+        let snapshot = storage.snapshot().unwrap();
+        let dedupe = snapshot
+            .event_dedup_records
+            .get(&(counterparty, event_id.into()))
+            .unwrap();
+        assert_eq!(dedupe.duplicate_stream_item_ids, vec![1]);
+        assert_eq!(dedupe.conflicting_stream_item_ids, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn test_persist_private_stream_batch_skips_malformed_receipt_access_index() {
+        let storage = InMemoryStorage::new();
+        let counterparty = counterparty();
+        let raw = receipt_access_raw_with_location(
+            "650e8400-e29b-41d4-a716-446655440000",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "invoice-2026-0001",
+            "/pub/paykit/v0/private/receipts/not-the-receipt-id",
+        );
+
+        persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![private_message(&raw)],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        let snapshot = storage.snapshot().unwrap();
+        assert_eq!(
+            snapshot.private_stream_items[0].parse_status,
+            PrivateStreamParseStatus::MalformedRecognized
+        );
+        let records = crate::receipt_access_records(&storage, &counterparty)
+            .await
+            .unwrap();
+        assert!(records.is_empty());
     }
 
     #[tokio::test]

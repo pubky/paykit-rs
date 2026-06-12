@@ -1,11 +1,11 @@
 # Paykit SDK Plan
 
-Status: planning / implementation design
-Date: 2026-06-03
+Status: implementation plan with initial Rust SDK foundation
+Date: 2026-06-04
 
 ## Goal
 
-Define the future Paykit SDK layer that sits above Paykit Library.
+Define the Paykit SDK layer that sits above Paykit Library.
 
 Paykit Library remains the stateless Rust implementation of Paykit Protocol
 wire formats, Pubky storage helpers, Encrypted Link transport helpers, and
@@ -32,8 +32,8 @@ payment methods through adapters without baking any one method into the SDK.
   profile/contact records and shared paths, but it should not own app screens,
   social graph semantics, or product-specific profile schemas.
 - Keep payment execution separate. Payment adapters provide receiving details,
-  endpoint compatibility, payment execution, settlement detection, and
-  method-specific state.
+  endpoint compatibility, payment-target construction, and method-specific
+  endpoint state.
 - Prefer typed records at the SDK boundary. Apps should not have to parse raw
   JSON or reason about Encrypted Link snapshots directly for normal workflows.
 - Expose low-level escape hatches where useful, but make the safe durable path
@@ -51,8 +51,7 @@ The system should have three main layers:
   recovery, Pubky session/capability handling, Pubky-backed Paykit
   profile/contact metadata, and app-facing APIs.
 - Payment adapter layer: receiving-detail generation, endpoint compatibility,
-  payment execution, settlement detection, method/provider state, and activity
-  records.
+  payment-target construction, method/provider state, and activity records.
 
 The SDK may still accept narrow platform hooks for secure session persistence,
 auth UI/Ring session handoff, custom profile/contact storage, scheduling, and
@@ -65,7 +64,7 @@ only for low-level protocol operations.
 
 ## Crate Layout
 
-The first implementation should add a new Rust crate:
+The initial implementation adds a new Rust crate:
 
 ```text
 paykit-sdk/
@@ -83,12 +82,6 @@ paykit-sdk/
     linked_peers.rs
     private_stream.rs
     private_lists.rs
-    payment_requests.rs
-    receipts.rs
-    reservations.rs
-    backup.rs
-    scheduler.rs
-    telemetry.rs
 ```
 
 Suggested module responsibilities:
@@ -96,27 +89,31 @@ Suggested module responsibilities:
 - `runtime`: owns `PaykitSdk`, coordinates adapters, storage, and workflow
   modules.
 - `config`: product-neutral policy knobs such as fallback behavior, retry
-  limits, stale cache rules, and message retention limits.
-- `adapters`: payment-method adapters plus narrow platform hooks for session
-  persistence, scheduling, reservations, and logging.
+  limits, stale cache rules, and future message retention limits.
+- `adapters`: payment-method adapter plus narrow platform hook for live Pubky
+  session access.
 - `storage`: durable records, transaction interface, migrations, and in-memory
   test storage.
 - `identity`: SDK-owned Pubky session capability state and identity
   refresh/import/export workflows.
 - `endpoints`: public Payment Endpoint publication, cleanup, and remote public
   Payment List reads.
-- `contacts`: SDK-owned Paykit-facing contact/profile records, shared namespace
-  handling, and optional custom path/schema hooks.
+- `contacts`: contact payment resolution types. SDK-owned Paykit-facing
+  contact/profile records, shared namespace handling, and optional custom
+  path/schema hooks are future scope.
 - `linked_peers`: Encrypted Link establishment, restore, recovery, and
   per-counterparty runtime state.
 - `private_stream`: ordered Private Application Message intake, persistence,
-  routing, dedupe, and derived view rebuild.
+  parsing, dedupe, and current derived view rebuilds.
 - `private_lists`: local and remote Private Payment List publication, caching,
   latest-state derivation, and size policy.
+- `receipts`: Receipt Access event indexing, Encrypted Receipt retrieval,
+  decryption, and retrieval state.
+
+Future modules should be added only when they have concrete implementation:
+
 - `payment_requests`: Payment Request event state machine, outbound event
   queueing, proof correlation, and scheduling hooks.
-- `receipts`: Receipt Access event indexing, Encrypted Receipt retrieval,
-  decryption, and retry of access messages.
 - `reservations`: optional contact-scoped or single-use receiving-detail
   reservation records.
 - `backup`: versioned export/import of SDK-managed state.
@@ -182,17 +179,19 @@ pub trait StorageAdapter {
 }
 ```
 
-`StorageTransaction` should support records for:
+The current Rust SDK foundation supports records for:
 
-- identity/session state
+- identity state
 - linked peer state
 - Encrypted Link snapshots and handshake snapshots
-- raw private stream items
-- parsed event records
-- dedupe indexes
-- derived current views
-- outbound messages and retry state
 - endpoint publication records
+- outbound Private Application Message records and retry state
+- raw Private Application Message stream items
+- Event Message dedupe indexes
+
+Future SDK storage should add records for:
+
+- parsed event records and derived current views
 - endpoint reservations
 - receipt records
 - backup metadata
@@ -208,6 +207,7 @@ Required for loading and storing local Pubky session material.
 ```rust
 pub trait PubkySessionProvider {
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>>;
+    async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>>;
     async fn clear_session_access(&self) -> Result<()>;
 }
 ```
@@ -216,6 +216,11 @@ pub trait PubkySessionProvider {
 client for counterparty homeserver access, and optional `PubkyLocalSecretKey`
 needed for Encrypted Links. The SDK derives and persists public `IdentityState`
 from that access during initialization.
+
+`load_public_storage` lets contact resolution fetch public Payment Endpoints
+without requiring authenticated session access. Implementations can reuse the
+Pubky client from `PubkySessionAccess` when they have one, or provide a separate
+public-storage client when only unauthenticated reads are available.
 
 The SDK derives Paykit capability from the session access:
 
@@ -282,7 +287,8 @@ contact grouping, or UI behavior.
 
 ### PaymentAdapter
 
-Required for endpoint publication and payment execution workflows.
+Required for endpoint publication, endpoint selection, and payment-target
+building.
 
 ```rust
 pub trait PaymentAdapter {
@@ -300,11 +306,6 @@ pub trait PaymentAdapter {
         &self,
         endpoint: &PaymentEndpointCandidate,
     ) -> Result<PaymentTarget>;
-
-    async fn execute_payment_request(
-        &self,
-        request: &PaymentRequestExecution,
-    ) -> Result<PaymentExecutionResult>;
 }
 ```
 
@@ -312,47 +313,28 @@ Endpoint selection requests include all discovered candidates, each candidate's
 source, and optional amount context. The adapter returns evaluations and may
 select one candidate from that batch.
 
-The adapter owns payment-method-specific details:
+The adapter owns payment-method-specific endpoint details:
 
 - receiving-detail generation
 - network or method metadata
 - balances, quote policy, fees, and route policy
-- payment execution
-- settlement detection
 - method-specific payload parsing beyond basic Paykit compatibility
 
-### EndpointReservationAdapter
+Payment execution and settlement detection stay with the integrating
+application or payment provider. Future SDK APIs may accept execution results
+from those systems.
 
-Optional. Used when payment methods need contact-scoped or single-use receiving
-details.
+### Future Endpoint Reservations
 
-```rust
-pub trait EndpointReservationAdapter {
-    async fn reserve(
-        &self,
-        contact: PubkyPublicKey,
-        method: PaymentEndpointIdentifier,
-    ) -> Result<ReservedReceivingDetail>;
+Some payment methods need contact-scoped or single-use receiving details. The
+current SDK keeps this out of the public adapter surface. A future reservation
+module can add durable records and adapter hooks once the first product
+integration proves the exact shape.
 
-    async fn rotate_after_use(
-        &self,
-        reservation_id: ReservationId,
-    ) -> Result<Option<ReservedReceivingDetail>>;
-}
-```
+### Future Scheduling
 
-### SchedulerAdapter
-
-Optional. Used for recurring Payment Requests.
-
-```rust
-pub trait SchedulerAdapter {
-    async fn schedule(&self, job: ScheduledPaymentJob) -> Result<()>;
-    async fn cancel(&self, job_id: ScheduledJobId) -> Result<()>;
-}
-```
-
-The SDK derives scheduling eligibility, but the integrating app/runtime may own
+Recurring Payment Request scheduling is future SDK scope. The SDK should derive
+eligibility and durable state, while the integrating app/runtime may still own
 the actual timer service.
 
 ### Logger And Clock
@@ -414,7 +396,7 @@ Append-only raw private stream item:
 - counterparty
 - stream sequence number assigned by the SDK
 - receive batch id
-- raw JSON payload
+- raw UTF-8 payload
 - parsed `version`
 - parsed `kind`
 - known Paykit kind, when recognized
@@ -428,6 +410,7 @@ This is the source of truth for private protocol-derived state.
 
 Tracks Event Message idempotency:
 
+- counterparty
 - event id
 - event kind
 - payload hash of the exact stored payload
@@ -451,15 +434,16 @@ view. They remain in the raw log.
 
 ### EndpointPublicationRecord
 
-Tracks local public and private endpoint publication:
+Tracks SDK-managed public Payment Endpoint publication:
 
-- scope: public or counterparty-private
 - Payment Endpoint Identifier
-- payload hash
+- last payload the SDK tried to publish
 - publication status: desired, published, pending removal, removed, failed
-- last attempted time
-- last confirmed time
-- retry count
+- last status update time
+- last error, when available
+
+Future versions may add payload hashes, separate attempt/confirmation times,
+and retry counters if the SDK needs change detection or richer retry policy.
 
 ### EndpointReservationRecord
 
@@ -518,54 +502,44 @@ Receipt Access records:
 - Receipt Decryption Key
 - optional Payment Request ID
 - optional Billing Period
-- retrieval state
+- retrieval state, timestamps, and last retrieval error
 
 Receipt records:
 
 - receipt id
-- decrypted receipt payload
 - payment reference
 - optional Payment Request ID
 - optional Billing Period
 - issuer context
+- recipient public key
+- optional Payment Endpoint Identifier
+- optional Payment Amount
+- caller-defined Receipt Metadata
 - retrieval/decryption time
+- Receipt Access Event ID and key hash used for retrieval
 
 Receipt Decryption Keys must be redacted in logs and debug output.
 
 ### OutboundPrivateMessageRecord
 
-Durable outbound private-message queue:
+Durable outbound Private Application Message queue:
 
 - outbound id
 - counterparty
-- message kind
-- event id, when applicable
-- exact raw JSON payload
+- Private Message Kind
+- exact raw JSON payload, including Event ID when the message kind has one
 - send status
 - attempt count
 - created, updated, attempted, and sent timestamps
 - last error
 
-The SDK should use one generic outbound private-message record type for all
-Private Application Message kinds, but process it as a FIFO queue per
+The SDK should use one generic outbound Private Application Message record type
+for all Private Application Message kinds, but process it as a FIFO queue per
 counterparty/Encrypted Link. Send workers must claim the next message through
 storage before sending it, and in-progress claims must expire so a crashed
 worker can be retried without letting two workers advance the same link at once.
 
 Event Message retries must reuse the same Event ID and exact payload.
-
-### UnknownPrivateMessageRetention
-
-Unknown valid Private Application Messages should be retained by default. The
-SDK config should define:
-
-- maximum retained unknown messages per counterparty
-- maximum retained bytes per counterparty
-- retention duration
-- whether discard is allowed
-
-Discard policy should never apply to recognized Paykit Event Messages unless
-the app explicitly purges all SDK state.
 
 ## Storage And Checkpoint Invariant
 
@@ -581,10 +555,10 @@ For each receive cycle:
 1. Claim the per-counterparty peer link operation lease.
 2. Restore or establish the Encrypted Link.
 3. Receive the full batch from `paykit-lib`.
-4. Parse every syntactically valid JSON Private Application Message enough to
-   identify version/kind.
-5. In one transaction, insert raw stream items, update dedupe records, update
-   derived views, and then save the advanced link snapshot.
+4. Persist every received Private Application Message plaintext and parse enough
+   to identify version/kind when the payload is valid JSON.
+5. In one transaction, insert raw stream items, update Event Message dedupe
+   records, and then save the advanced link snapshot.
 6. Release the lease.
 
 If the app crashes after messages are stored but before the snapshot is stored,
@@ -605,7 +579,7 @@ Recommended locks:
   handshake, send, receive, and snapshot updates per counterparty.
 - outbound queue claim/lock: serializes retry workers per counterparty.
 - reservation lock: serializes contact-scoped receiving-detail reservation and
-  rotation per counterparty/method.
+  rotation per counterparty/Payment Endpoint Identifier.
 
 These are local SDK/runtime locks, not protocol messages. They can be in-memory
 with durable recovery markers where needed. If a platform can run multiple
@@ -642,8 +616,8 @@ after a newer lease has replaced it.
 1. Ask `PaymentAdapter` for current public receiving details.
 2. Convert receiving details into Payment Endpoint payloads.
 3. Validate identifiers and payloads through `paykit-lib`.
-4. Compare desired payload hashes with `EndpointPublicationRecord`.
-5. Publish changed endpoints.
+4. Persist desired endpoint state.
+5. Publish desired endpoints.
 6. Remove stale managed endpoints.
 7. Persist confirmed/pending/failed state.
 8. Return an `EndpointSyncReport`.
@@ -673,7 +647,8 @@ configured to manage the whole Paykit public namespace.
 5. Build a complete Private Payment List.
 6. Enforce the pubky-noise message size limit.
 7. Persist outbound record and exact payload.
-8. Let the outbound private-message worker send through Encrypted Link.
+8. Let the outbound Private Application Message worker send through Encrypted
+   Link.
 9. Persist send result and updated link snapshot.
 
 Private Payment Lists publish endpoints only. Payment References come from
@@ -685,14 +660,14 @@ Payment Requests, Payment Proofs, and Receipts.
 2. Restore or establish Encrypted Link.
 3. Receive ordered Private Application Messages through `paykit-lib`.
 4. Persist raw messages and parse results.
-5. Route recognized messages:
-   - Private Payment List updates latest-state view.
-   - Receipt Access appends event records.
-   - Payment Request messages update lifecycle state.
-   - Payment Proof messages update proof records.
-6. Detect duplicate Event IDs and conflicting payloads.
-7. Persist updated snapshot after messages and derived state.
+5. Update Event Message dedupe records.
+6. Persist the updated Encrypted Link snapshot in the same transaction.
+7. Index Receipt Access events. Private Payment List views are derived on read
+   from stored stream items.
 8. Return a receive report.
+
+Future receive routing should extend the same raw stream log to Payment
+Requests, Payment Proofs, and any other Event Message kinds.
 
 ### Resolve Contact Payment
 
@@ -718,7 +693,6 @@ Flow:
    - `UnsupportedEndpoint`
    - `PrivateRecoveryPending`
    - `PublicOnlySession`
-   - `Error`
 
 The SDK should not block indefinitely waiting for private recovery.
 
@@ -776,7 +750,10 @@ settlement confirmation.
 4. Fetch Encrypted Receipt when requested or configured.
 5. Decrypt with Receipt Decryption Key.
 6. Verify Receipt ID/location correlation through `paykit-lib`.
-7. Index by Receipt ID, Payment Reference, Payment Request ID, Billing Period,
+7. Verify the decrypted receipt recipient matches the local Pubky identity.
+8. Try newer Receipt Access records first, but fall back to older valid records
+   for the same Receipt ID.
+9. Index by Receipt ID, Payment Reference, Payment Request ID, Billing Period,
    counterparty, and issuer.
 
 ### Backup And Restore
@@ -812,64 +789,24 @@ Restore flow:
 
 ## Public SDK API Shape
 
-The exact API will evolve, but the SDK should expose operations like:
+The current Rust SDK exposes initialization, identity status, public endpoint
+sync, linked peer handshakes, private stream receive, Private Payment List
+derivation/publication, contact payment resolution, and outbound Private
+Application Message processing, Receipt Access indexing/retrieval, and Payment
+Request lifecycle derivation plus checked outbound lifecycle queueing. Use
+`paykit-sdk` rustdoc for the exact current signatures.
+
+Future SDK versions should extend the current surface with operations like:
 
 ```rust
 impl PaykitSdk {
-    async fn initialize(&mut self) -> Result<InitializationReport>;
-    async fn identity_status(&self) -> Result<IdentityStatus>;
     async fn import_session(&mut self, session_secret: String) -> Result<IdentityStatus>;
     async fn sign_out(&mut self) -> Result<()>;
 
-    async fn sync_public_endpoints(&mut self) -> Result<EndpointSyncReport>;
     async fn clear_public_endpoints(&mut self) -> Result<EndpointSyncReport>;
 
     async fn sync_contact(&mut self, counterparty: PubkyPublicKey) -> Result<ContactSyncReport>;
     async fn sync_saved_contacts(&mut self, contacts: Vec<PubkyPublicKey>) -> Result<SyncReport>;
-
-    async fn receive_private_messages(
-        &mut self,
-        counterparty: PubkyPublicKey,
-    ) -> Result<PrivateReceiveReport>;
-
-    async fn current_private_payment_list(
-        &self,
-        counterparty: PubkyPublicKey,
-    ) -> Result<Option<PrivatePaymentListView>>;
-
-    async fn resolve_contact_payment(
-        &mut self,
-        request: ContactPaymentResolutionRequest,
-    ) -> Result<ContactPaymentResolution>;
-
-    async fn propose_payment_request(
-        &mut self,
-        counterparty: PubkyPublicKey,
-        terms: PaymentRequestTermsInput,
-    ) -> Result<PaymentRequestRecord>;
-
-    async fn accept_payment_request(
-        &mut self,
-        id: PaymentRequestId,
-    ) -> Result<PaymentRequestRecord>;
-
-    async fn reject_payment_request(
-        &mut self,
-        id: PaymentRequestId,
-        reason: Option<String>,
-    ) -> Result<PaymentRequestRecord>;
-
-    async fn cancel_payment_request(
-        &mut self,
-        id: PaymentRequestId,
-        reason: Option<String>,
-    ) -> Result<PaymentRequestRecord>;
-
-    async fn record_payment_proof(
-        &mut self,
-        id: PaymentRequestId,
-        proof: PaymentProofInput,
-    ) -> Result<PaymentRequestRecord>;
 
     async fn list_payment_requests(
         &self,
@@ -938,14 +875,19 @@ belongs to the app.
 
 ## Policy Configuration
 
-`PaykitSdkConfig` should include:
+Current `PaykitSdkConfig` includes:
 
 - public endpoint management scope
 - private sharing enabled/disabled
 - public fallback policy
-- private recovery wait duration and retry limits
+- private recovery wait duration
+- peer link operation lease timeout
+- outbound private send lease timeout
+
+Future policy configuration may add:
+
 - stale private cache policy
-- outbound retry policy
+- outbound retry policy beyond lease expiry
 - unknown message retention policy
 - receipt auto-retrieval policy
 - recurring Payment Request scheduling policy
@@ -980,24 +922,23 @@ These should stay outside Paykit SDK:
 - app backup transport and cloud sync
 - seed/secret derivation policy unless standardized
 
-## Implementation Build Order
+## Current Foundation And Next Work
 
-1. Add `paykit-sdk` crate skeleton, error type, config, adapter traits, and
-   in-memory test storage.
-2. Implement durable storage records and transaction/checkpoint contract.
-3. Implement identity capability state and public endpoint sync.
-4. Implement Encrypted Link runtime, peer records, private stream intake, and
-   checkpoint-safe persistence.
-5. Implement Private Payment List latest-state derivation and contact payment
-   resolution.
-6. Implement outbound queue and retry model for private messages.
-7. Implement Receipt Access indexing and Receipt retrieval.
-8. Implement Payment Request lifecycle derivation and outbound lifecycle APIs.
-9. Implement optional endpoint reservation subsystem.
-10. Implement backup/export/restore for SDK-managed state.
-11. Add FFI and platform wrappers.
-12. Migrate one existing app integration behind the SDK and use that to refine
-    adapters.
+The current Rust SDK foundation includes the crate skeleton, error/config
+types, adapter traits, in-memory test storage, identity state, public endpoint
+sync, Encrypted Link runtime records, private stream intake, Private Payment
+List latest-state derivation, contact payment resolution, outbound Private
+Application Message delivery, Receipt Access indexing, receipt retrieval,
+Payment Request lifecycle derivation, and checked outbound Payment Request
+lifecycle queueing.
+
+Next work:
+
+1. Add optional endpoint reservation support.
+2. Add backup/export/restore for SDK-managed state.
+3. Add SDK FFI and platform wrappers.
+4. Migrate one existing app integration behind the SDK and use that to refine
+   adapters.
 
 Each step should include unit tests for storage invariants and at least one
 integration-style test using an in-memory adapter setup.
@@ -1035,10 +976,12 @@ Platform tests:
 2. Should the default Paykit SDK profile/contact namespace use a reserved
    subdirectory under `/pub/paykit/v0/`, or an unversioned Paykit-level path
    under `/pub/paykit/`?
-3. What is the default public fallback policy for saved contacts?
+3. Should the current default public fallback and private recovery timeouts
+   differ for saved contacts versus one-off counterparties?
 4. How much endpoint reservation should be generalized in the first SDK version?
 5. How much recurring Payment Request scheduling should the SDK own versus
    delegating to app/runtime schedulers?
-6. What are the unknown Private Application Message retention defaults?
+6. What unknown Private Application Message retention defaults are appropriate
+   for mobile storage budgets once retention enforcement is implemented?
 7. Should SDK bindings become the primary mobile API while `paykit-ffi` remains
    low-level protocol API?

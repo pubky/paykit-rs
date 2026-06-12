@@ -13,8 +13,10 @@ pub mod error;
 pub mod identity;
 pub mod linked_peers;
 pub mod outbound_private;
+pub mod payment_requests;
 pub mod private_lists;
 pub mod private_stream;
+pub mod receipts;
 /// SDK runtime facade.
 pub mod runtime;
 /// Durable storage traits and in-memory test storage.
@@ -57,11 +59,24 @@ pub use outbound_private::{
     OutboundPrivateSendReport,
 };
 #[doc(inline)]
+pub use payment_requests::{
+    payment_request_records, received_payment_request_records, PaymentProofRecord,
+    PaymentRequestAmountRecord, PaymentRequestBillingPeriodRecord, PaymentRequestLifecycleState,
+    PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
+    PaymentRequestTermsRecord,
+};
+#[doc(inline)]
 pub use private_lists::{
     current_private_payment_list, derive_private_payment_list_view, PrivatePaymentListView,
 };
 #[doc(inline)]
 pub use private_stream::{EventIdConflict, PrivateStreamIntakeReport, PrivateStreamParseStatus};
+#[doc(inline)]
+pub use receipts::{
+    receipt_access_record_by_receipt_id, receipt_access_records, receipt_record,
+    ReceiptAccessRecord, ReceiptAmountRecord, ReceiptBillingPeriodRecord, ReceiptRecord,
+    ReceiptRetrievalStatus,
+};
 #[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
 #[doc(inline)]

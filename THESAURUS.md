@@ -7,7 +7,7 @@
 ## Bounded Contexts
 
 ### Paykit
-- **Definition**: The whole Paykit system/product, including Paykit Protocol, Paykit Library, future Paykit SDK/runtime work, private payments, receipts, Payment Requests, and related components.
+- **Definition**: The whole Paykit system/product, including Paykit Protocol, Paykit Library, Paykit SDK/runtime work, private payments, receipts, Payment Requests, and related components.
 - **NOT**: Only the protocol layer or only the Rust library.
 - **Synonyms to AVOID**: Paykit SDK when referring to the whole product or current stateless library
 - **Related terms**: Paykit Protocol, Paykit Library, Paykit SDK, Payment Request
@@ -25,8 +25,8 @@
 - **Related terms**: Paykit Protocol, Paykit SDK, Language Bindings
 
 ### Paykit SDK
-- **Definition**: A planned/future stateful integration layer above Paykit Library for durable Encrypted Link state, private stream routing, event logs, recovery behavior, Payment Request lifecycle state, receipt indexing, and ergonomic wallet/payment-processor workflows.
-- **NOT**: A current core component of Paykit architecture.
+- **Definition**: The stateful integration layer above Paykit Library for durable Encrypted Link state, private stream routing, event logs, recovery behavior, Payment Request lifecycle state, receipt indexing, and ergonomic wallet/payment-processor workflows. Current implementation starts as a Rust SDK runtime foundation.
+- **NOT**: Paykit Library, Paykit Protocol, or payment execution/settlement logic.
 - **Synonyms to AVOID**: Paykit core, Paykit runtime core, Pubky SDK
 - **Related terms**: Paykit, Paykit Library, Language Bindings
 
@@ -300,6 +300,7 @@ Current/core:
 - Paykit
 - Paykit Protocol
 - Paykit Library
+- Paykit SDK
 - Pubky Routing
 
 Protocol concepts:
@@ -334,7 +335,7 @@ Protocol concepts:
 - Encrypted Link Handshake
 
 Future/planned:
-- Paykit SDK
+- Paykit SDK platform bindings
 
 Implementation/legacy details:
 - Paykit FFI
