@@ -24,7 +24,8 @@ each other without side-channel coordination.
 This is a *recommended* convention, not a mandatory one. Paykit's routing
 layer does not enforce identifier shape beyond the structural checks performed
 by [`PaymentEndpointIdentifier`](../paykit-lib/src/payment_endpoint.rs) (ASCII alphanumeric, `-`, `_`, `.`;
-max 64 characters; no path traversal; the value `private` is reserved).
+max 64 characters; no path traversal; reserved Paykit storage values are
+rejected).
 
 Identifiers that follow this specification are interoperable with Paykit
 clients that follow the same conventions. Identifiers that do not follow it
@@ -245,10 +246,10 @@ Payment Endpoint Payloads are stored as [`PaymentEndpointPayload`](../paykit-lib
 UTF-8 strings. The reference implementation does not parse or validate payloads
 as JSON at the Paykit layer.
 
-The reserved identifier `private` is used internally by Paykit for private
-Paykit storage paths; it is rejected at `PaymentEndpointIdentifier`
-construction and therefore cannot appear as a conforming identifier under this
-specification either.
+The reserved identifiers `private` and `encrypted-link-recovery` are used
+internally by Paykit storage paths; they are rejected at
+`PaymentEndpointIdentifier` construction and therefore cannot appear as
+conforming identifiers under this specification either.
 
 ## 10. Security considerations
 

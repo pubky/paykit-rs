@@ -57,7 +57,7 @@ assert_eq!(identifier.as_str(), "btc-lightning-bolt11");
 assert!(PaymentEndpointIdentifier::new("../etc/passwd").is_err());
 ```
 
-**Allowed values:** 1-64 ASCII characters from the set `[a-zA-Z0-9_-.]`. The value must not consist solely of dots (`.` and `..` are rejected as path traversal components), and must not be the reserved identifier `private` (used by private Paykit storage). Slashes, null bytes, spaces, and other special characters are rejected.
+**Allowed values:** 1-64 ASCII characters from the set `[a-zA-Z0-9_-.]`. The value must not consist solely of dots (`.` and `..` are rejected as path traversal components), and must not be a reserved storage identifier such as `private` or `encrypted-link-recovery`. Slashes, null bytes, spaces, and other special characters are rejected.
 
 `PaymentEndpointIdentifier::new()` returns `Err(PaykitError::Validation(...))` for invalid input.
 
@@ -455,6 +455,13 @@ Snapshots produced by `pubky-noise` `0.1.0-rc3` used the older 189-byte format a
   In-process restore. Reuses an existing `Arc<PubkyNoiseConfig>` (obtainable via `EncryptedLink::config()`) when the link needs rebuilding without an app restart.
 
 After link restore, `max_send_retries` resets to `DEFAULT_MAX_SEND_RETRIES`. Call `EncryptedLink::set_max_send_retries` after restore if you need a non-default value.
+
+**Recovery markers:**
+
+`EncryptedLinkRecoveryMarker` is a minimal public Pubky marker for relink
+coordination when an Encrypted Link can no longer be trusted. `paykit-lib`
+provides stateless marker parsing, serialization, path derivation, and
+publish/fetch/remove helpers. SDKs decide when to publish or act on markers.
 
 **When to snapshot:**
 

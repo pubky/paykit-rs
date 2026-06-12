@@ -25,6 +25,8 @@ pub enum OutboundPrivateMessageStatus {
     Failed,
     /// The stored payload is invalid and must not be retried automatically.
     Invalid,
+    /// Newer latest-state data made this message unnecessary to send.
+    Superseded,
 }
 
 /// Failed outbound private send attempt.

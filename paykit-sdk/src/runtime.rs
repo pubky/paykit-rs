@@ -1,11 +1,12 @@
 use std::{cmp::Reverse, collections::HashSet};
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use paykit_lib::{
-    BillingPeriod, EventId, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
-    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent, PaymentRequestId,
-    PaymentRequestRejection, PaymentRequestTerms,
+    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaymentEndpointIdentifier, PaymentProof,
+    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
+    PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
 };
+use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -15,10 +16,13 @@ use crate::{
         restore_backup_state as restore_sdk_backup_state, RestoreReport, SdkBackupState,
     },
     config::{
-        EndpointManagementScope, PaykitSdkConfig, PrivateSharingPolicy, PublicFallbackPolicy,
+        EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
+        PrivateSharingPolicy, PublicContactSharingPolicy, PublicFallbackPolicy,
     },
     contacts::{
+        parse_profile_json, profile_json, public_contact_json, public_contact_path,
         ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
+        ContactRecord, ContactUpdate, PaykitProfile, PaykitProfileRecord, PAYKIT_PROFILE_PATH,
     },
     endpoint_reservations::{
         payment_endpoint_reservations, queue_private_payment_list_with_reservations,
@@ -63,9 +67,10 @@ use crate::{
         decrypt_receipt_record_from_access, fetch_encrypted_receipt_json,
         receipt_record_matches_access, ReceiptAccessRecord, ReceiptRecord, ReceiptRetrievalStatus,
     },
+    recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
     storage::{
-        EncryptedLinkStateRecord, OutboundPrivateMessageRecord, PeerLinkOperationLease,
-        StorageAdapter,
+        EncryptedLinkStateRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
+        PeerLinkOperationLease, StorageAdapter,
     },
     PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointEvaluation,
     PaymentEndpointReservation, PaymentEndpointReservationRelease,
@@ -205,6 +210,44 @@ where
         Ok((session, state))
     }
 
+    async fn require_initialized_identity(&self, context: &str) -> Result<PubkyPublicKey> {
+        self.storage
+            .transaction(|tx| {
+                tx.load_identity_state()
+                    .and_then(|state| state.public_key)
+                    .ok_or_else(|| PaykitSdkError::Identity {
+                        context: format!("cannot {context} without an initialized Pubky identity"),
+                        source: None,
+                    })
+            })
+            .await
+    }
+
+    async fn load_session_access_for_initialized_identity(
+        &self,
+        context: &str,
+    ) -> Result<PubkySessionAccess> {
+        let expected_public_key = self.require_initialized_identity(context).await?;
+        let session_access =
+            self.pubky
+                .load_session_access()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: format!("cannot {context} without an active Pubky session"),
+                    source: None,
+                })?;
+        let actual_public_key = session_access.public_key()?;
+        if actual_public_key != expected_public_key {
+            return Err(PaykitSdkError::Identity {
+                context: format!(
+                    "cannot {context} because active Pubky session does not match initialized identity"
+                ),
+                source: None,
+            });
+        }
+        Ok(session_access)
+    }
+
     /// Return the last persisted identity status, if initialized.
     pub async fn identity_status(&self) -> Result<Option<IdentityStatus>> {
         Ok(self
@@ -218,6 +261,272 @@ where
     /// Access SDK configuration.
     pub fn config(&self) -> &PaykitSdkConfig {
         &self.config
+    }
+
+    /// Save or update a local contact record.
+    pub async fn save_contact(&self, update: ContactUpdate) -> Result<ContactRecord> {
+        update.validate()?;
+        self.require_initialized_identity("save contact").await?;
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let existing = tx.contact_record(&update.public_key);
+                let record = ContactRecord::from_update(update, existing, now);
+                tx.save_contact_record(record.clone());
+                Ok(record)
+            })
+            .await
+    }
+
+    /// Load one local contact record.
+    pub async fn contact_record(
+        &self,
+        public_key: &PubkyPublicKey,
+    ) -> Result<Option<ContactRecord>> {
+        self.require_initialized_identity("load contact").await?;
+        self.storage
+            .transaction(|tx| Ok(tx.contact_record(public_key)))
+            .await
+    }
+
+    /// List local contact records.
+    pub async fn contact_records(&self) -> Result<Vec<ContactRecord>> {
+        self.require_initialized_identity("list contacts").await?;
+        self.storage
+            .transaction(|tx| Ok(tx.contact_records()))
+            .await
+    }
+
+    /// Remove one local contact record.
+    pub async fn remove_contact(
+        &self,
+        public_key: &PubkyPublicKey,
+    ) -> Result<Option<ContactRecord>> {
+        self.require_initialized_identity("remove contact").await?;
+        self.storage
+            .transaction(|tx| {
+                let Some(existing) = tx.contact_record(public_key) else {
+                    return Ok(None);
+                };
+                if !existing.can_remove_locally() {
+                    return Err(PaykitSdkError::Policy(format!(
+                        "remove public contact marker before deleting contact {public_key}"
+                    )));
+                }
+                Ok(tx.remove_contact_record(public_key))
+            })
+            .await
+    }
+
+    /// Publish the local public Paykit profile.
+    ///
+    /// This writes only `/pub/paykit/profile.json`. Profile image blob upload
+    /// and deletion are caller-managed.
+    pub async fn publish_profile(&self, profile: PaykitProfile) -> Result<PaykitProfileRecord> {
+        let json = profile_json(&profile)?;
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available for profile publication".into(),
+            source: None,
+        })?;
+        session_access
+            .session
+            .storage()
+            .put(PAYKIT_PROFILE_PATH, json)
+            .await
+            .map_err(|err| map_pubky_transport_error("publish Paykit profile", err))?;
+        Ok(PaykitProfileRecord {
+            public_key: session_access.public_key()?,
+            profile,
+            path: PAYKIT_PROFILE_PATH.into(),
+            updated_at: self.clock.now(),
+        })
+    }
+
+    /// Fetch a public Paykit profile.
+    pub async fn fetch_profile(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<Option<PaykitProfileRecord>> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for profile lookup".into(),
+                    source: None,
+                })?;
+        let Some(raw_json) = fetch_public_text(
+            &public_storage,
+            &public_key,
+            PAYKIT_PROFILE_PATH,
+            "fetch profile",
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PaykitProfileRecord {
+            public_key,
+            profile: parse_profile_json(&raw_json)?,
+            path: PAYKIT_PROFILE_PATH.into(),
+            updated_at: self.clock.now(),
+        }))
+    }
+
+    /// Fetch a contact's public profile and cache it in the local contact record.
+    pub async fn refresh_contact_profile(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<Option<ContactRecord>> {
+        self.require_initialized_identity("refresh contact profile")
+            .await?;
+        let fetched = self.fetch_profile(public_key.clone()).await?;
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let Some(existing) = tx.contact_record(&public_key) else {
+                    return Ok(None);
+                };
+                let record = existing.with_profile(fetched.map(|record| record.profile), now);
+                tx.save_contact_record(record.clone());
+                Ok(Some(record))
+            })
+            .await
+    }
+
+    /// Publish a public contact marker for a saved local contact.
+    ///
+    /// This can reveal part of the local contact graph. It only runs when
+    /// `public_contact_sharing` is `PublicPaykitNamespace`.
+    pub async fn publish_public_contact(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<ContactRecord> {
+        if self.config.public_contact_sharing != PublicContactSharingPolicy::PublicPaykitNamespace {
+            return Err(PaykitSdkError::Policy(
+                "public contact sharing is disabled".into(),
+            ));
+        }
+        let session_access = self
+            .load_session_access_for_initialized_identity("publish public contact")
+            .await?;
+        let pending_at = self.clock.now();
+        self.storage
+            .transaction(|tx| {
+                let Some(existing) = tx.contact_record(&public_key) else {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "cannot publish unsaved contact {public_key}"
+                    )));
+                };
+                tx.save_contact_record(
+                    existing.mark_public_contact_publication_pending(pending_at),
+                );
+                Ok(())
+            })
+            .await?;
+        let path = public_contact_path(&public_key);
+        let write_result = session_access
+            .session
+            .storage()
+            .put(path, public_contact_json(&public_key)?)
+            .await
+            .map_err(|err| map_pubky_transport_error("publish public contact", err));
+        if let Err(err) = write_result {
+            self.mark_public_contact_failed(&public_key, err.to_string())
+                .await?;
+            return Err(err);
+        }
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let Some(existing) = tx.contact_record(&public_key) else {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "contact {public_key} disappeared before public publication was recorded"
+                    )));
+                };
+                let record = existing.mark_public_contact_published(now);
+                tx.save_contact_record(record.clone());
+                Ok(record)
+            })
+            .await
+    }
+
+    /// Remove a public contact marker for a saved local contact.
+    ///
+    /// Cleanup is allowed even when public contact sharing is disabled, so an
+    /// app can stop publishing markers and still remove previously published
+    /// markers.
+    pub async fn remove_public_contact(
+        &self,
+        public_key: PubkyPublicKey,
+    ) -> Result<Option<ContactRecord>> {
+        let existing_record = self
+            .storage
+            .transaction(|tx| Ok(tx.contact_record(&public_key)))
+            .await?;
+        let session_access = self
+            .load_session_access_for_initialized_identity("remove public contact")
+            .await?;
+        let had_local_record = existing_record.is_some();
+        if existing_record
+            .as_ref()
+            .is_some_and(ContactRecord::may_have_public_marker)
+        {
+            let pending_at = self.clock.now();
+            self.storage
+                .transaction(|tx| {
+                    let Some(existing) = tx.contact_record(&public_key) else {
+                        return Ok(());
+                    };
+                    tx.save_contact_record(
+                        existing.mark_public_contact_removal_pending(pending_at),
+                    );
+                    Ok(())
+                })
+                .await?;
+        }
+        let path = public_contact_path(&public_key);
+        let delete_result = session_access.session.storage().delete(path).await;
+        if let Err(err) = delete_result {
+            if !is_pubky_not_found(&err) {
+                let err = map_pubky_transport_error("remove public contact", err);
+                self.mark_public_contact_failed(&public_key, err.to_string())
+                    .await?;
+                return Err(err);
+            }
+        }
+        if !had_local_record {
+            return Ok(None);
+        }
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let Some(existing) = tx.contact_record(&public_key) else {
+                    return Ok(None);
+                };
+                let record = existing.mark_public_contact_removed(now);
+                tx.save_contact_record(record.clone());
+                Ok(Some(record))
+            })
+            .await
+    }
+
+    async fn mark_public_contact_failed(
+        &self,
+        public_key: &PubkyPublicKey,
+        error: String,
+    ) -> Result<()> {
+        let failed_at = self.clock.now();
+        self.storage
+            .transaction(|tx| {
+                let Some(existing) = tx.contact_record(public_key) else {
+                    return Ok(());
+                };
+                tx.save_contact_record(existing.mark_public_contact_failed(error, failed_at));
+                Ok(())
+            })
+            .await
     }
 
     /// Access the payment adapter.
@@ -268,15 +577,111 @@ where
         restore_sdk_backup_state(&self.storage, backup).await
     }
 
+    /// Return tracked Encrypted Link recovery marker state for a counterparty.
+    pub async fn encrypted_link_recovery_marker_status(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Option<EncryptedLinkRecoveryMarkerReport>> {
+        recovery_marker_report(&self.storage, counterparty).await
+    }
+
+    /// Publish a minimal local recovery marker for a counterparty.
+    pub async fn publish_encrypted_link_recovery_marker(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<EncryptedLinkRecoveryMarkerReport> {
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available".into(),
+            source: None,
+        })?;
+        let new_episode = self
+            .mark_recovery_required_without_lease(&counterparty)
+            .await?;
+        self.publish_local_recovery_marker_with_session(&counterparty, &session_access, new_episode)
+            .await
+    }
+
+    /// Observe a counterparty's public recovery marker.
+    pub async fn observe_encrypted_link_recovery_marker(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<EncryptedLinkRecoveryMarkerReport> {
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available".into(),
+            source: None,
+        })?;
+        self.observe_remote_recovery_marker_with_session(&counterparty, &session_access)
+            .await
+    }
+
+    /// Remove the local public recovery marker for a counterparty.
+    pub async fn remove_encrypted_link_recovery_marker(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<EncryptedLinkRecoveryMarkerReport> {
+        if self.config.encrypted_link_recovery_markers
+            == EncryptedLinkRecoveryMarkerPolicy::Disabled
+        {
+            return self
+                .recovery_marker_report_or_default(&counterparty, false)
+                .await;
+        }
+
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available".into(),
+            source: None,
+        })?;
+        let secret_key = session_access
+            .local_secret_key
+            .as_ref()
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context:
+                    "local Pubky secret key is unavailable for Encrypted Link recovery markers"
+                        .into(),
+                source: None,
+            })?
+            .as_bytes();
+        let remote_public_key = counterparty.to_public_key()?;
+        paykit_lib::remove_encrypted_link_recovery_marker(
+            &session_access.session,
+            secret_key,
+            &remote_public_key,
+        )
+        .await?;
+
+        self.storage
+            .transaction(|tx| {
+                if let Some(mut peer) = tx.linked_peer(&counterparty) {
+                    peer.local_recovery_attempt_id = None;
+                    peer.local_recovery_marker_created_at = None;
+                    tx.save_linked_peer(peer);
+                }
+                Ok(())
+            })
+            .await?;
+        self.recovery_marker_report_or_default(&counterparty, false)
+            .await
+    }
+
     /// Return the latest valid Private Payment List view for a counterparty.
     pub async fn current_private_payment_list(
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Option<crate::PrivatePaymentListView>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
             return Ok(None);
         }
+        self.ensure_peer_allows_private_automation(counterparty)
+            .await?;
+        self.observe_remote_recovery_marker_for_cached_private_state(
+            counterparty,
+            session_access.as_ref(),
+        )
+        .await?;
         self.ensure_peer_allows_private_automation(counterparty)
             .await?;
         load_current_private_payment_list(&self.storage, counterparty).await
@@ -343,49 +748,49 @@ where
             )));
         }
         let now = self.clock.now();
-        let latest_access = &access_records[0];
-
-        let encrypted_json = match fetch_encrypted_receipt_json(
-            &public_storage,
-            &counterparty,
-            &latest_access.location,
-        )
-        .await
-        {
-            Ok(Some(encrypted_json)) => encrypted_json,
-            Ok(None) => {
-                let error = format!(
-                    "encrypted receipt {} was not found at {}",
-                    latest_access.receipt_id, latest_access.location
-                );
-                self.save_receipt_retrieval_error(
-                    latest_access,
-                    ReceiptRetrievalStatus::NotFound,
-                    now,
-                    error.clone(),
-                )
-                .await?;
-                return Err(PaykitSdkError::Transport {
-                    context: error,
-                    source: None,
-                });
-            }
-            Err(err) => {
-                let error = err.to_string();
-                self.save_receipt_retrieval_error(
-                    latest_access,
-                    ReceiptRetrievalStatus::Failed,
-                    now,
-                    error,
-                )
-                .await?;
-                return Err(err);
-            }
-        };
-
         let all_access_records = access_records.clone();
         let mut last_error = None;
         for access in access_records {
+            let encrypted_json = match fetch_encrypted_receipt_json(
+                &public_storage,
+                &counterparty,
+                &access.location,
+            )
+            .await
+            {
+                Ok(Some(encrypted_json)) => encrypted_json,
+                Ok(None) => {
+                    let error = format!(
+                        "encrypted receipt {} was not found at {}",
+                        access.receipt_id, access.location
+                    );
+                    self.save_receipt_retrieval_error(
+                        &access,
+                        ReceiptRetrievalStatus::NotFound,
+                        now,
+                        error.clone(),
+                    )
+                    .await?;
+                    last_error = Some(PaykitSdkError::Transport {
+                        context: error,
+                        source: None,
+                    });
+                    continue;
+                }
+                Err(err) => {
+                    let error = err.to_string();
+                    self.save_receipt_retrieval_error(
+                        &access,
+                        ReceiptRetrievalStatus::Failed,
+                        now,
+                        error,
+                    )
+                    .await?;
+                    last_error = Some(err);
+                    continue;
+                }
+            };
+
             match decrypt_receipt_record_from_access(
                 &access,
                 &encrypted_json,
@@ -1018,25 +1423,29 @@ where
         }
 
         let Some(handshake_role) = stored_link_state.handshake_role else {
-            mark_recovery_required_with_lease(
+            let mark = mark_recovery_required_with_lease(
                 &self.storage,
                 counterparty.clone(),
                 lease.clone(),
                 self.clock.now(),
             )
             .await?;
+            self.publish_local_recovery_marker_if_possible(&counterparty, mark.new_episode)
+                .await;
             return Err(PaykitSdkError::RecoveryRequired(format!(
                 "missing Encrypted Link Handshake role for counterparty {counterparty}"
             )));
         };
         let Some(snapshot_bytes) = stored_link_state.handshake_snapshot.as_ref() else {
-            mark_recovery_required_with_lease(
+            let mark = mark_recovery_required_with_lease(
                 &self.storage,
                 counterparty.clone(),
                 lease.clone(),
                 self.clock.now(),
             )
             .await?;
+            self.publish_local_recovery_marker_if_possible(&counterparty, mark.new_episode)
+                .await;
             return Err(PaykitSdkError::RecoveryRequired(format!(
                 "no in-progress Encrypted Link Handshake snapshot for counterparty {counterparty}"
             )));
@@ -1055,8 +1464,15 @@ where
             .as_ref()
             .is_err_and(should_mark_link_recovery_required)
         {
-            mark_recovery_required_with_lease(&self.storage, counterparty, lease, self.clock.now())
-                .await?;
+            let mark = mark_recovery_required_with_lease(
+                &self.storage,
+                counterparty.clone(),
+                lease,
+                self.clock.now(),
+            )
+            .await?;
+            self.publish_local_recovery_marker_if_possible(&counterparty, mark.new_episode)
+                .await;
         }
         result
     }
@@ -1066,9 +1482,9 @@ where
         &self,
         request: ContactPaymentResolutionRequest,
     ) -> Result<ContactPaymentResolution> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         let mut evaluations = Vec::new();
-        let private_allowed = match self
+        let mut private_allowed = match self
             .ensure_peer_allows_private_automation(&request.counterparty)
             .await
         {
@@ -1076,6 +1492,30 @@ where
             Err(PaykitSdkError::RecoveryRequired(_)) => false,
             Err(err) => return Err(err),
         };
+        if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
+            if let Err(err) = self
+                .observe_remote_recovery_marker_for_cached_private_state(
+                    &request.counterparty,
+                    session_access.as_ref(),
+                )
+                .await
+            {
+                if self.config.public_fallback == PublicFallbackPolicy::Disabled {
+                    return Err(err);
+                }
+                private_allowed = false;
+            }
+        }
+        if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
+            private_allowed = match self
+                .ensure_peer_allows_private_automation(&request.counterparty)
+                .await
+            {
+                Ok(()) => true,
+                Err(PaykitSdkError::RecoveryRequired(_)) => false,
+                Err(err) => return Err(err),
+            };
+        }
         let private_view = if private_allowed
             && identity.capability == PubkyIdentityCapability::PrivateLinkCapable
         {
@@ -1240,6 +1680,16 @@ where
         }
 
         if has_active_link {
+            if let Err(err) = self
+                .observe_remote_recovery_marker_for_cached_private_state(counterparty, None)
+                .await
+            {
+                if self.config.public_fallback == PublicFallbackPolicy::Disabled {
+                    return Err(err);
+                }
+                return Ok(PrivateRecoveryOutcome::NotNeeded);
+            }
+
             match self.receive_private_messages(counterparty.clone()).await {
                 Ok(_) => {
                     let private_view =
@@ -1256,8 +1706,13 @@ where
                 Err(PaykitSdkError::RecoveryRequired(_))
                 | Err(PaykitSdkError::Transport { .. })
                 | Err(PaykitSdkError::Protocol(_)) => {
-                    self.mark_private_recovery_pending(counterparty, link_generation)
+                    let recovery_update = self
+                        .mark_private_recovery_pending(counterparty, link_generation)
                         .await?;
+                    if let RecoveryRequiredUpdate::Marked { new_episode } = recovery_update {
+                        self.publish_local_recovery_marker_if_possible(counterparty, new_episode)
+                            .await;
+                    }
                     return Ok(PrivateRecoveryOutcome::Pending);
                 }
                 Err(err) => return Err(err),
@@ -1271,7 +1726,7 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         expected_link_generation: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<RecoveryRequiredUpdate> {
         let now = self.clock.now();
         self.storage
             .transaction(|tx| {
@@ -1279,21 +1734,16 @@ where
                     .encrypted_link_state(counterparty)
                     .map(|state| state.generation);
                 if current_generation != expected_link_generation {
-                    return Ok(());
+                    return Ok(RecoveryRequiredUpdate::Skipped);
                 }
-                let previous = tx.linked_peer(counterparty);
-                tx.save_linked_peer(crate::LinkedPeerRecord {
-                    counterparty: counterparty.clone(),
-                    state: LinkedPeerState::RecoveryRequired,
-                    last_sync_at: Some(now),
-                    last_private_receive_at: previous
-                        .as_ref()
-                        .and_then(|peer| peer.last_private_receive_at),
-                    failure_count: previous
-                        .as_ref()
-                        .map(|peer| peer.failure_count.saturating_add(1))
-                        .unwrap_or(1),
-                });
+                let mut peer = recovery_peer_or_default(tx.linked_peer(counterparty), counterparty);
+                let new_episode = peer.state != LinkedPeerState::RecoveryRequired;
+                peer.state = LinkedPeerState::RecoveryRequired;
+                if new_episode || peer.last_sync_at.is_none() {
+                    peer.last_sync_at = Some(now);
+                }
+                peer.failure_count = peer.failure_count.saturating_add(1);
+                tx.save_linked_peer(peer);
                 if let Some(link_state) = tx.encrypted_link_state(counterparty) {
                     tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                         counterparty: counterparty.clone(),
@@ -1304,9 +1754,290 @@ where
                         checkpointed_at: now,
                     });
                 }
-                Ok(())
+                Ok(RecoveryRequiredUpdate::Marked { new_episode })
             })
             .await
+    }
+
+    async fn mark_recovery_required_without_lease(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<bool> {
+        let now = self.clock.now();
+        self.storage
+            .transaction(|tx| {
+                let existing_peer = tx.linked_peer(counterparty);
+                let has_link_state = tx.encrypted_link_state(counterparty).is_some();
+                if !can_publish_recovery_marker(existing_peer.as_ref(), has_link_state) {
+                    return Err(PaykitSdkError::Policy(format!(
+                        "cannot publish Encrypted Link recovery marker without existing private link state for counterparty {counterparty}"
+                    )));
+                }
+                let mut peer = recovery_peer_or_default(existing_peer, counterparty);
+                if peer.state == LinkedPeerState::Blocked {
+                    return Err(PaykitSdkError::Policy(format!(
+                        "counterparty {counterparty} is blocked"
+                    )));
+                }
+                let new_episode = peer.state != LinkedPeerState::RecoveryRequired;
+                if peer.state != LinkedPeerState::RecoveryRequired {
+                    peer.failure_count = peer.failure_count.saturating_add(1);
+                }
+                peer.state = LinkedPeerState::RecoveryRequired;
+                if new_episode || peer.last_sync_at.is_none() {
+                    peer.last_sync_at = Some(now);
+                }
+                tx.save_linked_peer(peer);
+                if let Some(link_state) = tx.encrypted_link_state(counterparty) {
+                    tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                        counterparty: counterparty.clone(),
+                        link_snapshot: None,
+                        handshake_snapshot: None,
+                        handshake_role: None,
+                        generation: link_state.generation.saturating_add(1),
+                        checkpointed_at: now,
+                    });
+                }
+                Ok(new_episode)
+            })
+            .await
+    }
+
+    async fn publish_local_recovery_marker_if_possible(
+        &self,
+        counterparty: &PubkyPublicKey,
+        force_new_attempt: bool,
+    ) {
+        let Ok(Some(session_access)) = self.pubky.load_session_access().await else {
+            return;
+        };
+        let _ = self
+            .publish_local_recovery_marker_with_session(
+                counterparty,
+                &session_access,
+                force_new_attempt,
+            )
+            .await;
+    }
+
+    async fn publish_local_recovery_marker_with_session(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &PubkySessionAccess,
+        force_new_attempt: bool,
+    ) -> Result<EncryptedLinkRecoveryMarkerReport> {
+        if self.config.encrypted_link_recovery_markers
+            == EncryptedLinkRecoveryMarkerPolicy::Disabled
+        {
+            return self
+                .recovery_marker_report_or_default(counterparty, false)
+                .await;
+        }
+
+        let secret_key = session_access
+            .local_secret_key
+            .as_ref()
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context:
+                    "local Pubky secret key is unavailable for Encrypted Link recovery markers"
+                        .into(),
+                source: None,
+            })?
+            .as_bytes();
+        let remote_public_key = counterparty.to_public_key()?;
+        let now = self.clock.now();
+        let marker = self
+            .storage
+            .transaction(|tx| {
+                let mut peer = recovery_peer_or_default(tx.linked_peer(counterparty), counterparty);
+                let has_link_state = tx.encrypted_link_state(counterparty).is_some();
+                if !can_publish_recovery_marker(Some(&peer), has_link_state) {
+                    return Err(PaykitSdkError::Policy(format!(
+                        "cannot publish Encrypted Link recovery marker without existing private link state for counterparty {counterparty}"
+                    )));
+                }
+                let reusable_marker = if !force_new_attempt
+                    && peer.state == LinkedPeerState::RecoveryRequired
+                    && local_recovery_marker_belongs_to_current_episode(&peer)
+                {
+                    peer.local_recovery_attempt_id
+                        .as_ref()
+                        .zip(peer.local_recovery_marker_created_at)
+                        .map(|(attempt_id, created_at)| {
+                            let created_at_text =
+                                created_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+                            EncryptedLinkRecoveryMarker::new(attempt_id.clone(), created_at_text)
+                                .map(|marker| (marker, created_at))
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+                let (marker, marker_created_at) = reusable_marker
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        EncryptedLinkRecoveryMarker::new_v4(
+                            now.to_rfc3339_opts(SecondsFormat::Secs, true),
+                        )
+                        .map(|marker| (marker, now))
+                    })?;
+                peer.local_recovery_attempt_id = Some(marker.attempt_id().to_owned());
+                peer.local_recovery_marker_created_at = Some(marker_created_at);
+                tx.save_linked_peer(peer);
+                Ok(marker)
+            })
+            .await?;
+        paykit_lib::publish_encrypted_link_recovery_marker(
+            &session_access.session,
+            secret_key,
+            &remote_public_key,
+            &marker,
+        )
+        .await?;
+
+        self.recovery_marker_report_or_default(counterparty, false)
+            .await
+    }
+
+    async fn observe_remote_recovery_marker_for_cached_private_state(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: Option<&PubkySessionAccess>,
+    ) -> Result<()> {
+        if self.config.encrypted_link_recovery_markers
+            == EncryptedLinkRecoveryMarkerPolicy::Disabled
+        {
+            return Ok(());
+        }
+
+        let session_access = match session_access {
+            Some(session_access) => session_access,
+            None => {
+                let loaded = self.pubky.load_session_access().await?;
+                let Some(session_access) = loaded else {
+                    return Err(PaykitSdkError::Identity {
+                        context:
+                            "no Pubky session available for Encrypted Link recovery marker lookup"
+                                .into(),
+                        source: None,
+                    });
+                };
+                return self
+                    .observe_remote_recovery_marker_with_session(counterparty, &session_access)
+                    .await
+                    .map(|_| ());
+            }
+        };
+
+        self.observe_remote_recovery_marker_with_session(counterparty, session_access)
+            .await
+            .map(|_| ())
+    }
+
+    async fn observe_remote_recovery_marker_with_session(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &PubkySessionAccess,
+    ) -> Result<EncryptedLinkRecoveryMarkerReport> {
+        if self.config.encrypted_link_recovery_markers
+            == EncryptedLinkRecoveryMarkerPolicy::Disabled
+        {
+            return self
+                .recovery_marker_report_or_default(counterparty, false)
+                .await;
+        }
+
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for recovery marker lookup".into(),
+                    source: None,
+                })?;
+        let secret_key = session_access
+            .local_secret_key
+            .as_ref()
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context:
+                    "local Pubky secret key is unavailable for Encrypted Link recovery markers"
+                        .into(),
+                source: None,
+            })?
+            .as_bytes();
+        let remote_public_key = counterparty.to_public_key()?;
+        let Some(marker) = paykit_lib::fetch_encrypted_link_recovery_marker(
+            &public_storage,
+            secret_key,
+            &remote_public_key,
+        )
+        .await?
+        else {
+            return self
+                .recovery_marker_report_or_default(counterparty, false)
+                .await;
+        };
+
+        let now = self.clock.now();
+        let changed = self
+            .storage
+            .transaction(|tx| {
+                let existing_peer = tx.linked_peer(counterparty);
+                let has_link_state = tx.encrypted_link_state(counterparty).is_some();
+                if !can_publish_recovery_marker(existing_peer.as_ref(), has_link_state) {
+                    return Ok(false);
+                }
+                let mut peer = recovery_peer_or_default(existing_peer, counterparty);
+                if peer.remote_recovery_attempt_id.as_deref() == Some(marker.attempt_id()) {
+                    tx.save_linked_peer(peer);
+                    return Ok(false);
+                }
+                if peer.state == LinkedPeerState::Blocked {
+                    return Err(PaykitSdkError::Policy(format!(
+                        "counterparty {counterparty} is blocked"
+                    )));
+                }
+                peer.remote_recovery_attempt_id = Some(marker.attempt_id().to_owned());
+                peer.remote_recovery_marker_observed_at = Some(now);
+                peer.state = LinkedPeerState::RecoveryRequired;
+                peer.last_sync_at = Some(now);
+                peer.failure_count = peer.failure_count.saturating_add(1);
+                tx.save_linked_peer(peer);
+                if let Some(link_state) = tx.encrypted_link_state(counterparty) {
+                    tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                        counterparty: counterparty.clone(),
+                        link_snapshot: None,
+                        handshake_snapshot: None,
+                        handshake_role: None,
+                        generation: link_state.generation.saturating_add(1),
+                        checkpointed_at: now,
+                    });
+                }
+                Ok(true)
+            })
+            .await?;
+        self.recovery_marker_report_or_default(counterparty, changed)
+            .await
+    }
+
+    async fn recovery_marker_report_or_default(
+        &self,
+        counterparty: &PubkyPublicKey,
+        remote_marker_changed: bool,
+    ) -> Result<EncryptedLinkRecoveryMarkerReport> {
+        let peer = self
+            .storage
+            .transaction(|tx| {
+                Ok(recovery_peer_or_default(
+                    tx.linked_peer(counterparty),
+                    counterparty,
+                ))
+            })
+            .await?;
+        Ok(EncryptedLinkRecoveryMarkerReport::from_peer(
+            &peer,
+            remote_marker_changed,
+        ))
     }
 
     fn private_recovery_window_open(&self, started_at: DateTime<Utc>) -> Result<bool> {
@@ -1568,13 +2299,20 @@ where
             })?;
         let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
             let now = self.clock.now();
-            mark_recovery_required_with_lease(
+            let mark = mark_recovery_required_with_lease(
                 &self.storage,
                 counterparty.clone(),
                 lease.clone(),
                 now,
             )
             .await?;
+            let _ = self
+                .publish_local_recovery_marker_with_session(
+                    &counterparty,
+                    &session_access,
+                    mark.new_episode,
+                )
+                .await;
             return Err(PaykitSdkError::RecoveryRequired(format!(
                 "no active Encrypted Link snapshot for counterparty {counterparty}"
             )));
@@ -1583,13 +2321,20 @@ where
             Ok(snapshot) => snapshot,
             Err(err) => {
                 let now = self.clock.now();
-                mark_recovery_required_with_lease(
+                let mark = mark_recovery_required_with_lease(
                     &self.storage,
                     counterparty.clone(),
                     lease.clone(),
                     now,
                 )
                 .await?;
+                let _ = self
+                    .publish_local_recovery_marker_with_session(
+                        &counterparty,
+                        &session_access,
+                        mark.new_episode,
+                    )
+                    .await;
                 return Err(err.into());
             }
         };
@@ -1690,13 +2435,20 @@ where
             })?;
         let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
             let now = self.clock.now();
-            mark_recovery_required_with_lease(
+            let mark = mark_recovery_required_with_lease(
                 &self.storage,
                 counterparty.clone(),
                 lease.clone(),
                 now,
             )
             .await?;
+            let _ = self
+                .publish_local_recovery_marker_with_session(
+                    &counterparty,
+                    &session_access,
+                    mark.new_episode,
+                )
+                .await;
             return Err(PaykitSdkError::RecoveryRequired(format!(
                 "no active Encrypted Link snapshot for counterparty {counterparty}"
             )));
@@ -1705,13 +2457,20 @@ where
             Ok(snapshot) => snapshot,
             Err(err) => {
                 let now = self.clock.now();
-                mark_recovery_required_with_lease(
+                let mark = mark_recovery_required_with_lease(
                     &self.storage,
                     counterparty.clone(),
                     lease.clone(),
                     now,
                 )
                 .await?;
+                let _ = self
+                    .publish_local_recovery_marker_with_session(
+                        &counterparty,
+                        &session_access,
+                        mark.new_episode,
+                    )
+                    .await;
                 return Err(err.into());
             }
         };
@@ -1873,56 +2632,71 @@ where
         role: EncryptedLinkHandshakeRole,
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerHandshakeReport> {
-        self.ensure_peer_allows_private_automation(&counterparty)
-            .await?;
-        if let Some(existing) = self
+        let peer_state = self
             .storage
-            .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
-            .await?
-        {
-            if existing.link_snapshot.is_some() {
-                save_linked_peer_state_with_lease(
-                    &self.storage,
-                    counterparty.clone(),
-                    LinkedPeerState::Linked,
-                    lease.clone(),
-                    self.clock.now(),
-                )
-                .await?;
-                return Ok(LinkedPeerHandshakeReport {
-                    counterparty,
-                    state: LinkedPeerState::Linked,
-                    generation: existing.generation,
-                    handshake_role: None,
-                });
-            }
-            if existing.handshake_snapshot.is_some() {
-                if existing.handshake_role.is_none() {
-                    mark_recovery_required_with_lease(
+            .transaction(|tx| Ok(tx.linked_peer(&counterparty).map(|peer| peer.state)))
+            .await?;
+        if matches!(peer_state, Some(LinkedPeerState::Blocked)) {
+            return Err(PaykitSdkError::Policy(format!(
+                "counterparty {counterparty} is blocked"
+            )));
+        }
+
+        if !matches!(peer_state, Some(LinkedPeerState::RecoveryRequired)) {
+            if let Some(existing) = self
+                .storage
+                .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
+                .await?
+            {
+                if existing.link_snapshot.is_some() {
+                    save_linked_peer_state_with_lease(
                         &self.storage,
                         counterparty.clone(),
+                        LinkedPeerState::Linked,
                         lease.clone(),
                         self.clock.now(),
                     )
                     .await?;
-                    return Err(PaykitSdkError::RecoveryRequired(format!(
-                        "missing Encrypted Link Handshake role for counterparty {counterparty}"
-                    )));
+                    return Ok(LinkedPeerHandshakeReport {
+                        counterparty,
+                        state: LinkedPeerState::Linked,
+                        generation: existing.generation,
+                        handshake_role: None,
+                    });
                 }
-                save_linked_peer_state_with_lease(
-                    &self.storage,
-                    counterparty.clone(),
-                    LinkedPeerState::Linking,
-                    lease.clone(),
-                    self.clock.now(),
-                )
-                .await?;
-                return Ok(LinkedPeerHandshakeReport {
-                    counterparty,
-                    state: LinkedPeerState::Linking,
-                    generation: existing.generation,
-                    handshake_role: existing.handshake_role,
-                });
+                if existing.handshake_snapshot.is_some() {
+                    if existing.handshake_role.is_none() {
+                        let mark = mark_recovery_required_with_lease(
+                            &self.storage,
+                            counterparty.clone(),
+                            lease.clone(),
+                            self.clock.now(),
+                        )
+                        .await?;
+                        self.publish_local_recovery_marker_if_possible(
+                            &counterparty,
+                            mark.new_episode,
+                        )
+                        .await;
+                        return Err(PaykitSdkError::RecoveryRequired(format!(
+                            "missing Encrypted Link Handshake role for counterparty {counterparty}"
+                        )));
+                    }
+                    save_linked_peer_state_with_lease(
+                        &self.storage,
+                        counterparty.clone(),
+                        LinkedPeerState::Linking,
+                        lease.clone(),
+                        self.clock.now(),
+                    )
+                    .await?;
+                    return Ok(LinkedPeerHandshakeReport {
+                        counterparty,
+                        state: LinkedPeerState::Linking,
+                        generation: existing.generation,
+                        handshake_role: existing.handshake_role,
+                    });
+                }
             }
         }
 
@@ -2030,17 +2804,76 @@ where
                 .await
             }
             paykit_lib::HandshakeProgress::Complete(link) => {
-                save_linked_peer_link_state_if_generation_with_lease(
+                let report = save_linked_peer_link_state_if_generation_with_lease(
                     &self.storage,
-                    counterparty,
+                    counterparty.clone(),
                     link.serialize(),
                     expected_generation,
                     lease,
                     self.clock.now(),
                 )
-                .await
+                .await?;
+                self.remove_local_recovery_marker_if_recorded(&counterparty)
+                    .await;
+                Ok(report)
             }
         }
+    }
+
+    async fn remove_local_recovery_marker_if_recorded(&self, counterparty: &PubkyPublicKey) {
+        if self.config.encrypted_link_recovery_markers
+            == EncryptedLinkRecoveryMarkerPolicy::Disabled
+        {
+            return;
+        }
+        let has_local_marker = self
+            .storage
+            .transaction(|tx| {
+                Ok(tx
+                    .linked_peer(counterparty)
+                    .and_then(|peer| peer.local_recovery_attempt_id)
+                    .is_some())
+            })
+            .await
+            .unwrap_or(false);
+        if !has_local_marker {
+            return;
+        }
+
+        let Ok(Some(session_access)) = self.pubky.load_session_access().await else {
+            return;
+        };
+        let Some(secret_key) = session_access
+            .local_secret_key
+            .as_ref()
+            .map(|key| key.as_bytes())
+        else {
+            return;
+        };
+        let Ok(remote_public_key) = counterparty.to_public_key() else {
+            return;
+        };
+        if paykit_lib::remove_encrypted_link_recovery_marker(
+            &session_access.session,
+            secret_key,
+            &remote_public_key,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+        let _ = self
+            .storage
+            .transaction(|tx| {
+                if let Some(mut peer) = tx.linked_peer(counterparty) {
+                    peer.local_recovery_attempt_id = None;
+                    peer.local_recovery_marker_created_at = None;
+                    tx.save_linked_peer(peer);
+                }
+                Ok(())
+            })
+            .await;
     }
 
     async fn private_link_session_access(&self) -> Result<(PubkySessionAccess, [u8; 32])> {
@@ -2091,11 +2924,54 @@ fn should_mark_link_recovery_required(err: &PaykitSdkError) -> bool {
     )
 }
 
+fn recovery_peer_or_default(
+    peer: Option<LinkedPeerRecord>,
+    counterparty: &PubkyPublicKey,
+) -> LinkedPeerRecord {
+    peer.unwrap_or_else(|| LinkedPeerRecord {
+        counterparty: counterparty.clone(),
+        state: LinkedPeerState::Unknown,
+        last_sync_at: None,
+        last_private_receive_at: None,
+        failure_count: 0,
+        local_recovery_attempt_id: None,
+        local_recovery_marker_created_at: None,
+        remote_recovery_attempt_id: None,
+        remote_recovery_marker_observed_at: None,
+    })
+}
+
+fn can_publish_recovery_marker(peer: Option<&LinkedPeerRecord>, has_link_state: bool) -> bool {
+    has_link_state
+        || peer.is_some_and(|peer| {
+            matches!(
+                peer.state,
+                LinkedPeerState::Linking
+                    | LinkedPeerState::Linked
+                    | LinkedPeerState::RecoveryRequired
+            )
+        })
+}
+
+fn local_recovery_marker_belongs_to_current_episode(peer: &LinkedPeerRecord) -> bool {
+    let Some(created_at) = peer.local_recovery_marker_created_at else {
+        return false;
+    };
+    peer.last_sync_at
+        .map(|recovery_started_at| created_at >= recovery_started_at)
+        .unwrap_or(true)
+}
+
 enum PrivateRecoveryOutcome {
     NotNeeded,
     Pending,
     PublicOnly,
     Refreshed(Vec<PaymentEndpointCandidate>),
+}
+
+enum RecoveryRequiredUpdate {
+    Skipped,
+    Marked { new_episode: bool },
 }
 
 fn payable_resolution(
@@ -2195,6 +3071,49 @@ fn reservation_release(
     }
 }
 
+async fn fetch_public_text(
+    storage: &pubky::PublicStorage,
+    public_key: &PubkyPublicKey,
+    path: &str,
+    context: &'static str,
+) -> Result<Option<String>> {
+    let addr = format!("{public_key}{path}");
+    match storage.get(addr).await {
+        Ok(resp) => {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|err| PaykitSdkError::Transport {
+                    context: context.into(),
+                    source: Some(err.into()),
+                })?;
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            String::from_utf8(bytes.to_vec())
+                .map(Some)
+                .map_err(|err| PaykitSdkError::Protocol(format!("{context}: invalid UTF-8: {err}")))
+        }
+        Err(err) if is_pubky_not_found(&err) => Ok(None),
+        Err(err) => Err(map_pubky_transport_error(context, err)),
+    }
+}
+
+fn map_pubky_transport_error(context: &'static str, err: PubkyError) -> PaykitSdkError {
+    PaykitSdkError::Transport {
+        context: context.into(),
+        source: Some(err.into()),
+    }
+}
+
+fn is_pubky_not_found(err: &PubkyError) -> bool {
+    matches!(
+        err,
+        PubkyError::Request(RequestError::Server { status, .. })
+            if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
@@ -2235,6 +3154,13 @@ mod tests {
     impl PubkySessionProvider for TestPubkySessionProvider {
         async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
             Ok(self.session.clone())
+        }
+
+        async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+            Ok(self
+                .session
+                .as_ref()
+                .map(|session_access| session_access.outbox_client.public_storage()))
         }
 
         async fn clear_session_access(&self) -> Result<()> {
@@ -2547,6 +3473,10 @@ mod tests {
                         last_sync_at: Some(FixedClock.now()),
                         last_private_receive_at: None,
                         failure_count: 0,
+                        local_recovery_attempt_id: None,
+                        local_recovery_marker_created_at: None,
+                        remote_recovery_attempt_id: None,
+                        remote_recovery_marker_observed_at: None,
                     });
                     tx.save_public_endpoint_record(crate::PublicEndpointRecord {
                         identifier: "btc-lightning-bolt11".into(),
@@ -2554,6 +3484,19 @@ mod tests {
                         status: EndpointPublicationStatus::Published,
                         updated_at: FixedClock.now(),
                         last_error: None,
+                    });
+                    tx.save_contact_record(ContactRecord {
+                        public_key: counterparty.clone(),
+                        label: Some("Alice".into()),
+                        profile: None,
+                        profile_fetched_at: None,
+                        created_at: FixedClock.now(),
+                        updated_at: FixedClock.now(),
+                        public_contact_marker_status:
+                            crate::PublicContactMarkerStatus::NotPublished,
+                        public_contact_published_at: None,
+                        public_contact_removed_at: None,
+                        public_contact_last_error: None,
                     });
                     tx.insert_outbound_private_message(
                         crate::storage::NewOutboundPrivateMessage::new(
@@ -2582,8 +3525,333 @@ mod tests {
         let identity = snapshot.identity_state.unwrap();
         assert_eq!(identity.sign_out_generation, 4);
         assert!(snapshot.linked_peers.is_empty());
+        assert!(snapshot.contact_records.is_empty());
         assert!(snapshot.public_endpoint_records.is_empty());
         assert!(snapshot.outbound_private_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_contact_records_save_list_and_remove_locally() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let saved = sdk
+            .save_contact(ContactUpdate {
+                public_key: contact_public_key.clone(),
+                label: Some("Alice".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(saved.label.as_deref(), Some("Alice"));
+        assert_eq!(sdk.contact_records().await.unwrap(), vec![saved.clone()]);
+        assert_eq!(
+            sdk.contact_record(&contact_public_key).await.unwrap(),
+            Some(saved.clone())
+        );
+        assert_eq!(
+            sdk.remove_contact(&contact_public_key).await.unwrap(),
+            Some(saved)
+        );
+        assert!(sdk
+            .contact_record(&contact_public_key)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_save_contact_empty_label_clears_existing_label() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        sdk.save_contact(ContactUpdate {
+            public_key: contact_public_key.clone(),
+            label: Some("Alice".into()),
+        })
+        .await
+        .unwrap();
+        let updated = sdk
+            .save_contact(ContactUpdate {
+                public_key: contact_public_key,
+                label: Some(String::new()),
+            })
+            .await
+            .unwrap();
+
+        assert!(updated.label.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_remove_contact_blocks_when_public_marker_may_exist() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        storage
+            .transaction({
+                let contact_public_key = contact_public_key.clone();
+                move |tx| {
+                    tx.save_contact_record(ContactRecord {
+                        public_key: contact_public_key,
+                        label: None,
+                        profile: None,
+                        profile_fetched_at: None,
+                        created_at: FixedClock.now(),
+                        updated_at: FixedClock.now(),
+                        public_contact_marker_status: crate::PublicContactMarkerStatus::Published,
+                        public_contact_published_at: Some(FixedClock.now()),
+                        public_contact_removed_at: None,
+                        public_contact_last_error: None,
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.remove_contact(&contact_public_key).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    }
+
+    #[tokio::test]
+    async fn test_publish_public_contact_does_not_mark_pending_without_session() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        storage
+            .transaction({
+                let contact_public_key = contact_public_key.clone();
+                move |tx| {
+                    tx.save_contact_record(ContactRecord {
+                        public_key: contact_public_key,
+                        label: None,
+                        profile: None,
+                        profile_fetched_at: None,
+                        created_at: FixedClock.now(),
+                        updated_at: FixedClock.now(),
+                        public_contact_marker_status:
+                            crate::PublicContactMarkerStatus::NotPublished,
+                        public_contact_published_at: None,
+                        public_contact_removed_at: None,
+                        public_contact_last_error: None,
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig {
+                public_contact_sharing: PublicContactSharingPolicy::PublicPaykitNamespace,
+                ..PaykitSdkConfig::default()
+            },
+            FixedClock,
+        );
+
+        let result = sdk.publish_public_contact(contact_public_key.clone()).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+        let record = storage
+            .snapshot()
+            .unwrap()
+            .contact_records
+            .get(&contact_public_key)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            record.public_contact_marker_status,
+            crate::PublicContactMarkerStatus::NotPublished
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        storage
+            .transaction({
+                let contact_public_key = contact_public_key.clone();
+                move |tx| {
+                    tx.save_contact_record(ContactRecord {
+                        public_key: contact_public_key,
+                        label: None,
+                        profile: None,
+                        profile_fetched_at: None,
+                        created_at: FixedClock.now(),
+                        updated_at: FixedClock.now(),
+                        public_contact_marker_status: crate::PublicContactMarkerStatus::Published,
+                        public_contact_published_at: Some(FixedClock.now()),
+                        public_contact_removed_at: None,
+                        public_contact_last_error: None,
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.remove_public_contact(contact_public_key.clone()).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+        let record = storage
+            .snapshot()
+            .unwrap()
+            .contact_records
+            .get(&contact_public_key)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            record.public_contact_marker_status,
+            crate::PublicContactMarkerStatus::Published
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_public_contact_without_local_record_still_requires_session() {
+        let storage = InMemoryStorage::new();
+        let local_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .save_identity_state(IdentityState {
+                public_key: Some(local_public_key),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let result = sdk.remove_public_contact(contact_public_key).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_save_contact_requires_initialized_identity() {
+        let storage = InMemoryStorage::new();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+        let contact_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+
+        let result = sdk
+            .save_contact(ContactUpdate {
+                public_key: contact_public_key,
+                label: None,
+            })
+            .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     }
 
     #[tokio::test]
@@ -3044,7 +4312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_accept_payment_request_checks_lifecycle_before_send_readiness() {
+    async fn test_accept_payment_request_does_not_queue_without_private_send_readiness() {
         let storage = InMemoryStorage::new();
         let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
         let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
@@ -3147,44 +4415,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_initiate_link_with_peer_requires_identity_before_block_policy() {
+    async fn test_recovery_required_peer_allows_relink_attempt() {
         let storage = InMemoryStorage::new();
         let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
         crate::linked_peers::save_linked_peer_state(
             &storage,
             counterparty.clone(),
-            LinkedPeerState::Blocked,
+            LinkedPeerState::RecoveryRequired,
             FixedClock.now(),
         )
         .await
         .unwrap();
-        let sdk = PaykitSdk::with_clock(
-            storage,
-            TestPubkySessionProvider { session: None },
-            TestPaymentAdapter,
-            PaykitSdkConfig::default(),
-            FixedClock,
-        );
-
-        let result = sdk.initiate_link_with_peer(counterparty).await;
-
-        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    }
-
-    #[tokio::test]
-    async fn test_initiate_link_with_peer_requires_identity_before_peer_lease() {
-        let storage = InMemoryStorage::new();
-        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-        storage
+        let lease = storage
             .transaction({
                 let counterparty = counterparty.clone();
                 move |tx| {
-                    tx.claim_peer_link_operation(
-                        &counterparty,
-                        FixedClock.now(),
-                        FixedClock.now() + chrono::Duration::seconds(60),
-                    );
-                    Ok(())
+                    Ok(tx
+                        .claim_peer_link_operation(
+                            &counterparty,
+                            FixedClock.now(),
+                            FixedClock.now() + chrono::Duration::seconds(60),
+                        )
+                        .unwrap())
                 }
             })
             .await
@@ -3197,13 +4449,19 @@ mod tests {
             FixedClock,
         );
 
-        let result = sdk.initiate_link_with_peer(counterparty).await;
+        let result = sdk
+            .start_link_handshake_with_claim(
+                counterparty,
+                EncryptedLinkHandshakeRole::Initiator,
+                lease,
+            )
+            .await;
 
         assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     }
 
     #[tokio::test]
-    async fn test_advance_link_handshake_clears_untrusted_missing_snapshot_state() {
+    async fn test_advance_link_handshake_clears_unusable_link_state() {
         let storage = InMemoryStorage::new();
         let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
         storage
@@ -3241,7 +4499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advance_link_handshake_clears_untrusted_state_without_session() {
+    async fn test_advance_link_handshake_clears_unusable_handshake_snapshot() {
         let storage = InMemoryStorage::new();
         let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
         storage
@@ -3279,7 +4537,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advance_link_handshake_clears_untrusted_missing_role_state() {
+    async fn test_advance_link_handshake_clears_unusable_handshake_metadata() {
         let storage = InMemoryStorage::new();
         let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
         storage
@@ -3406,6 +4664,7 @@ mod tests {
                 sign_out_generation: 0,
             }),
             linked_peers: Vec::new(),
+            contact_records: Vec::new(),
             public_endpoint_records: Vec::new(),
             payment_endpoint_reservations: Vec::new(),
             encrypted_link_states: Vec::new(),
@@ -3494,6 +4753,10 @@ mod tests {
                         last_sync_at: Some(FixedClock.now()),
                         last_private_receive_at: None,
                         failure_count: 0,
+                        local_recovery_attempt_id: None,
+                        local_recovery_marker_created_at: None,
+                        remote_recovery_attempt_id: None,
+                        remote_recovery_marker_observed_at: None,
                     });
                     Ok(())
                 }
@@ -3530,6 +4793,10 @@ mod tests {
                         last_sync_at: Some(FixedClock.now()),
                         last_private_receive_at: None,
                         failure_count: 0,
+                        local_recovery_attempt_id: None,
+                        local_recovery_marker_created_at: None,
+                        remote_recovery_attempt_id: None,
+                        remote_recovery_marker_observed_at: None,
                     });
                     tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                         counterparty,
@@ -3552,9 +4819,11 @@ mod tests {
             FixedClock,
         );
 
-        sdk.mark_private_recovery_pending(&counterparty, Some(1))
+        let recovery_update = sdk
+            .mark_private_recovery_pending(&counterparty, Some(1))
             .await
             .unwrap();
+        assert!(matches!(recovery_update, RecoveryRequiredUpdate::Skipped));
 
         let peer = crate::load_linked_peer(&storage, &counterparty)
             .await
@@ -3562,9 +4831,14 @@ mod tests {
             .unwrap();
         assert_eq!(peer.state, LinkedPeerState::Linked);
 
-        sdk.mark_private_recovery_pending(&counterparty, Some(2))
+        let recovery_update = sdk
+            .mark_private_recovery_pending(&counterparty, Some(2))
             .await
             .unwrap();
+        assert!(matches!(
+            recovery_update,
+            RecoveryRequiredUpdate::Marked { new_episode: true }
+        ));
 
         let peer = crate::load_linked_peer(&storage, &counterparty)
             .await
@@ -3577,5 +4851,213 @@ mod tests {
             .unwrap();
         assert!(link_state.link_snapshot.is_none());
         assert_eq!(link_state.generation, 3);
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_link_recovery_marker_status_reports_peer_fields() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.save_linked_peer(crate::LinkedPeerRecord {
+                        counterparty,
+                        state: LinkedPeerState::RecoveryRequired,
+                        last_sync_at: Some(FixedClock.now()),
+                        last_private_receive_at: None,
+                        failure_count: 1,
+                        local_recovery_attempt_id: Some(
+                            "650e8400-e29b-41d4-a716-446655440000".into(),
+                        ),
+                        local_recovery_marker_created_at: Some(FixedClock.now()),
+                        remote_recovery_attempt_id: Some(
+                            "550e8400-e29b-41d4-a716-446655440000".into(),
+                        ),
+                        remote_recovery_marker_observed_at: Some(FixedClock.now()),
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let status = sdk
+            .encrypted_link_recovery_marker_status(&counterparty)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(status.state, LinkedPeerState::RecoveryRequired);
+        assert_eq!(
+            status.local_attempt_id.as_deref(),
+            Some("650e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(
+            status.remote_attempt_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert!(!status.remote_marker_changed);
+    }
+
+    #[tokio::test]
+    async fn test_mark_private_recovery_pending_preserves_marker_until_publish() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.save_linked_peer(crate::LinkedPeerRecord {
+                        counterparty: counterparty.clone(),
+                        state: LinkedPeerState::Linked,
+                        last_sync_at: Some(FixedClock.now()),
+                        last_private_receive_at: None,
+                        failure_count: 0,
+                        local_recovery_attempt_id: Some(
+                            "650e8400-e29b-41d4-a716-446655440000".into(),
+                        ),
+                        local_recovery_marker_created_at: Some(FixedClock.now()),
+                        remote_recovery_attempt_id: Some(
+                            "550e8400-e29b-41d4-a716-446655440000".into(),
+                        ),
+                        remote_recovery_marker_observed_at: Some(FixedClock.now()),
+                    });
+                    tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                        counterparty,
+                        link_snapshot: Some(vec![4, 5, 6]),
+                        handshake_snapshot: None,
+                        handshake_role: None,
+                        generation: 2,
+                        checkpointed_at: FixedClock.now(),
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let recovery_update = sdk
+            .mark_private_recovery_pending(&counterparty, Some(2))
+            .await
+            .unwrap();
+        assert!(matches!(
+            recovery_update,
+            RecoveryRequiredUpdate::Marked { new_episode: true }
+        ));
+
+        let peer = crate::load_linked_peer(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+        assert_eq!(
+            peer.local_recovery_attempt_id.as_deref(),
+            Some("650e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(
+            peer.remote_recovery_attempt_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn test_local_recovery_marker_must_belong_to_current_episode() {
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let recovery_started_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap();
+        let previous_episode_marker_at = Utc.with_ymd_and_hms(2026, 6, 3, 11, 59, 0).unwrap();
+        let current_episode_marker_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 1, 0).unwrap();
+        let mut peer = crate::LinkedPeerRecord {
+            counterparty,
+            state: LinkedPeerState::RecoveryRequired,
+            last_sync_at: Some(recovery_started_at),
+            last_private_receive_at: None,
+            failure_count: 1,
+            local_recovery_attempt_id: Some("650e8400-e29b-41d4-a716-446655440000".into()),
+            local_recovery_marker_created_at: Some(previous_episode_marker_at),
+            remote_recovery_attempt_id: None,
+            remote_recovery_marker_observed_at: None,
+        };
+
+        assert!(!local_recovery_marker_belongs_to_current_episode(&peer));
+
+        peer.local_recovery_marker_created_at = Some(current_episode_marker_at);
+
+        assert!(local_recovery_marker_belongs_to_current_episode(&peer));
+    }
+
+    #[tokio::test]
+    async fn test_mark_private_recovery_pending_preserves_ongoing_local_marker() {
+        let storage = InMemoryStorage::new();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.save_linked_peer(crate::LinkedPeerRecord {
+                        counterparty: counterparty.clone(),
+                        state: LinkedPeerState::RecoveryRequired,
+                        last_sync_at: Some(FixedClock.now()),
+                        last_private_receive_at: None,
+                        failure_count: 1,
+                        local_recovery_attempt_id: Some(
+                            "650e8400-e29b-41d4-a716-446655440000".into(),
+                        ),
+                        local_recovery_marker_created_at: Some(FixedClock.now()),
+                        remote_recovery_attempt_id: None,
+                        remote_recovery_marker_observed_at: None,
+                    });
+                    tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                        counterparty,
+                        link_snapshot: Some(vec![4, 5, 6]),
+                        handshake_snapshot: None,
+                        handshake_role: None,
+                        generation: 2,
+                        checkpointed_at: FixedClock.now(),
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::default(),
+            FixedClock,
+        );
+
+        let recovery_update = sdk
+            .mark_private_recovery_pending(&counterparty, Some(2))
+            .await
+            .unwrap();
+        assert!(matches!(
+            recovery_update,
+            RecoveryRequiredUpdate::Marked { new_episode: false }
+        ));
+
+        let peer = crate::load_linked_peer(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            peer.local_recovery_attempt_id.as_deref(),
+            Some("650e8400-e29b-41d4-a716-446655440000")
+        );
     }
 }

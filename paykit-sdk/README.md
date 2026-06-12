@@ -7,12 +7,11 @@ identity status, public Payment Endpoint sync, Encrypted Link state, private
 stream intake, Private Payment List derivation, contact payment resolution, and
 outbound Private Application Message delivery. It also derives Payment Request
 state, indexes Receipt Access events, retrieves/decrypts Encrypted Receipts,
-tracks optional Payment Endpoint Reservations, and exports/restores
-SDK-managed backup state.
+tracks optional Payment Endpoint Reservations, manages Paykit-facing profile
+and local contact records, and exports/restores SDK-managed backup state.
 
-The crate is currently Rust-only. Existing Swift, Kotlin, and React Native
-bindings continue to expose low-level `paykit-lib` APIs until SDK bindings are
-added.
+This crate is Rust-only. Platform bindings expose low-level `paykit-lib` APIs;
+SDK bindings are a separate integration surface.
 
 Payment execution, settlement detection, balances, route policy, product UI,
 and app backup transport stay outside the SDK and are provided by application

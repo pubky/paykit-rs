@@ -20,6 +20,7 @@ pub mod payment_requests;
 pub mod private_lists;
 pub mod private_stream;
 pub mod receipts;
+pub mod recovery;
 /// SDK runtime facade.
 pub mod runtime;
 /// Durable storage traits and in-memory test storage.
@@ -37,11 +38,14 @@ pub use adapters::{
 pub use backup::{export_backup_state, RestoreReport, SdkBackupState, SDK_BACKUP_VERSION};
 #[doc(inline)]
 pub use config::{
-    EndpointManagementScope, PaykitSdkConfig, PrivateSharingPolicy, PublicFallbackPolicy,
+    EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
+    PrivateSharingPolicy, PublicContactSharingPolicy, PublicFallbackPolicy,
 };
 #[doc(inline)]
 pub use contacts::{
     ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
+    ContactRecord, ContactUpdate, PaykitProfile, PaykitProfileRecord, PublicContactMarkerStatus,
+    PAYKIT_PROFILE_BLOB_PATH_PREFIX, PAYKIT_PROFILE_PATH, PAYKIT_PUBLIC_CONTACT_PATH_PREFIX,
 };
 #[doc(inline)]
 pub use endpoints::{
@@ -78,6 +82,8 @@ pub use receipts::{
     ReceiptAccessRecord, ReceiptAmountRecord, ReceiptBillingPeriodRecord, ReceiptRecord,
     ReceiptRetrievalStatus,
 };
+#[doc(inline)]
+pub use recovery::EncryptedLinkRecoveryMarkerReport;
 #[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
 #[doc(inline)]

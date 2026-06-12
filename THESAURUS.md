@@ -25,7 +25,7 @@
 - **Related terms**: Paykit Protocol, Paykit SDK, Language Bindings
 
 ### Paykit SDK
-- **Definition**: The stateful integration layer above Paykit Library for durable Encrypted Link state, private stream routing, event logs, recovery behavior, Payment Request lifecycle state, receipt indexing, and ergonomic wallet/payment-processor workflows. Current implementation starts as a Rust SDK runtime foundation.
+- **Definition**: The stateful integration layer above Paykit Library for durable Encrypted Link state, private stream routing, event logs, recovery behavior, Payment Request lifecycle state, receipt indexing, and ergonomic wallet/payment-processor workflows.
 - **NOT**: Paykit Library, Paykit Protocol, or payment execution/settlement logic.
 - **Synonyms to AVOID**: Paykit core, Paykit runtime core, Pubky SDK
 - **Related terms**: Paykit, Paykit Library, Language Bindings
@@ -35,6 +35,26 @@
 - **NOT**: First-class Paykit architecture components.
 - **Synonyms to AVOID**: Paykit SDK
 - **Related terms**: Paykit Library
+
+## SDK Terms
+
+### Paykit Profile
+- **Definition**: Public Paykit-facing display metadata published by a Pubky identity, such as display name and image pointer, under the SDK default profile path.
+- **NOT**: A product-specific profile page, app account record, or Payment Endpoint.
+- **Synonyms to AVOID**: Payment Profile when referring to SDK display metadata
+- **Related terms**: Paykit SDK, Pubky Routing, Contact Record
+
+### Contact Record
+- **Definition**: A local SDK record for a saved Pubky public key, optional local label, cached Paykit Profile, and contact-related SDK state.
+- **NOT**: A public social graph requirement or a Payment List.
+- **Synonyms to AVOID**: contact payment option
+- **Related terms**: Paykit SDK, Paykit Profile, Public Contact Marker
+
+### Public Contact Marker
+- **Definition**: An optional public Pubky marker published by explicit SDK policy to indicate a saved contact in the shared Paykit namespace.
+- **NOT**: The default Contact Record storage model or proof of an active Encrypted Link.
+- **Synonyms to AVOID**: public contact record when referring to the marker only
+- **Related terms**: Contact Record, Paykit Profile, Paykit SDK
 
 ## Core Protocol Terms
 
@@ -58,7 +78,7 @@
 
 ### Payment Endpoint Identifier
 - **Definition**: The canonical machine-readable identifier for a payment endpoint type, such as `btc-lightning-bolt12` or `eur-sepa-iban`.
-- **NOT**: The full Payment Endpoint or the payload/credential itself.
+- **NOT**: The full Payment Endpoint, the payload/credential itself, or reserved Paykit storage path segments such as `private` or `encrypted-link-recovery`.
 - **Synonyms to AVOID**: method id, payment method id
 - **Related terms**: Payment Endpoint, Payment Method, Asset, Rail, Endpoint Format
 
@@ -129,6 +149,12 @@
 - **NOT**: A Payment Request ID, Payment Reference, relationship identifier, or a hash of the Event Message payload.
 - **Synonyms to AVOID**: event reference, message reference when naming the protocol identifier
 - **Related terms**: Event Message, Payment Request, Payment Request ID
+
+### Encrypted Link Recovery Marker
+- **Definition**: A minimal public Pubky marker that one peer publishes to signal that a counterparty should relink an Encrypted Link. Marker paths are pairwise-derived; marker payloads carry only version, kind, recovery attempt ID, and creation time.
+- **NOT**: A Private Application Message, payment message, recovery transcript, or proof that the counterparty received the marker.
+- **Synonyms to AVOID**: private recovery marker, recovery message when naming the public marker concept
+- **Related terms**: Encrypted Link, Linked Peer, Paykit SDK
 
 ### Private Payment List
 - **Definition**: A versioned encrypted Paykit message carrying a complete Payment List shared with a Linked Peer. Latest-State Message semantics apply; a newer Private Payment List supersedes older queued Private Payment List messages.

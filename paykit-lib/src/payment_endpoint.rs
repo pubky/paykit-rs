@@ -18,7 +18,7 @@ use crate::{error::map_error, pubky_routing, PaykitError, PublicKey, Result};
 /// # Limits
 /// - Must not be empty.
 /// - Must not exceed 64 characters.
-/// - Must not be the reserved value `"private"`.
+/// - Must not be a reserved Paykit storage value.
 ///
 /// # Examples
 /// ```
@@ -36,6 +36,8 @@ pub struct PaymentEndpointIdentifier(String);
 const PAYMENT_ENDPOINT_IDENTIFIER_MAX_LEN: usize = 64;
 /// Reserved [`PaymentEndpointIdentifier`] value used by private Paykit storage.
 const PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE: &str = "private";
+/// Reserved [`PaymentEndpointIdentifier`] value used by recovery marker storage.
+const PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_RECOVERY: &str = "encrypted-link-recovery";
 
 impl PaymentEndpointIdentifier {
     /// Create a new `PaymentEndpointIdentifier` after validating the identifier.
@@ -59,9 +61,11 @@ impl PaymentEndpointIdentifier {
             )));
         }
 
-        if id == PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE {
+        if id == PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE
+            || id == PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_RECOVERY
+        {
             return Err(PaykitError::Validation(format!(
-                "PaymentEndpointIdentifier '{PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE}' is reserved for Private Payment Lists"
+                "PaymentEndpointIdentifier '{id}' is reserved for Paykit storage"
             )));
         }
 
@@ -398,9 +402,11 @@ mod validation_tests {
     }
 
     #[test]
-    fn test_payment_endpoint_identifier_reject_reserved_private() {
-        let err = PaymentEndpointIdentifier::new("private").unwrap_err();
-        assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("reserved")));
+    fn test_payment_endpoint_identifier_reject_reserved_values() {
+        for reserved in ["private", "encrypted-link-recovery"] {
+            let err = PaymentEndpointIdentifier::new(reserved).unwrap_err();
+            assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("reserved")));
+        }
     }
 
     // ── PaymentEndpointPayload: basic accessors ───────────────────────────────────

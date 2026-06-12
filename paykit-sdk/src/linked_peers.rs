@@ -50,6 +50,10 @@ pub struct LinkedPeerHandshakeReport {
     pub handshake_role: Option<EncryptedLinkHandshakeRole>,
 }
 
+pub(crate) struct RecoveryRequiredMark {
+    pub new_episode: bool,
+}
+
 /// Load the durable Linked Peer record for a counterparty.
 pub async fn load_linked_peer<S>(
     storage: &S,
@@ -70,6 +74,10 @@ fn default_linked_peer(counterparty: PubkyPublicKey) -> LinkedPeerRecord {
         last_sync_at: None,
         last_private_receive_at: None,
         failure_count: 0,
+        local_recovery_attempt_id: None,
+        local_recovery_marker_created_at: None,
+        remote_recovery_attempt_id: None,
+        remote_recovery_marker_observed_at: None,
     }
 }
 
@@ -182,7 +190,7 @@ pub(crate) async fn mark_recovery_required_with_lease<S>(
     counterparty: PubkyPublicKey,
     lease: PeerLinkOperationLease,
     now: DateTime<Utc>,
-) -> Result<LinkedPeerRecord>
+) -> Result<RecoveryRequiredMark>
 where
     S: StorageAdapter,
 {
@@ -194,7 +202,7 @@ async fn mark_recovery_required_inner<S>(
     counterparty: PubkyPublicKey,
     lease: Option<PeerLinkOperationLease>,
     now: DateTime<Utc>,
-) -> Result<LinkedPeerRecord>
+) -> Result<RecoveryRequiredMark>
 where
     S: StorageAdapter,
 {
@@ -207,8 +215,11 @@ where
                 .linked_peer(&counterparty)
                 .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
             ensure_not_blocked(&record)?;
+            let new_episode = record.state != LinkedPeerState::RecoveryRequired;
             record.state = LinkedPeerState::RecoveryRequired;
-            record.last_sync_at = Some(now);
+            if new_episode || record.last_sync_at.is_none() {
+                record.last_sync_at = Some(now);
+            }
             record.failure_count = record.failure_count.saturating_add(1);
             tx.save_linked_peer(record.clone());
             if let Some(link_state) = tx.encrypted_link_state(&counterparty) {
@@ -221,7 +232,7 @@ where
                     checkpointed_at: now,
                 });
             }
-            Ok(record)
+            Ok(RecoveryRequiredMark { new_episode })
         })
         .await
 }
@@ -653,10 +664,15 @@ mod tests {
             .await
             .unwrap();
 
-        let peer = mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
+        let mark = mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
             .await
             .unwrap();
 
+        assert!(mark.new_episode);
+        let peer = load_linked_peer(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
         let link_state = load_encrypted_link_state(&storage, &counterparty)
             .await
@@ -682,10 +698,15 @@ mod tests {
         .await
         .unwrap();
 
-        let peer = mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
+        let mark = mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
             .await
             .unwrap();
 
+        assert!(mark.new_episode);
+        let peer = load_linked_peer(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
         let link_state = load_encrypted_link_state(&storage, &counterparty)
             .await

@@ -29,6 +29,13 @@ pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
 /// individual file slots within the derived folders using a counter-based scheme.
 pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit/v0/private";
 
+/// Conventional prefix for Encrypted Link recovery markers.
+///
+/// Marker paths are derived per-counterparty pair before being appended below
+/// this prefix, so the prefix itself does not identify the counterparty pair.
+pub const PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX: &str =
+    "/pub/paykit/v0/encrypted-link-recovery";
+
 /// Writes or updates a payment endpoint document in the authenticated Pubky session.
 #[instrument(skip(session, payload), fields(identifier = %identifier))]
 pub async fn upsert_payment_endpoint(

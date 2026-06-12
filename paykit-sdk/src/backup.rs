@@ -8,6 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    contacts::ContactRecord,
     identity::{IdentityState, PubkyPublicKey},
     linked_peers::LinkedPeerState,
     outbound_private::validate_queued_outbound_private_message,
@@ -40,6 +41,8 @@ pub struct SdkBackupState {
     pub identity_state: Option<IdentityState>,
     /// Linked Peer records.
     pub linked_peers: Vec<LinkedPeerRecord>,
+    /// Local contact records.
+    pub contact_records: Vec<ContactRecord>,
     /// Public Payment Endpoint records.
     pub public_endpoint_records: Vec<PublicEndpointRecord>,
     /// Payment Endpoint Reservation records.
@@ -70,6 +73,7 @@ impl fmt::Debug for SdkBackupState {
             .field("version", &self.version)
             .field("identity_state", &self.identity_state)
             .field("linked_peers", &self.linked_peers.len())
+            .field("contact_records", &self.contact_records.len())
             .field(
                 "public_endpoint_records",
                 &self.public_endpoint_records.len(),
@@ -109,6 +113,8 @@ pub struct RestoreReport {
     pub restored_identity: bool,
     /// Number of restored Linked Peer records.
     pub linked_peers: usize,
+    /// Number of restored local contact records.
+    pub contact_records: usize,
     /// Number of restored public Payment Endpoint records.
     pub public_endpoint_records: usize,
     /// Number of restored Payment Endpoint Reservation records.
@@ -173,7 +179,12 @@ where
     storage
         .transaction(move |tx| {
             let current_identity = tx.load_identity_state();
-            let (state, report) = backup.into_storage_state(current_identity.as_ref())?;
+            let current_next_peer_link_operation_lease_id =
+                tx.export_storage_state().next_peer_link_operation_lease_id;
+            let (state, report) = backup.into_storage_state(
+                current_identity.as_ref(),
+                current_next_peer_link_operation_lease_id,
+            )?;
             tx.replace_storage_state(state);
             Ok(report)
         })
@@ -185,6 +196,10 @@ impl SdkBackupState {
         let mut linked_peers = state.linked_peers.into_values().collect::<Vec<_>>();
         linked_peers
             .sort_by(|left, right| left.counterparty.as_str().cmp(right.counterparty.as_str()));
+
+        let mut contact_records = state.contact_records.into_values().collect::<Vec<_>>();
+        contact_records
+            .sort_by(|left, right| left.public_key.as_str().cmp(right.public_key.as_str()));
 
         let mut public_endpoint_records = state
             .public_endpoint_records
@@ -241,6 +256,7 @@ impl SdkBackupState {
             version: SDK_BACKUP_VERSION,
             identity_state: state.identity_state,
             linked_peers,
+            contact_records,
             public_endpoint_records,
             payment_endpoint_reservations,
             encrypted_link_states,
@@ -258,10 +274,17 @@ impl SdkBackupState {
     fn into_storage_state(
         self,
         current_identity: Option<&IdentityState>,
+        next_peer_link_operation_lease_id: u64,
     ) -> Result<(ValidatedStorageState, RestoreReport)> {
         self.validate(current_identity)?;
 
         let mut linked_peers = keyed_by_counterparty(self.linked_peers, "Linked Peer")?;
+        let contact_records = keyed_by_tuple(
+            self.contact_records,
+            |record| record.public_key.clone(),
+            "local contact",
+        )?;
+        validate_contact_records(&contact_records)?;
         let public_endpoint_records = keyed_by_string(
             self.public_endpoint_records,
             |record| record.identifier.clone(),
@@ -327,6 +350,7 @@ impl SdkBackupState {
             version: self.version,
             restored_identity: self.identity_state.is_some(),
             linked_peers: linked_peers.len(),
+            contact_records: contact_records.len(),
             public_endpoint_records: public_endpoint_records.len(),
             payment_endpoint_reservations: payment_endpoint_reservations.len(),
             encrypted_link_states: encrypted_link_states.len(),
@@ -341,11 +365,12 @@ impl SdkBackupState {
         let state = StorageState {
             identity_state: self.identity_state,
             linked_peers,
+            contact_records,
             public_endpoint_records,
             payment_endpoint_reservations,
             encrypted_link_states,
             peer_link_operation_leases: HashMap::new(),
-            next_peer_link_operation_lease_id: 0,
+            next_peer_link_operation_lease_id,
             outbound_private_messages,
             next_outbound_private_message_id,
             private_stream_items,
@@ -403,6 +428,7 @@ impl SdkBackupState {
 
     pub(crate) fn has_identity_scoped_state(&self) -> bool {
         !self.linked_peers.is_empty()
+            || !self.contact_records.is_empty()
             || !self.public_endpoint_records.is_empty()
             || !self.payment_endpoint_reservations.is_empty()
             || !self.encrypted_link_states.is_empty()
@@ -541,6 +567,10 @@ fn mark_restored_peers_recovery_required(
                 last_sync_at: None,
                 last_private_receive_at: None,
                 failure_count: 0,
+                local_recovery_attempt_id: None,
+                local_recovery_marker_created_at: None,
+                remote_recovery_attempt_id: None,
+                remote_recovery_marker_observed_at: None,
             });
     }
 
@@ -655,6 +685,68 @@ fn validate_encrypted_link_snapshots(
 fn validate_public_endpoint_records(records: &HashMap<String, PublicEndpointRecord>) -> Result<()> {
     for record in records.values() {
         PaymentEndpointIdentifier::new(&record.identifier)?;
+    }
+    Ok(())
+}
+
+fn validate_contact_records(records: &HashMap<PubkyPublicKey, ContactRecord>) -> Result<()> {
+    for record in records.values() {
+        if let Some(profile) = record.profile.as_ref() {
+            profile.validate()?;
+        }
+        if let Some(label) = record.label.as_deref() {
+            crate::ContactUpdate {
+                public_key: record.public_key.clone(),
+                label: Some(label.to_owned()),
+            }
+            .validate()?;
+        }
+        validate_contact_marker_state(record)?;
+    }
+    Ok(())
+}
+
+fn validate_contact_marker_state(record: &ContactRecord) -> Result<()> {
+    use crate::PublicContactMarkerStatus::{
+        Failed, NotPublished, PendingPublication, PendingRemoval, Published, Removed,
+    };
+
+    if record.public_contact_published_at.is_some() && record.public_contact_removed_at.is_some() {
+        return Err(PaykitSdkError::Protocol(format!(
+            "local contact {} has inconsistent public contact marker timestamps",
+            record.public_key
+        )));
+    }
+
+    let invalid = match record.public_contact_marker_status {
+        NotPublished => {
+            record.public_contact_published_at.is_some()
+                || record.public_contact_removed_at.is_some()
+                || record.public_contact_last_error.is_some()
+        }
+        PendingPublication => record.public_contact_last_error.is_some(),
+        Published => {
+            record.public_contact_published_at.is_none()
+                || record.public_contact_removed_at.is_some()
+                || record.public_contact_last_error.is_some()
+        }
+        PendingRemoval => {
+            record.public_contact_published_at.is_none()
+                || record.public_contact_removed_at.is_some()
+                || record.public_contact_last_error.is_some()
+        }
+        Removed => {
+            record.public_contact_published_at.is_some()
+                || record.public_contact_removed_at.is_none()
+                || record.public_contact_last_error.is_some()
+        }
+        Failed => record.public_contact_last_error.is_none(),
+    };
+    if invalid {
+        return Err(PaykitSdkError::Protocol(format!(
+            "local contact {} has inconsistent public contact marker state",
+            record.public_key
+        )));
     }
     Ok(())
 }
@@ -957,6 +1049,21 @@ mod tests {
         }
     }
 
+    fn contact_record(public_key: PubkyPublicKey) -> ContactRecord {
+        ContactRecord {
+            public_key,
+            label: Some("Alice".into()),
+            profile: None,
+            profile_fetched_at: None,
+            created_at: timestamp(),
+            updated_at: timestamp(),
+            public_contact_marker_status: crate::PublicContactMarkerStatus::NotPublished,
+            public_contact_published_at: None,
+            public_contact_removed_at: None,
+            public_contact_last_error: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_export_backup_state_redacts_debug() {
         let storage = InMemoryStorage::new();
@@ -1007,7 +1114,12 @@ mod tests {
                 last_sync_at: Some(timestamp()),
                 last_private_receive_at: None,
                 failure_count: 0,
+                local_recovery_attempt_id: None,
+                local_recovery_marker_created_at: None,
+                remote_recovery_attempt_id: None,
+                remote_recovery_marker_observed_at: None,
             }],
+            contact_records: Vec::new(),
             public_endpoint_records: Vec::new(),
             payment_endpoint_reservations: Vec::new(),
             encrypted_link_states: vec![EncryptedLinkStateRecord {
@@ -1040,6 +1152,182 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_backup_state_round_trips_contact_records() {
+        let storage = InMemoryStorage::new();
+        let local_public_key = public_key();
+        let contact_public_key = public_key();
+        storage
+            .transaction({
+                let local_public_key = local_public_key.clone();
+                let contact_public_key = contact_public_key.clone();
+                move |tx| {
+                    tx.save_identity_state(identity(local_public_key));
+                    tx.save_contact_record(contact_record(contact_public_key));
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let backup = export_backup_state(&storage).await.unwrap();
+        let restore_storage = InMemoryStorage::new();
+        let report = restore_backup_state(&restore_storage, backup)
+            .await
+            .unwrap();
+        let restored = restore_storage.snapshot().unwrap();
+
+        assert_eq!(report.contact_records, 1);
+        assert_eq!(
+            restored.contact_records[&contact_public_key]
+                .label
+                .as_deref(),
+            Some("Alice")
+        );
+        assert!(report.recovery_required_peers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_restore_backup_state_rejects_inconsistent_contact_marker_state() {
+        let storage = InMemoryStorage::new();
+        let local_public_key = public_key();
+        let contact_public_key = public_key();
+        let mut contact = contact_record(contact_public_key);
+        contact.public_contact_published_at = Some(timestamp());
+        let backup = SdkBackupState {
+            version: SDK_BACKUP_VERSION,
+            identity_state: Some(identity(local_public_key)),
+            linked_peers: Vec::new(),
+            contact_records: vec![contact],
+            public_endpoint_records: Vec::new(),
+            payment_endpoint_reservations: Vec::new(),
+            encrypted_link_states: Vec::new(),
+            outbound_private_messages: Vec::new(),
+            private_stream_items: Vec::new(),
+            event_dedup_records: Vec::new(),
+            receipt_access_records: Vec::new(),
+            receipt_records: Vec::new(),
+            next_outbound_private_message_id: 0,
+            next_receive_batch_id: 0,
+            next_private_stream_item_id: 0,
+        };
+
+        let result = restore_backup_state(&storage, backup).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn test_restore_backup_state_rejects_dual_contact_marker_timestamps() {
+        let storage = InMemoryStorage::new();
+        let local_public_key = public_key();
+        let contact_public_key = public_key();
+        let mut contact = contact_record(contact_public_key)
+            .mark_public_contact_published(timestamp())
+            .mark_public_contact_removed(timestamp());
+        contact.public_contact_published_at = Some(timestamp());
+        contact.public_contact_marker_status = crate::PublicContactMarkerStatus::Failed;
+        contact.public_contact_last_error = Some("failed".into());
+        let backup = SdkBackupState {
+            version: SDK_BACKUP_VERSION,
+            identity_state: Some(identity(local_public_key)),
+            linked_peers: Vec::new(),
+            contact_records: vec![contact],
+            public_endpoint_records: Vec::new(),
+            payment_endpoint_reservations: Vec::new(),
+            encrypted_link_states: Vec::new(),
+            outbound_private_messages: Vec::new(),
+            private_stream_items: Vec::new(),
+            event_dedup_records: Vec::new(),
+            receipt_access_records: Vec::new(),
+            receipt_records: Vec::new(),
+            next_outbound_private_message_id: 0,
+            next_receive_batch_id: 0,
+            next_private_stream_item_id: 0,
+        };
+
+        let result = restore_backup_state(&storage, backup).await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn test_restore_backup_state_accepts_pending_contact_marker_removal() {
+        let storage = InMemoryStorage::new();
+        let local_public_key = public_key();
+        let contact_public_key = public_key();
+        let contact = contact_record(contact_public_key)
+            .mark_public_contact_published(timestamp())
+            .mark_public_contact_removal_pending(timestamp());
+        let backup = SdkBackupState {
+            version: SDK_BACKUP_VERSION,
+            identity_state: Some(identity(local_public_key)),
+            linked_peers: Vec::new(),
+            contact_records: vec![contact],
+            public_endpoint_records: Vec::new(),
+            payment_endpoint_reservations: Vec::new(),
+            encrypted_link_states: Vec::new(),
+            outbound_private_messages: Vec::new(),
+            private_stream_items: Vec::new(),
+            event_dedup_records: Vec::new(),
+            receipt_access_records: Vec::new(),
+            receipt_records: Vec::new(),
+            next_outbound_private_message_id: 0,
+            next_receive_batch_id: 0,
+            next_private_stream_item_id: 0,
+        };
+
+        let report = restore_backup_state(&storage, backup).await.unwrap();
+
+        assert_eq!(report.contact_records, 1);
+    }
+
+    #[tokio::test]
+    async fn test_restore_backup_state_preserves_next_peer_lease_id() {
+        let storage = InMemoryStorage::new();
+        let counterparty = public_key();
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    let lease = tx
+                        .claim_peer_link_operation(
+                            &counterparty,
+                            timestamp(),
+                            timestamp() + chrono::Duration::seconds(60),
+                        )
+                        .unwrap();
+                    assert_eq!(lease.lease_id, 0);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let backup = SdkBackupState {
+            version: SDK_BACKUP_VERSION,
+            identity_state: None,
+            linked_peers: Vec::new(),
+            contact_records: Vec::new(),
+            public_endpoint_records: Vec::new(),
+            payment_endpoint_reservations: Vec::new(),
+            encrypted_link_states: Vec::new(),
+            outbound_private_messages: Vec::new(),
+            private_stream_items: Vec::new(),
+            event_dedup_records: Vec::new(),
+            receipt_access_records: Vec::new(),
+            receipt_records: Vec::new(),
+            next_outbound_private_message_id: 0,
+            next_receive_batch_id: 0,
+            next_private_stream_item_id: 0,
+        };
+
+        restore_backup_state(&storage, backup).await.unwrap();
+        let snapshot = storage.snapshot().unwrap();
+
+        assert!(snapshot.peer_link_operation_leases.is_empty());
+        assert_eq!(snapshot.next_peer_link_operation_lease_id, 1);
+    }
+
+    #[tokio::test]
     async fn test_restore_backup_state_marks_link_state_without_peer_recovery_required() {
         let storage = InMemoryStorage::new();
         let counterparty = public_key();
@@ -1047,6 +1335,7 @@ mod tests {
             version: SDK_BACKUP_VERSION,
             identity_state: Some(identity(counterparty.clone())),
             linked_peers: Vec::new(),
+            contact_records: Vec::new(),
             public_endpoint_records: Vec::new(),
             payment_endpoint_reservations: Vec::new(),
             encrypted_link_states: vec![EncryptedLinkStateRecord {
@@ -1084,6 +1373,7 @@ mod tests {
             version: SDK_BACKUP_VERSION,
             identity_state: Some(identity(counterparty.clone())),
             linked_peers: Vec::new(),
+            contact_records: Vec::new(),
             public_endpoint_records: Vec::new(),
             payment_endpoint_reservations: Vec::new(),
             encrypted_link_states: Vec::new(),
@@ -1127,6 +1417,7 @@ mod tests {
             version: SDK_BACKUP_VERSION,
             identity_state: Some(identity(counterparty.clone())),
             linked_peers: Vec::new(),
+            contact_records: Vec::new(),
             public_endpoint_records: Vec::new(),
             payment_endpoint_reservations: Vec::new(),
             encrypted_link_states: vec![EncryptedLinkStateRecord {
@@ -1159,6 +1450,7 @@ mod tests {
             version: SDK_BACKUP_VERSION,
             identity_state: None,
             linked_peers: Vec::new(),
+            contact_records: Vec::new(),
             public_endpoint_records: vec![PublicEndpointRecord {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: Some("ln".into()),
@@ -1191,6 +1483,7 @@ mod tests {
             version: SDK_BACKUP_VERSION,
             identity_state: Some(identity(local_public_key)),
             linked_peers: Vec::new(),
+            contact_records: Vec::new(),
             public_endpoint_records: vec![PublicEndpointRecord {
                 identifier: "private".into(),
                 payload: Some("ln".into()),
@@ -1223,6 +1516,7 @@ mod tests {
             version: SDK_BACKUP_VERSION,
             identity_state: Some(identity(counterparty.clone())),
             linked_peers: Vec::new(),
+            contact_records: Vec::new(),
             public_endpoint_records: Vec::new(),
             payment_endpoint_reservations: Vec::new(),
             encrypted_link_states: Vec::new(),
@@ -1268,6 +1562,7 @@ mod tests {
             version: SDK_BACKUP_VERSION,
             identity_state: Some(identity(backup_public_key)),
             linked_peers: Vec::new(),
+            contact_records: Vec::new(),
             public_endpoint_records: Vec::new(),
             payment_endpoint_reservations: Vec::new(),
             encrypted_link_states: Vec::new(),
@@ -1294,6 +1589,7 @@ mod tests {
             version: SDK_BACKUP_VERSION,
             identity_state: Some(identity(counterparty.clone())),
             linked_peers: Vec::new(),
+            contact_records: Vec::new(),
             public_endpoint_records: Vec::new(),
             payment_endpoint_reservations: Vec::new(),
             encrypted_link_states: Vec::new(),

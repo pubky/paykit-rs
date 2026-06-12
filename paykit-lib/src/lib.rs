@@ -2,6 +2,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod encrypted_link;
+mod encrypted_link_recovery;
 mod error;
 mod event;
 mod payment_amount;
@@ -22,6 +23,13 @@ pub use encrypted_link::{
     EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot, HandshakeProgress,
     PrivateApplicationMessage, PrivateMessageKind, DEFAULT_MAX_RECOVERY_ATTEMPTS,
     DEFAULT_MAX_SEND_RETRIES,
+};
+#[doc(inline)]
+pub use encrypted_link_recovery::{
+    encrypted_link_recovery_marker_paths, fetch_encrypted_link_recovery_marker,
+    parse_encrypted_link_recovery_marker_json, publish_encrypted_link_recovery_marker,
+    remove_encrypted_link_recovery_marker, serialize_encrypted_link_recovery_marker,
+    EncryptedLinkRecoveryMarker,
 };
 #[doc(inline)]
 pub use error::PaykitError;
@@ -54,7 +62,9 @@ pub use private_payment_list::{
 pub use pubky::PublicKey;
 pub use pubky_noise;
 #[doc(inline)]
-pub use pubky_routing::{PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX};
+pub use pubky_routing::{
+    PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX, PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX,
+};
 #[doc(inline)]
 pub use receipt::{
     decrypt_receipt, parse_receipt_access_event_message, parse_receipt_access_json,

@@ -201,16 +201,17 @@ before executing a payment through their existing infrastructure.
 
 `paykit-sdk` is the Rust runtime layer for SDK-managed local
 state such as endpoint sync, Encrypted Link snapshots, private stream intake,
-Private Payment Lists, and contact payment resolution. Payment execution,
-settlement detection, product UI, and platform session storage remain with the
-integrating application and its adapters.
+Private Payment Lists, Paykit Profiles, local Contact Records, and contact
+payment resolution. Payment execution, settlement detection, product UI, and
+platform session storage remain with the integrating application and its
+adapters.
 
 ## Library Crates
 
 - [`paykit-lib`](paykit-lib/) is the canonical Rust Paykit Library. It consumes
   concrete Pubky SDK handles and keeps no global application state.
 - [`paykit-sdk`](paykit-sdk/) is the Rust SDK runtime for stateful Paykit
-  workflows. SDK platform bindings are planned separately.
+  workflows.
 - [`paykit-ffi`](paykit-ffi/) exposes UniFFI bindings for Swift and Kotlin.
 - [`paykit-react-native`](paykit-react-native/) wraps the generated bindings for
   React Native.

@@ -16,12 +16,7 @@ pub trait PubkySessionProvider: Send + Sync {
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>>;
 
     /// Load public Pubky storage for unauthenticated counterparty reads.
-    async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
-        let Some(session_access) = self.load_session_access().await? else {
-            return Ok(None);
-        };
-        Ok(Some(session_access.outbox_client.public_storage()))
-    }
+    async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>>;
 
     /// Clear local Pubky session access during sign-out.
     async fn clear_session_access(&self) -> Result<()>;
