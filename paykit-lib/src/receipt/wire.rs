@@ -246,7 +246,7 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
     }
 }
 
-pub(super) fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<String> {
+pub fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<String> {
     serde_json::to_string(&ReceiptAccessWire::from(access)).map_err(|err| {
         invalid_data(
             format!("failed to serialize Receipt Access JSON: {err}"),

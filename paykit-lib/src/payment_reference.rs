@@ -1,7 +1,7 @@
 use crate::{PaykitError, Result};
 
 /// Payee-visible correlation reference used to connect payments with Paykit artifacts.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PaymentReference(String);
 
 /// Maximum Payment Reference length in Unicode scalar values.
@@ -44,6 +44,12 @@ impl std::fmt::Display for PaymentReference {
     }
 }
 
+impl std::fmt::Debug for PaymentReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PaymentReference(<redacted>)")
+    }
+}
+
 impl AsRef<str> for PaymentReference {
     fn as_ref(&self) -> &str {
         &self.0
@@ -60,6 +66,7 @@ mod tests {
         let reference = PaymentReference::new("invoice 2026/0001").unwrap();
         assert_eq!(reference.as_str(), "invoice 2026/0001");
         assert_eq!(format!("{reference}"), "invoice 2026/0001");
+        assert_eq!(format!("{reference:?}"), "PaymentReference(<redacted>)");
     }
 
     #[test]

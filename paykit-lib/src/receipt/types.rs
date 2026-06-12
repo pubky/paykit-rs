@@ -71,7 +71,7 @@ impl fmt::Debug for ReceiptDraft {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReceiptDraft")
             .field("receipt_id", &self.receipt_id)
-            .field("payment_reference", &self.payment_reference)
+            .field("payment_reference", &"<redacted>")
             .field("payment_request_id", &self.payment_request_id)
             .field("billing_period", &self.billing_period)
             .field(
@@ -112,7 +112,7 @@ impl fmt::Debug for Receipt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Receipt")
             .field("receipt_id", &self.receipt_id)
-            .field("payment_reference", &self.payment_reference)
+            .field("payment_reference", &"<redacted>")
             .field("payment_request_id", &self.payment_request_id)
             .field("billing_period", &self.billing_period)
             .field("recipient_public_key", &self.recipient_public_key)
@@ -231,7 +231,7 @@ impl fmt::Debug for PreparedReceipt {
 }
 
 /// Receipt Access descriptor sent over the existing Noise channel.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReceiptAccess {
     /// Receipt Access message version. Currently always `1`.
     pub version: u8,
@@ -251,6 +251,22 @@ pub struct ReceiptAccess {
     pub location: String,
     /// Symmetric key needed to decrypt the Receipt.
     pub key: ReceiptDecryptionKey,
+}
+
+impl fmt::Debug for ReceiptAccess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReceiptAccess")
+            .field("version", &self.version)
+            .field("kind", &self.kind)
+            .field("event_id", &self.event_id)
+            .field("receipt_id", &self.receipt_id)
+            .field("payment_reference", &"<redacted>")
+            .field("payment_request_id", &self.payment_request_id)
+            .field("billing_period", &self.billing_period)
+            .field("location", &"<redacted>")
+            .field("key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// A recognized Receipt Access Event Message plus the raw JSON payload received
@@ -367,5 +383,72 @@ impl ReceiptAccess {
             self.billing_period.as_ref(),
             "Receipt Access",
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receipt_debug_redacts_payment_reference() {
+        let payment_reference = PaymentReference::new("invoice-secret-123").unwrap();
+        let draft = ReceiptDraft {
+            receipt_id: Some(ReceiptId::new_v4()),
+            payment_reference: payment_reference.clone(),
+            payment_request_id: Some(PaymentRequestId::new_v4()),
+            billing_period: None,
+            payment_endpoint_identifier: Some(
+                PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            ),
+            amount: Some(PaymentAmount {
+                value: "0.001".to_string(),
+                asset: "btc".to_string(),
+            }),
+            metadata: JsonMap::from_iter([(
+                "note".to_string(),
+                JsonValue::String("private receipt note".to_string()),
+            )]),
+        };
+        let receipt = Receipt {
+            receipt_id: draft.receipt_id.clone().unwrap(),
+            payment_reference,
+            payment_request_id: draft.payment_request_id.clone(),
+            billing_period: None,
+            recipient_public_key: pubky::Keypair::random().public_key().clone(),
+            payment_endpoint_identifier: draft.payment_endpoint_identifier.clone(),
+            amount: draft.amount.clone(),
+            metadata: draft.metadata.clone(),
+        };
+
+        let access = ReceiptAccess {
+            version: 1,
+            kind: PrivateMessageKind::ReceiptAccess,
+            event_id: EventId::new_v4(),
+            receipt_id: receipt.receipt_id.clone(),
+            payment_reference: receipt.payment_reference.clone(),
+            payment_request_id: receipt.payment_request_id.clone(),
+            billing_period: None,
+            location: ReceiptAccess::location_for(&receipt.receipt_id),
+            key: ReceiptDecryptionKey::generate(),
+        };
+        let prepared = PreparedReceipt {
+            receipt: receipt.clone(),
+            encrypted_receipt: "encrypted-secret".into(),
+            access: access.clone(),
+        };
+
+        for debug in [
+            format!("{draft:?}"),
+            format!("{receipt:?}"),
+            format!("{access:?}"),
+            format!("{prepared:?}"),
+        ] {
+            assert!(!debug.contains("invoice-secret-123"));
+            assert!(!debug.contains("private receipt note"));
+            assert!(!debug.contains("encrypted-secret"));
+            assert!(!debug.contains(access.key.as_str()));
+            assert!(!debug.contains(&access.location));
+        }
     }
 }
