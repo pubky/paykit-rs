@@ -174,6 +174,11 @@ impl EncryptedLink {
     ///
     /// This is the low-level send counterpart to
     /// [`receive_private_application_messages`](Self::receive_private_application_messages).
+    /// It validates only the generic `version` and `kind` envelope fields; it
+    /// does not require a known Paykit kind or validate known Paykit message
+    /// bodies. Use the typed serializers or SDK queue for protocol-managed
+    /// Paykit messages.
+    ///
     /// Higher-level callers should persist the exact JSON before sending when
     /// retrying the same message matters.
     pub async fn send_private_application_message_json(&mut self, raw_json: &str) -> Result<()> {
@@ -197,7 +202,7 @@ impl EncryptedLink {
         .await
     }
 
-    /// Receive currently available Private Application Messages in stream order.
+    /// Receive available Private Application Messages in stream order.
     ///
     /// The Noise read checkpoint advances past the returned messages. Callers
     /// that need crash-safe Event Message handling should persist returned

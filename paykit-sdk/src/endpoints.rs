@@ -8,24 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     adapters::ReceivingDetail,
+    publication::PublicationStatus,
     storage::{PublicEndpointRecord, StorageAdapter},
     PaykitSdkError, Result,
 };
-
-/// Publication status for a SDK-managed Payment Endpoint.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EndpointPublicationStatus {
-    /// The endpoint should be published.
-    Desired,
-    /// The endpoint is confirmed as published.
-    Published,
-    /// The endpoint should be removed.
-    PendingRemoval,
-    /// The endpoint is confirmed removed.
-    Removed,
-    /// The last publication attempt failed.
-    Failed,
-}
 
 /// One public endpoint changed during sync.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,7 +19,7 @@ pub struct EndpointSyncChange {
     /// Payment Endpoint Identifier.
     pub identifier: String,
     /// Resulting local publication status.
-    pub status: EndpointPublicationStatus,
+    pub status: PublicationStatus,
     /// Error text for failed changes.
     pub error: Option<String>,
 }
@@ -87,13 +73,13 @@ pub(crate) fn published_record(
     PublicEndpointRecord {
         identifier: identifier.as_str().to_owned(),
         payload: Some(payload.as_str().to_owned()),
-        status: EndpointPublicationStatus::Published,
+        status: PublicationStatus::Published,
         updated_at: now,
         last_error: None,
     }
 }
 
-pub(crate) fn desired_record(
+pub(crate) fn pending_publication_record(
     identifier: &PaymentEndpointIdentifier,
     payload: &PaymentEndpointPayload,
     now: DateTime<Utc>,
@@ -101,7 +87,7 @@ pub(crate) fn desired_record(
     PublicEndpointRecord {
         identifier: identifier.as_str().to_owned(),
         payload: Some(payload.as_str().to_owned()),
-        status: EndpointPublicationStatus::Desired,
+        status: PublicationStatus::PendingPublication,
         updated_at: now,
         last_error: None,
     }
@@ -115,7 +101,7 @@ pub(crate) fn pending_removal_record(
     PublicEndpointRecord {
         identifier,
         payload,
-        status: EndpointPublicationStatus::PendingRemoval,
+        status: PublicationStatus::PendingRemoval,
         updated_at: now,
         last_error: None,
     }
@@ -125,7 +111,7 @@ pub(crate) fn removed_record(identifier: String, now: DateTime<Utc>) -> PublicEn
     PublicEndpointRecord {
         identifier,
         payload: None,
-        status: EndpointPublicationStatus::Removed,
+        status: PublicationStatus::Removed,
         updated_at: now,
         last_error: None,
     }
@@ -140,39 +126,11 @@ pub(crate) fn failed_record(
     PublicEndpointRecord {
         identifier,
         payload,
-        status: EndpointPublicationStatus::Failed,
+        status: PublicationStatus::Failed,
         updated_at: now,
         last_error: Some(error),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_receiving_details_rejects_invalid_identifier() {
-        let result = normalize_receiving_details(vec![ReceivingDetail {
-            identifier: "../bad".into(),
-            payload: "payload".into(),
-        }]);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_normalize_receiving_details_rejects_duplicates() {
-        let result = normalize_receiving_details(vec![
-            ReceivingDetail {
-                identifier: "btc-lightning-bolt11".into(),
-                payload: "one".into(),
-            },
-            ReceivingDetail {
-                identifier: "btc-lightning-bolt11".into(),
-                payload: "two".into(),
-            },
-        ]);
-
-        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
-    }
-}
+mod tests;

@@ -20,6 +20,8 @@ pub struct EncryptedLinkRecoveryMarkerReport {
     pub local_attempt_id: Option<String>,
     /// Creation time for the local marker payload.
     pub local_marker_created_at: Option<DateTime<Utc>>,
+    /// Last local marker publish/remove error, when available.
+    pub local_marker_last_error: Option<String>,
     /// Latest observed counterparty recovery attempt id.
     pub remote_attempt_id: Option<String>,
     /// Time the counterparty marker was observed.
@@ -35,6 +37,7 @@ impl EncryptedLinkRecoveryMarkerReport {
             state: peer.state.clone(),
             local_attempt_id: peer.local_recovery_attempt_id.clone(),
             local_marker_created_at: peer.local_recovery_marker_created_at,
+            local_marker_last_error: peer.local_recovery_marker_last_error.clone(),
             remote_attempt_id: peer.remote_recovery_attempt_id.clone(),
             remote_marker_observed_at: peer.remote_recovery_marker_observed_at,
             remote_marker_changed,

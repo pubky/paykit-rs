@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt};
 
-use crate::{identity::PubkyPublicKey, PubkySessionAccess, Result};
+use crate::{identity::PubkyPublicKey, PaykitSdkError, PubkySessionAccess, Result};
 
 /// Provides live Pubky session access to the SDK.
 ///
@@ -13,6 +13,10 @@ use crate::{identity::PubkyPublicKey, PubkySessionAccess, Result};
 #[async_trait]
 pub trait PubkySessionProvider: Send + Sync {
     /// Load live Pubky access for storage and Encrypted Link workflows.
+    ///
+    /// Returning `None` means no live session access is currently available. It
+    /// does not sign the SDK out or clear identity-scoped storage; call
+    /// [`PaykitSdk::sign_out`](crate::PaykitSdk::sign_out) for explicit sign-out.
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>>;
 
     /// Load public Pubky storage for unauthenticated counterparty reads.
@@ -43,28 +47,38 @@ pub trait PaymentAdapter: Send + Sync {
     /// linked records. Adapters that return reservations should make them
     /// idempotent, expiring, or otherwise safe to abandon if the process stops
     /// before the SDK queues a Private Payment List.
+    ///
+    /// The SDK cancels reservations that become invalid before they are sent.
+    /// Once a reservation-backed detail has been shared, payment-specific
+    /// settlement, expiry, and cleanup remain adapter responsibilities.
     async fn reserve_receiving_details(
         &self,
-        _request: &PaymentEndpointReservationRequest,
+        _counterparty: &PubkyPublicKey,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         Ok(None)
     }
 
-    /// Release a previously reserved receiving detail, when supported.
-    async fn release_receiving_detail_reservation(
+    /// Cancel a previously reserved receiving detail.
+    ///
+    /// Adapters that return reservations must implement this explicitly so
+    /// cleanup cannot silently succeed while backend reservations remain held.
+    async fn cancel_receiving_detail_reservation(
         &self,
-        _release: &PaymentEndpointReservationRelease,
+        _cancellation: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
-        Ok(())
+        Err(PaykitSdkError::PaymentAdapter {
+            context: "receiving-detail reservation cancellation is not implemented".into(),
+            source: None,
+        })
     }
 
-    /// Rank and evaluate candidate endpoints for a payment.
-    async fn select_payment_endpoint(
+    /// Return payable candidates in adapter-preferred order.
+    async fn select_payment_endpoints(
         &self,
         request: &PaymentEndpointSelectionRequest,
-    ) -> Result<PaymentEndpointSelection>;
+    ) -> Result<Vec<PaymentEndpointCandidate>>;
 
-    /// Build a payment target from a compatible endpoint.
+    /// Build a payment target from a payable endpoint.
     async fn build_payment_target(
         &self,
         endpoint: &PaymentEndpointCandidate,
@@ -73,6 +87,7 @@ pub trait PaymentAdapter: Send + Sync {
 
 /// Scope used when asking for receiving details.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ReceivingDetailScope {
     /// Details intended for public Payment Endpoints.
     Public,
@@ -81,13 +96,6 @@ pub enum ReceivingDetailScope {
         /// Counterparty that will receive the private details.
         counterparty: PubkyPublicKey,
     },
-}
-
-/// Request passed to the payment adapter for receiving-detail reservation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentEndpointReservationRequest {
-    /// Counterparty whose Private Payment List will receive the reserved details.
-    pub counterparty: PubkyPublicKey,
 }
 
 /// Payment-method-specific receiving detail returned by an adapter.
@@ -111,7 +119,7 @@ impl fmt::Debug for ReceivingDetail {
 /// Receiving detail reserved by the payment adapter.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentEndpointReservation {
-    /// Adapter-stable reservation id.
+    /// Adapter-stable reservation id; non-empty, at most 128 bytes, no control characters.
     pub reservation_id: String,
     /// Reserved receiving detail.
     pub receiving_detail: ReceivingDetail,
@@ -121,9 +129,9 @@ pub struct PaymentEndpointReservation {
     pub attribution: HashMap<String, String>,
 }
 
-/// Request passed to release a receiving-detail reservation.
+/// Request passed to cancel a receiving-detail reservation.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentEndpointReservationRelease {
+pub struct PaymentEndpointReservationCancellation {
     /// Adapter-stable reservation id.
     pub reservation_id: String,
     /// Counterparty the reservation was intended for.
@@ -136,9 +144,9 @@ pub struct PaymentEndpointReservationRelease {
     pub attribution: HashMap<String, String>,
 }
 
-impl fmt::Debug for PaymentEndpointReservationRelease {
+impl fmt::Debug for PaymentEndpointReservationCancellation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PaymentEndpointReservationRelease")
+        f.debug_struct("PaymentEndpointReservationCancellation")
             .field("reservation_id", &self.reservation_id)
             .field("counterparty", &self.counterparty)
             .field("identifier", &self.identifier)
@@ -191,6 +199,7 @@ impl fmt::Debug for PaymentEndpointCandidate {
 
 /// Source of a discovered Payment Endpoint candidate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PaymentEndpointSource {
     /// Endpoint came from a counterparty-specific Private Payment List.
     PrivatePaymentList,
@@ -207,7 +216,7 @@ pub struct PaymentAmountContext {
     pub asset: String,
 }
 
-/// Request passed to the payment adapter for endpoint selection.
+/// Request passed to the payment adapter for payable endpoint ordering.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentEndpointSelectionRequest {
     /// Counterparty being paid.
@@ -218,68 +227,7 @@ pub struct PaymentEndpointSelectionRequest {
     pub candidates: Vec<PaymentEndpointCandidate>,
 }
 
-/// Adapter evaluation for one candidate endpoint.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentEndpointEvaluation {
-    /// Candidate being evaluated.
-    pub candidate: PaymentEndpointCandidate,
-    /// Compatibility status.
-    pub compatibility: EndpointCompatibility,
-    /// Adapter priority, where lower values are preferred.
-    pub priority: Option<u32>,
-}
-
-impl fmt::Debug for PaymentEndpointEvaluation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PaymentEndpointEvaluation")
-            .field("candidate", &self.candidate)
-            .field("compatibility", &self.compatibility)
-            .field("priority", &self.priority)
-            .finish()
-    }
-}
-
-/// Adapter endpoint selection result.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentEndpointSelection {
-    /// Selected payable candidate, when one is available.
-    pub selected: Option<PaymentEndpointCandidate>,
-    /// Evaluations for candidates considered by the adapter.
-    pub evaluations: Vec<PaymentEndpointEvaluation>,
-}
-
-impl fmt::Debug for PaymentEndpointSelection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PaymentEndpointSelection")
-            .field("selected", &self.selected)
-            .field("evaluations", &self.evaluations)
-            .finish()
-    }
-}
-
-/// Compatibility result for one endpoint.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EndpointCompatibility {
-    /// The endpoint can be paid by the adapter.
-    Payable,
-    /// The endpoint kind is unsupported.
-    Unsupported {
-        /// Optional adapter-specific reason.
-        reason: Option<String>,
-    },
-    /// The endpoint is recognized but stale/unusable.
-    Stale {
-        /// Optional adapter-specific reason.
-        reason: Option<String>,
-    },
-    /// The endpoint cannot be used for the requested amount.
-    AmountIncompatible {
-        /// Optional adapter-specific reason.
-        reason: Option<String>,
-    },
-}
-
-/// Payment target produced by an adapter.
+/// Payment-method-specific execution payload produced by an adapter.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentTarget {
     /// Method-specific target payload.
@@ -299,38 +247,4 @@ fn redacted_payload(payload: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn counterparty() -> PubkyPublicKey {
-        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
-    }
-
-    #[test]
-    fn test_endpoint_debug_redacts_payloads() {
-        let candidate = PaymentEndpointCandidate {
-            counterparty: counterparty(),
-            source: PaymentEndpointSource::PrivatePaymentList,
-            identifier: "btc-lightning-bolt11".into(),
-            payload: "ln-private-secret".into(),
-        };
-        let selection = PaymentEndpointSelection {
-            selected: Some(candidate.clone()),
-            evaluations: vec![PaymentEndpointEvaluation {
-                candidate,
-                compatibility: EndpointCompatibility::Payable,
-                priority: Some(0),
-            }],
-        };
-        let target = PaymentTarget {
-            payload: "method-specific-target".into(),
-        };
-
-        let debug = format!("{selection:?} {target:?}");
-
-        assert!(!debug.contains("ln-private-secret"));
-        assert!(!debug.contains("method-specific-target"));
-        assert!(debug.contains("<redacted:17 bytes>"));
-        assert!(debug.contains("<redacted:22 bytes>"));
-    }
-}
+mod tests;

@@ -1,5 +1,7 @@
 //! Durable outbound Private Application Message queue.
 
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use paykit_lib::PrivateMessageKind;
 use serde::{Deserialize, Serialize};
@@ -14,10 +16,11 @@ use crate::{
 
 /// Delivery status for one outbound Private Application Message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum OutboundPrivateMessageStatus {
     /// Message is queued and has not been sent.
     Pending,
-    /// A worker is currently trying to send this message.
+    /// A worker is sending this message.
     Sending,
     /// Message was sent successfully.
     Sent,
@@ -25,17 +28,67 @@ pub enum OutboundPrivateMessageStatus {
     Failed,
     /// The stored payload is invalid and must not be retried automatically.
     Invalid,
+    /// Automatic retry is paused because local Encrypted Link state is not trustworthy.
+    RecoveryRequired,
     /// Newer latest-state data made this message unnecessary to send.
     Superseded,
 }
 
 /// Failed outbound private send attempt.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundPrivateSendFailure {
     /// Outbound message id.
     pub outbound_message_id: u64,
     /// Error from the send attempt.
     pub error: String,
+}
+
+impl fmt::Debug for OutboundPrivateSendFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error = redacted_error(&self.error);
+        f.debug_struct("OutboundPrivateSendFailure")
+            .field("outbound_message_id", &self.outbound_message_id)
+            .field("error", &error)
+            .finish()
+    }
+}
+
+/// Failed cleanup of a superseded Payment Endpoint Reservation.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReservationCleanupFailure {
+    /// Reservation id, when the failure is tied to a specific reservation.
+    pub reservation_id: Option<String>,
+    /// Cleanup error.
+    pub error: String,
+}
+
+impl fmt::Debug for ReservationCleanupFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error = redacted_error(&self.error);
+        f.debug_struct("ReservationCleanupFailure")
+            .field("reservation_id", &self.reservation_id)
+            .field("error", &error)
+            .finish()
+    }
+}
+
+/// Failed recovery marker publication during outbound private send recovery.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryMarkerPublishFailure {
+    /// Outbound message id that triggered recovery, when available.
+    pub outbound_message_id: Option<u64>,
+    /// Recovery marker publication error.
+    pub error: String,
+}
+
+impl fmt::Debug for RecoveryMarkerPublishFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error = redacted_error(&self.error);
+        f.debug_struct("RecoveryMarkerPublishFailure")
+            .field("outbound_message_id", &self.outbound_message_id)
+            .field("error", &error)
+            .finish()
+    }
 }
 
 /// Summary returned after processing outbound private messages.
@@ -47,6 +100,37 @@ pub struct OutboundPrivateSendReport {
     pub sent: Vec<u64>,
     /// Messages that failed in this run.
     pub failed: Vec<OutboundPrivateSendFailure>,
+    /// Superseded reservation cleanup failures observed in this run.
+    pub reservation_cleanup_failures: Vec<ReservationCleanupFailure>,
+    /// Recovery marker publication failures observed after fail-closed recovery.
+    #[serde(default)]
+    pub recovery_marker_failures: Vec<RecoveryMarkerPublishFailure>,
+}
+
+/// Summary for processing outbound private messages for one counterparty.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundPrivateCounterpartySendReport {
+    /// Counterparty whose queue was processed.
+    pub counterparty: PubkyPublicKey,
+    /// Successful send report, when processing completed.
+    pub report: Option<OutboundPrivateSendReport>,
+    /// Error text, when processing failed for this counterparty.
+    pub error: Option<String>,
+}
+
+impl fmt::Debug for OutboundPrivateCounterpartySendReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error = self.error.as_deref().map(redacted_error);
+        f.debug_struct("OutboundPrivateCounterpartySendReport")
+            .field("counterparty", &self.counterparty)
+            .field("report", &self.report)
+            .field("error", &error)
+            .finish()
+    }
+}
+
+fn redacted_error(error: &str) -> String {
+    format!("<redacted:{} bytes>", error.len())
 }
 
 /// Enqueue one raw JSON Private Application Message.
@@ -62,6 +146,33 @@ where
     let kind = validate_outbound_private_message(&raw_json)?;
     storage
         .transaction(move |tx| {
+            let record = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                counterparty,
+                kind,
+                raw_json,
+                now,
+            ));
+            Ok(record)
+        })
+        .await
+}
+
+/// Enqueue one raw JSON Private Application Message while a peer operation
+/// lease is still active.
+pub(crate) async fn enqueue_private_message_with_link_lease<S>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    raw_json: String,
+    now: DateTime<Utc>,
+    lease: &PeerLinkOperationLease,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
+    let kind = validate_outbound_private_message(&raw_json)?;
+    storage
+        .transaction(move |tx| {
+            require_peer_link_operation_lease(tx, lease)?;
             let record = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 counterparty,
                 kind,
@@ -92,13 +203,19 @@ pub(crate) async fn claim_next_outbound_private_message<S>(
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
     stale_before: DateTime<Utc>,
+    failed_retry_after: DateTime<Utc>,
 ) -> Result<Option<OutboundPrivateMessageRecord>>
 where
     S: StorageAdapter,
 {
     storage
         .transaction(|tx| {
-            Ok(tx.claim_next_outbound_private_message(counterparty, now, stale_before))
+            Ok(tx.claim_next_outbound_private_message(
+                counterparty,
+                now,
+                stale_before,
+                failed_retry_after,
+            ))
         })
         .await
 }
@@ -108,6 +225,7 @@ pub(crate) async fn claim_next_outbound_private_message_with_peer_lease<S>(
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
     stale_before: DateTime<Utc>,
+    failed_retry_after: DateTime<Utc>,
     lease: PeerLinkOperationLease,
 ) -> Result<Option<OutboundPrivateMessageRecord>>
 where
@@ -116,7 +234,12 @@ where
     storage
         .transaction(move |tx| {
             require_peer_link_operation_lease(tx, &lease)?;
-            Ok(tx.claim_next_outbound_private_message(counterparty, now, stale_before))
+            Ok(tx.claim_next_outbound_private_message(
+                counterparty,
+                now,
+                stale_before,
+                failed_retry_after,
+            ))
         })
         .await
 }
@@ -149,6 +272,17 @@ pub(crate) fn mark_outbound_invalid(
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::Invalid;
+    record.updated_at = now;
+    record.last_error = Some(error);
+    record
+}
+
+pub(crate) fn mark_outbound_recovery_required(
+    mut record: OutboundPrivateMessageRecord,
+    error: String,
+    now: DateTime<Utc>,
+) -> OutboundPrivateMessageRecord {
+    record.status = OutboundPrivateMessageStatus::RecoveryRequired;
     record.updated_at = now;
     record.last_error = Some(error);
     record
@@ -247,200 +381,4 @@ fn private_application_message(
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::{TimeZone, Utc};
-
-    use super::*;
-    use crate::storage::InMemoryStorage;
-
-    fn timestamp() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
-    }
-
-    fn counterparty() -> PubkyPublicKey {
-        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
-    }
-
-    fn raw_private_list() -> String {
-        r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#.into()
-    }
-
-    #[tokio::test]
-    async fn test_enqueue_private_message_stores_pending_record() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        let record = enqueue_private_message(
-            &storage,
-            counterparty.clone(),
-            raw_private_list(),
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        let queued = queued_outbound_private_messages(&storage, &counterparty)
-            .await
-            .unwrap();
-        assert_eq!(record.outbound_message_id, 0);
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].status, OutboundPrivateMessageStatus::Pending);
-    }
-
-    #[tokio::test]
-    async fn test_enqueue_private_message_rejects_unknown_kind() {
-        let result = enqueue_private_message(
-            &InMemoryStorage::new(),
-            counterparty(),
-            r#"{"version":1,"kind":"paykit.unknown"}"#.into(),
-            timestamp(),
-        )
-        .await;
-
-        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
-    }
-
-    #[tokio::test]
-    async fn test_enqueue_private_message_rejects_malformed_known_body() {
-        let result = enqueue_private_message(
-            &InMemoryStorage::new(),
-            counterparty(),
-            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"../bad":"ln"}}"#
-                .into(),
-            timestamp(),
-        )
-        .await;
-
-        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
-    }
-
-    #[test]
-    fn test_validate_queued_outbound_private_message_rejects_malformed_known_body() {
-        let record = OutboundPrivateMessageRecord {
-            outbound_message_id: 7,
-            counterparty: counterparty(),
-            kind: "paykit.private_payment_list".into(),
-            raw_json:
-                r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"../bad":"ln"}}"#
-                    .into(),
-            status: OutboundPrivateMessageStatus::Pending,
-            attempt_count: 0,
-            created_at: timestamp(),
-            updated_at: timestamp(),
-            last_attempt_at: None,
-            sent_at: None,
-            last_error: None,
-        };
-
-        let result = validate_queued_outbound_private_message(&record);
-
-        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
-    }
-
-    #[tokio::test]
-    async fn test_claim_next_outbound_private_message_blocks_until_stale() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        enqueue_private_message(
-            &storage,
-            counterparty.clone(),
-            raw_private_list(),
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        let claimed = claim_next_outbound_private_message(
-            &storage,
-            &counterparty,
-            timestamp(),
-            timestamp() - chrono::Duration::seconds(60),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
-        assert_eq!(claimed.attempt_count, 1);
-
-        let duplicate_claim = claim_next_outbound_private_message(
-            &storage,
-            &counterparty,
-            timestamp(),
-            timestamp() - chrono::Duration::seconds(60),
-        )
-        .await
-        .unwrap();
-        assert!(duplicate_claim.is_none());
-
-        let stale_claim = claim_next_outbound_private_message(
-            &storage,
-            &counterparty,
-            timestamp() + chrono::Duration::seconds(61),
-            timestamp(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(stale_claim.outbound_message_id, claimed.outbound_message_id);
-        assert_eq!(stale_claim.attempt_count, 2);
-    }
-
-    #[tokio::test]
-    async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        enqueue_private_message(
-            &storage,
-            counterparty.clone(),
-            raw_private_list(),
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        let first_lease = storage
-            .transaction({
-                let counterparty = counterparty.clone();
-                move |tx| {
-                    Ok(tx
-                        .claim_peer_link_operation(
-                            &counterparty,
-                            timestamp(),
-                            timestamp() + chrono::Duration::seconds(10),
-                        )
-                        .unwrap())
-                }
-            })
-            .await
-            .unwrap();
-        storage
-            .transaction({
-                let counterparty = counterparty.clone();
-                move |tx| {
-                    tx.claim_peer_link_operation(
-                        &counterparty,
-                        timestamp() + chrono::Duration::seconds(11),
-                        timestamp() + chrono::Duration::seconds(71),
-                    );
-                    Ok(())
-                }
-            })
-            .await
-            .unwrap();
-
-        let result = claim_next_outbound_private_message_with_peer_lease(
-            &storage,
-            &counterparty,
-            timestamp() + chrono::Duration::seconds(12),
-            timestamp(),
-            first_lease,
-        )
-        .await;
-
-        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-        let queued = queued_outbound_private_messages(&storage, &counterparty)
-            .await
-            .unwrap();
-        assert_eq!(queued[0].status, OutboundPrivateMessageStatus::Pending);
-        assert_eq!(queued[0].attempt_count, 0);
-    }
-}
+mod tests;

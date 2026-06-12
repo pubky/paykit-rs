@@ -36,6 +36,8 @@ pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit/v0/private";
 pub const PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX: &str =
     "/pub/paykit/v0/encrypted-link-recovery";
 
+const LIST_PAGE_LIMIT: u16 = 100;
+
 /// Writes or updates a payment endpoint document in the authenticated Pubky session.
 #[instrument(skip(session, payload), fields(identifier = %identifier))]
 pub async fn upsert_payment_endpoint(
@@ -68,13 +70,19 @@ pub async fn delete_payment_endpoint(
 ) -> Result<()> {
     let path = payment_endpoint_path(identifier);
     debug!(path = %path, "deleting payment endpoint from Pubky storage");
-    session.storage().delete(path).await.map_err(|err| {
-        error!(error = %err, "failed to delete payment endpoint");
-        PaykitError::Transport {
-            context: "delete endpoint".into(),
-            source: err.into(),
+    match session.storage().delete(path).await {
+        Ok(_) => {}
+        Err(err) if is_not_found(&err) => {
+            debug!("payment endpoint already absent");
         }
-    })?;
+        Err(err) => {
+            error!(error = %err, "failed to delete payment endpoint");
+            return Err(PaykitError::Transport {
+                context: "delete endpoint".into(),
+                source: err.into(),
+            });
+        }
+    }
     debug!("payment endpoint removed successfully");
     Ok(())
 }
@@ -214,38 +222,61 @@ async fn list_resources(
     label: &str,
 ) -> Result<Vec<PubkyResource>> {
     trace!("listing directory resources");
-    let builder = match storage.list(&addr) {
-        Ok(builder) => builder,
-        Err(err) if is_not_found(&err) => {
-            debug!("directory not found, returning empty list");
-            return Ok(Vec::new());
-        }
-        Err(err) => {
-            error!(error = %err, "failed to create list builder");
-            return Err(PaykitError::Transport {
-                context: label.to_string(),
-                source: err.into(),
-            });
-        }
-    };
+    let mut resources = Vec::new();
+    let mut cursor = None::<String>;
 
-    match builder.shallow(true).send().await {
-        Ok(resources) => {
-            debug!(count = resources.len(), "directory resources listed");
-            Ok(resources)
+    loop {
+        let mut builder = match storage.list(&addr) {
+            Ok(builder) => builder.shallow(true).limit(LIST_PAGE_LIMIT),
+            Err(err) if is_not_found(&err) => {
+                debug!("directory not found, returning listed resources");
+                return Ok(resources);
+            }
+            Err(err) => {
+                error!(error = %err, "failed to create list builder");
+                return Err(PaykitError::Transport {
+                    context: label.to_string(),
+                    source: err.into(),
+                });
+            }
+        };
+
+        if let Some(cursor) = cursor.as_deref() {
+            builder = builder.cursor(cursor);
         }
-        Err(err) if is_not_found(&err) => {
-            debug!("directory not found during send, returning empty list");
-            Ok(Vec::new())
+
+        let page = match builder.send().await {
+            Ok(page) => page,
+            Err(err) if is_not_found(&err) => {
+                debug!("directory not found during send, returning listed resources");
+                return Ok(resources);
+            }
+            Err(err) => {
+                error!(error = %err, "list send failed");
+                return Err(PaykitError::Transport {
+                    context: format!("{label} send failed"),
+                    source: err.into(),
+                });
+            }
+        };
+
+        if page.is_empty() {
+            break;
         }
-        Err(err) => {
-            error!(error = %err, "list send failed");
-            Err(PaykitError::Transport {
-                context: format!("{label} send failed"),
-                source: err.into(),
-            })
+
+        let page_len = page.len();
+        cursor = page
+            .last()
+            .map(|resource| format!("{}{}", resource.owner.z32(), resource.path.as_str()));
+        resources.extend(page);
+
+        if page_len < LIST_PAGE_LIMIT as usize {
+            break;
         }
     }
+
+    debug!(count = resources.len(), "directory resources listed");
+    Ok(resources)
 }
 
 fn is_not_found(err: &PubkyError) -> bool {

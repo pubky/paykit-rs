@@ -3,6 +3,7 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use paykit_lib::PublicKey;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// Pubky public key string used by SDK records.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -68,8 +69,9 @@ impl From<PubkyPublicKey> for String {
 
 /// Pubky capability state visible to Paykit workflows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PubkyIdentityCapability {
-    /// No local Pubky session is available.
+    /// No Pubky identity is initialized, or explicit sign-out completed.
     SignedOut,
     /// Public Pubky operations may work, but private links cannot be established.
     PublicOnly,
@@ -93,14 +95,22 @@ impl PubkyLocalSecretKey {
     }
 
     /// Consume the wrapper and return the secret key bytes.
-    pub fn into_inner(self) -> [u8; 32] {
-        self.0
+    pub fn into_inner(mut self) -> [u8; 32] {
+        let bytes = self.0;
+        self.0.zeroize();
+        bytes
     }
 }
 
 impl fmt::Debug for PubkyLocalSecretKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PubkyLocalSecretKey(<redacted>)")
+    }
+}
+
+impl Drop for PubkyLocalSecretKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -180,51 +190,26 @@ pub struct IdentityStatus {
     pub public_key: Option<PubkyPublicKey>,
     /// Current Pubky capability.
     pub capability: PubkyIdentityCapability,
-    /// Whether private Paykit workflows can run.
+    /// Whether live Pubky session access is available for this identity.
+    pub live_session_available: bool,
+    /// Whether private Paykit workflows can run with the live session.
     pub private_link_capable: bool,
 }
 
-impl From<&IdentityState> for IdentityStatus {
-    fn from(state: &IdentityState) -> Self {
+impl IdentityStatus {
+    pub(crate) fn from_state(
+        state: &IdentityState,
+        live_session_available: bool,
+        private_link_capable: bool,
+    ) -> Self {
         Self {
             public_key: state.public_key.clone(),
             capability: state.capability,
-            private_link_capable: state.capability == PubkyIdentityCapability::PrivateLinkCapable,
+            live_session_available,
+            private_link_capable,
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_pubky_local_secret_key_debug_is_redacted() {
-        let key = PubkyLocalSecretKey::new([7; 32]);
-
-        assert_eq!(format!("{key:?}"), "PubkyLocalSecretKey(<redacted>)");
-    }
-
-    #[test]
-    fn test_pubky_public_key_validates_and_round_trips_z32() {
-        let public_key = pubky::Keypair::random().public_key();
-        let wrapped = PubkyPublicKey::new(public_key.z32()).unwrap();
-
-        assert_eq!(wrapped.to_public_key().unwrap(), public_key);
-        assert_eq!(wrapped.as_str(), public_key.z32());
-    }
-
-    #[test]
-    fn test_pubky_public_key_rejects_invalid_text() {
-        let result = PubkyPublicKey::new("pk-peer");
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_pubky_public_key_deserialization_validates() {
-        let result = serde_json::from_str::<PubkyPublicKey>(r#""pk-peer""#);
-
-        assert!(result.is_err());
-    }
-}
+mod tests;

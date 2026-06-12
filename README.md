@@ -76,7 +76,7 @@ Paykit can describe many kinds of payment details as long as payer and payee
 understand the same Payment Endpoint Identifiers. The recommended identifier
 convention is documented in
 [specs/payment-endpoint-identifier.md](specs/payment-endpoint-identifier.md).
-The convention is recommended for interoperability, but the current library only
+The convention is recommended for interoperability, but the library only
 enforces structural path-safety validation.
 
 ### Public Payment Lists
@@ -186,9 +186,9 @@ Payment processors can use Paykit to expose the Payment Endpoints they support,
 retrieve Payment Lists for payees, and apply their own Payment Selection Policy
 before executing a payment through their existing infrastructure.
 
-### Current Boundaries
+### Boundaries
 
-`paykit-lib` and the current platform bindings do not:
+`paykit-lib` and platform bindings do not:
 
 - execute payments
 - choose the final Payment Endpoint for a payer
@@ -201,10 +201,10 @@ before executing a payment through their existing infrastructure.
 
 `paykit-sdk` is the Rust runtime layer for SDK-managed local
 state such as endpoint sync, Encrypted Link snapshots, private stream intake,
-Private Payment Lists, Paykit Profiles, local Contact Records, and contact
-payment resolution. Payment execution, settlement detection, product UI, and
-platform session storage remain with the integrating application and its
-adapters.
+Private Payment Lists, Paykit Profiles, Paykit Blob helpers, read-only Pubky
+app profile/follows helpers, local Contact Records, and contact payment resolution. Payment
+execution, settlement detection, product UI, and platform session storage
+remain with the integrating application and its adapters.
 
 ## Library Crates
 
@@ -258,8 +258,8 @@ message.
 
 #### Receive Private Application Messages
 
-`EncryptedLink::receive_private_application_messages` returns the currently
-available Private Application Message batch in send order. SDK/runtime code should persist
+`EncryptedLink::receive_private_application_messages` returns the available
+Private Application Message batch in send order. SDK/runtime code should persist
 and route that raw stream, then use stateless parsers such as
 `parse_private_payment_list_json`, `parse_payment_request_event_message`,
 and `parse_receipt_access_event_message`. The raw payload is preserved even
@@ -304,7 +304,7 @@ snapshot is not, replay is expected; Event Messages should be deduped by
 `event_id`, while Receipt Access can also be reconciled by Receipt ID and caller
 receipt state.
 
-Current v0.2 private Paykit wire messages are closed-world JSON objects:
+Paykit v0.2 private wire messages are closed-world JSON objects:
 unknown fields are rejected unless a field is explicitly defined as an open JSON
 object, such as Payment Request `metadata`, Payment Proof `proof`, or Receipt
 Metadata.

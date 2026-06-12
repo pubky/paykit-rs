@@ -6,13 +6,14 @@ use serde::{Deserialize, Serialize};
 use crate::{
     storage::{
         require_peer_link_operation_lease, EncryptedLinkStateRecord, LinkedPeerRecord,
-        PeerLinkOperationLease, StorageAdapter,
+        PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
     PaykitSdkError, PubkyPublicKey, Result,
 };
 
 /// Local role for an in-progress Encrypted Link Handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EncryptedLinkHandshakeRole {
     /// Local peer initiated the handshake.
     Initiator,
@@ -22,11 +23,10 @@ pub enum EncryptedLinkHandshakeRole {
 
 /// Local relationship state for a counterparty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum LinkedPeerState {
-    /// The counterparty is not known locally.
-    Unknown,
-    /// The counterparty is known but no active Encrypted Link exists.
-    Known,
+    /// The SDK tracks this counterparty, but no active Encrypted Link exists.
+    NotLinked,
     /// An Encrypted Link Handshake is in progress.
     Linking,
     /// An Encrypted Link is established.
@@ -70,12 +70,13 @@ where
 fn default_linked_peer(counterparty: PubkyPublicKey) -> LinkedPeerRecord {
     LinkedPeerRecord {
         counterparty,
-        state: LinkedPeerState::Unknown,
+        state: LinkedPeerState::NotLinked,
         last_sync_at: None,
         last_private_receive_at: None,
         failure_count: 0,
         local_recovery_attempt_id: None,
         local_recovery_marker_created_at: None,
+        local_recovery_marker_last_error: None,
         remote_recovery_attempt_id: None,
         remote_recovery_marker_observed_at: None,
     }
@@ -107,7 +108,7 @@ fn report_current_link_state(
             generation: link_state.generation,
             handshake_role: None,
         }
-    } else {
+    } else if link_state.handshake_snapshot.is_some() {
         peer.state = LinkedPeerState::Linking;
         peer.last_sync_at = Some(now);
         peer.failure_count = 0;
@@ -116,6 +117,17 @@ fn report_current_link_state(
             state: LinkedPeerState::Linking,
             generation: link_state.generation,
             handshake_role: link_state.handshake_role,
+        }
+    } else {
+        peer.state = LinkedPeerState::RecoveryRequired;
+        if peer.last_sync_at.is_none() {
+            peer.last_sync_at = Some(now);
+        }
+        LinkedPeerHandshakeReport {
+            counterparty,
+            state: LinkedPeerState::RecoveryRequired,
+            generation: link_state.generation,
+            handshake_role: None,
         }
     }
 }
@@ -161,6 +173,10 @@ where
         .transaction(move |tx| {
             if let Some(lease) = lease.as_ref() {
                 require_peer_link_operation_lease(tx, lease)?;
+            } else if tx.peer_link_operation_lease(&counterparty).is_some() {
+                return Err(PaykitSdkError::Policy(format!(
+                    "peer link operation already in progress for counterparty {counterparty}"
+                )));
             }
             let mut record = tx
                 .linked_peer(&counterparty)
@@ -174,7 +190,7 @@ where
             record.last_sync_at = Some(now);
             if matches!(
                 record.state,
-                LinkedPeerState::Known | LinkedPeerState::Linking | LinkedPeerState::Linked
+                LinkedPeerState::NotLinked | LinkedPeerState::Linking | LinkedPeerState::Linked
             ) {
                 record.failure_count = 0;
             }
@@ -197,6 +213,63 @@ where
     mark_recovery_required_inner(storage, counterparty, Some(lease), now).await
 }
 
+pub(crate) fn mark_recovery_required_in_transaction<T>(
+    tx: &mut T,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+) -> Result<RecoveryRequiredMark>
+where
+    T: StorageTransaction + ?Sized,
+{
+    mark_recovery_required_in_transaction_inner(tx, counterparty, now, true)
+}
+
+pub(crate) fn mark_recovery_required_for_marker_in_transaction<T>(
+    tx: &mut T,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+) -> Result<RecoveryRequiredMark>
+where
+    T: StorageTransaction + ?Sized,
+{
+    mark_recovery_required_in_transaction_inner(tx, counterparty, now, false)
+}
+
+fn mark_recovery_required_in_transaction_inner<T>(
+    tx: &mut T,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+    bump_existing_episode: bool,
+) -> Result<RecoveryRequiredMark>
+where
+    T: StorageTransaction + ?Sized,
+{
+    let mut record = tx
+        .linked_peer(counterparty)
+        .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
+    ensure_not_blocked(&record)?;
+    let new_episode = record.state != LinkedPeerState::RecoveryRequired;
+    record.state = LinkedPeerState::RecoveryRequired;
+    if new_episode || record.last_sync_at.is_none() {
+        record.last_sync_at = Some(now);
+    }
+    if new_episode || bump_existing_episode {
+        record.failure_count = record.failure_count.saturating_add(1);
+    }
+    tx.save_linked_peer(record);
+    if let Some(link_state) = tx.encrypted_link_state(counterparty) {
+        tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+            counterparty: counterparty.clone(),
+            link_snapshot: None,
+            handshake_snapshot: None,
+            handshake_role: None,
+            generation: link_state.generation.saturating_add(1),
+            checkpointed_at: now,
+        });
+    }
+    Ok(RecoveryRequiredMark { new_episode })
+}
+
 async fn mark_recovery_required_inner<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -210,29 +283,12 @@ where
         .transaction(move |tx| {
             if let Some(lease) = lease.as_ref() {
                 require_peer_link_operation_lease(tx, lease)?;
+            } else if tx.peer_link_operation_lease(&counterparty).is_some() {
+                return Err(PaykitSdkError::Policy(format!(
+                    "peer link operation already in progress for counterparty {counterparty}"
+                )));
             }
-            let mut record = tx
-                .linked_peer(&counterparty)
-                .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
-            ensure_not_blocked(&record)?;
-            let new_episode = record.state != LinkedPeerState::RecoveryRequired;
-            record.state = LinkedPeerState::RecoveryRequired;
-            if new_episode || record.last_sync_at.is_none() {
-                record.last_sync_at = Some(now);
-            }
-            record.failure_count = record.failure_count.saturating_add(1);
-            tx.save_linked_peer(record.clone());
-            if let Some(link_state) = tx.encrypted_link_state(&counterparty) {
-                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
-                    counterparty: counterparty.clone(),
-                    link_snapshot: None,
-                    handshake_snapshot: None,
-                    handshake_role: None,
-                    generation: link_state.generation.saturating_add(1),
-                    checkpointed_at: now,
-                });
-            }
-            Ok(RecoveryRequiredMark { new_episode })
+            mark_recovery_required_in_transaction(tx, &counterparty, now)
         })
         .await
 }
@@ -578,335 +634,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::{TimeZone, Utc};
-
-    use super::*;
-    use crate::storage::InMemoryStorage;
-
-    fn timestamp() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap()
-    }
-
-    fn counterparty() -> PubkyPublicKey {
-        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
-    }
-
-    #[tokio::test]
-    async fn test_save_link_handshake_state_marks_peer_linking() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-
-        let report = save_link_handshake_state(
-            &storage,
-            counterparty.clone(),
-            EncryptedLinkHandshakeRole::Initiator,
-            vec![1, 2, 3],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(report.state, LinkedPeerState::Linking);
-        assert_eq!(
-            report.handshake_role,
-            Some(EncryptedLinkHandshakeRole::Initiator)
-        );
-        let peer = load_linked_peer(&storage, &counterparty)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(peer.state, LinkedPeerState::Linking);
-        let link_state = load_encrypted_link_state(&storage, &counterparty)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(link_state.handshake_snapshot, Some(vec![1, 2, 3]));
-        assert!(link_state.link_snapshot.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_save_linked_peer_link_state_clears_pending_handshake() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        save_link_handshake_state(
-            &storage,
-            counterparty.clone(),
-            EncryptedLinkHandshakeRole::Responder,
-            vec![1, 2, 3],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        let report =
-            save_linked_peer_link_state(&storage, counterparty.clone(), vec![4, 5, 6], timestamp())
-                .await
-                .unwrap();
-
-        assert_eq!(report.state, LinkedPeerState::Linked);
-        assert_eq!(report.handshake_role, None);
-        assert_eq!(report.generation, 1);
-        let link_state = load_encrypted_link_state(&storage, &counterparty)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(link_state.link_snapshot, Some(vec![4, 5, 6]));
-        assert!(link_state.handshake_snapshot.is_none());
-        assert!(link_state.handshake_role.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_mark_recovery_required_clears_active_link_snapshot() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        save_linked_peer_link_state(&storage, counterparty.clone(), vec![4, 5, 6], timestamp())
-            .await
-            .unwrap();
-
-        let mark = mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
-            .await
-            .unwrap();
-
-        assert!(mark.new_episode);
-        let peer = load_linked_peer(&storage, &counterparty)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
-        let link_state = load_encrypted_link_state(&storage, &counterparty)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(link_state.link_snapshot.is_none());
-        assert!(link_state.handshake_snapshot.is_none());
-        assert!(link_state.handshake_role.is_none());
-        assert_eq!(link_state.generation, 1);
-    }
-
-    #[tokio::test]
-    async fn test_mark_recovery_required_clears_handshake_snapshot() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        save_link_handshake_state(
-            &storage,
-            counterparty.clone(),
-            EncryptedLinkHandshakeRole::Responder,
-            vec![1, 2, 3],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        let mark = mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
-            .await
-            .unwrap();
-
-        assert!(mark.new_episode);
-        let peer = load_linked_peer(&storage, &counterparty)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
-        let link_state = load_encrypted_link_state(&storage, &counterparty)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(link_state.link_snapshot.is_none());
-        assert!(link_state.handshake_snapshot.is_none());
-        assert!(link_state.handshake_role.is_none());
-        assert_eq!(link_state.generation, 1);
-    }
-
-    #[tokio::test]
-    async fn test_save_link_handshake_state_rejects_blocked_peer() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        save_linked_peer_state(
-            &storage,
-            counterparty.clone(),
-            LinkedPeerState::Blocked,
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        let result = save_link_handshake_state(
-            &storage,
-            counterparty,
-            EncryptedLinkHandshakeRole::Initiator,
-            vec![1, 2, 3],
-            timestamp(),
-        )
-        .await;
-
-        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-    }
-
-    #[tokio::test]
-    async fn test_generation_checked_handshake_save_keeps_newer_link() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        save_link_handshake_state(
-            &storage,
-            counterparty.clone(),
-            EncryptedLinkHandshakeRole::Initiator,
-            vec![1, 2, 3],
-            timestamp(),
-        )
-        .await
-        .unwrap();
-        save_linked_peer_link_state(&storage, counterparty.clone(), vec![4, 5, 6], timestamp())
-            .await
-            .unwrap();
-
-        let report = save_link_handshake_state_if_generation(
-            &storage,
-            counterparty.clone(),
-            EncryptedLinkHandshakeRole::Initiator,
-            vec![7, 8, 9],
-            0,
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(report.state, LinkedPeerState::Linked);
-        assert_eq!(report.generation, 1);
-        let link_state = load_encrypted_link_state(&storage, &counterparty)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(link_state.link_snapshot, Some(vec![4, 5, 6]));
-        assert!(link_state.handshake_snapshot.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_lease_checked_handshake_save_rejects_stale_lease() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-
-        let first_lease = storage
-            .transaction({
-                let counterparty = counterparty.clone();
-                move |tx| {
-                    Ok(tx.claim_peer_link_operation(
-                        &counterparty,
-                        timestamp(),
-                        timestamp() + chrono::Duration::seconds(10),
-                    ))
-                }
-            })
-            .await
-            .unwrap()
-            .unwrap();
-        let active_lease = storage
-            .transaction({
-                let counterparty = counterparty.clone();
-                move |tx| {
-                    Ok(tx.claim_peer_link_operation(
-                        &counterparty,
-                        timestamp() + chrono::Duration::seconds(11),
-                        timestamp() + chrono::Duration::seconds(71),
-                    ))
-                }
-            })
-            .await
-            .unwrap()
-            .unwrap();
-
-        let result = save_link_handshake_state_with_lease(
-            &storage,
-            counterparty.clone(),
-            EncryptedLinkHandshakeRole::Initiator,
-            vec![1, 2, 3],
-            first_lease,
-            timestamp() + chrono::Duration::seconds(12),
-        )
-        .await;
-
-        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-        let link_state = load_encrypted_link_state(&storage, &counterparty)
-            .await
-            .unwrap();
-        assert!(link_state.is_none());
-        assert_eq!(
-            storage
-                .transaction({
-                    let counterparty = counterparty.clone();
-                    move |tx| Ok(tx.peer_link_operation_lease(&counterparty))
-                })
-                .await
-                .unwrap(),
-            Some(active_lease)
-        );
-    }
-
-    #[tokio::test]
-    async fn test_lease_checked_recovery_rejects_stale_lease() {
-        let storage = InMemoryStorage::new();
-        let counterparty = counterparty();
-        save_linked_peer_state(
-            &storage,
-            counterparty.clone(),
-            LinkedPeerState::Linked,
-            timestamp(),
-        )
-        .await
-        .unwrap();
-
-        let first_lease = storage
-            .transaction({
-                let counterparty = counterparty.clone();
-                move |tx| {
-                    Ok(tx.claim_peer_link_operation(
-                        &counterparty,
-                        timestamp(),
-                        timestamp() + chrono::Duration::seconds(10),
-                    ))
-                }
-            })
-            .await
-            .unwrap()
-            .unwrap();
-        let active_lease = storage
-            .transaction({
-                let counterparty = counterparty.clone();
-                move |tx| {
-                    Ok(tx.claim_peer_link_operation(
-                        &counterparty,
-                        timestamp() + chrono::Duration::seconds(11),
-                        timestamp() + chrono::Duration::seconds(71),
-                    ))
-                }
-            })
-            .await
-            .unwrap()
-            .unwrap();
-
-        let result = mark_recovery_required_with_lease(
-            &storage,
-            counterparty.clone(),
-            first_lease,
-            timestamp() + chrono::Duration::seconds(12),
-        )
-        .await;
-
-        assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-        let peer = load_linked_peer(&storage, &counterparty)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(peer.state, LinkedPeerState::Linked);
-        assert_eq!(
-            storage
-                .transaction({
-                    let counterparty = counterparty.clone();
-                    move |tx| Ok(tx.peer_link_operation_lease(&counterparty))
-                })
-                .await
-                .unwrap(),
-            Some(active_lease)
-        );
-    }
-}
+mod tests;

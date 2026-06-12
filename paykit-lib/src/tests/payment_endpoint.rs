@@ -104,13 +104,35 @@ async fn list_reflects_additions_and_removals() {
 }
 
 #[tokio::test]
-async fn removing_missing_endpoint_is_error() {
+async fn list_fetches_multiple_pages() {
+    let setup = TestSetup::new().await;
+    let mut expected = HashMap::new();
+
+    for index in 0..105 {
+        let identifier = PaymentEndpointIdentifier::new(format!("endpoint-{index:03}")).unwrap();
+        let payload = PaymentEndpointPayload::new(format!("payload-{index:03}"));
+        set_payment_endpoint(&setup.session, identifier.clone(), payload.clone())
+            .await
+            .unwrap();
+        expected.insert(identifier, payload);
+    }
+
+    let list = get_payment_list(&setup.public_storage, &setup.public_key)
+        .await
+        .unwrap();
+    assert_eq!(list.payment_endpoints, expected);
+
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn removing_missing_endpoint_is_idempotent() {
     let setup = TestSetup::new().await;
     let method = PaymentEndpointIdentifier::new("unused").unwrap();
 
     remove_payment_endpoint(&setup.session, method)
         .await
-        .expect_err("removing non-existent endpoint should fail");
+        .expect("removing non-existent endpoint should be idempotent");
 
     setup.raw_session.signout().await.unwrap();
 }

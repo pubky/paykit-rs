@@ -210,7 +210,7 @@ async fn demo(session: &pubky::PubkySession) -> paykit_lib::Result<()> {
 }
 ```
 
-**Note:** Removing a non-existent Payment Endpoint returns the error surfaced by the Pubky SDK as `PaykitError::Transport`.
+**Note:** Removing a non-existent Payment Endpoint succeeds, so cleanup can be retried safely.
 
 #### `get_payment_list`
 
@@ -349,10 +349,14 @@ Receipt Location is a path on the issuer's homeserver, not a complete Pubky reso
 
 - `prepare_receipt(link, draft: ReceiptDraft) -> Result<PreparedReceipt>`
   Builds a canonical local `Receipt` from the caller's `ReceiptDraft`, fills in the recipient public key from `link`, generates a fresh `ReceiptId` when the draft does not provide one, copies optional Payment Request ID and Billing Period correlation into the Receipt and Receipt Access descriptor, generates a fresh `ReceiptDecryptionKey`, encrypts the Receipt into an Encrypted Receipt, and returns the matching `ReceiptAccess` descriptor without storing or sending anything. Receipt Metadata is a caller-defined JSON object.
+- `prepare_receipt_for_recipient(recipient_public_key, draft: ReceiptDraft) -> Result<PreparedReceipt>`
+  Same as `prepare_receipt`, but takes the recipient public key directly so stateful runtimes can prepare receipt issuance before restoring or sending over an Encrypted Link.
 - `store_prepared_receipt(session, prepared: &PreparedReceipt) -> Result<()>`
   Stores the Encrypted Receipt from a prepared issuance at its Receipt Location.
 - `send_receipt_access(link, access: &ReceiptAccess) -> Result<()>`
   Sends a prepared Receipt Access descriptor over Noise. This can be retried with the same descriptor if storage already succeeded.
+- `serialize_receipt_access_json(access: &ReceiptAccess) -> Result<String>`
+  Returns the canonical Receipt Access Event Message JSON for durable outbound queues.
 - `parse_receipt_access_event_message(message: &PrivateApplicationMessage) -> Option<ReceiptAccessEventMessage>`
   Stateless parser for Receipt Access events from the raw Private Application Message stream. Recognized but malformed Receipt Access events are returned with a validation error so callers can persist the raw payload before advancing their durable checkpoint.
 - `parse_receipt_access_json(json: &str) -> Result<ReceiptAccess>`
