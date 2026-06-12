@@ -391,3 +391,6 @@ impl fmt::Debug for PaymentEndpointReservationRecord {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests;

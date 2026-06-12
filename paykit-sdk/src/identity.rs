@@ -210,3 +210,6 @@ impl IdentityStatus {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

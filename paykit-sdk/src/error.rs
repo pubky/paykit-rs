@@ -78,3 +78,6 @@ impl From<paykit_lib::PaykitError> for PaykitSdkError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

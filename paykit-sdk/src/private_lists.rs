@@ -125,3 +125,6 @@ pub(crate) fn derive_private_payment_list_view(
         last_refresh_at: Some(item.received_at),
     }))
 }
+
+#[cfg(test)]
+mod tests;

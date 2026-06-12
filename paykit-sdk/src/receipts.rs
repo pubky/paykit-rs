@@ -937,3 +937,6 @@ fn is_not_found(err: &PubkyError) -> bool {
             if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
     )
 }
+
+#[cfg(test)]
+mod tests;

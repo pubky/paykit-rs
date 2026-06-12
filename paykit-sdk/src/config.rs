@@ -184,3 +184,6 @@ fn default_profile_namespace() -> String {
 fn default_outbound_private_retry_backoff() -> Duration {
     Duration::from_secs(30)
 }
+
+#[cfg(test)]
+mod tests;

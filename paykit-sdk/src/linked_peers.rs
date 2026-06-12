@@ -632,3 +632,6 @@ where
         .transaction(|tx| Ok(tx.encrypted_link_state(counterparty)))
         .await
 }
+
+#[cfg(test)]
+mod tests;
