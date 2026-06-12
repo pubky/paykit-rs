@@ -750,3 +750,6 @@ fn normalize_label(label: Option<String>) -> Option<String> {
         }
     })
 }
+
+#[cfg(test)]
+mod tests;

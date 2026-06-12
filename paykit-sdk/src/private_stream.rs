@@ -334,3 +334,6 @@ pub(crate) fn payload_hash(raw_json: &str) -> String {
     let digest = Sha256::digest(raw_json.as_bytes());
     format!("sha256:{digest:x}")
 }
+
+#[cfg(test)]
+mod tests;
