@@ -1,6 +1,7 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 use crate::{identity::PubkyPublicKey, PubkySessionAccess, Result};
 
@@ -35,6 +36,33 @@ pub trait PaymentAdapter: Send + Sync {
         scope: ReceivingDetailScope,
     ) -> Result<Vec<ReceivingDetail>>;
 
+    /// Reserve receiving details for a counterparty's Private Payment List.
+    ///
+    /// Returning `None` means this adapter does not handle reservations and the
+    /// SDK should use regular receiving details.
+    ///
+    /// Returning `Some` means the returned reservations are the complete set of
+    /// private receiving details to share for that counterparty.
+    ///
+    /// Reservation happens in the payment adapter before the SDK can persist
+    /// linked records. Adapters that return reservations should make them
+    /// idempotent, expiring, or otherwise safe to abandon if the process stops
+    /// before the SDK queues a Private Payment List.
+    async fn reserve_receiving_details(
+        &self,
+        _request: &PaymentEndpointReservationRequest,
+    ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
+        Ok(None)
+    }
+
+    /// Release a previously reserved receiving detail, when supported.
+    async fn release_receiving_detail_reservation(
+        &self,
+        _release: &PaymentEndpointReservationRelease,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Rank and evaluate candidate endpoints for a payment.
     async fn select_payment_endpoint(
         &self,
@@ -60,6 +88,13 @@ pub enum ReceivingDetailScope {
     },
 }
 
+/// Request passed to the payment adapter for receiving-detail reservation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentEndpointReservationRequest {
+    /// Counterparty whose Private Payment List will receive the reserved details.
+    pub counterparty: PubkyPublicKey,
+}
+
 /// Payment-method-specific receiving detail returned by an adapter.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceivingDetail {
@@ -74,6 +109,63 @@ impl fmt::Debug for ReceivingDetail {
         f.debug_struct("ReceivingDetail")
             .field("identifier", &self.identifier)
             .field("payload", &redacted_payload(&self.payload))
+            .finish()
+    }
+}
+
+/// Receiving detail reserved by the payment adapter.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentEndpointReservation {
+    /// Adapter-stable reservation id.
+    pub reservation_id: String,
+    /// Reserved receiving detail.
+    pub receiving_detail: ReceivingDetail,
+    /// Optional reservation expiry.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Adapter-provided attribution metadata.
+    pub attribution: HashMap<String, String>,
+}
+
+/// Request passed to release a receiving-detail reservation.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentEndpointReservationRelease {
+    /// Adapter-stable reservation id.
+    pub reservation_id: String,
+    /// Counterparty the reservation was intended for.
+    pub counterparty: PubkyPublicKey,
+    /// Payment Endpoint Identifier.
+    pub identifier: String,
+    /// Hash of the reserved endpoint payload.
+    pub payload_hash: String,
+    /// Adapter-provided attribution metadata from the reservation.
+    pub attribution: HashMap<String, String>,
+}
+
+impl fmt::Debug for PaymentEndpointReservationRelease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaymentEndpointReservationRelease")
+            .field("reservation_id", &self.reservation_id)
+            .field("counterparty", &self.counterparty)
+            .field("identifier", &self.identifier)
+            .field("payload_hash", &self.payload_hash)
+            .field(
+                "attribution",
+                &format_args!("<redacted:{} fields>", self.attribution.len()),
+            )
+            .finish()
+    }
+}
+
+impl fmt::Debug for PaymentEndpointReservation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaymentEndpointReservation")
+            .field("reservation_id", &self.reservation_id)
+            .field("receiving_detail", &self.receiving_detail)
+            .field("expires_at", &self.expires_at)
+            .field(
+                "attribution",
+                &format_args!("<redacted:{} fields>", self.attribution.len()),
+            )
             .finish()
     }
 }

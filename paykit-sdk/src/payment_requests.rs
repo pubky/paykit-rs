@@ -315,7 +315,7 @@ impl PaymentRequestRecord {
 /// newest-first by the last applied stream item. Malformed recognized Payment
 /// Request events without a valid `payment_request_id` remain available in the
 /// raw private stream log but cannot be attached to a request-scoped record.
-pub async fn received_payment_request_records<S>(
+pub(crate) async fn received_payment_request_records<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
@@ -352,7 +352,7 @@ where
 /// Records merge received Payment Request events from the private stream with
 /// local outbound Payment Request events from the outbound private-message log.
 /// Returned records are newest-first by local record time.
-pub async fn payment_request_records<S>(
+pub(crate) async fn payment_request_records<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,

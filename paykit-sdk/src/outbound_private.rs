@@ -72,7 +72,7 @@ where
 }
 
 /// Load private messages that should be attempted for one counterparty.
-pub async fn queued_outbound_private_messages<S>(
+pub(crate) async fn queued_outbound_private_messages<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
 ) -> Result<Vec<OutboundPrivateMessageRecord>>
@@ -165,7 +165,7 @@ pub(crate) fn validate_queued_outbound_private_message(
     Ok(())
 }
 
-fn validate_outbound_private_message(raw_json: &str) -> Result<String> {
+pub(crate) fn validate_outbound_private_message(raw_json: &str) -> Result<String> {
     if raw_json.len() > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
         return Err(PaykitSdkError::Protocol(
             "Private Application Message exceeds pubky-noise message size".into(),

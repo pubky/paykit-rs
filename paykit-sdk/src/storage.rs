@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    backup::ValidatedStorageState,
     endpoints::EndpointPublicationStatus,
     identity::{IdentityState, PubkyPublicKey},
     linked_peers::LinkedPeerState,
@@ -44,6 +45,12 @@ pub trait StorageAdapter: Send + Sync {
 
 /// Mutable operations available inside one storage transaction.
 pub trait StorageTransaction {
+    /// Export the full logical SDK storage state.
+    fn export_storage_state(&self) -> StorageState;
+
+    /// Replace the full logical SDK storage state after backup validation.
+    fn replace_storage_state(&mut self, state: ValidatedStorageState);
+
     /// Load the current identity state.
     fn load_identity_state(&self) -> Option<IdentityState>;
 
@@ -67,6 +74,22 @@ pub trait StorageTransaction {
 
     /// Save one SDK-managed public Payment Endpoint record.
     fn save_public_endpoint_record(&mut self, record: PublicEndpointRecord);
+
+    /// List Payment Endpoint Reservation records for one counterparty.
+    fn payment_endpoint_reservations(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Vec<PaymentEndpointReservationRecord>;
+
+    /// Load one Payment Endpoint Reservation record.
+    fn payment_endpoint_reservation(
+        &self,
+        counterparty: &PubkyPublicKey,
+        reservation_id: &str,
+    ) -> Option<PaymentEndpointReservationRecord>;
+
+    /// Save one Payment Endpoint Reservation record.
+    fn save_payment_endpoint_reservation(&mut self, record: PaymentEndpointReservationRecord);
 
     /// Load one Encrypted Link state record.
     fn encrypted_link_state(
@@ -190,6 +213,27 @@ pub struct PublicEndpointRecord {
     pub updated_at: DateTime<Utc>,
     /// Last sync error, when available.
     pub last_error: Option<String>,
+}
+
+/// Durable SDK-managed Payment Endpoint Reservation record.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentEndpointReservationRecord {
+    /// Adapter-stable reservation id.
+    pub reservation_id: String,
+    /// Counterparty the reserved endpoint is intended for.
+    pub counterparty: PubkyPublicKey,
+    /// Payment Endpoint Identifier.
+    pub identifier: String,
+    /// Hash of the reserved endpoint payload.
+    pub payload_hash: String,
+    /// Latest outbound message id that queued this reservation for sharing.
+    pub outbound_message_id: u64,
+    /// Adapter-provided attribution metadata.
+    pub attribution: HashMap<String, String>,
+    /// Optional reservation expiry.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
 }
 
 /// Durable Encrypted Link snapshot state.
@@ -581,7 +625,7 @@ pub struct EventDedupRecord {
     pub conflicting_stream_item_ids: Vec<u64>,
 }
 
-/// In-memory storage state used for tests and examples.
+/// Logical SDK storage state used by snapshots, tests, and backup/restore.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StorageState {
     /// Current identity state.
@@ -590,6 +634,9 @@ pub struct StorageState {
     pub linked_peers: HashMap<PubkyPublicKey, LinkedPeerRecord>,
     /// SDK-managed public endpoint records by identifier.
     pub public_endpoint_records: HashMap<String, PublicEndpointRecord>,
+    /// SDK-managed Payment Endpoint Reservation records by counterparty and reservation id.
+    pub payment_endpoint_reservations:
+        HashMap<(PubkyPublicKey, String), PaymentEndpointReservationRecord>,
     /// Encrypted Link state records by counterparty.
     pub encrypted_link_states: HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
     /// Active peer link operation leases by counterparty.
@@ -667,6 +714,14 @@ struct InMemoryStorageTransaction {
 }
 
 impl StorageTransaction for InMemoryStorageTransaction {
+    fn export_storage_state(&self) -> StorageState {
+        self.state.clone()
+    }
+
+    fn replace_storage_state(&mut self, state: ValidatedStorageState) {
+        self.state = state.into_storage_state();
+    }
+
     fn load_identity_state(&self) -> Option<IdentityState> {
         self.state.identity_state.clone()
     }
@@ -684,6 +739,7 @@ impl StorageTransaction for InMemoryStorageTransaction {
         self.state.linked_peers.clear();
         self.state.encrypted_link_states.clear();
         self.state.peer_link_operation_leases.clear();
+        self.state.payment_endpoint_reservations.clear();
         self.state.outbound_private_messages.clear();
         self.state.private_stream_items.clear();
         self.state.event_dedup_records.clear();
@@ -713,6 +769,39 @@ impl StorageTransaction for InMemoryStorageTransaction {
         self.state
             .public_endpoint_records
             .insert(record.identifier.clone(), record);
+    }
+
+    fn payment_endpoint_reservations(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Vec<PaymentEndpointReservationRecord> {
+        let mut records = self
+            .state
+            .payment_endpoint_reservations
+            .values()
+            .filter(|record| &record.counterparty == counterparty)
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| record.created_at);
+        records
+    }
+
+    fn payment_endpoint_reservation(
+        &self,
+        counterparty: &PubkyPublicKey,
+        reservation_id: &str,
+    ) -> Option<PaymentEndpointReservationRecord> {
+        self.state
+            .payment_endpoint_reservations
+            .get(&(counterparty.clone(), reservation_id.to_owned()))
+            .cloned()
+    }
+
+    fn save_payment_endpoint_reservation(&mut self, record: PaymentEndpointReservationRecord) {
+        self.state.payment_endpoint_reservations.insert(
+            (record.counterparty.clone(), record.reservation_id.clone()),
+            record,
+        );
     }
 
     fn encrypted_link_state(
@@ -979,12 +1068,9 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::{
-        outbound_private::{
-            claim_next_outbound_private_message, mark_outbound_failed, mark_outbound_invalid,
-            mark_outbound_sent,
-        },
-        queued_outbound_private_messages,
+    use crate::outbound_private::{
+        claim_next_outbound_private_message, mark_outbound_failed, mark_outbound_invalid,
+        mark_outbound_sent, queued_outbound_private_messages,
     };
 
     fn timestamp() -> DateTime<Utc> {
@@ -1054,6 +1140,21 @@ mod tests {
         }
     }
 
+    fn payment_endpoint_reservation_record(
+        counterparty: PubkyPublicKey,
+    ) -> PaymentEndpointReservationRecord {
+        PaymentEndpointReservationRecord {
+            reservation_id: "reservation-1".into(),
+            counterparty,
+            identifier: "btc-lightning-bolt11".into(),
+            payload_hash: "reserved-payload-hash".into(),
+            outbound_message_id: 7,
+            attribution: HashMap::from([("contact".into(), "alice".into())]),
+            expires_at: None,
+            created_at: timestamp(),
+        }
+    }
+
     #[test]
     fn test_sensitive_storage_debug_is_redacted() {
         let counterparty = counterparty();
@@ -1085,12 +1186,15 @@ mod tests {
         );
         let receipt_access = receipt_access_record(stream.counterparty.clone());
         let receipt = receipt_record(receipt_access.counterparty.clone());
+        let reservation = payment_endpoint_reservation_record(receipt_access.counterparty.clone());
 
-        let debug =
-            format!("{link_state:?} {outbound:?} {stream:?} {receipt_access:?} {receipt:?}");
+        let debug = format!(
+            "{link_state:?} {outbound:?} {stream:?} {receipt_access:?} {receipt:?} {reservation:?}"
+        );
         assert!(debug.contains("<redacted:"));
         assert!(!debug.contains("secret"));
         assert!(!debug.contains("receipt-secret"));
+        assert!(!debug.contains("alice"));
         assert!(!debug.contains("[1, 2, 3]"));
     }
 
@@ -1111,6 +1215,9 @@ mod tests {
                         failure_count: 0,
                     });
                     tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
+                    tx.save_payment_endpoint_reservation(payment_endpoint_reservation_record(
+                        counterparty.clone(),
+                    ));
                     tx.insert_outbound_private_message(outbound_private_message(
                         counterparty.clone(),
                     ));
@@ -1155,6 +1262,7 @@ mod tests {
             LinkedPeerState::Linked
         );
         assert_eq!(snapshot.public_endpoint_records.len(), 1);
+        assert_eq!(snapshot.payment_endpoint_reservations.len(), 1);
         assert_eq!(snapshot.outbound_private_messages.len(), 1);
         assert_eq!(snapshot.private_stream_items.len(), 1);
         assert_eq!(snapshot.event_dedup_records.len(), 1);
@@ -1341,6 +1449,9 @@ mod tests {
                         failure_count: 0,
                     });
                     tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
+                    tx.save_payment_endpoint_reservation(payment_endpoint_reservation_record(
+                        counterparty.clone(),
+                    ));
                     tx.insert_outbound_private_message(outbound_private_message(
                         counterparty.clone(),
                     ));
@@ -1370,6 +1481,7 @@ mod tests {
         assert_eq!(snapshot.identity_state, Some(identity));
         assert!(snapshot.linked_peers.is_empty());
         assert!(snapshot.public_endpoint_records.is_empty());
+        assert!(snapshot.payment_endpoint_reservations.is_empty());
         assert!(snapshot.encrypted_link_states.is_empty());
         assert!(snapshot.outbound_private_messages.is_empty());
         assert!(snapshot.private_stream_items.is_empty());
@@ -1404,6 +1516,9 @@ mod tests {
                         failure_count: 0,
                     });
                     tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
+                    tx.save_payment_endpoint_reservation(payment_endpoint_reservation_record(
+                        counterparty.clone(),
+                    ));
                     tx.claim_peer_link_operation(
                         &counterparty,
                         timestamp(),
@@ -1438,6 +1553,7 @@ mod tests {
         let snapshot = storage.snapshot().unwrap();
         assert_eq!(snapshot.identity_state, Some(identity));
         assert_eq!(snapshot.public_endpoint_records.len(), 1);
+        assert!(snapshot.payment_endpoint_reservations.is_empty());
         assert!(snapshot.linked_peers.is_empty());
         assert!(snapshot.encrypted_link_states.is_empty());
         assert!(snapshot.outbound_private_messages.is_empty());

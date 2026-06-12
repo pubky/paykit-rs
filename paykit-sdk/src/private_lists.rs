@@ -41,7 +41,7 @@ impl fmt::Debug for PrivatePaymentListView {
 }
 
 /// Load the current Private Payment List view for one counterparty.
-pub async fn current_private_payment_list<S>(
+pub(crate) async fn current_private_payment_list<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
 ) -> Result<Option<PrivatePaymentListView>>
@@ -74,7 +74,7 @@ where
 }
 
 /// Derive the latest valid Private Payment List view from private stream items.
-pub fn derive_private_payment_list_view(
+pub(crate) fn derive_private_payment_list_view(
     mut items: Vec<PrivateStreamItemRecord>,
 ) -> Result<Option<PrivatePaymentListView>> {
     items.sort_by_key(|item| item.stream_item_id);
