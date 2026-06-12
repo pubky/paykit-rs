@@ -2,6 +2,10 @@
 
 set -e
 
+usage() {
+    echo "Usage: $0 [-r|--release] [--major|-M|--minor|-m|--patch|-p] [--rc] all"
+}
+
 set_version() {
     local new_version="$1"
 
@@ -13,6 +17,8 @@ set_version() {
 
     "${SED_INPLACE[@]}" "s/^version = \".*\"/version = \"$new_version\"/" Cargo.toml
     "${SED_INPLACE[@]}" "s/^version = \".*\"/version = \"$new_version\"/" ../paykit-lib/Cargo.toml
+    "${SED_INPLACE[@]}" "s/^version = \".*\"/version = \"$new_version\"/" ../paykit-sdk/Cargo.toml
+    "${SED_INPLACE[@]}" "s/paykit-lib = { path = \"..\\/paykit-lib\", version = \".*\" }/paykit-lib = { path = \"..\\/paykit-lib\", version = \"$new_version\" }/" ../paykit-sdk/Cargo.toml
     "${SED_INPLACE[@]}" "s/let tag = \"v.*\"/let tag = \"v$new_version\"/" ../Package.swift
     "${SED_INPLACE[@]}" "s/^version=.*/version=$new_version/" bindings/android/gradle.properties
 }
@@ -103,33 +109,30 @@ while [[ $# -gt 0 ]]; do
             USE_RC=true
             shift
             ;;
-        ios|android|all)
+        all)
             BUILD_TARGET="$1"
             shift
             ;;
+        ios|android)
+            echo "Error: build all platform bindings together with './build.sh all'."
+            echo "Use build_ios.sh or build_android.sh directly only for local sub-build debugging."
+            usage
+            exit 1
+            ;;
         *)
-            echo "Usage: $0 [-r|--release] [--major|-M|--minor|-m|--patch|-p] [--rc] {ios|android|all}"
+            usage
             exit 1
             ;;
     esac
 done
 
+if [ "$BUILD_TARGET" != "all" ]; then
+    usage
+    exit 1
+fi
+
 if [ "$DO_RELEASE" = true ]; then
     bump_version "$BUMP_TYPE" "$USE_RC"
 fi
 
-case "$BUILD_TARGET" in
-  "ios")
-    ./build_ios.sh
-    ;;
-  "android")
-    ./build_android.sh
-    ;;
-  "all")
-    ./build_ios.sh && ./build_android.sh
-    ;;
-  *)
-    echo "Usage: $0 [-r|--release] [--major|-M|--minor|-m|--patch|-p] [--rc] {ios|android|all}"
-    exit 1
-    ;;
-esac
+./build_ios.sh && ./build_android.sh
