@@ -1,35 +1,43 @@
 #![doc = "Stateful runtime layer for Paykit integrations."]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+/// Adapter traits and payment endpoint selection types.
 pub mod adapters;
-pub mod backup;
+/// SDK runtime policy configuration.
 pub mod config;
 pub mod contacts;
 pub mod endpoints;
+/// SDK error type.
 pub mod error;
+/// Pubky identity and capability types.
 pub mod identity;
 pub mod linked_peers;
-pub mod payment_requests;
+pub mod outbound_private;
 pub mod private_lists;
 pub mod private_stream;
-pub mod receipts;
-pub mod reservations;
+/// SDK runtime facade.
 pub mod runtime;
-pub mod scheduler;
+/// Durable storage traits and in-memory test storage.
 pub mod storage;
-pub mod telemetry;
 
 #[doc(inline)]
 pub use adapters::{
-    ContactRecord, EndpointCompatibility, EndpointReservationAdapter, PaymentAdapter,
-    PaymentEndpointCandidate, PaymentExecutionResult, PaymentRequestExecution, PaymentTarget,
-    ProfileRecord, ProfileUpdate, PubkySessionProvider, ReceivingDetail, ReceivingDetailScope,
-    ReservedReceivingDetail, SchedulerAdapter,
+    EndpointCompatibility, PaymentAdapter, PaymentAmountContext, PaymentEndpointCandidate,
+    PaymentEndpointEvaluation, PaymentEndpointSelection, PaymentEndpointSelectionRequest,
+    PaymentEndpointSource, PaymentTarget, PubkySessionProvider, ReceivingDetail,
+    ReceivingDetailScope,
 };
 #[doc(inline)]
 pub use config::{
     EndpointManagementScope, PaykitSdkConfig, PrivateSharingPolicy, PublicFallbackPolicy,
-    UnknownMessageRetentionPolicy,
+};
+#[doc(inline)]
+pub use contacts::{
+    ContactPaymentResolution, ContactPaymentResolutionRequest, ContactPaymentResolutionStatus,
+};
+#[doc(inline)]
+pub use endpoints::{
+    load_public_endpoint_records, EndpointPublicationStatus, EndpointSyncChange, EndpointSyncReport,
 };
 #[doc(inline)]
 pub use error::PaykitSdkError;
@@ -39,12 +47,28 @@ pub use identity::{
     PubkySessionAccess,
 };
 #[doc(inline)]
+pub use linked_peers::{
+    load_encrypted_link_state, load_linked_peer, EncryptedLinkHandshakeRole,
+    LinkedPeerHandshakeReport, LinkedPeerState,
+};
+#[doc(inline)]
+pub use outbound_private::{
+    queued_outbound_private_messages, OutboundPrivateMessageStatus, OutboundPrivateSendFailure,
+    OutboundPrivateSendReport,
+};
+#[doc(inline)]
+pub use private_lists::{
+    current_private_payment_list, derive_private_payment_list_view, PrivatePaymentListView,
+};
+#[doc(inline)]
+pub use private_stream::{EventIdConflict, PrivateStreamIntakeReport, PrivateStreamParseStatus};
+#[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
 #[doc(inline)]
 pub use storage::{
     EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
-    NewPrivateStreamItem, PrivateStreamItemRecord, StorageAdapter, StorageState,
-    StorageTransaction,
+    OutboundPrivateMessageRecord, PrivateStreamItemRecord, PublicEndpointRecord, StorageAdapter,
+    StorageState, StorageTransaction,
 };
 
 /// Common result alias for Paykit SDK operations.

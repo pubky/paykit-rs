@@ -1,6 +1,5 @@
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// Policy for SDK-managed public Payment Endpoint cleanup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,30 +30,6 @@ pub enum PublicFallbackPolicy {
     AfterPrivateRecoveryTimeout,
 }
 
-/// Retention limits for unknown Private Application Messages.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnknownMessageRetentionPolicy {
-    /// Maximum unknown messages retained per counterparty.
-    pub max_messages_per_counterparty: usize,
-    /// Maximum unknown message bytes retained per counterparty.
-    pub max_bytes_per_counterparty: usize,
-    /// Maximum retention duration.
-    pub retention_duration: Duration,
-    /// Whether unknown messages may be discarded when limits are reached.
-    pub allow_discard: bool,
-}
-
-impl Default for UnknownMessageRetentionPolicy {
-    fn default() -> Self {
-        Self {
-            max_messages_per_counterparty: 1_000,
-            max_bytes_per_counterparty: 512 * 1024,
-            retention_duration: Duration::from_secs(60 * 60 * 24 * 30),
-            allow_discard: true,
-        }
-    }
-}
-
 /// Runtime configuration for Paykit SDK.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaykitSdkConfig {
@@ -66,8 +41,10 @@ pub struct PaykitSdkConfig {
     pub public_fallback: PublicFallbackPolicy,
     /// Maximum time to spend on private recovery before returning/falling back.
     pub private_recovery_timeout: Duration,
-    /// Unknown private message retention limits.
-    pub unknown_message_retention: UnknownMessageRetentionPolicy,
+    /// Time after which an in-progress peer link operation can be retried.
+    pub peer_link_operation_lease_timeout: Duration,
+    /// Time after which an in-progress outbound private send can be retried.
+    pub outbound_private_send_lease_timeout: Duration,
 }
 
 impl Default for PaykitSdkConfig {
@@ -77,7 +54,8 @@ impl Default for PaykitSdkConfig {
             private_sharing: PrivateSharingPolicy::Enabled,
             public_fallback: PublicFallbackPolicy::AfterPrivateRecoveryTimeout,
             private_recovery_timeout: Duration::from_secs(3),
-            unknown_message_retention: UnknownMessageRetentionPolicy::default(),
+            peer_link_operation_lease_timeout: Duration::from_secs(60),
+            outbound_private_send_lease_timeout: Duration::from_secs(60),
         }
     }
 }

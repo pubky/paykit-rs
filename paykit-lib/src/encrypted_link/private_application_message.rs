@@ -70,7 +70,8 @@ impl std::fmt::Display for PrivateMessageKind {
 /// One Private Application Message received from an Encrypted Link.
 ///
 /// This is the low-level receive item for the Private Application Message stream.
-/// It keeps the raw JSON so callers can route and persist messages themselves.
+/// It keeps the raw plaintext payload so callers can route and persist messages
+/// themselves, including malformed JSON payloads.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PrivateApplicationMessage {
     /// Private Application Message version from the JSON `version` field, when
@@ -79,7 +80,7 @@ pub struct PrivateApplicationMessage {
     /// Message kind string from the JSON `kind` field, when the field is a
     /// string.
     pub kind: Option<String>,
-    /// Raw JSON plaintext received over the Encrypted Link.
+    /// Raw plaintext received over the Encrypted Link.
     pub raw_json: String,
 }
 
@@ -97,29 +98,27 @@ impl std::fmt::Debug for PrivateApplicationMessage {
 }
 
 impl PrivateApplicationMessage {
-    pub(super) fn from_plaintext(plaintext: String) -> Result<Self> {
-        let value: serde_json::Value =
-            serde_json::from_str(&plaintext).map_err(|err| PaykitError::InvalidData {
-                context: format!("failed to parse Private Application Message JSON: {err}"),
-                source: Some(err.into()),
-            })?;
+    pub(super) fn from_plaintext(plaintext: String) -> Self {
+        let value = serde_json::from_str::<serde_json::Value>(&plaintext).ok();
         let version = value
-            .get("version")
+            .as_ref()
+            .and_then(|value| value.get("version"))
             .and_then(serde_json::Value::as_u64)
             .and_then(|version| u8::try_from(version).ok());
         let kind = value
-            .get("kind")
+            .as_ref()
+            .and_then(|value| value.get("kind"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
-        Ok(Self {
+        Self {
             version,
             kind,
             raw_json: plaintext,
-        })
+        }
     }
 
-    /// Return the known Paykit kind from the raw JSON payload, if this library
-    /// version recognizes it.
+    /// Return the known Paykit kind from the raw payload, if this library can
+    /// parse and recognize it.
     pub fn known_kind(&self) -> Option<PrivateMessageKind> {
         serde_json::from_str::<serde_json::Value>(&self.raw_json)
             .ok()
@@ -144,7 +143,9 @@ fn decode_private_application_message(
         source: Some(err.into()),
     })?;
 
-    PrivateApplicationMessage::from_plaintext(plaintext.to_owned())
+    Ok(PrivateApplicationMessage::from_plaintext(
+        plaintext.to_owned(),
+    ))
 }
 
 pub(super) async fn receive_private_application_messages(
@@ -308,7 +309,7 @@ mod tests {
     #[test]
     fn test_private_application_message_keeps_malformed_header() {
         let raw = r#"{"version":"bad","kind":"paykit.payment_request","event_id":"not-a-uuid"}"#;
-        let message = PrivateApplicationMessage::from_plaintext(raw.to_string()).unwrap();
+        let message = PrivateApplicationMessage::from_plaintext(raw.to_string());
 
         assert_eq!(message.version, None);
         assert_eq!(
@@ -321,7 +322,7 @@ mod tests {
     #[test]
     fn test_private_application_message_keeps_json_without_kind() {
         let raw = r#"{"version":1,"payload":"unknown"}"#;
-        let message = PrivateApplicationMessage::from_plaintext(raw.to_string()).unwrap();
+        let message = PrivateApplicationMessage::from_plaintext(raw.to_string());
 
         assert_eq!(message.version, Some(1));
         assert_eq!(message.kind, None);
@@ -347,10 +348,21 @@ mod tests {
     #[test]
     fn test_private_application_message_debug_redacts_raw_json() {
         let raw = r#"{"version":1,"kind":"paykit.receipt_access","key":"secret"}"#;
-        let message = PrivateApplicationMessage::from_plaintext(raw.to_string()).unwrap();
+        let message = PrivateApplicationMessage::from_plaintext(raw.to_string());
         let debug = format!("{message:?}");
 
         assert!(!debug.contains("secret"));
         assert!(debug.contains("<redacted:"));
+    }
+
+    #[test]
+    fn test_private_application_message_keeps_invalid_json() {
+        let raw = "not json";
+        let message = PrivateApplicationMessage::from_plaintext(raw.to_string());
+
+        assert_eq!(message.version, None);
+        assert_eq!(message.kind, None);
+        assert_eq!(message.known_kind(), None);
+        assert_eq!(message.raw_json, raw);
     }
 }

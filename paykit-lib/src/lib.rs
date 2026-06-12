@@ -47,7 +47,8 @@ pub use payment_request::{
 };
 #[doc(inline)]
 pub use private_payment_list::{
-    parse_private_payment_list_json, set_private_payment_list, PrivatePaymentList,
+    parse_private_payment_list_json, serialize_private_payment_list_json, set_private_payment_list,
+    PrivatePaymentList,
 };
 #[doc(inline)]
 pub use pubky::PublicKey;

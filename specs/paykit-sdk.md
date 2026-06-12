@@ -291,10 +291,10 @@ pub trait PaymentAdapter {
         scope: ReceivingDetailScope,
     ) -> Result<Vec<ReceivingDetail>>;
 
-    async fn is_endpoint_payable(
+    async fn select_payment_endpoint(
         &self,
-        endpoint: &PaymentEndpointCandidate,
-    ) -> Result<EndpointCompatibility>;
+        request: &PaymentEndpointSelectionRequest,
+    ) -> Result<PaymentEndpointSelection>;
 
     async fn build_payment_target(
         &self,
@@ -307,6 +307,10 @@ pub trait PaymentAdapter {
     ) -> Result<PaymentExecutionResult>;
 }
 ```
+
+Endpoint selection requests include all discovered candidates, each candidate's
+source, and optional amount context. The adapter returns evaluations and may
+select one candidate from that batch.
 
 The adapter owns payment-method-specific details:
 
@@ -380,8 +384,8 @@ Tracks local Pubky identity state:
 One record per counterparty:
 
 - counterparty public key
-- relationship state: unknown, known, linked, recovery required, blocked
-- initiator/responder role
+- relationship state: unknown, known, linking, linked, recovery required, blocked
+- in-progress handshake role: initiator or responder
 - last sync time
 - last private receive time
 - current recovery marker state
@@ -426,7 +430,7 @@ Tracks Event Message idempotency:
 
 - event id
 - event kind
-- canonical payload hash
+- payload hash of the exact stored payload
 - first stream item id
 - duplicate stream item ids
 - conflict status
@@ -438,7 +442,6 @@ Conflicting reused Event IDs must fail closed for the affected derived state.
 Latest-state view per counterparty:
 
 - latest valid stream item id
-- latest payload hash
 - current Payment Endpoint map
 - stale/recovery status
 - last refresh time
@@ -529,20 +532,25 @@ Receipt records:
 
 Receipt Decryption Keys must be redacted in logs and debug output.
 
-### OutboundMessageRecord
+### OutboundPrivateMessageRecord
 
-Durable outbound queue:
+Durable outbound private-message queue:
 
 - outbound id
 - counterparty
 - message kind
 - event id, when applicable
-- exact serialized payload
-- payload hash
+- exact raw JSON payload
 - send status
-- retry count
-- next retry time
+- attempt count
+- created, updated, attempted, and sent timestamps
 - last error
+
+The SDK should use one generic outbound private-message record type for all
+Private Application Message kinds, but process it as a FIFO queue per
+counterparty/Encrypted Link. Send workers must claim the next message through
+storage before sending it, and in-progress claims must expire so a crashed
+worker can be retried without letting two workers advance the same link at once.
 
 Event Message retries must reuse the same Event ID and exact payload.
 
@@ -570,14 +578,14 @@ advanced Encrypted Link snapshot.
 
 For each receive cycle:
 
-1. Acquire the per-counterparty private-stream lock.
+1. Claim the per-counterparty peer link operation lease.
 2. Restore or establish the Encrypted Link.
 3. Receive the full batch from `paykit-lib`.
 4. Parse every syntactically valid JSON Private Application Message enough to
    identify version/kind.
 5. In one transaction, insert raw stream items, update dedupe records, update
    derived views, and then save the advanced link snapshot.
-6. Release the lock.
+6. Release the lease.
 
 If the app crashes after messages are stored but before the snapshot is stored,
 replay is acceptable and must be deduped. If the snapshot is stored without the
@@ -593,16 +601,18 @@ Recommended locks:
 - identity lock: serializes import/export/sign-out and capability refresh.
 - public endpoint lock: serializes publication and cleanup of local public
   Payment Endpoints.
-- peer link lock: serializes Encrypted Link restore, handshake, send, receive,
-  and snapshot updates per counterparty.
-- private stream lock: serializes receive/checkpoint work per counterparty.
-- outbound queue lock: serializes retry workers per counterparty.
+- storage-backed peer link operation lease: serializes Encrypted Link restore,
+  handshake, send, receive, and snapshot updates per counterparty.
+- outbound queue claim/lock: serializes retry workers per counterparty.
 - reservation lock: serializes contact-scoped receiving-detail reservation and
   rotation per counterparty/method.
 
 These are local SDK/runtime locks, not protocol messages. They can be in-memory
 with durable recovery markers where needed. If a platform can run multiple
 processes against the same storage, lock ownership must be storage-backed.
+Lease expiry makes a stale operation reclaimable by another worker; durable
+writes still check the currently stored lease id so an old holder cannot commit
+after a newer lease has replaced it.
 
 ## Workflows
 
@@ -641,25 +651,37 @@ processes against the same storage, lock ownership must be storage-backed.
 The SDK should not remove endpoints it did not create unless explicitly
 configured to manage the whole Paykit public namespace.
 
+### Establish Encrypted Link
+
+1. Ensure the identity is private-link-capable.
+2. Start an initiator or responder Encrypted Link Handshake through
+   `paykit-lib`.
+3. Persist the handshake snapshot, role, and `linking` peer state.
+4. Advance the stored handshake on retry/poll cycles.
+5. When the handshake is pending, replace the stored handshake snapshot.
+6. When the handshake completes, persist the active link snapshot, clear the
+   handshake snapshot/role, and mark the peer `linked`.
+7. If restore or handshake advancement fails, mark the peer recovery-required
+   and stop private automation for that peer.
+
 ### Publish Private Payment List
 
 1. Ensure the identity is private-link-capable.
-2. Ensure or restore Linked Peer.
+2. Ensure the counterparty has an active Encrypted Link snapshot.
 3. Ask `PaymentAdapter` for private receiving details scoped to the counterparty.
 4. Apply reservation policy if enabled.
 5. Build a complete Private Payment List.
 6. Enforce the pubky-noise message size limit.
-7. Skip send when payload hash matches the last published payload.
-8. Persist outbound record and exact payload.
-9. Send through Encrypted Link.
-10. Persist send result and updated link snapshot.
+7. Persist outbound record and exact payload.
+8. Let the outbound private-message worker send through Encrypted Link.
+9. Persist send result and updated link snapshot.
 
 Private Payment Lists publish endpoints only. Payment References come from
 Payment Requests, Payment Proofs, and Receipts.
 
 ### Receive Private Stream
 
-1. Acquire peer link/private stream locks.
+1. Claim the peer link operation lease.
 2. Restore or establish Encrypted Link.
 3. Receive ordered Private Application Messages through `paykit-lib`.
 4. Persist raw messages and parse results.
@@ -686,9 +708,10 @@ Flow:
 1. Load contact/profile display metadata if configured.
 2. Check Linked Peer and cached private Payment List.
 3. If private state is stale and recovery is possible, run bounded recovery.
-4. If private endpoints are available, ask `PaymentAdapter` for compatibility.
+4. If private endpoints are available, pass them to `PaymentAdapter` as one
+   batch with amount context when known.
 5. If no private endpoint is payable and public fallback is allowed, fetch
-   public Payment List and check compatibility.
+   public Payment List and pass those candidates as a second batch.
 6. Return a structured result:
    - `Payable`
    - `NoEndpoint`
