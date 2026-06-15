@@ -36,6 +36,18 @@ impl Clock for FixedClock {
     }
 }
 
+#[test]
+fn test_public_resource_address_uses_canonical_public_key() {
+    let public_key = pubky::Keypair::random().public_key();
+    let wrapped = PubkyPublicKey::from_public_key(&public_key);
+    let path = "/pub/pubky.app/profile.json";
+
+    let address = public_resource_address(&wrapped, path).unwrap();
+
+    assert_eq!(address, format!("{public_key}{path}"));
+    assert_ne!(address, format!("{wrapped}{path}"));
+}
+
 struct TestPubkySessionProvider {
     session: Option<PubkySessionAccess>,
 }

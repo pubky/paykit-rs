@@ -465,7 +465,7 @@ async fn fetch_public_text(
     path: &str,
     context: &'static str,
 ) -> Result<Option<String>> {
-    let addr = format!("{public_key}{path}");
+    let addr = public_resource_address(public_key, path)?;
     match storage.get(addr).await {
         Ok(resp) => {
             let bytes = resp
@@ -506,6 +506,10 @@ async fn fetch_public_file_uri(
     }
 }
 
+fn public_resource_address(public_key: &PubkyPublicKey, path: &str) -> Result<String> {
+    Ok(format!("{}{}", public_key.to_public_key()?, path))
+}
+
 async fn list_public_resources(
     storage: &pubky::PublicStorage,
     public_key: &PubkyPublicKey,
@@ -514,7 +518,7 @@ async fn list_public_resources(
 ) -> Result<Vec<pubky::PubkyResource>> {
     const LIST_PAGE_LIMIT: u16 = 100;
 
-    let addr = format!("{public_key}{path}");
+    let addr = public_resource_address(public_key, path)?;
     let mut entries = Vec::new();
     let mut cursor = None::<String>;
     loop {
@@ -537,7 +541,7 @@ async fn list_public_resources(
         let page_len = page.len();
         cursor = page
             .last()
-            .map(|entry| format!("{}{}", entry.owner.z32(), entry.path.as_str()));
+            .map(|entry| format!("{}{}", entry.owner, entry.path.as_str()));
         entries.extend(page);
         if page_len < LIST_PAGE_LIMIT as usize {
             break;
