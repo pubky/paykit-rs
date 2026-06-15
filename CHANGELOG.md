@@ -7,6 +7,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc15] - 2026-06-15
+
+### Fixed
+- Rebuilt the mobile bindings from current `master` for the Android native
+  symbol release chain.
+
 ## [0.1.0-rc14] - 2026-06-11
 
 ### Fixed
@@ -147,7 +153,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc14...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc15...HEAD
+[0.1.0-rc15]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc15
 [0.1.0-rc14]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc14
 [0.1.0-rc13]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc13
 [0.1.0-rc12]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc12
