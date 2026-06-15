@@ -6,6 +6,10 @@ use crate::{
     PaykitError, Result,
 };
 
+// Local marker used when decrypted private plaintext is not valid UTF-8.
+// This is not a protocol message. It lets receive callers persist the malformed
+// stream item, advance their local link checkpoint, and avoid wedging on the
+// same encrypted slot forever.
 const INVALID_UTF8_PRIVATE_MESSAGE_PREFIX: &str = "paykit.invalid_utf8_private_message:";
 
 /// Private Message Kind values understood by Paykit.
@@ -77,8 +81,9 @@ impl std::fmt::Display for PrivateMessageKind {
 ///
 /// This is the low-level receive item for the Private Application Message stream.
 /// It keeps the raw plaintext payload so callers can route and persist messages
-/// themselves. If decrypted bytes are not UTF-8, `raw_json` contains an
-/// invalid-JSON marker with the bytes encoded as base64url.
+/// themselves. If decrypted bytes are not UTF-8, `raw_json` contains a local
+/// invalid-JSON marker with the bytes encoded as base64url. Higher layers should
+/// treat that marker as malformed input, not as a Private Application Message.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PrivateApplicationMessage {
     /// Private Application Message version from the JSON `version` field, when
@@ -137,7 +142,11 @@ impl PrivateApplicationMessage {
             })
     }
 
-    /// Return a parse error when this item represents non-UTF-8 plaintext bytes.
+    /// Return a parse error for the local invalid-UTF-8 receive marker.
+    ///
+    /// SDK/runtime callers use this to persist an audit/error record for a
+    /// malformed stream item while still advancing the local Encrypted Link
+    /// checkpoint. This is not expected on valid protocol messages.
     pub fn invalid_utf8_error(&self) -> Option<&'static str> {
         self.raw_json
             .starts_with(INVALID_UTF8_PRIVATE_MESSAGE_PREFIX)

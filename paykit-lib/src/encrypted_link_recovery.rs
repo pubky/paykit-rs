@@ -1,4 +1,20 @@
-//! Stateless Encrypted Link recovery marker helpers.
+//! Stateless Encrypted Link Recovery Marker helpers.
+//!
+//! Recovery markers are public Pubky records used when a runtime decides an
+//! Encrypted Link with one counterparty can no longer be used safely. They are
+//! not sent over the broken link. Instead, each peer derives a pairwise marker
+//! path from its local secret key and the counterparty public key, writes a
+//! minimal marker to its own homeserver, and polls the counterparty's derived
+//! marker path.
+//!
+//! Marker payloads intentionally contain only `version`, `kind`, `attempt_id`,
+//! and `created_at`. They do not contain payment data, endpoint data, message
+//! counters, peer labels, or recovery transcripts.
+//!
+//! This module only provides the wire shape and Pubky publish/fetch/remove
+//! helpers. A higher-level runtime or SDK decides when a link is
+//! recovery-required, whether public markers are allowed by policy, and how to
+//! relink after observing a marker.
 
 use pubky::{
     errors::RequestError, Error as PubkyError, PubkySession, PublicKey, PublicStorage, StatusCode,
