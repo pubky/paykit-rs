@@ -7,11 +7,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-## [0.1.0-rc17] - 2026-06-15
+## [0.1.0-rc18] - 2026-06-15
 
 ### Fixed
-- Published Android bindings with full native DWARF debug metadata and 16 KB
-  LOAD alignment for all packaged ABIs.
+- Published stripped Android bindings with separate native debug symbols and
+  16 KB LOAD alignment for all packaged ABIs.
 
 ## [0.1.0-rc12] - 2026-06-03
 
@@ -147,8 +147,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc17...HEAD
-[0.1.0-rc17]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc17
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc18...HEAD
+[0.1.0-rc18]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc18
 [0.1.0-rc12]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc12
 [0.1.0-rc2]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc2
 [0.1.0-rc1]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc1

@@ -11,6 +11,7 @@ TARGET_DIR="../target"
 ANDROID_LIB_DIR="./bindings/android"
 BASE_DIR="$ANDROID_LIB_DIR/lib/src/main/kotlin/com/synonym/paykit"
 JNILIBS_DIR="$ANDROID_LIB_DIR/lib/src/main/jniLibs"
+NATIVE_DEBUG_SYMBOLS_ZIP="$ANDROID_LIB_DIR/native-debug-symbols.zip"
 
 echo "Installing gobley-uniffi-bindgen fork..."
 cargo install --git https://github.com/ovitrif/gobley.git gobley-uniffi-bindgen --force
@@ -62,7 +63,33 @@ find_readelf() {
     exit 1
 }
 
+find_strip() {
+    if command -v llvm-strip >/dev/null 2>&1; then
+        command -v llvm-strip
+        return
+    fi
+
+    for ndk_dir in "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK_HOME:-}" "${NDK_HOME:-}"; do
+        if [ -z "$ndk_dir" ] || [ ! -d "$ndk_dir/toolchains/llvm/prebuilt" ]; then
+            continue
+        fi
+
+        ndk_strip=$(find "$ndk_dir/toolchains/llvm/prebuilt" -path '*/bin/llvm-strip' | head -n 1)
+        if [ -n "$ndk_strip" ]; then
+            echo "$ndk_strip"
+            return
+        fi
+    done
+
+    echo "Error: llvm-strip is required to strip Android native release libraries"
+    exit 1
+}
+
 has_dwarf_debug_metadata() {
+    "$READELF_BIN" -S "$1" | grep -Eq '\.debug_'
+}
+
+has_dwarf_sections() {
     "$READELF_BIN" -S "$1" | grep -Eq '\.debug_'
 }
 
@@ -108,6 +135,20 @@ validate_android_library() {
     fi
 }
 
+validate_stripped_android_library() {
+    lib="$1"
+    if has_dwarf_sections "$lib"; then
+        echo "Error: Android release native library still contains .debug_* sections: $lib"
+        exit 1
+    fi
+
+    if ! has_16kb_load_alignment "$lib"; then
+        echo "Error: Android native library is not 16 KB page-size aligned: $lib"
+        readelf_program_headers "$lib" | grep LOAD || true
+        exit 1
+    fi
+}
+
 validate_android_symbols() {
     READELF_BIN=$(find_readelf)
 
@@ -119,6 +160,40 @@ validate_android_symbols() {
         fi
 
         validate_android_library "$lib"
+    done
+}
+
+create_native_debug_symbols_archive() {
+    tmp_dir=$(mktemp -d)
+
+    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+        mkdir -p "$tmp_dir/$abi"
+        cp "$JNILIBS_DIR/$abi/libpaykit.so" "$tmp_dir/$abi/"
+    done
+
+    rm -f "$NATIVE_DEBUG_SYMBOLS_ZIP"
+    archive_path="$PWD/$NATIVE_DEBUG_SYMBOLS_ZIP"
+    (
+        cd "$tmp_dir"
+        zip -qr "$archive_path" armeabi-v7a arm64-v8a x86 x86_64
+    )
+    zip -T "$NATIVE_DEBUG_SYMBOLS_ZIP" >/dev/null
+    rm -rf "$tmp_dir"
+}
+
+strip_android_libraries() {
+    STRIP_BIN=$(find_strip)
+
+    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+        "$STRIP_BIN" --strip-unneeded "$JNILIBS_DIR/$abi/libpaykit.so"
+    done
+}
+
+validate_stripped_android_symbols() {
+    READELF_BIN=$(find_readelf)
+
+    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+        validate_stripped_android_library "$JNILIBS_DIR/$abi/libpaykit.so"
     done
 }
 
@@ -141,7 +216,7 @@ validate_android_aar_symbols() {
             exit 1
         fi
 
-        validate_android_library "$lib"
+        validate_stripped_android_library "$lib"
     done
 
     rm -rf "$tmp_dir"
@@ -159,6 +234,9 @@ cargo ndk \
     -t x86_64 \
     build --release
 validate_android_symbols
+create_native_debug_symbols_archive
+strip_android_libraries
+validate_stripped_android_symbols
 unset CARGO_PROFILE_RELEASE_DEBUG
 unset CARGO_PROFILE_RELEASE_STRIP
 
