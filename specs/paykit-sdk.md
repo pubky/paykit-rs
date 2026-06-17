@@ -194,10 +194,10 @@ crash-recovery contract.
 ```rust
 #[async_trait]
 pub trait StorageAdapter {
-    async fn transaction<T>(
+    async fn transaction_erased<'a>(
         &self,
-        f: impl FnOnce(&mut dyn StorageTransaction) -> Result<T> + Send,
-    ) -> Result<T>;
+        f: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>>;
 }
 ```
 
@@ -563,8 +563,6 @@ Derived record per Payment Request:
 - accepted/rejected/canceled event ids
 - latest Payment Proof records
 - recurrence schedule metadata
-- automatic execution status
-- recovery/fail-closed status
 
 SDK lifecycle states should be explicit and local:
 
@@ -1172,6 +1170,7 @@ SDK errors should be structured:
 - `Storage`: durable storage failure
 - `Identity`: Pubky session/key/capability failure
 - `Transport`: Pubky or Encrypted Link transport failure
+- `NotFound`: required local or Pubky resource is missing
 - `Protocol`: invalid Paykit message, conflict, or unsupported version
 - `Policy`: operation blocked by configuration or privacy policy
 - `PaymentAdapter`: payment adapter failure
