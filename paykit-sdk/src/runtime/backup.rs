@@ -19,8 +19,12 @@ where
         if backup.identity_public_key().is_some() || backup.has_identity_scoped_state() {
             let session_access = self.validate_backup_restore_session(&backup).await?;
             if let Some(identity_state) = backup.identity_state.as_mut() {
-                identity_state.capability = session_access.capability();
-                identity_state.local_secret_available = session_access.private_link_capable();
+                identity_state.capability = session_access
+                    .capability_for_capabilities(&self.config.required_session_capabilities())?;
+                identity_state.local_secret_available = session_access
+                    .private_link_capable_for_capabilities(
+                        &self.config.required_session_capabilities(),
+                    )?;
             }
             trusted_identity = Some(self.restore_validation_identity(&session_access).await?);
         }
@@ -48,8 +52,11 @@ where
                 source: None,
             });
         }
+        let required_capabilities = self.config.required_session_capabilities();
+        session_access.validate_for_capabilities(&required_capabilities)?;
         if backup.has_private_identity_scoped_state()
-            && session_access.capability() != PubkyIdentityCapability::PrivateLinkCapable
+            && session_access.capability_for_capabilities(&required_capabilities)?
+                != PubkyIdentityCapability::PrivateLinkCapable
         {
             return Err(PaykitSdkError::Identity {
                 context: "cannot restore private Paykit state without private-link capability"
@@ -65,8 +72,10 @@ where
         session_access: &PubkySessionAccess,
     ) -> Result<IdentityState> {
         let public_key = session_access.public_key()?;
-        let capability = session_access.capability();
-        let local_secret_available = session_access.private_link_capable();
+        let required_capabilities = self.config.required_session_capabilities();
+        let capability = session_access.capability_for_capabilities(&required_capabilities)?;
+        let local_secret_available =
+            session_access.private_link_capable_for_capabilities(&required_capabilities)?;
         let initialized_at = self.clock.now();
         self.storage
             .transaction(move |tx| {

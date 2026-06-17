@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::identity::PubkyPublicKey;
+use crate::{identity::PubkyPublicKey, pubky_session::PAYKIT_SESSION_CAPABILITIES};
 
 /// Default namespace segment for SDK profile/contact public data.
 ///
@@ -123,6 +123,21 @@ impl PaykitSdkConfig {
             self.public_contact_path_prefix(),
             public_key.as_str()
         )
+    }
+
+    /// Return the Pubky session capabilities required by this SDK configuration.
+    pub fn required_session_capabilities(&self) -> String {
+        let mut capabilities = vec![
+            PAYKIT_SESSION_CAPABILITIES.to_string(),
+            format!("{}:rw", self.paykit_profile_path()),
+            format!("{}:rw", self.paykit_profile_blob_path_prefix()),
+        ];
+
+        if self.public_contact_sharing == PublicContactSharingPolicy::ConfiguredPublicNamespace {
+            capabilities.push(format!("{}:rw", self.public_contact_path_prefix()));
+        }
+
+        capabilities.join(",")
     }
 }
 
