@@ -13,6 +13,24 @@ contact/payment workflows, and ergonomic platform APIs.
 The SDK should be product-neutral and payment-method-neutral. It should support
 payment methods through adapters without baking any one method into the SDK.
 
+## App-Owned Runtime Model
+
+The SDK uses an app-owned Paykit runtime model. One SDK runtime represents one
+app, wallet, or receiver runtime that owns its own Paykit state:
+Encrypted Link snapshots, private stream checkpoints, outbound queues, Payment
+Requests, Receipts, Payment Endpoint Reservations, recovery state, and backup
+data.
+
+The app or binding layer provides live Pubky session access to that runtime.
+The SDK consumes that access for Paykit workflows, but it is not a shared
+identity coordinator and does not require Ring or another wallet before an app
+can integrate Paykit.
+
+Multiple apps that belong to the same human identity can be linked, discovered,
+or aggregated explicitly above the app-owned runtime model. That does not mean
+all apps silently share one private Paykit runtime, one Encrypted Link state
+machine, or one payment execution state.
+
 ## Design Principles
 
 - Keep `paykit-lib` stateless. It validates and sends protocol objects, but it
@@ -52,9 +70,9 @@ The system should have three main layers:
   records.
 
 The SDK may still accept narrow platform hooks for secure session persistence,
-auth UI/Ring session handoff, custom profile/contact storage, scheduling, and
-logging. Those hooks should not require each app to reimplement Pubky Paykit
-logic.
+auth UI, custom profile/contact storage, scheduling, and logging. Those hooks
+should not require each app to reimplement Pubky Paykit logic or to depend on a
+separate shared-runtime coordinator.
 
 The SDK should depend on `paykit-lib`, not replace it. Platform apps should
 prefer SDK bindings for normal product workflows and use `paykit-lib` bindings
@@ -155,7 +173,8 @@ protocol-level integrations.
 
 ## Core Runtime Object
 
-The SDK should expose a single runtime object per local Pubky identity:
+The SDK should expose a single runtime object per app-owned local Paykit
+runtime:
 
 ```rust
 pub struct PaykitSdk<S, K, P, C> {
@@ -220,7 +239,8 @@ Production apps should provide a durable implementation.
 
 ### PubkySessionProvider
 
-Required for loading and storing local Pubky session material.
+Required for loading live Pubky session access for the app-owned Paykit
+runtime.
 
 ```rust
 pub trait PubkySessionProvider {
@@ -233,7 +253,9 @@ pub trait PubkySessionProvider {
 `PubkySessionAccess` provides the live authenticated `PubkySession`, Pubky
 client for counterparty homeserver access, and optional `PubkyLocalSecretKey`
 needed for Encrypted Links. The SDK derives and persists public `IdentityState`
-from that access during initialization.
+from that access during initialization. The provider is the narrow boundary
+where the app or bindings expose current session access; it is not a Ring
+dependency or a shared identity/runtime coordinator.
 
 If `load_session_access` returns `None`, no live session access is currently
 available. Ordinary refreshes must preserve the last identity-scoped state and
@@ -264,9 +286,10 @@ succeed. A same-identity transition from `PrivateLinkCapable` to `PublicOnly`
 must preserve private SDK state; only explicit sign-out, identity change, or an
 explicit key-loss/key-rotation operation should delete it.
 
-The SDK should provide high-level import/export/sign-out APIs itself. The
-provider is the narrow platform hook for secure storage and auth-session handoff,
-not a separate Pubky SDK that integrators must use.
+The SDK should provide high-level initialization, backup/export/restore, and
+sign-out APIs itself. The provider is the narrow platform hook for secure
+storage and auth-session handoff, not a separate Pubky SDK or identity product
+that integrators must use.
 
 ### Paykit Profile And Contact Namespace
 
@@ -288,7 +311,8 @@ profile/contact namespace segment. For example, `profile_namespace =
 "bitkit.to"` makes Paykit Profile and contact marker helpers use
 `/pub/bitkit.to/profile.json`, `/pub/bitkit.to/blobs/...`, and
 `/pub/bitkit.to/contacts/...`. This does not change core Paykit Protocol paths
-such as public Payment Endpoints.
+such as public Payment Endpoints, and it does not create app-specific private
+runtime isolation under one shared key.
 
 `image_uri` may point at the configured blob prefix or another public image
 location. The SDK can publish/delete Paykit blobs under the configured blob
@@ -1228,6 +1252,7 @@ These should stay outside Paykit SDK:
 - localized copy and navigation
 - app backup transport and cloud sync
 - seed/secret derivation policy unless standardized
+- shared identity coordination or cross-app aggregation policy
 
 ## Test Plan
 
@@ -1276,3 +1301,5 @@ Platform tests:
 - Multi-app and multi-device Paykit identity synchronization, including how
   active Encrypted Link checkpoints, outbound queues, and recurring Payment
   Request execution coordinate without rewinding private message counters.
+- Explicit connected-key or linked-receiver records for aggregating multiple
+  app-owned Paykit runtimes under one user identity.

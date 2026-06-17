@@ -141,7 +141,7 @@ pub struct InitializationReport {
     pub live_session_available: bool,
 }
 
-/// Stateful Paykit SDK runtime for one local Pubky identity.
+/// Stateful Paykit SDK runtime for one app-owned local Paykit runtime.
 pub struct PaykitSdk<S, K, P, C = SystemClock> {
     storage: S,
     pubky: K,

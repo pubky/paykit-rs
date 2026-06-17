@@ -45,7 +45,8 @@ pub struct PaykitSdkConfig {
     ///
     /// This is a local SDK convention for Paykit-facing profile, blob, and
     /// public contact marker helpers. Pubky session permissions remain the
-    /// authority for what a caller can actually write.
+    /// authority for what a caller can actually write. This does not change
+    /// core Paykit Protocol paths or split private runtime state.
     #[serde(default = "default_profile_namespace")]
     pub profile_namespace: String,
     /// Public endpoint management scope.
