@@ -35,7 +35,6 @@ pub enum PublicContactSharingPolicy {
     /// Keep saved contacts only in local SDK storage. This is the default.
     LocalOnly,
     /// Allow explicit public contact marker publication in the configured namespace.
-    #[serde(alias = "PublicPaykitNamespace")]
     ConfiguredPublicNamespace,
 }
 
