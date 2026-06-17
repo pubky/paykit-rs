@@ -504,9 +504,7 @@ fn terminal_private_list_reservation_needs_cleanup(
     if message.kind != PrivateMessageKind::PrivatePaymentList.as_str() {
         return false;
     }
-    matches!(
-        message.status,
-        crate::outbound_private::OutboundPrivateMessageStatus::Invalid
-    ) || (message.status == crate::outbound_private::OutboundPrivateMessageStatus::Superseded
-        && message.last_attempt_at.is_none())
+    matches!(message.status, OutboundPrivateMessageStatus::Invalid)
+        || (message.status == OutboundPrivateMessageStatus::Superseded
+            && message.last_attempt_at.is_none())
 }

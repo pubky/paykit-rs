@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::{
-    publication::PublicationStatus, PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate,
-    PaymentTarget, PubkyPublicKey, Result,
+    domain::publication::PublicationStatus, PaykitSdkError, PaymentAmountContext,
+    PaymentEndpointCandidate, PaymentTarget, PubkyPublicKey, Result,
 };
 
 /// Default public Paykit profile path.

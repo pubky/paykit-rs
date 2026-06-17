@@ -572,7 +572,7 @@ async fn test_enqueue_payment_request_event_requires_private_capable_identity() 
 async fn test_process_outbound_private_messages_preserves_untrusted_queue_without_session() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    crate::outbound_private::enqueue_private_message(
+    crate::domain::outbound_private::enqueue_private_message(
         &storage,
         counterparty.clone(),
         private_list_json(),
@@ -593,9 +593,10 @@ async fn test_process_outbound_private_messages_preserves_untrusted_queue_withou
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    let queued = crate::outbound_private::queued_outbound_private_messages(&storage, &counterparty)
-        .await
-        .unwrap();
+    let queued =
+        crate::domain::outbound_private::queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
     assert_eq!(queued.len(), 1);
     assert!(storage
         .transaction({
@@ -611,7 +612,7 @@ async fn test_process_outbound_private_messages_preserves_untrusted_queue_withou
 async fn test_process_outbound_private_messages_blocks_recovery_required_peer() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    crate::linked_peers::save_linked_peer_state(
+    crate::domain::linked_peers::save_linked_peer_state(
         &storage,
         counterparty.clone(),
         LinkedPeerState::RecoveryRequired,
@@ -619,7 +620,7 @@ async fn test_process_outbound_private_messages_blocks_recovery_required_peer() 
     )
     .await
     .unwrap();
-    crate::outbound_private::enqueue_private_message(
+    crate::domain::outbound_private::enqueue_private_message(
         &storage,
         counterparty.clone(),
         private_list_json(),
@@ -640,8 +641,9 @@ async fn test_process_outbound_private_messages_blocks_recovery_required_peer() 
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
-    let queued = crate::outbound_private::queued_outbound_private_messages(&storage, &counterparty)
-        .await
-        .unwrap();
+    let queued =
+        crate::domain::outbound_private::queued_outbound_private_messages(&storage, &counterparty)
+            .await
+            .unwrap();
     assert_eq!(queued.len(), 1);
 }

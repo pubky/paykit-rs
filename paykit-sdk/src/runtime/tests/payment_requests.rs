@@ -453,7 +453,7 @@ async fn queue_request_with_inbound_acceptance(
         request_id,
         recurrence,
     ));
-    crate::payment_requests::enqueue_payment_request_event(
+    crate::domain::payment_requests::enqueue_payment_request_event(
         storage,
         counterparty.clone(),
         &request_event,

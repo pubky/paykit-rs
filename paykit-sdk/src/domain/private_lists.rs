@@ -10,12 +10,12 @@ use paykit_lib::{
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
-use crate::outbound_private::enqueue_private_message;
+use crate::domain::outbound_private::enqueue_private_message;
 use crate::{
-    adapters::ReceivingDetail,
-    endpoints::normalize_receiving_details,
-    outbound_private::enqueue_private_message_with_link_lease,
-    private_stream::PrivateStreamParseStatus,
+    domain::adapters::ReceivingDetail,
+    domain::endpoints::normalize_receiving_details,
+    domain::outbound_private::enqueue_private_message_with_link_lease,
+    domain::private_stream::PrivateStreamParseStatus,
     storage::{
         OutboundPrivateMessageRecord, PeerLinkOperationLease, PrivateStreamItemRecord,
         StorageAdapter,

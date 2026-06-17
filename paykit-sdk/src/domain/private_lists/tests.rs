@@ -2,9 +2,9 @@ use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 
 use super::*;
 use crate::{
-    adapters::ReceivingDetail,
-    outbound_private::queued_outbound_private_messages,
-    private_stream::persist_private_stream_batch,
+    domain::adapters::ReceivingDetail,
+    domain::outbound_private::queued_outbound_private_messages,
+    domain::private_stream::persist_private_stream_batch,
     storage::{InMemoryStorage, PrivateStreamItemRecord},
     PaykitSdkError,
 };

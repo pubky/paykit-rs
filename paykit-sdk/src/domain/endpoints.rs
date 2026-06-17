@@ -7,8 +7,8 @@ use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    adapters::ReceivingDetail,
-    publication::PublicationStatus,
+    domain::adapters::ReceivingDetail,
+    domain::publication::PublicationStatus,
     storage::{PublicEndpointRecord, StorageAdapter},
     PaykitSdkError, Result,
 };

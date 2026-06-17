@@ -6,11 +6,11 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    adapters::{
+    domain::adapters::{
         PaymentEndpointReservation, PaymentEndpointReservationCancellation, ReceivingDetail,
     },
-    endpoints::normalize_receiving_details,
-    outbound_private::{validate_outbound_private_message, OutboundPrivateMessageStatus},
+    domain::endpoints::normalize_receiving_details,
+    domain::outbound_private::{validate_outbound_private_message, OutboundPrivateMessageStatus},
     storage::{
         require_peer_link_operation_lease, NewOutboundPrivateMessage, OutboundPrivateMessageRecord,
         PaymentEndpointReservationRecord, PeerLinkOperationLease, StorageAdapter,

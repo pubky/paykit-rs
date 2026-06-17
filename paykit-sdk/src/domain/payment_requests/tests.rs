@@ -2,11 +2,11 @@ use chrono::{Duration as ChronoDuration, TimeZone};
 
 use super::*;
 use crate::{
-    outbound_private::{
+    domain::outbound_private::{
         enqueue_private_message as enqueue_untyped_private_message,
         queued_outbound_private_messages,
     },
-    private_stream::persist_private_stream_batch,
+    domain::private_stream::persist_private_stream_batch,
     storage::InMemoryStorage,
 };
 

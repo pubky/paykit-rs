@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{TimeZone, Utc};
 
 use super::*;
-use crate::outbound_private::{
+use crate::domain::outbound_private::{
     claim_next_outbound_private_message, mark_outbound_failed, mark_outbound_invalid,
     mark_outbound_sent, queued_outbound_private_messages,
 };

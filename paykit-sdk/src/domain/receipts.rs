@@ -18,8 +18,8 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    outbound_private::validate_outbound_private_message,
-    records::{AmountRecord, BillingPeriodRecord},
+    domain::outbound_private::validate_outbound_private_message,
+    domain::records::{AmountRecord, BillingPeriodRecord},
     storage::{NewOutboundPrivateMessage, StorageAdapter},
     PaykitSdkError, PubkyPublicKey, Result,
 };

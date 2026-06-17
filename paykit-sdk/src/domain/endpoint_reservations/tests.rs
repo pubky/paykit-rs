@@ -255,7 +255,7 @@ async fn test_unattempted_superseded_reservation_cancellations() {
     )
     .await
     .unwrap();
-    crate::outbound_private::claim_next_outbound_private_message(
+    crate::domain::outbound_private::claim_next_outbound_private_message(
         &storage,
         &counterparty,
         timestamp(),
@@ -310,7 +310,7 @@ async fn test_unattempted_superseded_reservation_cancellations_skip_attempted_li
         })
         .await
         .unwrap();
-    crate::outbound_private::claim_next_outbound_private_message(
+    crate::domain::outbound_private::claim_next_outbound_private_message(
         &storage,
         &counterparty,
         timestamp(),

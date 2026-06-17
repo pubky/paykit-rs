@@ -4,13 +4,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    contacts::ContactRecord,
+    domain::contacts::ContactRecord,
+    domain::linked_peers::LinkedPeerState,
+    domain::outbound_private::OutboundPrivateMessageStatus,
+    domain::private_stream::PrivateStreamParseStatus,
+    domain::publication::PublicationStatus,
+    domain::receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
     identity::{IdentityState, PubkyPublicKey},
-    linked_peers::LinkedPeerState,
-    outbound_private::OutboundPrivateMessageStatus,
-    private_stream::PrivateStreamParseStatus,
-    publication::PublicationStatus,
-    receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
 };
 
 /// Durable Linked Peer state.

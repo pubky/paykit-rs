@@ -110,52 +110,63 @@ The SDK crate uses this layout:
 paykit-sdk/
   Cargo.toml
   src/
-    lib.rs                  public re-export surface
-    runtime.rs              PaykitSdk facade and shared runtime helpers
-    runtime/                user-facing SDK workflows
-    storage.rs              storage trait and shared helpers
-    storage/                in-memory storage, queue helpers, record helpers
-    backup.rs               backup export/import model
-    backup/                 backup validation
-    payment_requests.rs     Payment Request records and filters
-    payment_requests/       Payment Request derivation logic
-    *.rs                    domain modules and adapter/config/error types
+    lib.rs
+    config.rs
+    error.rs
+    identity.rs
+    pubky_session.rs
+    domain/
+      adapters.rs
+      contacts.rs
+      endpoints.rs
+      endpoint_reservations.rs
+      linked_peers.rs
+      outbound_private.rs
+      payment_requests.rs
+      private_lists.rs
+      private_stream.rs
+      publication.rs
+      receipts.rs
+      records.rs
+      recovery.rs
+    runtime/
+      mod.rs
+      backup.rs
+      contacts.rs
+      encrypted_links.rs
+      outbound_private.rs
+      payment_requests.rs
+      payment_resolution.rs
+      private_lists.rs
+      private_stream.rs
+      public_endpoints.rs
+      receipts.rs
+      recovery.rs
+    storage/
+      mod.rs
+      in_memory.rs
+      queue.rs
+      records.rs
+    backup/
+      mod.rs
+      validation.rs
 ```
 
 Module responsibilities:
 
-- `runtime`: owns `PaykitSdk`, coordinates adapters, storage, and workflow
-  modules.
+- `runtime`: owns `PaykitSdk` and the SDK workflows that coordinate adapters,
+  storage, Pubky, and Paykit Library calls.
+- `domain`: SDK-facing types, records, and pure derivation helpers.
+- `storage`: durable records, transaction interface, queue helpers, and
+  in-memory test storage.
+- `backup`: versioned export/import of SDK-managed state and restore
+  validation.
 - `config`: product-neutral policy knobs such as recovery behavior, endpoint
   publication scope, and retry limits.
-- `adapters`: payment-method adapter plus narrow platform hook for live Pubky
-  session access.
-- `storage`: durable records, transaction interface, and in-memory test
-  storage.
-- `records`: shared durable record field types.
 - `identity`: SDK-owned Pubky session capability state, identity refresh state,
   and local Pubky key helpers.
 - `pubky_session`: Pubky signup, signin, session import, auth handoff, and
   `pubky://` normalization helpers.
-- `endpoints`: public Payment Endpoint publication, cleanup, and remote public
-  Payment List reads.
-- `publication`: shared local publication status values for SDK-managed public
-  data.
-- `contacts`: SDK-owned Paykit-facing profile records, local contact records,
-  optional public contact markers, and contact payment resolution types.
-- `linked_peers`: Encrypted Link establishment, restore, recovery, and
-  per-counterparty runtime state.
-- `private_stream`: ordered Private Application Message intake, persistence,
-  parsing, dedupe, and current derived view rebuilds.
-- `private_lists`: local and remote Private Payment List publication, caching,
-  latest-state derivation, and size policy.
-- `payment_requests`: Payment Request event state derivation, outbound event
-  queueing, and proof correlation.
-- `receipts`: receipt issuance state, Receipt Access event indexing, Encrypted
-  Receipt retrieval, decryption, and retrieval state.
-- `endpoint_reservations`: optional receiving-detail reservation records for
-  Private Payment List sharing.
-- `backup`: versioned export/import of SDK-managed state.
 
 Additional modules should be added only when they have concrete implementation:
 

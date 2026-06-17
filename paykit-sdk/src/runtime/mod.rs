@@ -27,7 +27,7 @@ use crate::{
         EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
         PublicContactSharingPolicy,
     },
-    contacts::{
+    domain::contacts::{
         parse_profile_json, parse_pubky_profile_json, paykit_blob_path,
         paykit_blob_path_from_uri_or_path, paykit_blob_uri, profile_json,
         pubky_follow_keys_from_follow_entries, public_contact_json, ContactPaymentResolution,
@@ -36,33 +36,33 @@ use crate::{
         PaykitBlobRecord, PaykitProfile, PaykitProfileRecord, PubkyProfileRecord,
         ResolvedPaymentEndpoint, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
     },
-    endpoint_reservations::{
+    domain::endpoint_reservations::{
         expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
         queue_private_payment_list_with_reservations_with_link_lease, reservation_payload_hash,
         unattempted_superseded_reservation_cancellations,
         PaymentEndpointReservationCancellationRecord,
     },
-    endpoints::{
+    domain::endpoints::{
         failed_record, normalize_receiving_details, pending_publication_record,
         pending_removal_record, published_record, removed_record, EndpointSyncChange,
         EndpointSyncReport,
     },
-    identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
-    linked_peers::{
+    domain::linked_peers::{
         default_linked_peer, mark_recovery_required_for_marker_in_transaction,
         mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
         save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
         save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
         EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
     },
-    outbound_private::{
+    domain::outbound_private::{
         claim_next_outbound_private_message_with_peer_lease, mark_outbound_failed,
         mark_outbound_invalid, mark_outbound_recovery_required, mark_outbound_sent,
         queued_outbound_private_messages, validate_queued_outbound_private_message,
-        OutboundPrivateCounterpartySendReport, OutboundPrivateSendFailure,
-        OutboundPrivateSendReport, RecoveryMarkerPublishFailure, ReservationCleanupFailure,
+        OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
+        OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
+        ReservationCleanupFailure,
     },
-    payment_requests::{
+    domain::payment_requests::{
         enqueue_payment_proof as enqueue_payment_proof_message,
         enqueue_payment_request as enqueue_payment_request_message,
         enqueue_payment_request_acceptance as enqueue_payment_request_acceptance_message,
@@ -73,16 +73,16 @@ use crate::{
         request_from_record, PaymentRequestFilter, PaymentRequestLifecycleState,
         PaymentRequestLocalRole, PaymentRequestRecord,
     },
-    private_lists::{
+    domain::private_lists::{
         current_private_payment_list as load_current_private_payment_list,
         enqueue_private_payment_list_with_link_lease as enqueue_private_payment_list_message_with_link_lease,
     },
-    private_stream::{
+    domain::private_stream::{
         persist_private_stream_batch_with_link_lease, PrivateStreamCounterpartyIntakeReport,
         PrivateStreamIntakeReport,
     },
-    publication::PublicationStatus,
-    receipts::{
+    domain::publication::PublicationStatus,
+    domain::receipts::{
         decrypt_receipt_record_from_access, enqueue_receipt_access_for_issuance,
         fetch_encrypted_receipt_json, receipt_issuance_record as load_receipt_issuance_record,
         receipt_issuance_record_by_receipt_id as load_receipt_issuance_record_by_receipt_id,
@@ -92,7 +92,8 @@ use crate::{
         ReceiptIssuanceRecord, ReceiptIssuanceStatus, ReceiptIssuanceView, ReceiptRecord,
         ReceiptRetrievalStatus,
     },
-    recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
+    domain::recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
+    identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
     storage::{
         outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
         OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,

@@ -12,13 +12,13 @@ use super::{
     recovery::{local_recovery_marker_belongs_to_current_episode, RecoveryRequiredUpdate},
 };
 use crate::{
-    adapters::{
+    domain::adapters::{
         PaymentEndpointCandidate, PaymentEndpointReservation,
         PaymentEndpointReservationCancellation, PaymentEndpointSelectionRequest, PaymentTarget,
         ReceivingDetail, ReceivingDetailScope,
     },
-    endpoint_reservations::queue_private_payment_list_with_reservations,
-    private_stream::persist_private_stream_batch,
+    domain::endpoint_reservations::queue_private_payment_list_with_reservations,
+    domain::private_stream::persist_private_stream_batch,
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
         NewOutboundPrivateMessage, PublicEndpointRecord,
