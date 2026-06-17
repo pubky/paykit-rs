@@ -10,7 +10,6 @@ pub enum PublicationStatus {
     #[default]
     NotPublished,
     /// Publication was recorded locally before the remote write.
-    #[serde(alias = "Desired")]
     PendingPublication,
     /// Publication is known to exist.
     Published,
@@ -20,16 +19,4 @@ pub enum PublicationStatus {
     Removed,
     /// Last publication or removal attempt failed.
     Failed,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_publication_status_accepts_desired_alias() {
-        let status: PublicationStatus = serde_json::from_str("\"Desired\"").unwrap();
-
-        assert_eq!(status, PublicationStatus::PendingPublication);
-    }
 }
