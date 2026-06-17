@@ -92,24 +92,16 @@ The SDK crate uses this layout:
 paykit-sdk/
   Cargo.toml
   src/
-    lib.rs
-    config.rs
-    error.rs
-    runtime.rs
-    adapters.rs
-    storage.rs
-    records.rs
-    identity.rs
-    endpoints.rs
-    publication.rs
-    contacts.rs
-    linked_peers.rs
-    private_stream.rs
-    private_lists.rs
-    payment_requests.rs
-    receipts.rs
-    endpoint_reservations.rs
-    backup.rs
+    lib.rs                  public re-export surface
+    runtime.rs              PaykitSdk facade and shared runtime helpers
+    runtime/                user-facing SDK workflows
+    storage.rs              storage trait and shared helpers
+    storage/                in-memory storage, queue helpers, record helpers
+    backup.rs               backup export/import model
+    backup/                 backup validation
+    payment_requests.rs     Payment Request records and filters
+    payment_requests/       Payment Request derivation logic
+    *.rs                    domain modules and adapter/config/error types
 ```
 
 Module responsibilities:
@@ -525,7 +517,6 @@ Latest-state view per counterparty:
 
 - latest valid stream item id
 - current Payment Endpoint map
-- stale/recovery status
 - last refresh time
 
 Malformed newer Private Payment List messages do not replace the last valid
@@ -584,7 +575,6 @@ SDK lifecycle states should be explicit and local:
 - `canceled`
 - `proof_submitted`
 - `active_recurring`
-- `paused`
 - `recovery_required`
 - `invalid_conflict`
 
