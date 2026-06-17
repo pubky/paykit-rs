@@ -14,7 +14,8 @@ JNILIBS_DIR="$ANDROID_LIB_DIR/lib/src/main/jniLibs"
 NATIVE_DEBUG_SYMBOLS_ZIP="$ANDROID_LIB_DIR/native-debug-symbols.zip"
 
 echo "Installing gobley-uniffi-bindgen fork..."
-cargo install --git https://github.com/ovitrif/gobley.git gobley-uniffi-bindgen --force
+GOBLEY_REV="82a0f93ad552d0c45e185f728f14c3c60b1ed707"
+cargo install --git https://github.com/ovitrif/gobley.git --rev "$GOBLEY_REV" gobley-uniffi-bindgen --force
 
 # Install the cargo-ndk version used by the mobile release scripts.
 CARGO_NDK_VERSION="3.5.4"
