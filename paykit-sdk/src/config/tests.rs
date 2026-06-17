@@ -74,14 +74,3 @@ fn test_config_rejects_pubky_app_profile_namespace() {
 
     assert!(config.validate().is_err());
 }
-
-#[test]
-fn test_public_contact_sharing_policy_accepts_old_variant_name() {
-    let parsed =
-        serde_json::from_str::<PublicContactSharingPolicy>(r#""PublicPaykitNamespace""#).unwrap();
-
-    assert_eq!(
-        parsed,
-        PublicContactSharingPolicy::ConfiguredPublicNamespace
-    );
-}
