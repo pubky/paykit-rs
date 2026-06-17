@@ -244,7 +244,7 @@ state. If local storage clearing fails after session access is cleared, the app
 must retry sign-out or clear SDK storage through its adapter.
 Apps that want explicit sign-out to be reversible for the same user must export
 and persist an SDK backup before calling `sign_out`; sign-out must not be used
-for temporary session unavailability.
+when live session access is merely unavailable.
 
 `load_public_storage` lets contact resolution fetch public Payment Endpoints
 without requiring authenticated session access. Implementations can reuse the
@@ -1176,7 +1176,7 @@ SDK errors should be structured:
 - `Policy`: operation blocked by configuration or privacy policy
 - `PaymentAdapter`: payment adapter failure
 - `RecoveryRequired`: local state is inconsistent and automatic execution is
-  paused
+  blocked until recovery completes
 
 Errors should include machine-readable codes and short redacted context. UI copy
 belongs to the app.
