@@ -87,20 +87,28 @@ where
                 "cannot block the local Paykit identity".into(),
             ));
         }
+        let lease = self.claim_peer_link_operation(&counterparty).await?;
+        let result = self
+            .block_peer_with_claim(counterparty, lease.clone())
+            .await;
+        self.finish_peer_link_operation(lease, result).await
+    }
+
+    async fn block_peer_with_claim(
+        &self,
+        counterparty: PubkyPublicKey,
+        lease: PeerLinkOperationLease,
+    ) -> Result<LinkedPeerRecord> {
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
+                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                 let mut record = tx
                     .linked_peer(&counterparty)
                     .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
                 record.state = LinkedPeerState::Blocked;
                 record.last_sync_at = Some(now);
                 record.failure_count = 0;
-                record.local_recovery_attempt_id = None;
-                record.local_recovery_marker_created_at = None;
-                record.local_recovery_marker_last_error = None;
-                record.remote_recovery_attempt_id = None;
-                record.remote_recovery_marker_observed_at = None;
                 tx.save_linked_peer(record.clone());
                 clear_encrypted_link_state(tx, &counterparty, now);
                 Ok(record)
@@ -119,20 +127,31 @@ where
                 "cannot unblock the local Paykit identity".into(),
             ));
         }
+        let lease = self.claim_peer_link_operation(&counterparty).await?;
+        let result = self
+            .unblock_peer_with_claim(counterparty, lease.clone())
+            .await;
+        self.finish_peer_link_operation(lease, result).await
+    }
+
+    async fn unblock_peer_with_claim(
+        &self,
+        counterparty: PubkyPublicKey,
+        lease: PeerLinkOperationLease,
+    ) -> Result<LinkedPeerRecord> {
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
+                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                 let mut record = tx
                     .linked_peer(&counterparty)
                     .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
+                if record.state != LinkedPeerState::Blocked {
+                    return Ok(record);
+                }
                 record.state = LinkedPeerState::NotLinked;
                 record.last_sync_at = Some(now);
                 record.failure_count = 0;
-                record.local_recovery_attempt_id = None;
-                record.local_recovery_marker_created_at = None;
-                record.local_recovery_marker_last_error = None;
-                record.remote_recovery_attempt_id = None;
-                record.remote_recovery_marker_observed_at = None;
                 tx.save_linked_peer(record.clone());
                 clear_encrypted_link_state(tx, &counterparty, now);
                 Ok(record)
