@@ -49,6 +49,56 @@ async fn test_pending_outbound_private_counterparties_dedupes_work() {
 }
 
 #[tokio::test]
+async fn test_pending_outbound_private_counterparties_includes_cleanup_only_work() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let queued = queue_private_payment_list_with_reservations(
+        &storage,
+        &counterparty,
+        vec![PaymentEndpointReservation {
+            reservation_id: "reservation-1".into(),
+            receiving_detail: ReceivingDetail {
+                identifier: "btc-lightning-bolt11".into(),
+                payload: "one".into(),
+            },
+            expires_at: None,
+            attribution: HashMap::new(),
+        }],
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let mut invalid = tx
+                    .outbound_private_messages(&counterparty)
+                    .into_iter()
+                    .find(|message| message.outbound_message_id == queued.outbound_message_id)
+                    .unwrap();
+                invalid.status = OutboundPrivateMessageStatus::Invalid;
+                tx.save_outbound_private_message(invalid)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    assert_eq!(
+        sdk.pending_outbound_private_counterparties().await.unwrap(),
+        vec![counterparty]
+    );
+}
+
+#[tokio::test]
 async fn test_pending_outbound_private_counterparties_waits_for_stale_sending() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
