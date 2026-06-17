@@ -252,7 +252,7 @@ where
     /// same user's private Paykit state later should export and persist an SDK
     /// backup before calling this method.
     ///
-    /// Temporary session unavailability should be represented by
+    /// Missing live session access should be represented by
     /// [`PubkySessionProvider::load_session_access`] returning `None`; that
     /// preserves stored SDK state and only blocks Pubky-backed workflows.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
