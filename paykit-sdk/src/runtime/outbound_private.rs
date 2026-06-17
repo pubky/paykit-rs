@@ -61,35 +61,46 @@ where
             .transaction(move |tx| {
                 let snapshot = tx.export_storage_state();
                 let mut by_counterparty = HashMap::new();
+                let mut by_outbound_id = HashMap::new();
                 for message in snapshot.outbound_private_messages {
+                    by_outbound_id.insert(message.outbound_message_id, message.clone());
                     by_counterparty
                         .entry(message.counterparty.clone())
                         .or_insert_with(Vec::new)
                         .push(message);
                 }
-                let mut counterparties = by_counterparty
+
+                let mut candidates = HashSet::new();
+                for (counterparty, messages) in by_counterparty {
+                    if outbound_private_queue_head_is_claimable(
+                        &messages,
+                        stale_before,
+                        failed_retry_after,
+                    ) {
+                        candidates.insert(counterparty);
+                    }
+                }
+                for reservation in snapshot.payment_endpoint_reservations.values() {
+                    if terminal_private_list_reservation_needs_cleanup(reservation, &by_outbound_id)
+                    {
+                        candidates.insert(reservation.counterparty.clone());
+                    }
+                }
+
+                let mut counterparties = candidates
                     .into_iter()
-                    .filter_map(|(counterparty, messages)| {
-                        if snapshot
-                            .linked_peers
-                            .get(&counterparty)
-                            .is_some_and(|peer| {
-                                matches!(
-                                    peer.state,
-                                    LinkedPeerState::Linking
-                                        | LinkedPeerState::RecoveryRequired
-                                        | LinkedPeerState::Blocked
-                                )
-                            })
-                        {
-                            return None;
+                    .filter(|counterparty| {
+                        if snapshot.linked_peers.get(counterparty).is_some_and(|peer| {
+                            matches!(
+                                peer.state,
+                                LinkedPeerState::Linking
+                                    | LinkedPeerState::RecoveryRequired
+                                    | LinkedPeerState::Blocked
+                            )
+                        }) {
+                            return false;
                         }
-                        outbound_private_queue_head_is_claimable(
-                            &messages,
-                            stale_before,
-                            failed_retry_after,
-                        )
-                        .then_some(counterparty)
+                        true
                     })
                     .collect::<Vec<_>>();
                 counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
@@ -443,4 +454,21 @@ where
                 });
         }
     }
+}
+
+fn terminal_private_list_reservation_needs_cleanup(
+    reservation: &crate::storage::PaymentEndpointReservationRecord,
+    outbound_by_id: &HashMap<u64, OutboundPrivateMessageRecord>,
+) -> bool {
+    let Some(message) = outbound_by_id.get(&reservation.outbound_message_id) else {
+        return false;
+    };
+    if message.kind != PrivateMessageKind::PrivatePaymentList.as_str() {
+        return false;
+    }
+    matches!(
+        message.status,
+        crate::outbound_private::OutboundPrivateMessageStatus::Invalid
+    ) || (message.status == crate::outbound_private::OutboundPrivateMessageStatus::Superseded
+        && message.last_attempt_at.is_none())
 }
