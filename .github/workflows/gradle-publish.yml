@@ -74,10 +74,9 @@ jobs:
         path: paykit-ffi/bindings/android/native-debug-symbols.zip
 
     - name: Upload native debug symbols to release
-      if: github.event_name == 'release'
       env:
         GH_TOKEN: ${{ github.token }}
-      run: gh release upload "${{ github.event.release.tag_name }}" paykit-ffi/bindings/android/native-debug-symbols.zip --clobber
+      run: gh release upload "${{ steps.version.outputs.tag }}" paykit-ffi/bindings/android/native-debug-symbols.zip --clobber
 
     - name: Publish to GitHub Packages
       working-directory: paykit-ffi/bindings/android
