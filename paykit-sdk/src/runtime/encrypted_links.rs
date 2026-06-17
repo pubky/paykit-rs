@@ -75,6 +75,71 @@ where
         }
     }
 
+    /// Block a counterparty for local Paykit private workflows.
+    ///
+    /// Blocking is local policy. It clears stored Encrypted Link state so the
+    /// peer cannot resume private workflows until explicitly unblocked and
+    /// linked again.
+    pub async fn block_peer(&self, counterparty: PubkyPublicKey) -> Result<LinkedPeerRecord> {
+        let local_public_key = self.require_initialized_identity("block peer").await?;
+        if counterparty == local_public_key {
+            return Err(PaykitSdkError::Policy(
+                "cannot block the local Paykit identity".into(),
+            ));
+        }
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let mut record = tx
+                    .linked_peer(&counterparty)
+                    .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
+                record.state = LinkedPeerState::Blocked;
+                record.last_sync_at = Some(now);
+                record.failure_count = 0;
+                record.local_recovery_attempt_id = None;
+                record.local_recovery_marker_created_at = None;
+                record.local_recovery_marker_last_error = None;
+                record.remote_recovery_attempt_id = None;
+                record.remote_recovery_marker_observed_at = None;
+                tx.save_linked_peer(record.clone());
+                clear_encrypted_link_state(tx, &counterparty, now);
+                Ok(record)
+            })
+            .await
+    }
+
+    /// Remove a local peer block and return the peer to `NotLinked`.
+    ///
+    /// Existing Encrypted Link snapshots are not restored. Callers should start
+    /// a fresh Encrypted Link Handshake before private workflows resume.
+    pub async fn unblock_peer(&self, counterparty: PubkyPublicKey) -> Result<LinkedPeerRecord> {
+        let local_public_key = self.require_initialized_identity("unblock peer").await?;
+        if counterparty == local_public_key {
+            return Err(PaykitSdkError::Policy(
+                "cannot unblock the local Paykit identity".into(),
+            ));
+        }
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let mut record = tx
+                    .linked_peer(&counterparty)
+                    .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
+                record.state = LinkedPeerState::NotLinked;
+                record.last_sync_at = Some(now);
+                record.failure_count = 0;
+                record.local_recovery_attempt_id = None;
+                record.local_recovery_marker_created_at = None;
+                record.local_recovery_marker_last_error = None;
+                record.remote_recovery_attempt_id = None;
+                record.remote_recovery_marker_observed_at = None;
+                tx.save_linked_peer(record.clone());
+                clear_encrypted_link_state(tx, &counterparty, now);
+                Ok(record)
+            })
+            .await
+    }
+
     /// Start an Encrypted Link Handshake as the initiator.
     pub async fn initiate_link_with_peer(
         &self,
@@ -441,5 +506,22 @@ where
             })?
             .as_bytes();
         Ok((session_access, secret_key))
+    }
+}
+
+fn clear_encrypted_link_state(
+    tx: &mut dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+) {
+    if let Some(link_state) = tx.encrypted_link_state(counterparty) {
+        tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+            counterparty: counterparty.clone(),
+            link_snapshot: None,
+            handshake_snapshot: None,
+            handshake_role: None,
+            generation: link_state.generation.saturating_add(1),
+            checkpointed_at: now,
+        });
     }
 }

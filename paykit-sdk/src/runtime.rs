@@ -49,11 +49,11 @@ use crate::{
     },
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
     linked_peers::{
-        mark_recovery_required_for_marker_in_transaction, mark_recovery_required_in_transaction,
-        mark_recovery_required_with_lease, save_link_handshake_state_if_generation_with_lease,
-        save_link_handshake_state_with_lease, save_linked_peer_link_state_if_generation_with_lease,
-        save_linked_peer_state_with_lease, EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport,
-        LinkedPeerState,
+        default_linked_peer, mark_recovery_required_for_marker_in_transaction,
+        mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
+        save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
+        save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
+        EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
     },
     outbound_private::{
         claim_next_outbound_private_message_with_peer_lease, mark_outbound_failed,
@@ -95,7 +95,7 @@ use crate::{
     recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
     storage::{
         outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
-        OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter,
+        OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
     PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointReservation,
     PaymentEndpointReservationCancellation, PaymentEndpointSelectionRequest, PaymentEndpointSource,

@@ -10,7 +10,12 @@ where
     /// Save or update a local contact record.
     pub async fn save_contact(&self, update: ContactUpdate) -> Result<ContactRecord> {
         update.validate()?;
-        self.require_initialized_identity("save contact").await?;
+        let local_public_key = self.require_initialized_identity("save contact").await?;
+        if update.public_key == local_public_key {
+            return Err(PaykitSdkError::Policy(
+                "cannot save the local Paykit identity as a contact".into(),
+            ));
+        }
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
