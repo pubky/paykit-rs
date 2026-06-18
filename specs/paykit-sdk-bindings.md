@@ -4,15 +4,17 @@
 
 Define the platform binding surface for Paykit SDK.
 
-Paykit SDK bindings should expose the stateful SDK runtime to Swift, Kotlin,
-and React Native apps without forcing platform integrators to reimplement SDK
-state-machine rules. The bindings should make common Paykit workflows easy,
-while keeping sensitive low-level state and protocol escape hatches out of the
-default app API.
+Paykit SDK bindings should replace the old app-facing mobile FFI surface with a
+stateful SDK runtime for Swift, Kotlin, and React Native apps. Platform
+integrators should not need to reimplement SDK state-machine rules or combine
+low-level `paykit-lib` calls themselves. The bindings should make common Paykit
+workflows easy, while keeping sensitive low-level state and protocol escape
+hatches out of the default app API.
 
 ## Design Principles
 
-- Expose SDK workflows, not raw storage internals.
+- Expose SDK workflows, not raw storage internals or low-level protocol
+  building blocks.
 - Keep the Rust SDK responsible for durable state transitions, ordering,
   dedupe, recovery, and validation.
 - Preserve the app-owned runtime model. One binding handle represents one app,
@@ -27,26 +29,41 @@ default app API.
 
 ## Architecture
 
-Bindings should be a separate integration surface above `paykit-sdk`:
+Bindings should be an SDK-facing integration surface above `paykit-sdk`. The
+existing mobile binding crates can be reset around this surface instead of
+adding a second long-term FFI layer.
 
 ```text
 paykit-sdk/
   Rust runtime, state machine, storage contract, adapters, records
 
-paykit-sdk-ffi/
-  opaque SDK handle, FFI-safe DTOs, callback adapters, error mapping
+paykit-ffi/
+  SDK handle, FFI-safe DTOs, callback adapters, error mapping
 
-paykit-sdk-react-native/
+paykit-react-native/
   TypeScript wrapper, discriminated unions, promise/callback bridge
 ```
 
-Platform apps should normally depend on SDK bindings. Low-level `paykit-lib`
-bindings can remain available for protocol-only integrations, but apps should
-not need them for ordinary Paykit runtime workflows.
+Platform apps should depend on SDK bindings as the normal Paykit integration
+surface. The previous low-level mobile FFI should not remain as an equal
+parallel API. Since mobile bindings are still pre-production, the binding layer
+can be reset around the SDK shape instead of preserving a migration path for the
+old low-level surface.
+
+Low-level `paykit-lib` functionality should only be exposed again when there is
+a concrete SDK workflow, diagnostic export, or protocol-only use case that
+needs it. Those escape hatches should be clearly separated from the default app
+API.
+
+For React Native, distinguish the generated native SDK bindings from the
+hand-written TypeScript facade. The TypeScript facade may expose a smaller
+helper surface, but a React Native app-facing SDK runtime wrapper should expose
+the default workflows below before it replaces direct native SDK use.
 
 ## Runtime Handle
 
 Bindings should expose one opaque SDK handle per app-owned local Paykit runtime.
+This handle is the primary mobile API object.
 
 The handle should own:
 
@@ -82,7 +99,7 @@ loading, checked atomic replacement, and deletion.
 
 The SDK state blob is an internal, versioned serialization of SDK storage state.
 It is not the public SDK backup export format. Bindings should treat it as an
-opaque `SensitiveSdkStateBlob`, and Rust should own schema validation and
+opaque `SdkStateBlob`, and Rust should own schema validation and
 migration.
 
 Each SDK storage transaction should load the current blob, mutate the full
@@ -113,7 +130,7 @@ ordering, monotonic IDs, Encrypted Link checkpoint coupling, lease validation,
 dedupe indexes, and backup replacement invariants.
 
 React Native bindings should keep SDK state blob storage in the native module by
-default. Passing `SensitiveSdkStateBlob` bytes through the JavaScript bridge
+default. Passing `SdkStateBlob` bytes through the JavaScript bridge
 should be an explicit advanced mode because it creates extra copies, increases
 devtools/logging exposure, and can add bridge-size and performance risks.
 
@@ -149,6 +166,9 @@ session import, capability-checked auth handoff, and `pubky://` normalization.
 Binding helpers should request the capability scope returned by the active
 `PaykitSdkConfig` and validate completed/imported sessions against that same
 scope.
+When bindings create the Pubky client internally, they should expose FFI-safe
+client configuration for platform-owned network policy such as request
+timeouts.
 `PubkyLocalSecretKey` exposes app/runtime-domain-separated key derivation and
 public-key-from-secret helpers. Platform bindings should wrap those helpers
 where the platform has no better native primitive. Auth URLs and exported
@@ -214,8 +234,10 @@ Recommended shapes:
 
 Platform enum/union wrappers that mirror SDK statuses, lifecycle states,
 payment resolution results, recovery states, or error codes should include an
-unknown case that preserves the raw code/value. New Rust SDK statuses should not
-silently deserialize into a misleading known platform value.
+unknown case. When the underlying value is a string/tagged payload, preserve
+the raw code/value. When a generated FFI enum only exposes a future Rust variant
+as an unknown fallback, surface `unknown` rather than silently mapping it into a
+misleading known platform value.
 
 This applies especially to:
 
@@ -286,10 +308,11 @@ Sensitive fields include:
 - payable endpoint ordering or provider metadata
 
 If a platform wrapper must expose sensitive data for backup/export or storage
-callbacks, that type should be clearly named and documented as sensitive.
+callbacks, that type should be documented as sensitive and must redact default
+debug/string output.
 
-State blobs and exported backups should use sensitive wrapper names such as
-`SensitiveSdkStateBlob` and `SensitiveSdkBackupBlob`. Bindings should require
+State blobs and exported backups should use explicit object names such as
+`SdkStateBlob` and `SdkBackupBlob`. Bindings should require
 caller-managed encryption before cloud transport or cross-device backup. If a
 blob is not app-encrypted, platform docs should require protected local storage:
 iOS Keychain or protected files with backup exclusion as appropriate, and
@@ -359,6 +382,8 @@ misconstruction.
 
 ## Non-Goals
 
+- Do not maintain the old low-level mobile FFI as a second app-facing Paykit
+  API.
 - Do not expose the full Rust `StorageTransaction` trait to platform apps.
 - Do not make platform apps parse raw Private Application Messages for normal
   workflows.
@@ -370,14 +395,16 @@ misconstruction.
 
 ## Implementation Decisions
 
+- Start SDK bindings from a clean SDK-first FFI surface. Old low-level exports
+  may be removed rather than wrapped or kept for migration.
 - The first mobile storage implementation should use app-provided state blob
   callbacks. First-party file/keychain helpers can be added later only if one
   generic helper clearly fits multiple apps and does not hide platform security
   decisions.
 - Paykit SDK bindings should give integrators one Paykit SDK package/import for
-  normal app integration. That package should include or re-export the
-  low-level `paykit-lib` APIs needed by SDK workflows, while still keeping
-  advanced protocol-only escape hatches separate from default app APIs.
+  normal app integration. That package should expose SDK workflows first; any
+  lower-level protocol helpers should be intentionally added, documented, and
+  kept separate from default app APIs.
 - Default app APIs should expose redacted typed audit records only. Examples
   include event kind, status, timestamps, peer, error code, payload size,
   payload hash, and redacted summaries. Raw Private Application Message JSON,

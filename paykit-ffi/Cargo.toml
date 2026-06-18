@@ -3,7 +3,7 @@ name = "paykit-ffi"
 version = "0.1.0-rc12"
 edition = "2021"
 rust-version = "1.91.1"
-description = "UniFFI bindings for paykit-lib targeting iOS and Android"
+description = "UniFFI bindings for Paykit SDK targeting iOS and Android"
 license = "MIT"
 
 [lib]
@@ -21,6 +21,9 @@ dev-auth = []
 
 [dependencies]
 paykit-lib = { path = "../paykit-lib" }
+paykit-sdk = { path = "../paykit-sdk" }
+async-trait = "0.1"
+anyhow = "1"
 uniffi = { version = "0.29.4", features = ["cli", "bindgen"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 thiserror = "2"
@@ -29,7 +32,9 @@ pubky = "0.8.0"
 hex = "0.4"
 log = "0.4"
 tracing = { version = "0.1", features = ["log"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+postcard = { version = "1.1.3", features = ["use-std"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"

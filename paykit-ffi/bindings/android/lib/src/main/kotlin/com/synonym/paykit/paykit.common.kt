@@ -101,286 +101,1212 @@ public object NoPointer
 
 
 
-@kotlinx.serialization.Serializable
-public data class FfiBillingPeriod (
-    val `startsAt`: kotlin.String,
-    val `endsAt`: kotlin.String
-) {
-    public companion object
-}
 
 
 
-@kotlinx.serialization.Serializable
-public data class FfiHandshakeProgress (
-    val `status`: kotlin.String,
-    val `handleId`: kotlin.String
-) {
-    public companion object
-}
 
+/**
+ * Stateful Paykit SDK runtime handle.
+ */
+public interface FfiPaykitSdkInterface {
 
+    /**
+     * Return this runtime's configuration.
+     */
+    public fun `config`(): FfiPaykitSdkConfig
 
-@kotlinx.serialization.Serializable
-public data class FfiPaymentAmount (
-    val `value`: kotlin.String,
-    val `asset`: kotlin.String
-) {
-    public companion object
-}
+    /**
+     * Return one local Contact Record.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `contactRecord`(`publicKey`: kotlin.String): FfiContactRecord?
 
+    /**
+     * Return all local Contact Records.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `contactRecords`(): List<FfiContactRecord>
 
+    /**
+     * Delete a blob by `pubky://` URI or configured Paykit profile path.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `deletePaykitBlob`(`uriOrPath`: kotlin.String)
 
-@kotlinx.serialization.Serializable
-public data class FfiPaymentEndpoint (
-    val `paymentEndpointIdentifier`: kotlin.String,
-    val `paymentEndpointPayload`: kotlin.String
-) {
-    public companion object
-}
+    /**
+     * Export SDK-managed backup state as an opaque blob.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `exportBackupState`(): FfiSdkBackupBlob
 
+    /**
+     * Fetch a public Paykit Profile.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `fetchPaykitProfile`(`publicKey`: kotlin.String): FfiPaykitProfileRecord?
 
+    /**
+     * Fetch public Pubky file bytes.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `fetchPubkyFile`(`uri`: kotlin.String): kotlin.ByteArray?
 
-@kotlinx.serialization.Serializable
-public data class FfiPaymentProof (
-    val `eventId`: kotlin.String,
-    val `paymentRequestId`: kotlin.String,
-    val `paymentReference`: kotlin.String,
-    val `billingPeriod`: FfiBillingPeriod?,
-    val `paymentEndpointIdentifier`: kotlin.String,
-    val `proofJson`: kotlin.String
-) {
-    public companion object
-}
+    /**
+     * Fetch public Pubky app follows.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `fetchPubkyFollows`(`publicKey`: kotlin.String): List<kotlin.String>
 
+    /**
+     * Fetch a public Pubky app profile.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `fetchPubkyProfile`(`publicKey`: kotlin.String): FfiPubkyProfileRecord?
 
+    /**
+     * Fetch a public Pubky UTF-8 text file.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `fetchPubkyText`(`uri`: kotlin.String): kotlin.String?
 
-@kotlinx.serialization.Serializable
-public data class FfiPaymentRequest (
-    val `eventId`: kotlin.String,
-    val `paymentRequestId`: kotlin.String,
-    val `request`: FfiPaymentRequestTerms
-) {
-    public companion object
-}
+    /**
+     * Return current identity status, when initialized.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `identityStatus`(): FfiIdentityStatus?
 
+    /**
+     * Initialize durable SDK identity state.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `initialize`(): FfiInitializationReport
 
+    /**
+     * Publish a blob under this identity's Paykit profile namespace.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `publishPaykitBlob`(`blobName`: kotlin.String, `bytes`: kotlin.ByteArray): FfiPaykitBlobRecord
 
-@kotlinx.serialization.Serializable
-public data class FfiPaymentRequestAcceptance (
-    val `eventId`: kotlin.String,
-    val `paymentRequestId`: kotlin.String
-) {
-    public companion object
-}
+    /**
+     * Publish this identity's Paykit Profile.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `publishPaykitProfile`(`profile`: FfiPaykitProfile): FfiPaykitProfileRecord
 
+    /**
+     * Publish a public Contact Marker for a local Contact Record.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `publishPublicContact`(`publicKey`: kotlin.String): FfiContactRecord
 
+    /**
+     * Refresh the cached Paykit Profile for a local Contact Record.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `refreshContactPaykitProfile`(`publicKey`: kotlin.String): FfiContactRecord?
 
-@kotlinx.serialization.Serializable
-public data class FfiPaymentRequestCancellation (
-    val `eventId`: kotlin.String,
-    val `paymentRequestId`: kotlin.String,
-    val `reason`: kotlin.String?
-) {
-    public companion object
-}
+    /**
+     * Remove a local Contact Record when it has no public marker to clean up.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `removeContact`(`publicKey`: kotlin.String): FfiContactRecord?
 
+    /**
+     * Remove a public Contact Marker.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `removePublicContact`(`publicKey`: kotlin.String): FfiContactRecord?
 
+    /**
+     * Resolve display metadata for a contact.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolveContactProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): FfiContactProfileResolution?
 
-@kotlinx.serialization.Serializable
-public data class FfiPaymentRequestEvent (
-    val `eventType`: kotlin.String,
-    val `request`: FfiPaymentRequest?,
-    val `acceptance`: FfiPaymentRequestAcceptance?,
-    val `rejection`: FfiPaymentRequestRejection?,
-    val `cancellation`: FfiPaymentRequestCancellation?,
-    val `proof`: FfiPaymentProof?
-) {
-    public companion object
-}
+    /**
+     * Restore SDK-managed backup state from an opaque blob.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `restoreBackupState`(`backup`: FfiSdkBackupBlob): FfiRestoreReport
 
+    /**
+     * Save or update a local Contact Record.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `saveContact`(`update`: FfiContactUpdate): FfiContactRecord
 
+    /**
+     * Clear live Pubky session access and SDK-managed identity-scoped state.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `signOut`(): FfiIdentityStatus
 
-@kotlinx.serialization.Serializable
-public data class FfiPaymentRequestEventMessage (
-    val `kind`: kotlin.String,
-    val `eventId`: kotlin.String?,
-    val `paymentRequestId`: kotlin.String?,
-    val `rawJson`: kotlin.String,
-    val `event`: FfiPaymentRequestEvent?,
-    val `validationError`: kotlin.String?
-) {
-    public companion object
-}
+    /**
+     * Retry pending public Contact Marker publication/removal work.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncPublicContactMarkers`(): List<FfiContactRecord>
 
-
-
-@kotlinx.serialization.Serializable
-public data class FfiPaymentRequestRejection (
-    val `eventId`: kotlin.String,
-    val `paymentRequestId`: kotlin.String,
-    val `reason`: kotlin.String?
-) {
-    public companion object
-}
-
-
-
-@kotlinx.serialization.Serializable
-public data class FfiPaymentRequestTerms (
-    val `amount`: FfiPaymentAmount,
-    val `paymentReference`: kotlin.String,
-    val `proposalExpiresAt`: kotlin.String?,
-    val `recurrence`: FfiRecurrence?,
-    val `acceptedPaymentEndpointIdentifiers`: List<kotlin.String>,
-    val `metadataJson`: kotlin.String
-) {
-    public companion object
-}
-
-
-
-@kotlinx.serialization.Serializable
-public data class FfiPreparedReceipt (
-    val `receipt`: FfiReceipt,
-    val `encryptedReceipt`: kotlin.String,
-    val `access`: FfiReceiptAccess
-) {
-    public companion object
-}
-
-
-
-@kotlinx.serialization.Serializable
-public data class FfiPrivateApplicationMessage (
-    val `version`: kotlin.UInt?,
-    val `kind`: kotlin.String?,
-    val `rawJson`: kotlin.String
-) {
-    public companion object
-}
-
-
-
-@kotlinx.serialization.Serializable
-public data class FfiPrivatePaymentList (
-    val `paymentEndpoints`: List<FfiPaymentEndpoint>
-) {
-    public companion object
-}
-
-
-
-@kotlinx.serialization.Serializable
-public data class FfiReceipt (
-    val `receiptId`: kotlin.String,
-    val `paymentReference`: kotlin.String,
-    val `paymentRequestId`: kotlin.String?,
-    val `billingPeriod`: FfiBillingPeriod?,
-    val `recipientPublicKey`: kotlin.String,
-    val `paymentEndpointIdentifier`: kotlin.String?,
-    val `amount`: FfiPaymentAmount?,
-    val `metadataJson`: kotlin.String
-) {
-    public companion object
-}
-
-
-
-@kotlinx.serialization.Serializable
-public data class FfiReceiptAccess (
-    val `eventId`: kotlin.String,
-    val `receiptId`: kotlin.String,
-    val `paymentReference`: kotlin.String,
-    val `paymentRequestId`: kotlin.String?,
-    val `billingPeriod`: FfiBillingPeriod?,
-    val `location`: kotlin.String,
-    val `key`: kotlin.String
-) {
-    public companion object
-}
-
-
-
-@kotlinx.serialization.Serializable
-public data class FfiReceiptAccessEventMessage (
-    val `kind`: kotlin.String,
-    val `eventId`: kotlin.String?,
-    val `receiptId`: kotlin.String?,
-    val `rawJson`: kotlin.String,
-    val `access`: FfiReceiptAccess?,
-    val `validationError`: kotlin.String?
-) {
-    public companion object
-}
-
-
-
-@kotlinx.serialization.Serializable
-public data class FfiReceiptDraft (
-    val `receiptId`: kotlin.String?,
-    val `paymentReference`: kotlin.String,
-    val `paymentRequestId`: kotlin.String?,
-    val `billingPeriod`: FfiBillingPeriod?,
-    val `paymentEndpointIdentifier`: kotlin.String?,
-    val `amount`: FfiPaymentAmount?,
-    val `metadataJson`: kotlin.String
-) {
-    public companion object
-}
-
-
-
-@kotlinx.serialization.Serializable
-public data class FfiRecurrence (
-    val `every`: kotlin.UInt,
-    val `unit`: kotlin.String,
-    val `startsAt`: kotlin.String,
-    val `anchor`: kotlin.String,
-    val `endsAt`: kotlin.String?
-) {
     public companion object
 }
 
 
 
 
+/**
+ * Pending Pubky auth request.
+ */
+public interface FfiPubkyAuthRequestInterface {
 
+    /**
+     * Return the auth URL to show as a deeplink or QR code.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `authorizationUrl`(): kotlin.String
+
+    /**
+     * Wait for auth approval and validate the resulting session capabilities.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `complete`(`localSecretKey`: FfiPubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): FfiPubkySessionBootstrapResult
+
+    public companion object
+}
+
+
+
+
+/**
+ * Local Pubky secret key bytes supplied by platform secure storage.
+ */
+public interface FfiPubkyLocalSecretKeyInterface {
+
+    /**
+     * Export the raw bytes for platform secure storage.
+     */
+    public fun `exportBytes`(): kotlin.ByteArray
+
+    public companion object
+}
+
+
+
+
+/**
+ * Live Pubky access material supplied by platform session storage.
+ */
+public interface FfiPubkySessionAccessInterface {
+
+    /**
+     * Export the local Pubky secret key, when available.
+     */
+    public fun `exportLocalSecretKey`(): FfiPubkyLocalSecretKey?
+
+    /**
+     * Export the Pubky session bearer secret for platform secure storage.
+     */
+    public fun `exportSessionSecret`(): kotlin.String
+
+    public companion object
+}
+
+
+
+
+/**
+ * Pubky session bootstrap helper.
+ */
+public interface FfiPubkySessionBootstrapInterface {
+
+    /**
+     * Approve a Pubky auth URL with this local secret key.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `approveAuth`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: FfiPubkyLocalSecretKey)
+
+    /**
+     * Import an exported Pubky session secret.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: FfiPubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): FfiPubkySessionBootstrapResult
+
+    /**
+     * Resume a short-lived auth flow from its authorization URL.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): FfiPubkyAuthRequest
+
+    /**
+     * Sign in with a local Pubky secret key and return session access material.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `signIn`(`localSecretKey`: FfiPubkyLocalSecretKey): FfiPubkySessionBootstrapResult
+
+    /**
+     * Sign up on a homeserver and return session access material.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `signUp`(`localSecretKey`: FfiPubkyLocalSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?): FfiPubkySessionBootstrapResult
+
+    /**
+     * Start a sign-in auth flow for an external signer.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `startSignInAuth`(`capabilities`: kotlin.String): FfiPubkyAuthRequest
+
+    /**
+     * Start a signup auth flow for an external signer.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `startSignUpAuth`(`capabilities`: kotlin.String, `homeserverPublicKey`: kotlin.String, `signupToken`: kotlin.String?): FfiPubkyAuthRequest
+
+    public companion object
+}
+
+
+
+
+/**
+ * SDK backup blob owned by the app.
+ */
+public interface FfiSdkBackupBlobInterface {
+
+    /**
+     * Export the raw bytes for app-controlled backup storage.
+     */
+    public fun `exportBytes`(): kotlin.ByteArray
+
+    public companion object
+}
+
+
+
+
+/**
+ * Platform-owned Pubky session provider.
+ */
+public interface FfiSdkPubkySessionProvider {
+
+    /**
+     * Load current live Pubky session access, when available.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `loadSessionAccess`(): FfiPubkySessionAccess?
+
+    /**
+     * Report whether unauthenticated public Pubky storage can be used.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `publicStorageAvailable`(): kotlin.Boolean
+
+    /**
+     * Clear platform session access during explicit SDK sign-out.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `clearSessionAccess`()
+
+    public companion object
+}
+
+
+
+
+/**
+ * SDK state blob owned by platform storage.
+ */
+public interface FfiSdkStateBlobInterface {
+
+    /**
+     * Export the raw bytes for platform storage.
+     */
+    public fun `exportBytes`(): kotlin.ByteArray
+
+    public companion object
+}
+
+
+
+
+/**
+ * Platform-owned durable blob store for SDK state.
+ */
+public interface FfiSdkStateBlobStore {
+
+    /**
+     * Load the current SDK state blob, when one exists.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `loadStateBlob`(): FfiSdkStateBlobSnapshot?
+
+    /**
+     * Atomically save a new SDK state blob.
+     *
+     * `expected_revision` is `None` when no previous blob was loaded. The
+     * platform store should reject the write if the stored revision changed.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `saveStateBlobAtomically`(`blob`: FfiSdkStateBlob, `expectedRevision`: kotlin.String?): kotlin.String
+
+    /**
+     * Atomically clear the SDK state blob.
+     *
+     * The platform store should reject the clear if the stored revision does
+     * not match `expected_revision`.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `clearStateBlob`(`expectedRevision`: kotlin.String?): kotlin.String
+
+    public companion object
+}
+
+
+
+
+/**
+ * Contact display profile resolved by trying Paykit Profile first.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiContactProfileResolution (
+    /**
+     * Profile owner.
+     */
+    val `publicKey`: kotlin.String,
+    /**
+     * Source that produced this profile.
+     */
+    val `source`: FfiContactProfileSource,
+    /**
+     * Normalized display name for app contact lists.
+     */
+    val `displayName`: kotlin.String?,
+    /**
+     * Normalized image pointer for app contact lists.
+     */
+    val `imageUri`: kotlin.String?,
+    /**
+     * Paykit Profile payload when the source is Paykit Profile.
+     */
+    val `paykitProfile`: FfiPaykitProfile?,
+    /**
+     * Pubky Profile payload when the source is Pubky Profile.
+     */
+    val `pubkyProfile`: FfiPubkyProfile?,
+    /**
+     * Local observation time as RFC3339 text.
+     */
+    val `fetchedAt`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Local SDK contact record.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiContactRecord (
+    /**
+     * Contact public key.
+     */
+    val `publicKey`: kotlin.String,
+    /**
+     * Optional local display label.
+     */
+    val `label`: kotlin.String?,
+    /**
+     * Cached public profile, when fetched.
+     */
+    val `profile`: FfiPaykitProfile?,
+    /**
+     * Time the cached public profile was fetched as RFC3339 text.
+     */
+    val `profileFetchedAt`: kotlin.String?,
+    /**
+     * Time the contact was first saved locally as RFC3339 text.
+     */
+    val `createdAt`: kotlin.String,
+    /**
+     * Time the local contact record last changed as RFC3339 text.
+     */
+    val `updatedAt`: kotlin.String,
+    /**
+     * Public Contact Marker publication state.
+     */
+    val `publicContactMarkerStatus`: FfiPublicationStatus,
+    /**
+     * Time the contact was last published publicly as RFC3339 text.
+     */
+    val `publicContactPublishedAt`: kotlin.String?,
+    /**
+     * Time the public contact marker was last removed as RFC3339 text.
+     */
+    val `publicContactRemovedAt`: kotlin.String?,
+    /**
+     * Last public contact marker publication/removal error.
+     */
+    val `publicContactLastError`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Local SDK contact update.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiContactUpdate (
+    /**
+     * Contact public key.
+     */
+    val `publicKey`: kotlin.String,
+    /**
+     * Optional local display label.
+     */
+    val `label`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Current identity status returned to apps.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiIdentityStatus (
+    /**
+     * Current local public key, when signed in.
+     */
+    val `publicKey`: kotlin.String?,
+    /**
+     * Current Pubky capability.
+     */
+    val `capability`: FfiPubkyIdentityCapability,
+    /**
+     * Whether live Pubky session access is available for this identity.
+     */
+    val `liveSessionAvailable`: kotlin.Boolean,
+    /**
+     * Whether private Paykit workflows can run with the live session.
+     */
+    val `privateLinkCapable`: kotlin.Boolean
+) {
+    public companion object
+}
+
+
+
+/**
+ * Initialization report returned after SDK startup.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiInitializationReport (
+    /**
+     * Last persisted identity status.
+     */
+    val `identity`: FfiIdentityStatus,
+    /**
+     * Whether live Pubky session access was available during startup.
+     */
+    val `liveSessionAvailable`: kotlin.Boolean
+) {
+    public companion object
+}
+
+
+
+/**
+ * Public blob published under the configured Paykit namespace.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPaykitBlobRecord (
+    /**
+     * Blob owner.
+     */
+    val `publicKey`: kotlin.String,
+    /**
+     * Pubky path used for the blob.
+     */
+    val `path`: kotlin.String,
+    /**
+     * Canonical `pubky://` URI for the blob.
+     */
+    val `uri`: kotlin.String,
+    /**
+     * Blob size in bytes.
+     */
+    val `sizeBytes`: kotlin.ULong,
+    /**
+     * Local publication time as RFC3339 text.
+     */
+    val `updatedAt`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Public Paykit-facing profile metadata.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPaykitProfile (
+    /**
+     * Public display name.
+     */
+    val `displayName`: kotlin.String?,
+    /**
+     * Public image pointer such as a Pubky path or URL.
+     */
+    val `imageUri`: kotlin.String?,
+    /**
+     * App-specific public profile fields encoded as a JSON object.
+     */
+    val `extraJson`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Profile record fetched or published through the SDK.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPaykitProfileRecord (
+    /**
+     * Profile owner.
+     */
+    val `publicKey`: kotlin.String,
+    /**
+     * Public profile metadata.
+     */
+    val `profile`: FfiPaykitProfile,
+    /**
+     * Pubky path used for the profile.
+     */
+    val `path`: kotlin.String,
+    /**
+     * Local observation/publication time as RFC3339 text.
+     */
+    val `updatedAt`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Runtime configuration for Paykit SDK bindings.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPaykitSdkConfig (
+    /**
+     * Namespace segment for SDK profile/contact public data under `/pub/`.
+     */
+    val `profileNamespace`: kotlin.String,
+    /**
+     * Public endpoint management scope.
+     */
+    val `endpointManagementScope`: FfiEndpointManagementScope,
+    /**
+     * Public recovery marker behavior.
+     */
+    val `encryptedLinkRecoveryMarkers`: FfiEncryptedLinkRecoveryMarkerPolicy,
+    /**
+     * Public contact marker behavior.
+     */
+    val `publicContactSharing`: FfiPublicContactSharingPolicy,
+    /**
+     * Peer link operation lease timeout in seconds.
+     */
+    val `peerLinkOperationLeaseTimeoutSecs`: kotlin.ULong,
+    /**
+     * Outbound private send lease timeout in seconds.
+     */
+    val `outboundPrivateSendLeaseTimeoutSecs`: kotlin.ULong,
+    /**
+     * Minimum delay before retrying a failed outbound private send in seconds.
+     */
+    val `outboundPrivateRetryBackoffSecs`: kotlin.ULong
+) {
+    public companion object
+}
+
+
+
+/**
+ * Public details parsed from a Pubky auth deep link.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPubkyAuthDetails (
+    /**
+     * Auth request kind.
+     */
+    val `kind`: FfiPubkyAuthRequestKind,
+    /**
+     * Requested capabilities as canonical Pubky capability text.
+     */
+    val `capabilities`: kotlin.String?,
+    /**
+     * Relay URL used by the auth flow.
+     */
+    val `relayUrl`: kotlin.String?,
+    /**
+     * Homeserver requested by a signup flow.
+     */
+    val `homeserverPublicKey`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Pubky client configuration owned by the binding layer.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPubkyClientConfig (
+    /**
+     * Request timeout for Pubky HTTP operations in seconds.
+     */
+    val `requestTimeoutSecs`: kotlin.ULong
+) {
+    public companion object
+}
+
+
+
+/**
+ * Public profile metadata from the Pubky app namespace.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPubkyProfile (
+    /**
+     * Public display name.
+     */
+    val `name`: kotlin.String,
+    /**
+     * Optional profile bio.
+     */
+    val `bio`: kotlin.String?,
+    /**
+     * Optional public image pointer.
+     */
+    val `image`: kotlin.String?,
+    /**
+     * Public profile links.
+     */
+    val `links`: List<FfiPubkyProfileLink>,
+    /**
+     * Optional public status text.
+     */
+    val `status`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Public profile link from the Pubky app namespace.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPubkyProfileLink (
+    /**
+     * Link title.
+     */
+    val `title`: kotlin.String,
+    /**
+     * Link URL.
+     */
+    val `url`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Public profile record fetched from the Pubky app namespace.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPubkyProfileRecord (
+    /**
+     * Profile owner.
+     */
+    val `publicKey`: kotlin.String,
+    /**
+     * Public profile metadata.
+     */
+    val `profile`: FfiPubkyProfile,
+    /**
+     * Pubky path used for the profile.
+     */
+    val `path`: kotlin.String,
+    /**
+     * Local observation time as RFC3339 text.
+     */
+    val `fetchedAt`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Parsed Pubky resource with a normalized owner and path.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPubkyResourceRef (
+    /**
+     * Resource owner public key.
+     */
+    val `publicKey`: kotlin.String,
+    /**
+     * Absolute resource path.
+     */
+    val `path`: kotlin.String,
+    /**
+     * Transport URL resolved by the Pubky client.
+     */
+    val `transportUrl`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Result of creating or importing a Pubky session.
+ */
+
+public data class FfiPubkySessionBootstrapResult (
+    /**
+     * Session access material to persist in platform session storage.
+     */
+    val `sessionAccess`: FfiPubkySessionAccess,
+    /**
+     * Local Pubky public key.
+     */
+    val `publicKey`: kotlin.String,
+    /**
+     * Capability implied by the session and optional local secret key.
+     */
+    val `capability`: FfiPubkyIdentityCapability
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`sessionAccess`,
+            this.`publicKey`,
+            this.`capability`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Report returned after restoring SDK-managed backup state.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiRestoreReport (
+    /**
+     * Restored backup schema version.
+     */
+    val `version`: kotlin.UInt,
+    /**
+     * Whether identity state was restored.
+     */
+    val `restoredIdentity`: kotlin.Boolean,
+    /**
+     * Number of restored Linked Peer records.
+     */
+    val `linkedPeers`: kotlin.ULong,
+    /**
+     * Number of restored local contact records.
+     */
+    val `contactRecords`: kotlin.ULong,
+    /**
+     * Number of restored public Payment Endpoint records.
+     */
+    val `publicEndpointRecords`: kotlin.ULong,
+    /**
+     * Number of restored Payment Endpoint Reservation records.
+     */
+    val `paymentEndpointReservations`: kotlin.ULong,
+    /**
+     * Number of restored Encrypted Link state records.
+     */
+    val `encryptedLinkStates`: kotlin.ULong,
+    /**
+     * Number of restored outbound Private Application Message records.
+     */
+    val `outboundPrivateMessages`: kotlin.ULong,
+    /**
+     * Number of restored private stream item records.
+     */
+    val `privateStreamItems`: kotlin.ULong,
+    /**
+     * Number of restored Event Message dedupe records.
+     */
+    val `eventDedupRecords`: kotlin.ULong,
+    /**
+     * Number of restored Receipt Access records.
+     */
+    val `receiptAccessRecords`: kotlin.ULong,
+    /**
+     * Number of restored decrypted Receipt records.
+     */
+    val `receiptRecords`: kotlin.ULong,
+    /**
+     * Number of restored local receipt issuance records.
+     */
+    val `receiptIssuanceRecords`: kotlin.ULong,
+    /**
+     * Counterparties restored as recovery-required.
+     */
+    val `recoveryRequiredPeers`: List<kotlin.String>
+) {
+    public companion object
+}
+
+
+
+/**
+ * Current SDK state blob with its platform storage revision.
+ */
+
+public data class FfiSdkStateBlobSnapshot (
+    /**
+     * Encoded SDK state.
+     */
+    val `blob`: FfiSdkStateBlob,
+    /**
+     * Opaque platform storage revision for optimistic writes.
+     */
+    val `revision`: kotlin.String
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`blob`,
+            this.`revision`,
+        )
+    }
+    public companion object
+}
+
+
+
+
+/**
+ * Source used for a resolved contact profile.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiContactProfileSource {
+
+    /**
+     * Resolved from the configured Paykit Profile path.
+     */
+    PAYKIT_PROFILE,
+    /**
+     * Resolved from the Pubky app profile path.
+     */
+    PUBKY_PROFILE,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * SDK policy for public Encrypted Link recovery markers.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiEncryptedLinkRecoveryMarkerPolicy {
+
+    /**
+     * Publish and observe recovery markers.
+     */
+    ENABLED,
+    /**
+     * Do not use recovery markers.
+     */
+    DISABLED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * SDK policy for public Payment Endpoint cleanup.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiEndpointManagementScope {
+
+    /**
+     * Manage only endpoints previously published by the SDK.
+     */
+    MANAGED_ONLY,
+    /**
+     * Manage the full local Paykit public namespace.
+     */
+    FULL_PAYKIT_NAMESPACE,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Kind of Pubky auth request represented by a deep link.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiPubkyAuthRequestKind {
+
+    /**
+     * Sign in to an existing Pubky account.
+     */
+    SIGN_IN,
+    /**
+     * Sign up on a Pubky homeserver.
+     */
+    SIGN_UP,
+    /**
+     * Export a secret from a signer.
+     */
+    SECRET_EXPORT,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Pubky capability state for one app-owned Paykit runtime.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiPubkyIdentityCapability {
+
+    /**
+     * No Pubky identity is initialized, or explicit sign-out completed.
+     */
+    SIGNED_OUT,
+    /**
+     * Public Pubky operations may work, but private links cannot be established.
+     */
+    PUBLIC_ONLY,
+    /**
+     * Public operations and Encrypted Links can work.
+     */
+    PRIVATE_LINK_CAPABLE,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * SDK policy for public contact marker publication.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiPublicContactSharingPolicy {
+
+    /**
+     * Keep saved contacts only in local SDK storage.
+     */
+    LOCAL_ONLY,
+    /**
+     * Allow explicit public contact marker publication in the configured namespace.
+     */
+    CONFIGURED_PUBLIC_NAMESPACE,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Local publication state for SDK-managed public data.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiPublicationStatus {
+
+    /**
+     * No publication is known to exist.
+     */
+    NOT_PUBLISHED,
+    /**
+     * Publication was recorded locally before the remote write.
+     */
+    PENDING_PUBLICATION,
+    /**
+     * Publication is known to exist.
+     */
+    PUBLISHED,
+    /**
+     * Removal was recorded locally before the remote delete.
+     */
+    PENDING_REMOVAL,
+    /**
+     * Publication is known to be removed.
+     */
+    REMOVED,
+    /**
+     * Last publication or removal attempt failed.
+     */
+    FAILED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+
+/**
+ * Error type exposed through generated bindings.
+ */
 public sealed class PaykitFfiException: kotlin.Exception() {
 
+    /**
+     * Durable storage failed.
+     */
+    public class Storage(
+        public val `code`: kotlin.String,
+        public val `context`: kotlin.String,
+    ) : PaykitFfiException() {
+        override val message: String
+            get() = "code=${ `code` }, context=${ `context` }"
+    }
+
+    /**
+     * Pubky identity, session, or key capability failed.
+     */
+    public class Identity(
+        public val `code`: kotlin.String,
+        public val `context`: kotlin.String,
+    ) : PaykitFfiException() {
+        override val message: String
+            get() = "code=${ `code` }, context=${ `context` }"
+    }
+
+    /**
+     * Pubky or Encrypted Link transport failed.
+     */
     public class Transport(
-        public val `reason`: kotlin.String,
+        public val `code`: kotlin.String,
+        public val `context`: kotlin.String,
     ) : PaykitFfiException() {
         override val message: String
-            get() = "reason=${ `reason` }"
+            get() = "code=${ `code` }, context=${ `context` }"
     }
 
+    /**
+     * Requested Paykit or Pubky resource was not found.
+     */
     public class NotFound(
-        public val `reason`: kotlin.String,
+        public val `code`: kotlin.String,
+        public val `context`: kotlin.String,
     ) : PaykitFfiException() {
         override val message: String
-            get() = "reason=${ `reason` }"
+            get() = "code=${ `code` }, context=${ `context` }"
     }
 
-    public class InvalidData(
-        public val `reason`: kotlin.String,
+    /**
+     * Paykit protocol data is invalid, conflicting, or unsupported.
+     */
+    public class Protocol(
+        public val `code`: kotlin.String,
+        public val `context`: kotlin.String,
     ) : PaykitFfiException() {
         override val message: String
-            get() = "reason=${ `reason` }"
+            get() = "code=${ `code` }, context=${ `context` }"
     }
 
-    public class Validation(
-        public val `reason`: kotlin.String,
+    /**
+     * Operation is blocked by configured SDK policy.
+     */
+    public class Policy(
+        public val `code`: kotlin.String,
+        public val `context`: kotlin.String,
     ) : PaykitFfiException() {
         override val message: String
-            get() = "reason=${ `reason` }"
+            get() = "code=${ `code` }, context=${ `context` }"
     }
 
-    public class Session(
-        public val `reason`: kotlin.String,
+    /**
+     * Payment adapter failed.
+     */
+    public class PaymentAdapter(
+        public val `code`: kotlin.String,
+        public val `context`: kotlin.String,
     ) : PaykitFfiException() {
         override val message: String
-            get() = "reason=${ `reason` }"
+            get() = "code=${ `code` }, context=${ `context` }"
+    }
+
+    /**
+     * Local state needs explicit recovery before automation can continue.
+     */
+    public class RecoveryRequired(
+        public val `code`: kotlin.String,
+        public val `context`: kotlin.String,
+    ) : PaykitFfiException() {
+        override val message: String
+            get() = "code=${ `code` }, context=${ `context` }"
     }
 
 }

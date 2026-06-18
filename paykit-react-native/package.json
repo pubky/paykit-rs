@@ -1,7 +1,7 @@
 {
   "name": "@synonymdev/react-native-paykit",
   "version": "0.1.0",
-  "description": "React Native wrapper for Paykit FFI bindings",
+  "description": "React Native wrapper for Paykit SDK bindings",
   "source": "./src/index.tsx",
   "main": "./lib/commonjs/index.js",
   "module": "./lib/module/index.js",
@@ -36,11 +36,12 @@
     "!**/.*"
   ],
   "scripts": {
-    "test": "jest",
+    "test": "npm run typecheck && npm run lint",
     "typecheck": "tsc",
     "lint": "eslint \"**/*.{js,ts,tsx}\"",
     "clean": "rm -rf android/build ios/build lib",
     "prepare": "bob build",
+    "prepack": "cd ../paykit-ffi && ./build.sh all && cd ../paykit-react-native && npm run update-bindings",
     "update-bindings": "./scripts/update-bindings.sh"
   },
   "keywords": [
@@ -84,12 +85,6 @@
   "peerDependencies": {
     "react": "*",
     "react-native": "*"
-  },
-  "jest": {
-    "preset": "react-native",
-    "modulePathIgnorePatterns": [
-      "<rootDir>/lib/"
-    ]
   },
   "eslintConfig": {
     "root": true,

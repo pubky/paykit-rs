@@ -43,21 +43,27 @@ impl StorageAdapter for InMemoryStorage {
             context: "in-memory storage lock poisoned".into(),
             source: Some(anyhow::anyhow!(err.to_string())),
         })?;
-        let mut transaction = InMemoryStorageTransaction {
-            state: guard.clone(),
-        };
-
-        let value = f(&mut transaction)?;
-        *guard = transaction.state;
+        let (updated_state, value) = run_storage_state_transaction(guard.clone(), f)?;
+        *guard = updated_state;
         Ok(value)
     }
 }
 
-struct InMemoryStorageTransaction {
+/// Run one logical SDK storage transaction against an owned storage state.
+pub fn run_storage_state_transaction(
+    state: StorageState,
+    f: StorageTransactionCallback<'_>,
+) -> Result<(StorageState, Box<dyn std::any::Any + Send>)> {
+    let mut transaction = StorageStateTransaction { state };
+    let value = f(&mut transaction)?;
+    Ok((transaction.state, value))
+}
+
+struct StorageStateTransaction {
     state: StorageState,
 }
 
-impl StorageTransaction for InMemoryStorageTransaction {
+impl StorageTransaction for StorageStateTransaction {
     fn export_storage_state(&self) -> StorageState {
         self.state.clone()
     }

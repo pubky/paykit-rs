@@ -477,7 +477,7 @@ pub struct EventDedupRecord {
 }
 
 /// Logical SDK storage state used by snapshots, tests, and backup/restore.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageState {
     /// Current identity state.
     pub identity_state: Option<IdentityState>,
