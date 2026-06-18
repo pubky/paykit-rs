@@ -1341,6 +1341,12 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1425,10 +1431,16 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_contact_records() != 49216.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_current_private_payment_list() != 28155.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_blob() != 43993.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 21009.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list() != 42080.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_state() != 29122.toShort()) {
@@ -1501,6 +1513,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact() != 46208.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_payment() != 23408.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 56264.toShort()) {
@@ -1702,10 +1717,16 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_contact_records(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_current_private_payment_list(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_blob(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_state(
@@ -1778,6 +1799,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_payment(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile(
@@ -2023,12 +2047,22 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_current_private_payment_list(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_delete_paykit_blob(
         `ptr`: Pointer?,
         `uriOrPath`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_encrypted_link_recovery_marker_status(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_enqueue_private_payment_list(
         `ptr`: Pointer?,
         `counterparty`: RustBufferByValue,
     ): Long
@@ -2145,6 +2179,11 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_remove_public_contact(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_resolve_contact_payment(
+        `ptr`: Pointer?,
+        `request`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_resolve_contact_profile(
@@ -3302,6 +3341,29 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
     }
 
     /**
+     * Return the latest valid Private Payment List view for a counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `currentPrivatePaymentList`(`counterparty`: kotlin.String): FfiPrivatePaymentListView? {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_current_private_payment_list(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterOptionalTypeFfiPrivatePaymentListView.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Delete a blob by `pubky://` URI or configured Paykit profile path.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -3343,6 +3405,29 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterOptionalTypeFfiEncryptedLinkRecoveryMarkerReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Queue the current complete Private Payment List for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `enqueuePrivatePaymentList`(`counterparty`: kotlin.String): FfiQueuedPrivateMessage {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_enqueue_private_payment_list(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiQueuedPrivateMessage.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -3889,6 +3974,29 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterOptionalTypeFfiContactRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Resolve payable endpoints for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `resolveContactPayment`(`request`: FfiContactPaymentResolutionRequest): FfiContactPaymentResolution {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_resolve_contact_payment(
+                    thisPtr,
+                    FfiConverterTypeFfiContactPaymentResolutionRequest.lower(`request`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiContactPaymentResolution.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -6708,6 +6816,56 @@ internal object uniffiCallbackInterfaceFfiSdkStateBlobStore {
 
 
 
+public object FfiConverterTypeFfiContactPaymentResolution: FfiConverterRustBuffer<FfiContactPaymentResolution> {
+    override fun read(buf: ByteBuffer): FfiContactPaymentResolution {
+        return FfiContactPaymentResolution(
+            FfiConverterTypeFfiContactPaymentResolutionStatus.read(buf),
+            FfiConverterTypeFfiContactPaymentResolutionPrivateState.read(buf),
+            FfiConverterSequenceTypeFfiResolvedPaymentEndpoint.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiContactPaymentResolution): ULong = (
+            FfiConverterTypeFfiContactPaymentResolutionStatus.allocationSize(value.`status`) +
+            FfiConverterTypeFfiContactPaymentResolutionPrivateState.allocationSize(value.`privateState`) +
+            FfiConverterSequenceTypeFfiResolvedPaymentEndpoint.allocationSize(value.`payableEndpoints`)
+    )
+
+    override fun write(value: FfiContactPaymentResolution, buf: ByteBuffer) {
+        FfiConverterTypeFfiContactPaymentResolutionStatus.write(value.`status`, buf)
+        FfiConverterTypeFfiContactPaymentResolutionPrivateState.write(value.`privateState`, buf)
+        FfiConverterSequenceTypeFfiResolvedPaymentEndpoint.write(value.`payableEndpoints`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiContactPaymentResolutionRequest: FfiConverterRustBuffer<FfiContactPaymentResolutionRequest> {
+    override fun read(buf: ByteBuffer): FfiContactPaymentResolutionRequest {
+        return FfiContactPaymentResolutionRequest(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeFfiPaymentAmountContext.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiContactPaymentResolutionRequest): ULong = (
+            FfiConverterString.allocationSize(value.`counterparty`) +
+            FfiConverterOptionalTypeFfiPaymentAmountContext.allocationSize(value.`amount`) +
+            FfiConverterBoolean.allocationSize(value.`includePublicEndpoints`)
+    )
+
+    override fun write(value: FfiContactPaymentResolutionRequest, buf: ByteBuffer) {
+        FfiConverterString.write(value.`counterparty`, buf)
+        FfiConverterOptionalTypeFfiPaymentAmountContext.write(value.`amount`, buf)
+        FfiConverterBoolean.write(value.`includePublicEndpoints`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiContactProfileResolution: FfiConverterRustBuffer<FfiContactProfileResolution> {
     override fun read(buf: ByteBuffer): FfiContactProfileResolution {
         return FfiContactProfileResolution(
@@ -7407,6 +7565,53 @@ public object FfiConverterTypeFfiPaymentTarget: FfiConverterRustBuffer<FfiPaymen
 
 
 
+public object FfiConverterTypeFfiPrivatePaymentListEndpoint: FfiConverterRustBuffer<FfiPrivatePaymentListEndpoint> {
+    override fun read(buf: ByteBuffer): FfiPrivatePaymentListEndpoint {
+        return FfiPrivatePaymentListEndpoint(
+            FfiConverterString.read(buf),
+            FfiConverterTypeFfiPaymentPayload.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPrivatePaymentListEndpoint): ULong = (
+            FfiConverterString.allocationSize(value.`identifier`) +
+            FfiConverterTypeFfiPaymentPayload.allocationSize(value.`payload`)
+    )
+
+    override fun write(value: FfiPrivatePaymentListEndpoint, buf: ByteBuffer) {
+        FfiConverterString.write(value.`identifier`, buf)
+        FfiConverterTypeFfiPaymentPayload.write(value.`payload`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiPrivatePaymentListView: FfiConverterRustBuffer<FfiPrivatePaymentListView> {
+    override fun read(buf: ByteBuffer): FfiPrivatePaymentListView {
+        return FfiPrivatePaymentListView(
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterSequenceTypeFfiPrivatePaymentListEndpoint.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPrivatePaymentListView): ULong = (
+            FfiConverterOptionalULong.allocationSize(value.`latestStreamItemId`) +
+            FfiConverterSequenceTypeFfiPrivatePaymentListEndpoint.allocationSize(value.`paymentEndpoints`) +
+            FfiConverterOptionalString.allocationSize(value.`lastRefreshAt`)
+    )
+
+    override fun write(value: FfiPrivatePaymentListView, buf: ByteBuffer) {
+        FfiConverterOptionalULong.write(value.`latestStreamItemId`, buf)
+        FfiConverterSequenceTypeFfiPrivatePaymentListEndpoint.write(value.`paymentEndpoints`, buf)
+        FfiConverterOptionalString.write(value.`lastRefreshAt`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport: FfiConverterRustBuffer<FfiPrivateStreamCounterpartyIntakeReport> {
     override fun read(buf: ByteBuffer): FfiPrivateStreamCounterpartyIntakeReport {
         return FfiPrivateStreamCounterpartyIntakeReport(
@@ -7635,6 +7840,52 @@ public object FfiConverterTypeFfiPubkySessionBootstrapResult: FfiConverterRustBu
 
 
 
+public object FfiConverterTypeFfiQueuedPrivateMessage: FfiConverterRustBuffer<FfiQueuedPrivateMessage> {
+    override fun read(buf: ByteBuffer): FfiQueuedPrivateMessage {
+        return FfiQueuedPrivateMessage(
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiPrivateOperationError.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiQueuedPrivateMessage): ULong = (
+            FfiConverterULong.allocationSize(value.`outboundMessageId`) +
+            FfiConverterString.allocationSize(value.`counterparty`) +
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`status`) +
+            FfiConverterUInt.allocationSize(value.`attemptCount`) +
+            FfiConverterString.allocationSize(value.`createdAt`) +
+            FfiConverterString.allocationSize(value.`updatedAt`) +
+            FfiConverterOptionalString.allocationSize(value.`lastAttemptAt`) +
+            FfiConverterOptionalString.allocationSize(value.`sentAt`) +
+            FfiConverterOptionalTypeFfiPrivateOperationError.allocationSize(value.`lastError`)
+    )
+
+    override fun write(value: FfiQueuedPrivateMessage, buf: ByteBuffer) {
+        FfiConverterULong.write(value.`outboundMessageId`, buf)
+        FfiConverterString.write(value.`counterparty`, buf)
+        FfiConverterString.write(value.`kind`, buf)
+        FfiConverterTypeFfiOutboundPrivateMessageStatus.write(value.`status`, buf)
+        FfiConverterUInt.write(value.`attemptCount`, buf)
+        FfiConverterString.write(value.`createdAt`, buf)
+        FfiConverterString.write(value.`updatedAt`, buf)
+        FfiConverterOptionalString.write(value.`lastAttemptAt`, buf)
+        FfiConverterOptionalString.write(value.`sentAt`, buf)
+        FfiConverterOptionalTypeFfiPrivateOperationError.write(value.`lastError`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiReceivingDetail: FfiConverterRustBuffer<FfiReceivingDetail> {
     override fun read(buf: ByteBuffer): FfiReceivingDetail {
         return FfiReceivingDetail(
@@ -7723,6 +7974,37 @@ public object FfiConverterTypeFfiReservationCleanupFailure: FfiConverterRustBuff
 
 
 
+public object FfiConverterTypeFfiResolvedPaymentEndpoint: FfiConverterRustBuffer<FfiResolvedPaymentEndpoint> {
+    override fun read(buf: ByteBuffer): FfiResolvedPaymentEndpoint {
+        return FfiResolvedPaymentEndpoint(
+            FfiConverterString.read(buf),
+            FfiConverterTypeFfiPaymentEndpointSource.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeFfiPaymentPayload.read(buf),
+            FfiConverterTypeFfiPaymentTarget.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiResolvedPaymentEndpoint): ULong = (
+            FfiConverterString.allocationSize(value.`counterparty`) +
+            FfiConverterTypeFfiPaymentEndpointSource.allocationSize(value.`source`) +
+            FfiConverterString.allocationSize(value.`identifier`) +
+            FfiConverterTypeFfiPaymentPayload.allocationSize(value.`payload`) +
+            FfiConverterTypeFfiPaymentTarget.allocationSize(value.`target`)
+    )
+
+    override fun write(value: FfiResolvedPaymentEndpoint, buf: ByteBuffer) {
+        FfiConverterString.write(value.`counterparty`, buf)
+        FfiConverterTypeFfiPaymentEndpointSource.write(value.`source`, buf)
+        FfiConverterString.write(value.`identifier`, buf)
+        FfiConverterTypeFfiPaymentPayload.write(value.`payload`, buf)
+        FfiConverterTypeFfiPaymentTarget.write(value.`target`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiRestoreReport: FfiConverterRustBuffer<FfiRestoreReport> {
     override fun read(buf: ByteBuffer): FfiRestoreReport {
         return FfiRestoreReport(
@@ -7797,6 +8079,42 @@ public object FfiConverterTypeFfiSdkStateBlobSnapshot: FfiConverterRustBuffer<Ff
     override fun write(value: FfiSdkStateBlobSnapshot, buf: ByteBuffer) {
         FfiConverterTypeFfiSdkStateBlob.write(value.`blob`, buf)
         FfiConverterString.write(value.`revision`, buf)
+    }
+}
+
+
+
+
+
+public object FfiConverterTypeFfiContactPaymentResolutionPrivateState: FfiConverterRustBuffer<FfiContactPaymentResolutionPrivateState> {
+    override fun read(buf: ByteBuffer): FfiContactPaymentResolutionPrivateState = try {
+        FfiContactPaymentResolutionPrivateState.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FfiContactPaymentResolutionPrivateState): ULong = 4UL
+
+    override fun write(value: FfiContactPaymentResolutionPrivateState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+public object FfiConverterTypeFfiContactPaymentResolutionStatus: FfiConverterRustBuffer<FfiContactPaymentResolutionStatus> {
+    override fun read(buf: ByteBuffer): FfiContactPaymentResolutionStatus = try {
+        FfiContactPaymentResolutionStatus.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FfiContactPaymentResolutionStatus): ULong = 4UL
+
+    override fun write(value: FfiContactPaymentResolutionStatus, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -7886,6 +8204,24 @@ public object FfiConverterTypeFfiLinkedPeerState: FfiConverterRustBuffer<FfiLink
     override fun allocationSize(value: FfiLinkedPeerState): ULong = 4UL
 
     override fun write(value: FfiLinkedPeerState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+public object FfiConverterTypeFfiOutboundPrivateMessageStatus: FfiConverterRustBuffer<FfiOutboundPrivateMessageStatus> {
+    override fun read(buf: ByteBuffer): FfiOutboundPrivateMessageStatus = try {
+        FfiOutboundPrivateMessageStatus.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FfiOutboundPrivateMessageStatus): ULong = 4UL
+
+    override fun write(value: FfiOutboundPrivateMessageStatus, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -8560,6 +8896,35 @@ public object FfiConverterOptionalTypeFfiPaymentAmountContext: FfiConverterRustB
 
 
 
+public object FfiConverterOptionalTypeFfiPrivatePaymentListView: FfiConverterRustBuffer<FfiPrivatePaymentListView?> {
+    override fun read(buf: ByteBuffer): FfiPrivatePaymentListView? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiPrivatePaymentListView.read(buf)
+    }
+
+    override fun allocationSize(value: FfiPrivatePaymentListView?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiPrivatePaymentListView.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiPrivatePaymentListView?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiPrivatePaymentListView.write(value, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterOptionalTypeFfiPrivateStreamIntakeReport: FfiConverterRustBuffer<FfiPrivateStreamIntakeReport?> {
     override fun read(buf: ByteBuffer): FfiPrivateStreamIntakeReport? {
         if (buf.get().toInt() == 0) {
@@ -8984,6 +9349,31 @@ public object FfiConverterSequenceTypeFfiPaymentEndpointReservation: FfiConverte
 
 
 
+public object FfiConverterSequenceTypeFfiPrivatePaymentListEndpoint: FfiConverterRustBuffer<List<FfiPrivatePaymentListEndpoint>> {
+    override fun read(buf: ByteBuffer): List<FfiPrivatePaymentListEndpoint> {
+        val len = buf.getInt()
+        return List<FfiPrivatePaymentListEndpoint>(len) {
+            FfiConverterTypeFfiPrivatePaymentListEndpoint.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiPrivatePaymentListEndpoint>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiPrivatePaymentListEndpoint.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiPrivatePaymentListEndpoint>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiPrivatePaymentListEndpoint.write(it, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterSequenceTypeFfiPrivateStreamCounterpartyIntakeReport: FfiConverterRustBuffer<List<FfiPrivateStreamCounterpartyIntakeReport>> {
     override fun read(buf: ByteBuffer): List<FfiPrivateStreamCounterpartyIntakeReport> {
         val len = buf.getInt()
@@ -9102,6 +9492,31 @@ public object FfiConverterSequenceTypeFfiReservationCleanupFailure: FfiConverter
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFfiReservationCleanupFailure.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeFfiResolvedPaymentEndpoint: FfiConverterRustBuffer<List<FfiResolvedPaymentEndpoint>> {
+    override fun read(buf: ByteBuffer): List<FfiResolvedPaymentEndpoint> {
+        val len = buf.getInt()
+        return List<FfiResolvedPaymentEndpoint>(len) {
+            FfiConverterTypeFfiResolvedPaymentEndpoint.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiResolvedPaymentEndpoint>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiResolvedPaymentEndpoint.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiResolvedPaymentEndpoint>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiResolvedPaymentEndpoint.write(it, buf)
         }
     }
 }

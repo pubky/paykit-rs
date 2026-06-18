@@ -61,6 +61,18 @@ Paykit-side workflow.
 Private operation errors expose stable category/code fields and redacted
 context. Raw diagnostic details require an explicit debug export method.
 
+### Private Payment Lists and Payment Resolution
+
+- `FfiPaykitSdk.enqueuePrivatePaymentList` — queue current private receiving
+  details for one counterparty.
+- `FfiPaykitSdk.currentPrivatePaymentList` — inspect the latest cached Private
+  Payment List view for one counterparty.
+- `FfiPaykitSdk.resolveContactPayment` — resolve payable private and optional
+  public Payment Endpoints into adapter-built payment targets.
+
+Private endpoint payloads and payment targets use `FfiPaymentPayload`, so raw
+payment-method data is exported only through explicit payload methods.
+
 ### Pubky Session Bootstrap
 
 - `FfiPubkySessionBootstrap` — create/import Pubky sessions and auth flows.
