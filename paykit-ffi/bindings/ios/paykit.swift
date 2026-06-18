@@ -527,6 +527,21 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
 
     /**
+     * Start an Encrypted Link Handshake as the responder.
+     */
+    func acceptLinkWithPeer(counterparty: String) async throws  -> FfiLinkedPeerHandshakeReport
+
+    /**
+     * Advance the stored Encrypted Link Handshake for one counterparty.
+     */
+    func advanceLinkHandshake(counterparty: String) async throws  -> FfiLinkedPeerHandshakeReport
+
+    /**
+     * Block a counterparty for local Paykit private workflows.
+     */
+    func blockPeer(counterparty: String) async throws  -> FfiLinkedPeerRecord
+
+    /**
      * Return this runtime's configuration.
      */
     func config()  -> FfiPaykitSdkConfig
@@ -545,6 +560,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Delete a blob by `pubky://` URI or configured Paykit profile path.
      */
     func deletePaykitBlob(uriOrPath: String) async throws
+
+    /**
+     * Return tracked Encrypted Link recovery marker state for a counterparty.
+     */
+    func encryptedLinkRecoveryMarkerStatus(counterparty: String) async throws  -> FfiEncryptedLinkRecoveryMarkerReport?
 
     /**
      * Export SDK-managed backup state as an opaque blob.
@@ -587,6 +607,41 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func initialize() async throws  -> FfiInitializationReport
 
     /**
+     * Start an Encrypted Link Handshake as the initiator.
+     */
+    func initiateLinkWithPeer(counterparty: String) async throws  -> FfiLinkedPeerHandshakeReport
+
+    /**
+     * List locally tracked Linked Peer records.
+     */
+    func linkedPeers() async throws  -> [FfiLinkedPeerRecord]
+
+    /**
+     * Observe a counterparty's public recovery marker.
+     */
+    func observeEncryptedLinkRecoveryMarker(counterparty: String) async throws  -> FfiEncryptedLinkRecoveryMarkerReport
+
+    /**
+     * List counterparties with queued private messages ready for retry.
+     */
+    func pendingOutboundPrivateCounterparties() async throws  -> [String]
+
+    /**
+     * Send queued outbound private messages for one counterparty in order.
+     */
+    func processOutboundPrivateMessages(counterparty: String) async throws  -> FfiOutboundPrivateSendReport
+
+    /**
+     * Process queued outbound private messages for every pending counterparty.
+     */
+    func processPendingPrivateMessages() async throws  -> [FfiOutboundPrivateCounterpartySendReport]
+
+    /**
+     * Publish a minimal local recovery marker for a counterparty.
+     */
+    func publishEncryptedLinkRecoveryMarker(counterparty: String) async throws  -> FfiEncryptedLinkRecoveryMarkerReport
+
+    /**
      * Publish a blob under this identity's Paykit profile namespace.
      */
     func publishPaykitBlob(blobName: String, bytes: Data) async throws  -> FfiPaykitBlobRecord
@@ -602,6 +657,16 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func publishPublicContact(publicKey: String) async throws  -> FfiContactRecord
 
     /**
+     * Receive and durably persist available private messages.
+     */
+    func receivePrivateMessages(counterparty: String) async throws  -> FfiPrivateStreamIntakeReport
+
+    /**
+     * Receive private messages from every locally linked counterparty.
+     */
+    func receivePrivateMessagesFromLinkedPeers() async throws  -> [FfiPrivateStreamCounterpartyIntakeReport]
+
+    /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
     func refreshContactPaykitProfile(publicKey: String) async throws  -> FfiContactRecord?
@@ -610,6 +675,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Remove a local Contact Record when it has no public marker to clean up.
      */
     func removeContact(publicKey: String) async throws  -> FfiContactRecord?
+
+    /**
+     * Remove the local public recovery marker for a counterparty.
+     */
+    func removeEncryptedLinkRecoveryMarker(counterparty: String) async throws  -> FfiEncryptedLinkRecoveryMarkerReport
 
     /**
      * Remove a public Contact Marker.
@@ -645,6 +715,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Publish current public receiving details and remove stale SDK-managed endpoints.
      */
     func syncPublicEndpoints() async throws  -> FfiEndpointSyncReport
+
+    /**
+     * Remove a local peer block and return the peer to NotLinked.
+     */
+    func unblockPeer(counterparty: String) async throws  -> FfiLinkedPeerRecord
 
 }
 /**
@@ -759,6 +834,66 @@ public static func withPubkyClientConfig(stateStore: FfiSdkStateBlobStore, sessi
 
 
     /**
+     * Start an Encrypted Link Handshake as the responder.
+     */
+open func acceptLinkWithPeer(counterparty: String)async throws  -> FfiLinkedPeerHandshakeReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_accept_link_with_peer(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiLinkedPeerHandshakeReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Advance the stored Encrypted Link Handshake for one counterparty.
+     */
+open func advanceLinkHandshake(counterparty: String)async throws  -> FfiLinkedPeerHandshakeReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_advance_link_handshake(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiLinkedPeerHandshakeReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Block a counterparty for local Paykit private workflows.
+     */
+open func blockPeer(counterparty: String)async throws  -> FfiLinkedPeerRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_block_peer(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiLinkedPeerRecord_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Return this runtime's configuration.
      */
 open func config() -> FfiPaykitSdkConfig  {
@@ -824,6 +959,26 @@ open func deletePaykitBlob(uriOrPath: String)async throws   {
             completeFunc: ffi_paykit_rust_future_complete_void,
             freeFunc: ffi_paykit_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Return tracked Encrypted Link recovery marker state for a counterparty.
+     */
+open func encryptedLinkRecoveryMarkerStatus(counterparty: String)async throws  -> FfiEncryptedLinkRecoveryMarkerReport?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_encrypted_link_recovery_marker_status(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeFfiEncryptedLinkRecoveryMarkerReport.lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -989,6 +1144,146 @@ open func initialize()async throws  -> FfiInitializationReport  {
 }
 
     /**
+     * Start an Encrypted Link Handshake as the initiator.
+     */
+open func initiateLinkWithPeer(counterparty: String)async throws  -> FfiLinkedPeerHandshakeReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_initiate_link_with_peer(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiLinkedPeerHandshakeReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List locally tracked Linked Peer records.
+     */
+open func linkedPeers()async throws  -> [FfiLinkedPeerRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_linked_peers(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiLinkedPeerRecord.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Observe a counterparty's public recovery marker.
+     */
+open func observeEncryptedLinkRecoveryMarker(counterparty: String)async throws  -> FfiEncryptedLinkRecoveryMarkerReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_observe_encrypted_link_recovery_marker(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List counterparties with queued private messages ready for retry.
+     */
+open func pendingOutboundPrivateCounterparties()async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_pending_outbound_private_counterparties(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Send queued outbound private messages for one counterparty in order.
+     */
+open func processOutboundPrivateMessages(counterparty: String)async throws  -> FfiOutboundPrivateSendReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_process_outbound_private_messages(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiOutboundPrivateSendReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Process queued outbound private messages for every pending counterparty.
+     */
+open func processPendingPrivateMessages()async throws  -> [FfiOutboundPrivateCounterpartySendReport]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_process_pending_private_messages(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiOutboundPrivateCounterpartySendReport.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Publish a minimal local recovery marker for a counterparty.
+     */
+open func publishEncryptedLinkRecoveryMarker(counterparty: String)async throws  -> FfiEncryptedLinkRecoveryMarkerReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_publish_encrypted_link_recovery_marker(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Publish a blob under this identity's Paykit profile namespace.
      */
 open func publishPaykitBlob(blobName: String, bytes: Data)async throws  -> FfiPaykitBlobRecord  {
@@ -1049,6 +1344,46 @@ open func publishPublicContact(publicKey: String)async throws  -> FfiContactReco
 }
 
     /**
+     * Receive and durably persist available private messages.
+     */
+open func receivePrivateMessages(counterparty: String)async throws  -> FfiPrivateStreamIntakeReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_receive_private_messages(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiPrivateStreamIntakeReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Receive private messages from every locally linked counterparty.
+     */
+open func receivePrivateMessagesFromLinkedPeers()async throws  -> [FfiPrivateStreamCounterpartyIntakeReport]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_receive_private_messages_from_linked_peers(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiPrivateStreamCounterpartyIntakeReport.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
 open func refreshContactPaykitProfile(publicKey: String)async throws  -> FfiContactRecord?  {
@@ -1084,6 +1419,26 @@ open func removeContact(publicKey: String)async throws  -> FfiContactRecord?  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeFfiContactRecord.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Remove the local public recovery marker for a counterparty.
+     */
+open func removeEncryptedLinkRecoveryMarker(counterparty: String)async throws  -> FfiEncryptedLinkRecoveryMarkerReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_remove_encrypted_link_recovery_marker(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1224,6 +1579,26 @@ open func syncPublicEndpoints()async throws  -> FfiEndpointSyncReport  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeFfiEndpointSyncReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Remove a local peer block and return the peer to NotLinked.
+     */
+open func unblockPeer(counterparty: String)async throws  -> FfiLinkedPeerRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_unblock_peer(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiLinkedPeerRecord_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1424,6 +1799,185 @@ public func FfiConverterTypeFfiPaymentPayload_lift(_ pointer: UnsafeMutableRawPo
 #endif
 public func FfiConverterTypeFfiPaymentPayload_lower(_ value: FfiPaymentPayload) -> UnsafeMutableRawPointer {
     return FfiConverterTypeFfiPaymentPayload.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Private workflow error with redacted default context.
+ */
+public protocol FfiPrivateOperationErrorProtocol: AnyObject, Sendable {
+
+    /**
+     * Stable error category for app branching.
+     */
+    func category()  -> String
+
+    /**
+     * Stable error code for app branching.
+     */
+    func code()  -> String
+
+    /**
+     * Export raw debug details for explicit diagnostic handling.
+     */
+    func exportDebugDetails()  -> String
+
+    /**
+     * Redacted error context safe for normal UI/log surfaces.
+     */
+    func redactedContext()  -> String
+
+}
+/**
+ * Private workflow error with redacted default context.
+ */
+open class FfiPrivateOperationError: FfiPrivateOperationErrorProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffiprivateoperationerror(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffiprivateoperationerror(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Stable error category for app branching.
+     */
+open func category() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiprivateoperationerror_category(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Stable error code for app branching.
+     */
+open func code() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiprivateoperationerror_code(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Export raw debug details for explicit diagnostic handling.
+     */
+open func exportDebugDetails() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiprivateoperationerror_export_debug_details(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Redacted error context safe for normal UI/log surfaces.
+     */
+open func redactedContext() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiprivateoperationerror_redacted_context(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPrivateOperationError: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = FfiPrivateOperationError
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> FfiPrivateOperationError {
+        return FfiPrivateOperationError(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: FfiPrivateOperationError) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivateOperationError {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: FfiPrivateOperationError, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivateOperationError_lift(_ pointer: UnsafeMutableRawPointer) throws -> FfiPrivateOperationError {
+    return try FfiConverterTypeFfiPrivateOperationError.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivateOperationError_lower(_ value: FfiPrivateOperationError) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeFfiPrivateOperationError.lower(value)
 }
 
 
@@ -3964,6 +4518,133 @@ public func FfiConverterTypeFfiContactUpdate_lower(_ value: FfiContactUpdate) ->
 
 
 /**
+ * Public recovery marker state tracked for one Linked Peer.
+ */
+public struct FfiEncryptedLinkRecoveryMarkerReport {
+    /**
+     * Counterparty public key.
+     */
+    public var counterparty: String
+    /**
+     * Current Linked Peer state.
+     */
+    public var state: FfiLinkedPeerState
+    /**
+     * Locally published recovery attempt id.
+     */
+    public var localAttemptId: String?
+    /**
+     * Creation time for the local marker payload as RFC3339 text.
+     */
+    public var localMarkerCreatedAt: String?
+    /**
+     * Last local marker publish/remove error, when available.
+     */
+    public var localMarkerLastError: FfiPrivateOperationError?
+    /**
+     * Latest observed counterparty recovery attempt id.
+     */
+    public var remoteAttemptId: String?
+    /**
+     * Time the counterparty marker was observed as RFC3339 text.
+     */
+    public var remoteMarkerObservedAt: String?
+    /**
+     * Whether this operation observed a new counterparty marker.
+     */
+    public var remoteMarkerChanged: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty public key.
+         */counterparty: String,
+        /**
+         * Current Linked Peer state.
+         */state: FfiLinkedPeerState,
+        /**
+         * Locally published recovery attempt id.
+         */localAttemptId: String?,
+        /**
+         * Creation time for the local marker payload as RFC3339 text.
+         */localMarkerCreatedAt: String?,
+        /**
+         * Last local marker publish/remove error, when available.
+         */localMarkerLastError: FfiPrivateOperationError?,
+        /**
+         * Latest observed counterparty recovery attempt id.
+         */remoteAttemptId: String?,
+        /**
+         * Time the counterparty marker was observed as RFC3339 text.
+         */remoteMarkerObservedAt: String?,
+        /**
+         * Whether this operation observed a new counterparty marker.
+         */remoteMarkerChanged: Bool) {
+        self.counterparty = counterparty
+        self.state = state
+        self.localAttemptId = localAttemptId
+        self.localMarkerCreatedAt = localMarkerCreatedAt
+        self.localMarkerLastError = localMarkerLastError
+        self.remoteAttemptId = remoteAttemptId
+        self.remoteMarkerObservedAt = remoteMarkerObservedAt
+        self.remoteMarkerChanged = remoteMarkerChanged
+    }
+}
+
+#if compiler(>=6)
+extension FfiEncryptedLinkRecoveryMarkerReport: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEncryptedLinkRecoveryMarkerReport {
+        return
+            try FfiEncryptedLinkRecoveryMarkerReport(
+                counterparty: FfiConverterString.read(from: &buf),
+                state: FfiConverterTypeFfiLinkedPeerState.read(from: &buf),
+                localAttemptId: FfiConverterOptionString.read(from: &buf),
+                localMarkerCreatedAt: FfiConverterOptionString.read(from: &buf),
+                localMarkerLastError: FfiConverterOptionTypeFfiPrivateOperationError.read(from: &buf),
+                remoteAttemptId: FfiConverterOptionString.read(from: &buf),
+                remoteMarkerObservedAt: FfiConverterOptionString.read(from: &buf),
+                remoteMarkerChanged: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiEncryptedLinkRecoveryMarkerReport, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterTypeFfiLinkedPeerState.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.localAttemptId, into: &buf)
+        FfiConverterOptionString.write(value.localMarkerCreatedAt, into: &buf)
+        FfiConverterOptionTypeFfiPrivateOperationError.write(value.localMarkerLastError, into: &buf)
+        FfiConverterOptionString.write(value.remoteAttemptId, into: &buf)
+        FfiConverterOptionString.write(value.remoteMarkerObservedAt, into: &buf)
+        FfiConverterBool.write(value.remoteMarkerChanged, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport_lift(_ buf: RustBuffer) throws -> FfiEncryptedLinkRecoveryMarkerReport {
+    return try FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport_lower(_ value: FfiEncryptedLinkRecoveryMarkerReport) -> RustBuffer {
+    return FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.lower(value)
+}
+
+
+/**
  * One public endpoint changed during sync.
  */
 public struct FfiEndpointSyncChange {
@@ -4166,6 +4847,107 @@ public func FfiConverterTypeFfiEndpointSyncReport_lower(_ value: FfiEndpointSync
 
 
 /**
+ * Reused Event ID with a different payload.
+ */
+public struct FfiEventIdConflict {
+    /**
+     * Conflicting Event ID.
+     */
+    public var eventId: String
+    /**
+     * First stream item that used this Event ID.
+     */
+    public var firstStreamItemId: UInt64
+    /**
+     * Stream item that reused this Event ID with a different payload.
+     */
+    public var conflictingStreamItemId: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Conflicting Event ID.
+         */eventId: String,
+        /**
+         * First stream item that used this Event ID.
+         */firstStreamItemId: UInt64,
+        /**
+         * Stream item that reused this Event ID with a different payload.
+         */conflictingStreamItemId: UInt64) {
+        self.eventId = eventId
+        self.firstStreamItemId = firstStreamItemId
+        self.conflictingStreamItemId = conflictingStreamItemId
+    }
+}
+
+#if compiler(>=6)
+extension FfiEventIdConflict: Sendable {}
+#endif
+
+
+extension FfiEventIdConflict: Equatable, Hashable {
+    public static func ==(lhs: FfiEventIdConflict, rhs: FfiEventIdConflict) -> Bool {
+        if lhs.eventId != rhs.eventId {
+            return false
+        }
+        if lhs.firstStreamItemId != rhs.firstStreamItemId {
+            return false
+        }
+        if lhs.conflictingStreamItemId != rhs.conflictingStreamItemId {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(eventId)
+        hasher.combine(firstStreamItemId)
+        hasher.combine(conflictingStreamItemId)
+    }
+}
+
+extension FfiEventIdConflict: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiEventIdConflict: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEventIdConflict {
+        return
+            try FfiEventIdConflict(
+                eventId: FfiConverterString.read(from: &buf),
+                firstStreamItemId: FfiConverterUInt64.read(from: &buf),
+                conflictingStreamItemId: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiEventIdConflict, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.eventId, into: &buf)
+        FfiConverterUInt64.write(value.firstStreamItemId, into: &buf)
+        FfiConverterUInt64.write(value.conflictingStreamItemId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEventIdConflict_lift(_ buf: RustBuffer) throws -> FfiEventIdConflict {
+    return try FfiConverterTypeFfiEventIdConflict.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEventIdConflict_lower(_ value: FfiEventIdConflict) -> RustBuffer {
+    return FfiConverterTypeFfiEventIdConflict.lower(value)
+}
+
+
+/**
  * Current identity status returned to apps.
  */
 public struct FfiIdentityStatus {
@@ -4364,6 +5146,509 @@ public func FfiConverterTypeFfiInitializationReport_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeFfiInitializationReport_lower(_ value: FfiInitializationReport) -> RustBuffer {
     return FfiConverterTypeFfiInitializationReport.lower(value)
+}
+
+
+/**
+ * Result of starting or advancing an Encrypted Link Handshake.
+ */
+public struct FfiLinkedPeerHandshakeReport {
+    /**
+     * Counterparty public key.
+     */
+    public var counterparty: String
+    /**
+     * Current Linked Peer state after the operation.
+     */
+    public var state: FfiLinkedPeerState
+    /**
+     * Current Encrypted Link state generation.
+     */
+    public var generation: UInt64
+    /**
+     * In-progress handshake role, when a handshake remains pending.
+     */
+    public var handshakeRole: FfiEncryptedLinkHandshakeRole?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty public key.
+         */counterparty: String,
+        /**
+         * Current Linked Peer state after the operation.
+         */state: FfiLinkedPeerState,
+        /**
+         * Current Encrypted Link state generation.
+         */generation: UInt64,
+        /**
+         * In-progress handshake role, when a handshake remains pending.
+         */handshakeRole: FfiEncryptedLinkHandshakeRole?) {
+        self.counterparty = counterparty
+        self.state = state
+        self.generation = generation
+        self.handshakeRole = handshakeRole
+    }
+}
+
+#if compiler(>=6)
+extension FfiLinkedPeerHandshakeReport: Sendable {}
+#endif
+
+
+extension FfiLinkedPeerHandshakeReport: Equatable, Hashable {
+    public static func ==(lhs: FfiLinkedPeerHandshakeReport, rhs: FfiLinkedPeerHandshakeReport) -> Bool {
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.state != rhs.state {
+            return false
+        }
+        if lhs.generation != rhs.generation {
+            return false
+        }
+        if lhs.handshakeRole != rhs.handshakeRole {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(counterparty)
+        hasher.combine(state)
+        hasher.combine(generation)
+        hasher.combine(handshakeRole)
+    }
+}
+
+extension FfiLinkedPeerHandshakeReport: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLinkedPeerHandshakeReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLinkedPeerHandshakeReport {
+        return
+            try FfiLinkedPeerHandshakeReport(
+                counterparty: FfiConverterString.read(from: &buf),
+                state: FfiConverterTypeFfiLinkedPeerState.read(from: &buf),
+                generation: FfiConverterUInt64.read(from: &buf),
+                handshakeRole: FfiConverterOptionTypeFfiEncryptedLinkHandshakeRole.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiLinkedPeerHandshakeReport, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterTypeFfiLinkedPeerState.write(value.state, into: &buf)
+        FfiConverterUInt64.write(value.generation, into: &buf)
+        FfiConverterOptionTypeFfiEncryptedLinkHandshakeRole.write(value.handshakeRole, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLinkedPeerHandshakeReport_lift(_ buf: RustBuffer) throws -> FfiLinkedPeerHandshakeReport {
+    return try FfiConverterTypeFfiLinkedPeerHandshakeReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLinkedPeerHandshakeReport_lower(_ value: FfiLinkedPeerHandshakeReport) -> RustBuffer {
+    return FfiConverterTypeFfiLinkedPeerHandshakeReport.lower(value)
+}
+
+
+/**
+ * Locally tracked Linked Peer record.
+ */
+public struct FfiLinkedPeerRecord {
+    /**
+     * Counterparty public key.
+     */
+    public var counterparty: String
+    /**
+     * Current local relationship/link state.
+     */
+    public var state: FfiLinkedPeerState
+    /**
+     * Last successful sync time as RFC3339 text.
+     */
+    public var lastSyncAt: String?
+    /**
+     * Last private receive time as RFC3339 text.
+     */
+    public var lastPrivateReceiveAt: String?
+    /**
+     * Consecutive failure count for recovery/retry policy.
+     */
+    public var failureCount: UInt32
+    /**
+     * Locally published Encrypted Link recovery attempt id.
+     */
+    public var localRecoveryAttemptId: String?
+    /**
+     * Creation time for the local recovery marker payload as RFC3339 text.
+     */
+    public var localRecoveryMarkerCreatedAt: String?
+    /**
+     * Last local marker publish/remove error, when available.
+     */
+    public var localRecoveryMarkerLastError: FfiPrivateOperationError?
+    /**
+     * Latest counterparty recovery attempt id already observed.
+     */
+    public var remoteRecoveryAttemptId: String?
+    /**
+     * Time the counterparty recovery marker was observed as RFC3339 text.
+     */
+    public var remoteRecoveryMarkerObservedAt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty public key.
+         */counterparty: String,
+        /**
+         * Current local relationship/link state.
+         */state: FfiLinkedPeerState,
+        /**
+         * Last successful sync time as RFC3339 text.
+         */lastSyncAt: String?,
+        /**
+         * Last private receive time as RFC3339 text.
+         */lastPrivateReceiveAt: String?,
+        /**
+         * Consecutive failure count for recovery/retry policy.
+         */failureCount: UInt32,
+        /**
+         * Locally published Encrypted Link recovery attempt id.
+         */localRecoveryAttemptId: String?,
+        /**
+         * Creation time for the local recovery marker payload as RFC3339 text.
+         */localRecoveryMarkerCreatedAt: String?,
+        /**
+         * Last local marker publish/remove error, when available.
+         */localRecoveryMarkerLastError: FfiPrivateOperationError?,
+        /**
+         * Latest counterparty recovery attempt id already observed.
+         */remoteRecoveryAttemptId: String?,
+        /**
+         * Time the counterparty recovery marker was observed as RFC3339 text.
+         */remoteRecoveryMarkerObservedAt: String?) {
+        self.counterparty = counterparty
+        self.state = state
+        self.lastSyncAt = lastSyncAt
+        self.lastPrivateReceiveAt = lastPrivateReceiveAt
+        self.failureCount = failureCount
+        self.localRecoveryAttemptId = localRecoveryAttemptId
+        self.localRecoveryMarkerCreatedAt = localRecoveryMarkerCreatedAt
+        self.localRecoveryMarkerLastError = localRecoveryMarkerLastError
+        self.remoteRecoveryAttemptId = remoteRecoveryAttemptId
+        self.remoteRecoveryMarkerObservedAt = remoteRecoveryMarkerObservedAt
+    }
+}
+
+#if compiler(>=6)
+extension FfiLinkedPeerRecord: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLinkedPeerRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLinkedPeerRecord {
+        return
+            try FfiLinkedPeerRecord(
+                counterparty: FfiConverterString.read(from: &buf),
+                state: FfiConverterTypeFfiLinkedPeerState.read(from: &buf),
+                lastSyncAt: FfiConverterOptionString.read(from: &buf),
+                lastPrivateReceiveAt: FfiConverterOptionString.read(from: &buf),
+                failureCount: FfiConverterUInt32.read(from: &buf),
+                localRecoveryAttemptId: FfiConverterOptionString.read(from: &buf),
+                localRecoveryMarkerCreatedAt: FfiConverterOptionString.read(from: &buf),
+                localRecoveryMarkerLastError: FfiConverterOptionTypeFfiPrivateOperationError.read(from: &buf),
+                remoteRecoveryAttemptId: FfiConverterOptionString.read(from: &buf),
+                remoteRecoveryMarkerObservedAt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiLinkedPeerRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterTypeFfiLinkedPeerState.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.lastSyncAt, into: &buf)
+        FfiConverterOptionString.write(value.lastPrivateReceiveAt, into: &buf)
+        FfiConverterUInt32.write(value.failureCount, into: &buf)
+        FfiConverterOptionString.write(value.localRecoveryAttemptId, into: &buf)
+        FfiConverterOptionString.write(value.localRecoveryMarkerCreatedAt, into: &buf)
+        FfiConverterOptionTypeFfiPrivateOperationError.write(value.localRecoveryMarkerLastError, into: &buf)
+        FfiConverterOptionString.write(value.remoteRecoveryAttemptId, into: &buf)
+        FfiConverterOptionString.write(value.remoteRecoveryMarkerObservedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLinkedPeerRecord_lift(_ buf: RustBuffer) throws -> FfiLinkedPeerRecord {
+    return try FfiConverterTypeFfiLinkedPeerRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLinkedPeerRecord_lower(_ value: FfiLinkedPeerRecord) -> RustBuffer {
+    return FfiConverterTypeFfiLinkedPeerRecord.lower(value)
+}
+
+
+/**
+ * Summary for processing outbound private messages for one counterparty.
+ */
+public struct FfiOutboundPrivateCounterpartySendReport {
+    /**
+     * Counterparty whose queue was processed.
+     */
+    public var counterparty: String
+    /**
+     * Successful send report, when processing completed.
+     */
+    public var report: FfiOutboundPrivateSendReport?
+    /**
+     * Error text, when processing failed for this counterparty.
+     */
+    public var error: FfiPrivateOperationError?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty whose queue was processed.
+         */counterparty: String,
+        /**
+         * Successful send report, when processing completed.
+         */report: FfiOutboundPrivateSendReport?,
+        /**
+         * Error text, when processing failed for this counterparty.
+         */error: FfiPrivateOperationError?) {
+        self.counterparty = counterparty
+        self.report = report
+        self.error = error
+    }
+}
+
+#if compiler(>=6)
+extension FfiOutboundPrivateCounterpartySendReport: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOutboundPrivateCounterpartySendReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOutboundPrivateCounterpartySendReport {
+        return
+            try FfiOutboundPrivateCounterpartySendReport(
+                counterparty: FfiConverterString.read(from: &buf),
+                report: FfiConverterOptionTypeFfiOutboundPrivateSendReport.read(from: &buf),
+                error: FfiConverterOptionTypeFfiPrivateOperationError.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOutboundPrivateCounterpartySendReport, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterOptionTypeFfiOutboundPrivateSendReport.write(value.report, into: &buf)
+        FfiConverterOptionTypeFfiPrivateOperationError.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOutboundPrivateCounterpartySendReport_lift(_ buf: RustBuffer) throws -> FfiOutboundPrivateCounterpartySendReport {
+    return try FfiConverterTypeFfiOutboundPrivateCounterpartySendReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOutboundPrivateCounterpartySendReport_lower(_ value: FfiOutboundPrivateCounterpartySendReport) -> RustBuffer {
+    return FfiConverterTypeFfiOutboundPrivateCounterpartySendReport.lower(value)
+}
+
+
+/**
+ * Failed outbound private send attempt.
+ */
+public struct FfiOutboundPrivateSendFailure {
+    /**
+     * Outbound message id.
+     */
+    public var outboundMessageId: UInt64
+    /**
+     * Error from the send attempt.
+     */
+    public var error: FfiPrivateOperationError
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Outbound message id.
+         */outboundMessageId: UInt64,
+        /**
+         * Error from the send attempt.
+         */error: FfiPrivateOperationError) {
+        self.outboundMessageId = outboundMessageId
+        self.error = error
+    }
+}
+
+#if compiler(>=6)
+extension FfiOutboundPrivateSendFailure: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOutboundPrivateSendFailure: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOutboundPrivateSendFailure {
+        return
+            try FfiOutboundPrivateSendFailure(
+                outboundMessageId: FfiConverterUInt64.read(from: &buf),
+                error: FfiConverterTypeFfiPrivateOperationError.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOutboundPrivateSendFailure, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.outboundMessageId, into: &buf)
+        FfiConverterTypeFfiPrivateOperationError.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOutboundPrivateSendFailure_lift(_ buf: RustBuffer) throws -> FfiOutboundPrivateSendFailure {
+    return try FfiConverterTypeFfiOutboundPrivateSendFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOutboundPrivateSendFailure_lower(_ value: FfiOutboundPrivateSendFailure) -> RustBuffer {
+    return FfiConverterTypeFfiOutboundPrivateSendFailure.lower(value)
+}
+
+
+/**
+ * Summary returned after processing outbound private messages.
+ */
+public struct FfiOutboundPrivateSendReport {
+    /**
+     * Messages attempted in this run.
+     */
+    public var attempted: [UInt64]
+    /**
+     * Messages marked sent in this run.
+     */
+    public var sent: [UInt64]
+    /**
+     * Messages that failed in this run.
+     */
+    public var failed: [FfiOutboundPrivateSendFailure]
+    /**
+     * Superseded reservation cleanup failures observed in this run.
+     */
+    public var reservationCleanupFailures: [FfiReservationCleanupFailure]
+    /**
+     * Recovery marker publication failures observed after fail-closed recovery.
+     */
+    public var recoveryMarkerFailures: [FfiRecoveryMarkerPublishFailure]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Messages attempted in this run.
+         */attempted: [UInt64],
+        /**
+         * Messages marked sent in this run.
+         */sent: [UInt64],
+        /**
+         * Messages that failed in this run.
+         */failed: [FfiOutboundPrivateSendFailure],
+        /**
+         * Superseded reservation cleanup failures observed in this run.
+         */reservationCleanupFailures: [FfiReservationCleanupFailure],
+        /**
+         * Recovery marker publication failures observed after fail-closed recovery.
+         */recoveryMarkerFailures: [FfiRecoveryMarkerPublishFailure]) {
+        self.attempted = attempted
+        self.sent = sent
+        self.failed = failed
+        self.reservationCleanupFailures = reservationCleanupFailures
+        self.recoveryMarkerFailures = recoveryMarkerFailures
+    }
+}
+
+#if compiler(>=6)
+extension FfiOutboundPrivateSendReport: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOutboundPrivateSendReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOutboundPrivateSendReport {
+        return
+            try FfiOutboundPrivateSendReport(
+                attempted: FfiConverterSequenceUInt64.read(from: &buf),
+                sent: FfiConverterSequenceUInt64.read(from: &buf),
+                failed: FfiConverterSequenceTypeFfiOutboundPrivateSendFailure.read(from: &buf),
+                reservationCleanupFailures: FfiConverterSequenceTypeFfiReservationCleanupFailure.read(from: &buf),
+                recoveryMarkerFailures: FfiConverterSequenceTypeFfiRecoveryMarkerPublishFailure.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOutboundPrivateSendReport, into buf: inout [UInt8]) {
+        FfiConverterSequenceUInt64.write(value.attempted, into: &buf)
+        FfiConverterSequenceUInt64.write(value.sent, into: &buf)
+        FfiConverterSequenceTypeFfiOutboundPrivateSendFailure.write(value.failed, into: &buf)
+        FfiConverterSequenceTypeFfiReservationCleanupFailure.write(value.reservationCleanupFailures, into: &buf)
+        FfiConverterSequenceTypeFfiRecoveryMarkerPublishFailure.write(value.recoveryMarkerFailures, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOutboundPrivateSendReport_lift(_ buf: RustBuffer) throws -> FfiOutboundPrivateSendReport {
+    return try FfiConverterTypeFfiOutboundPrivateSendReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOutboundPrivateSendReport_lower(_ value: FfiOutboundPrivateSendReport) -> RustBuffer {
+    return FfiConverterTypeFfiOutboundPrivateSendReport.lower(value)
 }
 
 
@@ -5372,6 +6657,184 @@ public func FfiConverterTypeFfiPaymentTarget_lower(_ value: FfiPaymentTarget) ->
 
 
 /**
+ * Summary for receiving private messages from one counterparty.
+ */
+public struct FfiPrivateStreamCounterpartyIntakeReport {
+    /**
+     * Counterparty whose private stream was received.
+     */
+    public var counterparty: String
+    /**
+     * Successful intake report, when receive completed.
+     */
+    public var report: FfiPrivateStreamIntakeReport?
+    /**
+     * Error text, when receive failed for this counterparty.
+     */
+    public var error: FfiPrivateOperationError?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty whose private stream was received.
+         */counterparty: String,
+        /**
+         * Successful intake report, when receive completed.
+         */report: FfiPrivateStreamIntakeReport?,
+        /**
+         * Error text, when receive failed for this counterparty.
+         */error: FfiPrivateOperationError?) {
+        self.counterparty = counterparty
+        self.report = report
+        self.error = error
+    }
+}
+
+#if compiler(>=6)
+extension FfiPrivateStreamCounterpartyIntakeReport: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivateStreamCounterpartyIntakeReport {
+        return
+            try FfiPrivateStreamCounterpartyIntakeReport(
+                counterparty: FfiConverterString.read(from: &buf),
+                report: FfiConverterOptionTypeFfiPrivateStreamIntakeReport.read(from: &buf),
+                error: FfiConverterOptionTypeFfiPrivateOperationError.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPrivateStreamCounterpartyIntakeReport, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterOptionTypeFfiPrivateStreamIntakeReport.write(value.report, into: &buf)
+        FfiConverterOptionTypeFfiPrivateOperationError.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport_lift(_ buf: RustBuffer) throws -> FfiPrivateStreamCounterpartyIntakeReport {
+    return try FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport_lower(_ value: FfiPrivateStreamCounterpartyIntakeReport) -> RustBuffer {
+    return FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport.lower(value)
+}
+
+
+/**
+ * Summary of a persisted private stream batch.
+ */
+public struct FfiPrivateStreamIntakeReport {
+    /**
+     * Receive batch id assigned by storage.
+     */
+    public var receiveBatchId: UInt64
+    /**
+     * Stored stream item ids in input order.
+     */
+    public var streamItemIds: [UInt64]
+    /**
+     * Event ID conflicts found while updating dedupe records.
+     */
+    public var eventConflicts: [FfiEventIdConflict]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Receive batch id assigned by storage.
+         */receiveBatchId: UInt64,
+        /**
+         * Stored stream item ids in input order.
+         */streamItemIds: [UInt64],
+        /**
+         * Event ID conflicts found while updating dedupe records.
+         */eventConflicts: [FfiEventIdConflict]) {
+        self.receiveBatchId = receiveBatchId
+        self.streamItemIds = streamItemIds
+        self.eventConflicts = eventConflicts
+    }
+}
+
+#if compiler(>=6)
+extension FfiPrivateStreamIntakeReport: Sendable {}
+#endif
+
+
+extension FfiPrivateStreamIntakeReport: Equatable, Hashable {
+    public static func ==(lhs: FfiPrivateStreamIntakeReport, rhs: FfiPrivateStreamIntakeReport) -> Bool {
+        if lhs.receiveBatchId != rhs.receiveBatchId {
+            return false
+        }
+        if lhs.streamItemIds != rhs.streamItemIds {
+            return false
+        }
+        if lhs.eventConflicts != rhs.eventConflicts {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(receiveBatchId)
+        hasher.combine(streamItemIds)
+        hasher.combine(eventConflicts)
+    }
+}
+
+extension FfiPrivateStreamIntakeReport: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPrivateStreamIntakeReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivateStreamIntakeReport {
+        return
+            try FfiPrivateStreamIntakeReport(
+                receiveBatchId: FfiConverterUInt64.read(from: &buf),
+                streamItemIds: FfiConverterSequenceUInt64.read(from: &buf),
+                eventConflicts: FfiConverterSequenceTypeFfiEventIdConflict.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPrivateStreamIntakeReport, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.receiveBatchId, into: &buf)
+        FfiConverterSequenceUInt64.write(value.streamItemIds, into: &buf)
+        FfiConverterSequenceTypeFfiEventIdConflict.write(value.eventConflicts, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivateStreamIntakeReport_lift(_ buf: RustBuffer) throws -> FfiPrivateStreamIntakeReport {
+    return try FfiConverterTypeFfiPrivateStreamIntakeReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivateStreamIntakeReport_lower(_ value: FfiPrivateStreamIntakeReport) -> RustBuffer {
+    return FfiConverterTypeFfiPrivateStreamIntakeReport.lower(value)
+}
+
+
+/**
  * Public details parsed from a Pubky auth deep link.
  */
 public struct FfiPubkyAuthDetails {
@@ -6223,6 +7686,140 @@ public func FfiConverterTypeFfiReceivingDetailScope_lower(_ value: FfiReceivingD
 
 
 /**
+ * Failed recovery marker publication during outbound private send recovery.
+ */
+public struct FfiRecoveryMarkerPublishFailure {
+    /**
+     * Outbound message id that triggered recovery, when available.
+     */
+    public var outboundMessageId: UInt64?
+    /**
+     * Recovery marker publication error.
+     */
+    public var error: FfiPrivateOperationError
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Outbound message id that triggered recovery, when available.
+         */outboundMessageId: UInt64?,
+        /**
+         * Recovery marker publication error.
+         */error: FfiPrivateOperationError) {
+        self.outboundMessageId = outboundMessageId
+        self.error = error
+    }
+}
+
+#if compiler(>=6)
+extension FfiRecoveryMarkerPublishFailure: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiRecoveryMarkerPublishFailure: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiRecoveryMarkerPublishFailure {
+        return
+            try FfiRecoveryMarkerPublishFailure(
+                outboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
+                error: FfiConverterTypeFfiPrivateOperationError.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiRecoveryMarkerPublishFailure, into buf: inout [UInt8]) {
+        FfiConverterOptionUInt64.write(value.outboundMessageId, into: &buf)
+        FfiConverterTypeFfiPrivateOperationError.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiRecoveryMarkerPublishFailure_lift(_ buf: RustBuffer) throws -> FfiRecoveryMarkerPublishFailure {
+    return try FfiConverterTypeFfiRecoveryMarkerPublishFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiRecoveryMarkerPublishFailure_lower(_ value: FfiRecoveryMarkerPublishFailure) -> RustBuffer {
+    return FfiConverterTypeFfiRecoveryMarkerPublishFailure.lower(value)
+}
+
+
+/**
+ * Failed cleanup of a superseded Payment Endpoint Reservation.
+ */
+public struct FfiReservationCleanupFailure {
+    /**
+     * Reservation id, when the failure is tied to a specific reservation.
+     */
+    public var reservationId: String?
+    /**
+     * Cleanup error.
+     */
+    public var error: FfiPrivateOperationError
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Reservation id, when the failure is tied to a specific reservation.
+         */reservationId: String?,
+        /**
+         * Cleanup error.
+         */error: FfiPrivateOperationError) {
+        self.reservationId = reservationId
+        self.error = error
+    }
+}
+
+#if compiler(>=6)
+extension FfiReservationCleanupFailure: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReservationCleanupFailure: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReservationCleanupFailure {
+        return
+            try FfiReservationCleanupFailure(
+                reservationId: FfiConverterOptionString.read(from: &buf),
+                error: FfiConverterTypeFfiPrivateOperationError.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReservationCleanupFailure, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.reservationId, into: &buf)
+        FfiConverterTypeFfiPrivateOperationError.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReservationCleanupFailure_lift(_ buf: RustBuffer) throws -> FfiReservationCleanupFailure {
+    return try FfiConverterTypeFfiReservationCleanupFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReservationCleanupFailure_lower(_ value: FfiReservationCleanupFailure) -> RustBuffer {
+    return FfiConverterTypeFfiReservationCleanupFailure.lower(value)
+}
+
+
+/**
  * Report returned after restoring SDK-managed backup state.
  */
 public struct FfiRestoreReport {
@@ -6637,6 +8234,97 @@ extension FfiContactProfileSource: Codable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Local role for an in-progress Encrypted Link Handshake.
+ */
+
+public enum FfiEncryptedLinkHandshakeRole {
+
+    /**
+     * Local peer initiated the handshake.
+     */
+    case initiator
+    /**
+     * Local peer accepted a handshake initiated by the counterparty.
+     */
+    case responder
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension FfiEncryptedLinkHandshakeRole: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiEncryptedLinkHandshakeRole: FfiConverterRustBuffer {
+    typealias SwiftType = FfiEncryptedLinkHandshakeRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEncryptedLinkHandshakeRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .initiator
+
+        case 2: return .responder
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiEncryptedLinkHandshakeRole, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .initiator:
+            writeInt(&buf, Int32(1))
+
+
+        case .responder:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEncryptedLinkHandshakeRole_lift(_ buf: RustBuffer) throws -> FfiEncryptedLinkHandshakeRole {
+    return try FfiConverterTypeFfiEncryptedLinkHandshakeRole.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEncryptedLinkHandshakeRole_lower(_ value: FfiEncryptedLinkHandshakeRole) -> RustBuffer {
+    return FfiConverterTypeFfiEncryptedLinkHandshakeRole.lower(value)
+}
+
+
+extension FfiEncryptedLinkHandshakeRole: Equatable, Hashable {}
+
+extension FfiEncryptedLinkHandshakeRole: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * SDK policy for public Encrypted Link recovery markers.
  */
 
@@ -6810,6 +8498,127 @@ public func FfiConverterTypeFfiEndpointManagementScope_lower(_ value: FfiEndpoin
 extension FfiEndpointManagementScope: Equatable, Hashable {}
 
 extension FfiEndpointManagementScope: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Local relationship state for a counterparty.
+ */
+
+public enum FfiLinkedPeerState {
+
+    /**
+     * The SDK tracks this counterparty, but no active Encrypted Link exists.
+     */
+    case notLinked
+    /**
+     * An Encrypted Link Handshake is in progress.
+     */
+    case linking
+    /**
+     * An Encrypted Link is established.
+     */
+    case linked
+    /**
+     * Local state cannot safely continue without recovery.
+     */
+    case recoveryRequired
+    /**
+     * Local policy blocks this peer.
+     */
+    case blocked
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension FfiLinkedPeerState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLinkedPeerState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiLinkedPeerState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLinkedPeerState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .notLinked
+
+        case 2: return .linking
+
+        case 3: return .linked
+
+        case 4: return .recoveryRequired
+
+        case 5: return .blocked
+
+        case 6: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiLinkedPeerState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .notLinked:
+            writeInt(&buf, Int32(1))
+
+
+        case .linking:
+            writeInt(&buf, Int32(2))
+
+
+        case .linked:
+            writeInt(&buf, Int32(3))
+
+
+        case .recoveryRequired:
+            writeInt(&buf, Int32(4))
+
+
+        case .blocked:
+            writeInt(&buf, Int32(5))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLinkedPeerState_lift(_ buf: RustBuffer) throws -> FfiLinkedPeerState {
+    return try FfiConverterTypeFfiLinkedPeerState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLinkedPeerState_lower(_ value: FfiLinkedPeerState) -> RustBuffer {
+    return FfiConverterTypeFfiLinkedPeerState.lower(value)
+}
+
+
+extension FfiLinkedPeerState: Equatable, Hashable {}
+
+extension FfiLinkedPeerState: Codable {}
 
 
 
@@ -7616,6 +9425,30 @@ extension PaykitFfiError: Foundation.LocalizedError {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -7656,6 +9489,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiPrivateOperationError: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPrivateOperationError?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiPrivateOperationError.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiPrivateOperationError.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -7760,6 +9617,30 @@ fileprivate struct FfiConverterOptionTypeFfiContactRecord: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiEncryptedLinkRecoveryMarkerReport: FfiConverterRustBuffer {
+    typealias SwiftType = FfiEncryptedLinkRecoveryMarkerReport?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiIdentityStatus: FfiConverterRustBuffer {
     typealias SwiftType = FfiIdentityStatus?
 
@@ -7776,6 +9657,30 @@ fileprivate struct FfiConverterOptionTypeFfiIdentityStatus: FfiConverterRustBuff
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFfiIdentityStatus.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOutboundPrivateSendReport: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOutboundPrivateSendReport?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOutboundPrivateSendReport.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOutboundPrivateSendReport.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -7856,6 +9761,30 @@ fileprivate struct FfiConverterOptionTypeFfiPaymentAmountContext: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiPrivateStreamIntakeReport: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPrivateStreamIntakeReport?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiPrivateStreamIntakeReport.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiPrivateStreamIntakeReport.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiPubkyProfile: FfiConverterRustBuffer {
     typealias SwiftType = FfiPubkyProfile?
 
@@ -7928,6 +9857,30 @@ fileprivate struct FfiConverterOptionTypeFfiSdkStateBlobSnapshot: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiEncryptedLinkHandshakeRole: FfiConverterRustBuffer {
+    typealias SwiftType = FfiEncryptedLinkHandshakeRole?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiEncryptedLinkHandshakeRole.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiEncryptedLinkHandshakeRole.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionSequenceTypeFfiPaymentEndpointReservation: FfiConverterRustBuffer {
     typealias SwiftType = [FfiPaymentEndpointReservation]?
 
@@ -7946,6 +9899,31 @@ fileprivate struct FfiConverterOptionSequenceTypeFfiPaymentEndpointReservation: 
         case 1: return try FfiConverterSequenceTypeFfiPaymentEndpointReservation.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt64]
+
+    public static func write(_ value: [UInt64], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt64.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt64] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt64]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt64.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -8027,6 +10005,106 @@ fileprivate struct FfiConverterSequenceTypeFfiEndpointSyncChange: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiEventIdConflict: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiEventIdConflict]
+
+    public static func write(_ value: [FfiEventIdConflict], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiEventIdConflict.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiEventIdConflict] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiEventIdConflict]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiEventIdConflict.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiLinkedPeerRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLinkedPeerRecord]
+
+    public static func write(_ value: [FfiLinkedPeerRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLinkedPeerRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLinkedPeerRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLinkedPeerRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiLinkedPeerRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiOutboundPrivateCounterpartySendReport: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiOutboundPrivateCounterpartySendReport]
+
+    public static func write(_ value: [FfiOutboundPrivateCounterpartySendReport], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiOutboundPrivateCounterpartySendReport.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiOutboundPrivateCounterpartySendReport] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiOutboundPrivateCounterpartySendReport]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiOutboundPrivateCounterpartySendReport.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiOutboundPrivateSendFailure: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiOutboundPrivateSendFailure]
+
+    public static func write(_ value: [FfiOutboundPrivateSendFailure], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiOutboundPrivateSendFailure.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiOutboundPrivateSendFailure] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiOutboundPrivateSendFailure]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiOutboundPrivateSendFailure.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiPaymentEndpointCandidate: FfiConverterRustBuffer {
     typealias SwiftType = [FfiPaymentEndpointCandidate]
 
@@ -8077,6 +10155,31 @@ fileprivate struct FfiConverterSequenceTypeFfiPaymentEndpointReservation: FfiCon
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiPrivateStreamCounterpartyIntakeReport: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiPrivateStreamCounterpartyIntakeReport]
+
+    public static func write(_ value: [FfiPrivateStreamCounterpartyIntakeReport], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPrivateStreamCounterpartyIntakeReport] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiPrivateStreamCounterpartyIntakeReport]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiPubkyProfileLink: FfiConverterRustBuffer {
     typealias SwiftType = [FfiPubkyProfileLink]
 
@@ -8119,6 +10222,56 @@ fileprivate struct FfiConverterSequenceTypeFfiReceivingDetail: FfiConverterRustB
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiReceivingDetail.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiRecoveryMarkerPublishFailure: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiRecoveryMarkerPublishFailure]
+
+    public static func write(_ value: [FfiRecoveryMarkerPublishFailure], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiRecoveryMarkerPublishFailure.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiRecoveryMarkerPublishFailure] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiRecoveryMarkerPublishFailure]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiRecoveryMarkerPublishFailure.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiReservationCleanupFailure: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiReservationCleanupFailure]
+
+    public static func write(_ value: [FfiReservationCleanupFailure], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiReservationCleanupFailure.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiReservationCleanupFailure] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiReservationCleanupFailure]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiReservationCleanupFailure.read(from: &buf))
         }
         return seq
     }
@@ -8326,6 +10479,15 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_resolve_pubky_url() != 12085) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 32868) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 20770) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 3462) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8336,6 +10498,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_blob() != 43993) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 21009) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_state() != 29122) {
@@ -8362,6 +10527,27 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_initialize() != 60774) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_initiate_link_with_peer() != 54115) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 57246) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 51945) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 36875) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_process_outbound_private_messages() != 52525) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_process_pending_private_messages() != 56244) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 29039) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_blob() != 48358) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8371,10 +10557,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 49322) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages() != 45996) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers() != 15229) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 29974) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 19304) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 10086) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact() != 46208) {
@@ -8398,7 +10593,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints() != 41929) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 22658) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaymentpayload_export_text() != 53824) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiprivateoperationerror_category() != 32940) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiprivateoperationerror_code() != 52491) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiprivateoperationerror_export_debug_details() != 57660) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiprivateoperationerror_redacted_context() != 46174) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url() != 7484) {

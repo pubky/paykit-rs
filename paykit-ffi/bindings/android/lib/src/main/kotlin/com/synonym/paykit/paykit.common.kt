@@ -111,6 +111,24 @@ public object NoPointer
 public interface FfiPaykitSdkInterface {
 
     /**
+     * Start an Encrypted Link Handshake as the responder.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `acceptLinkWithPeer`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport
+
+    /**
+     * Advance the stored Encrypted Link Handshake for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `advanceLinkHandshake`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport
+
+    /**
+     * Block a counterparty for local Paykit private workflows.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `blockPeer`(`counterparty`: kotlin.String): FfiLinkedPeerRecord
+
+    /**
      * Return this runtime's configuration.
      */
     public fun `config`(): FfiPaykitSdkConfig
@@ -132,6 +150,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `deletePaykitBlob`(`uriOrPath`: kotlin.String)
+
+    /**
+     * Return tracked Encrypted Link recovery marker state for a counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `encryptedLinkRecoveryMarkerStatus`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport?
 
     /**
      * Export SDK-managed backup state as an opaque blob.
@@ -182,6 +206,48 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `initialize`(): FfiInitializationReport
 
     /**
+     * Start an Encrypted Link Handshake as the initiator.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `initiateLinkWithPeer`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport
+
+    /**
+     * List locally tracked Linked Peer records.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `linkedPeers`(): List<FfiLinkedPeerRecord>
+
+    /**
+     * Observe a counterparty's public recovery marker.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `observeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport
+
+    /**
+     * List counterparties with queued private messages ready for retry.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `pendingOutboundPrivateCounterparties`(): List<kotlin.String>
+
+    /**
+     * Send queued outbound private messages for one counterparty in order.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `processOutboundPrivateMessages`(`counterparty`: kotlin.String): FfiOutboundPrivateSendReport
+
+    /**
+     * Process queued outbound private messages for every pending counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `processPendingPrivateMessages`(): List<FfiOutboundPrivateCounterpartySendReport>
+
+    /**
+     * Publish a minimal local recovery marker for a counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `publishEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport
+
+    /**
      * Publish a blob under this identity's Paykit profile namespace.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -200,6 +266,18 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `publishPublicContact`(`publicKey`: kotlin.String): FfiContactRecord
 
     /**
+     * Receive and durably persist available private messages.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receivePrivateMessages`(`counterparty`: kotlin.String): FfiPrivateStreamIntakeReport
+
+    /**
+     * Receive private messages from every locally linked counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receivePrivateMessagesFromLinkedPeers`(): List<FfiPrivateStreamCounterpartyIntakeReport>
+
+    /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -210,6 +288,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `removeContact`(`publicKey`: kotlin.String): FfiContactRecord?
+
+    /**
+     * Remove the local public recovery marker for a counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `removeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport
 
     /**
      * Remove a public Contact Marker.
@@ -253,6 +337,12 @@ public interface FfiPaykitSdkInterface {
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `syncPublicEndpoints`(): FfiEndpointSyncReport
 
+    /**
+     * Remove a local peer block and return the peer to NotLinked.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `unblockPeer`(`counterparty`: kotlin.String): FfiLinkedPeerRecord
+
     public companion object
 }
 
@@ -268,6 +358,37 @@ public interface FfiPaymentPayloadInterface {
      * Export the payload text for payment adapter execution.
      */
     public fun `exportText`(): kotlin.String
+
+    public companion object
+}
+
+
+
+
+/**
+ * Private workflow error with redacted default context.
+ */
+public interface FfiPrivateOperationErrorInterface {
+
+    /**
+     * Stable error category for app branching.
+     */
+    public fun `category`(): kotlin.String
+
+    /**
+     * Stable error code for app branching.
+     */
+    public fun `code`(): kotlin.String
+
+    /**
+     * Export raw debug details for explicit diagnostic handling.
+     */
+    public fun `exportDebugDetails`(): kotlin.String
+
+    /**
+     * Redacted error context safe for normal UI/log surfaces.
+     */
+    public fun `redactedContext`(): kotlin.String
 
     public companion object
 }
@@ -651,6 +772,61 @@ public data class FfiContactUpdate (
 
 
 /**
+ * Public recovery marker state tracked for one Linked Peer.
+ */
+
+public data class FfiEncryptedLinkRecoveryMarkerReport (
+    /**
+     * Counterparty public key.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Current Linked Peer state.
+     */
+    val `state`: FfiLinkedPeerState,
+    /**
+     * Locally published recovery attempt id.
+     */
+    val `localAttemptId`: kotlin.String?,
+    /**
+     * Creation time for the local marker payload as RFC3339 text.
+     */
+    val `localMarkerCreatedAt`: kotlin.String?,
+    /**
+     * Last local marker publish/remove error, when available.
+     */
+    val `localMarkerLastError`: FfiPrivateOperationError?,
+    /**
+     * Latest observed counterparty recovery attempt id.
+     */
+    val `remoteAttemptId`: kotlin.String?,
+    /**
+     * Time the counterparty marker was observed as RFC3339 text.
+     */
+    val `remoteMarkerObservedAt`: kotlin.String?,
+    /**
+     * Whether this operation observed a new counterparty marker.
+     */
+    val `remoteMarkerChanged`: kotlin.Boolean
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`state`,
+            this.`localAttemptId`,
+            this.`localMarkerCreatedAt`,
+            this.`localMarkerLastError`,
+            this.`remoteAttemptId`,
+            this.`remoteMarkerObservedAt`,
+            this.`remoteMarkerChanged`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
  * One public endpoint changed during sync.
  */
 @kotlinx.serialization.Serializable
@@ -690,6 +866,29 @@ public data class FfiEndpointSyncReport (
      * Endpoints that failed to publish or remove.
      */
     val `failed`: List<FfiEndpointSyncChange>
+) {
+    public companion object
+}
+
+
+
+/**
+ * Reused Event ID with a different payload.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiEventIdConflict (
+    /**
+     * Conflicting Event ID.
+     */
+    val `eventId`: kotlin.String,
+    /**
+     * First stream item that used this Event ID.
+     */
+    val `firstStreamItemId`: kotlin.ULong,
+    /**
+     * Stream item that reused this Event ID with a different payload.
+     */
+    val `conflictingStreamItemId`: kotlin.ULong
 ) {
     public companion object
 }
@@ -737,6 +936,193 @@ public data class FfiInitializationReport (
      */
     val `liveSessionAvailable`: kotlin.Boolean
 ) {
+    public companion object
+}
+
+
+
+/**
+ * Result of starting or advancing an Encrypted Link Handshake.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiLinkedPeerHandshakeReport (
+    /**
+     * Counterparty public key.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Current Linked Peer state after the operation.
+     */
+    val `state`: FfiLinkedPeerState,
+    /**
+     * Current Encrypted Link state generation.
+     */
+    val `generation`: kotlin.ULong,
+    /**
+     * In-progress handshake role, when a handshake remains pending.
+     */
+    val `handshakeRole`: FfiEncryptedLinkHandshakeRole?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Locally tracked Linked Peer record.
+ */
+
+public data class FfiLinkedPeerRecord (
+    /**
+     * Counterparty public key.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Current local relationship/link state.
+     */
+    val `state`: FfiLinkedPeerState,
+    /**
+     * Last successful sync time as RFC3339 text.
+     */
+    val `lastSyncAt`: kotlin.String?,
+    /**
+     * Last private receive time as RFC3339 text.
+     */
+    val `lastPrivateReceiveAt`: kotlin.String?,
+    /**
+     * Consecutive failure count for recovery/retry policy.
+     */
+    val `failureCount`: kotlin.UInt,
+    /**
+     * Locally published Encrypted Link recovery attempt id.
+     */
+    val `localRecoveryAttemptId`: kotlin.String?,
+    /**
+     * Creation time for the local recovery marker payload as RFC3339 text.
+     */
+    val `localRecoveryMarkerCreatedAt`: kotlin.String?,
+    /**
+     * Last local marker publish/remove error, when available.
+     */
+    val `localRecoveryMarkerLastError`: FfiPrivateOperationError?,
+    /**
+     * Latest counterparty recovery attempt id already observed.
+     */
+    val `remoteRecoveryAttemptId`: kotlin.String?,
+    /**
+     * Time the counterparty recovery marker was observed as RFC3339 text.
+     */
+    val `remoteRecoveryMarkerObservedAt`: kotlin.String?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`state`,
+            this.`lastSyncAt`,
+            this.`lastPrivateReceiveAt`,
+            this.`failureCount`,
+            this.`localRecoveryAttemptId`,
+            this.`localRecoveryMarkerCreatedAt`,
+            this.`localRecoveryMarkerLastError`,
+            this.`remoteRecoveryAttemptId`,
+            this.`remoteRecoveryMarkerObservedAt`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Summary for processing outbound private messages for one counterparty.
+ */
+
+public data class FfiOutboundPrivateCounterpartySendReport (
+    /**
+     * Counterparty whose queue was processed.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Successful send report, when processing completed.
+     */
+    val `report`: FfiOutboundPrivateSendReport?,
+    /**
+     * Error text, when processing failed for this counterparty.
+     */
+    val `error`: FfiPrivateOperationError?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`report`,
+            this.`error`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Failed outbound private send attempt.
+ */
+
+public data class FfiOutboundPrivateSendFailure (
+    /**
+     * Outbound message id.
+     */
+    val `outboundMessageId`: kotlin.ULong,
+    /**
+     * Error from the send attempt.
+     */
+    val `error`: FfiPrivateOperationError
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`outboundMessageId`,
+            this.`error`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Summary returned after processing outbound private messages.
+ */
+
+public data class FfiOutboundPrivateSendReport (
+    /**
+     * Messages attempted in this run.
+     */
+    val `attempted`: List<kotlin.ULong>,
+    /**
+     * Messages marked sent in this run.
+     */
+    val `sent`: List<kotlin.ULong>,
+    /**
+     * Messages that failed in this run.
+     */
+    val `failed`: List<FfiOutboundPrivateSendFailure>,
+    /**
+     * Superseded reservation cleanup failures observed in this run.
+     */
+    val `reservationCleanupFailures`: List<FfiReservationCleanupFailure>,
+    /**
+     * Recovery marker publication failures observed after fail-closed recovery.
+     */
+    val `recoveryMarkerFailures`: List<FfiRecoveryMarkerPublishFailure>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`attempted`,
+            this.`sent`,
+            this.`failed`,
+            this.`reservationCleanupFailures`,
+            this.`recoveryMarkerFailures`,
+        )
+    }
     public companion object
 }
 
@@ -1047,6 +1433,59 @@ public data class FfiPaymentTarget (
 
 
 /**
+ * Summary for receiving private messages from one counterparty.
+ */
+
+public data class FfiPrivateStreamCounterpartyIntakeReport (
+    /**
+     * Counterparty whose private stream was received.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Successful intake report, when receive completed.
+     */
+    val `report`: FfiPrivateStreamIntakeReport?,
+    /**
+     * Error text, when receive failed for this counterparty.
+     */
+    val `error`: FfiPrivateOperationError?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`report`,
+            this.`error`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Summary of a persisted private stream batch.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPrivateStreamIntakeReport (
+    /**
+     * Receive batch id assigned by storage.
+     */
+    val `receiveBatchId`: kotlin.ULong,
+    /**
+     * Stored stream item ids in input order.
+     */
+    val `streamItemIds`: List<kotlin.ULong>,
+    /**
+     * Event ID conflicts found while updating dedupe records.
+     */
+    val `eventConflicts`: List<FfiEventIdConflict>
+) {
+    public companion object
+}
+
+
+
+/**
  * Public details parsed from a Pubky auth deep link.
  */
 @kotlinx.serialization.Serializable
@@ -1263,6 +1702,56 @@ public data class FfiReceivingDetailScope (
 
 
 /**
+ * Failed recovery marker publication during outbound private send recovery.
+ */
+
+public data class FfiRecoveryMarkerPublishFailure (
+    /**
+     * Outbound message id that triggered recovery, when available.
+     */
+    val `outboundMessageId`: kotlin.ULong?,
+    /**
+     * Recovery marker publication error.
+     */
+    val `error`: FfiPrivateOperationError
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`outboundMessageId`,
+            this.`error`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Failed cleanup of a superseded Payment Endpoint Reservation.
+ */
+
+public data class FfiReservationCleanupFailure (
+    /**
+     * Reservation id, when the failure is tied to a specific reservation.
+     */
+    val `reservationId`: kotlin.String?,
+    /**
+     * Cleanup error.
+     */
+    val `error`: FfiPrivateOperationError
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`reservationId`,
+            this.`error`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
  * Report returned after restoring SDK-managed backup state.
  */
 @kotlinx.serialization.Serializable
@@ -1383,6 +1872,33 @@ public enum class FfiContactProfileSource {
 
 
 /**
+ * Local role for an in-progress Encrypted Link Handshake.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiEncryptedLinkHandshakeRole {
+
+    /**
+     * Local peer initiated the handshake.
+     */
+    INITIATOR,
+    /**
+     * Local peer accepted a handshake initiated by the counterparty.
+     */
+    RESPONDER,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
  * SDK policy for public Encrypted Link recovery markers.
  */
 
@@ -1424,6 +1940,45 @@ public enum class FfiEndpointManagementScope {
      * Manage the full local Paykit public namespace.
      */
     FULL_PAYKIT_NAMESPACE,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Local relationship state for a counterparty.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiLinkedPeerState {
+
+    /**
+     * The SDK tracks this counterparty, but no active Encrypted Link exists.
+     */
+    NOT_LINKED,
+    /**
+     * An Encrypted Link Handshake is in progress.
+     */
+    LINKING,
+    /**
+     * An Encrypted Link is established.
+     */
+    LINKED,
+    /**
+     * Local state cannot safely continue without recovery.
+     */
+    RECOVERY_REQUIRED,
+    /**
+     * Local policy blocks this peer.
+     */
+    BLOCKED,
     /**
      * SDK returned a value this binding version does not understand.
      */
