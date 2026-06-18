@@ -182,9 +182,9 @@ impl TryFrom<PaymentRequestTermsRecord> for FfiPaymentRequestTerms {
     fn try_from(value: PaymentRequestTermsRecord) -> Result<Self, Self::Error> {
         Ok(Self {
             amount: value.amount.into(),
-            payment_reference: Arc::new(FfiPaymentReference {
-                text: value.payment_reference,
-            }),
+            payment_reference: Arc::new(FfiPaymentReference::from_validated_text(
+                value.payment_reference,
+            )),
             proposal_expires_at: value.proposal_expires_at,
             recurrence: value.recurrence.map(Into::into),
             accepted_payment_endpoint_identifiers: value.accepted_payment_endpoint_identifiers,
@@ -202,9 +202,9 @@ impl TryFrom<PaymentProofRecord> for FfiPaymentProofRecord {
             outbound_message_id: value.outbound_message_id,
             outbound_status: value.outbound_status.map(Into::into),
             stream_item_id: value.stream_item_id,
-            payment_reference: Arc::new(FfiPaymentReference {
-                text: value.payment_reference,
-            }),
+            payment_reference: Arc::new(FfiPaymentReference::from_validated_text(
+                value.payment_reference,
+            )),
             billing_period: value.billing_period.map(Into::into),
             payment_endpoint_identifier: value.payment_endpoint_identifier,
             proof_json: json_object_to_string("Payment Proof proof", &value.proof)?,

@@ -32,6 +32,12 @@ impl fmt::Debug for FfiPaymentReference {
     }
 }
 
+impl FfiPaymentReference {
+    pub(crate) fn from_validated_text(text: String) -> Self {
+        Self { text }
+    }
+}
+
 #[uniffi::export]
 impl FfiPaymentReference {
     /// Create a Payment Reference after validating it.

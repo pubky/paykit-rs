@@ -7,9 +7,9 @@ The generated bindings expose the SDK runtime foundation: configuration, Pubky
 session bootstrap helpers, opaque SDK state storage callbacks, payment adapter
 callbacks, identity initialization/sign-out, SDK backup/restore, public Payment
 Endpoint sync, Paykit Profile and Contact Record workflows, and public Pubky
-read helpers. Product workflows such as private links, payment requests, and
-contact payment resolution belong on the SDK surface rather than on low-level
-`paykit-lib` protocol bindings.
+read helpers. Product workflows such as private links, payment requests,
+receipts, and contact payment resolution belong on the SDK surface rather than
+on low-level `paykit-lib` protocol bindings.
 
 ## Exported Surface
 
@@ -87,6 +87,22 @@ payment-method data is exported only through explicit payload methods.
 
 Returned records reflect local stream and outbound queue state. Outbound
 statuses still indicate whether a queued event has been sent.
+
+### Receipts
+
+- `generateReceiptId` — create a caller-stable Receipt ID for retry-safe
+  issuance.
+- `FfiPaykitSdk.prepareReceiptIssuance`, `issueReceipt`, and
+  `processReceiptIssuance` — persist receipt issuance state, store the
+  Encrypted Receipt, and queue Receipt Access.
+- `FfiPaykitSdk.issuedReceipts`, `issuedReceiptsTo`,
+  `receiptIssuanceRecords`, `receiptAccess`, `receiptAccessFrom`,
+  `receiptAccessRecords`, `retrieveReceipt`, `receipts`, `receiptsFrom`, and
+  `receiptRecords` — inspect issued, indexed, and decrypted receipts.
+
+Receipt Decryption Keys and encrypted payloads stay inside SDK-managed state.
+Payment References are exposed through the redacted `FfiPaymentReference`
+object.
 
 ### Pubky Session Bootstrap
 

@@ -642,6 +642,21 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func initiateLinkWithPeer(counterparty: String) async throws  -> FfiLinkedPeerHandshakeReport
 
     /**
+     * Prepare, store, and queue Receipt Access for private delivery.
+     */
+    func issueReceipt(counterparty: String, draft: FfiReceiptDraft) async throws  -> FfiReceiptIssuanceView
+
+    /**
+     * List issued receipts across non-blocked counterparties, newest first.
+     */
+    func issuedReceipts() async throws  -> [FfiReceiptIssuanceView]
+
+    /**
+     * List issued receipts for one counterparty, newest first.
+     */
+    func issuedReceiptsTo(counterparty: String) async throws  -> [FfiReceiptIssuanceView]
+
+    /**
      * List locally tracked Linked Peer records.
      */
     func linkedPeers() async throws  -> [FfiLinkedPeerRecord]
@@ -672,6 +687,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func pendingOutboundPrivateCounterparties() async throws  -> [String]
 
     /**
+     * Prepare a receipt issuance and persist it before network side effects.
+     */
+    func prepareReceiptIssuance(counterparty: String, draft: FfiReceiptDraft) async throws  -> FfiReceiptIssuanceView
+
+    /**
      * Send queued outbound private messages for one counterparty in order.
      */
     func processOutboundPrivateMessages(counterparty: String) async throws  -> FfiOutboundPrivateSendReport
@@ -680,6 +700,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Process queued outbound private messages for every pending counterparty.
      */
     func processPendingPrivateMessages() async throws  -> [FfiOutboundPrivateCounterpartySendReport]
+
+    /**
+     * Continue storage and Receipt Access queueing for a prepared issuance.
+     */
+    func processReceiptIssuance(counterparty: String, receiptId: String) async throws  -> FfiReceiptIssuanceView
 
     /**
      * Queue a new Payment Request proposal and return local derived state.
@@ -705,6 +730,41 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Publish a public Contact Marker for a local Contact Record.
      */
     func publishPublicContact(publicKey: String) async throws  -> FfiContactRecord
+
+    /**
+     * List Receipt Access across non-blocked counterparties, newest first.
+     */
+    func receiptAccess() async throws  -> [FfiReceiptAccessView]
+
+    /**
+     * List Receipt Access received from one counterparty.
+     */
+    func receiptAccessFrom(counterparty: String) async throws  -> [FfiReceiptAccessView]
+
+    /**
+     * List indexed Receipt Access records for one counterparty.
+     */
+    func receiptAccessRecords(counterparty: String) async throws  -> [FfiReceiptAccessView]
+
+    /**
+     * List local receipt issuance records for one counterparty.
+     */
+    func receiptIssuanceRecords(counterparty: String) async throws  -> [FfiReceiptIssuanceView]
+
+    /**
+     * List decrypted Receipt records for one issuer, newest first.
+     */
+    func receiptRecords(issuer: String) async throws  -> [FfiReceiptRecord]
+
+    /**
+     * List decrypted receipts across non-blocked issuers, newest first.
+     */
+    func receipts() async throws  -> [FfiReceiptRecord]
+
+    /**
+     * List decrypted receipts from one issuer, newest first.
+     */
+    func receiptsFrom(issuer: String) async throws  -> [FfiReceiptRecord]
 
     /**
      * Receive and durably persist available private messages.
@@ -760,6 +820,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Restore SDK-managed backup state from an opaque blob.
      */
     func restoreBackupState(backup: FfiSdkBackupBlob) async throws  -> FfiRestoreReport
+
+    /**
+     * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
+     */
+    func retrieveReceipt(counterparty: String, receiptId: String) async throws  -> FfiReceiptRecord
 
     /**
      * Save or update a local Contact Record.
@@ -1354,6 +1419,66 @@ open func initiateLinkWithPeer(counterparty: String)async throws  -> FfiLinkedPe
 }
 
     /**
+     * Prepare, store, and queue Receipt Access for private delivery.
+     */
+open func issueReceipt(counterparty: String, draft: FfiReceiptDraft)async throws  -> FfiReceiptIssuanceView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_issue_receipt(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterTypeFfiReceiptDraft_lower(draft)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiReceiptIssuanceView_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List issued receipts across non-blocked counterparties, newest first.
+     */
+open func issuedReceipts()async throws  -> [FfiReceiptIssuanceView]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_issued_receipts(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiReceiptIssuanceView.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List issued receipts for one counterparty, newest first.
+     */
+open func issuedReceiptsTo(counterparty: String)async throws  -> [FfiReceiptIssuanceView]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_issued_receipts_to(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiReceiptIssuanceView.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * List locally tracked Linked Peer records.
      */
 open func linkedPeers()async throws  -> [FfiLinkedPeerRecord]  {
@@ -1474,6 +1599,26 @@ open func pendingOutboundPrivateCounterparties()async throws  -> [String]  {
 }
 
     /**
+     * Prepare a receipt issuance and persist it before network side effects.
+     */
+open func prepareReceiptIssuance(counterparty: String, draft: FfiReceiptDraft)async throws  -> FfiReceiptIssuanceView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_prepare_receipt_issuance(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterTypeFfiReceiptDraft_lower(draft)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiReceiptIssuanceView_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Send queued outbound private messages for one counterparty in order.
      */
 open func processOutboundPrivateMessages(counterparty: String)async throws  -> FfiOutboundPrivateSendReport  {
@@ -1509,6 +1654,26 @@ open func processPendingPrivateMessages()async throws  -> [FfiOutboundPrivateCou
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeFfiOutboundPrivateCounterpartySendReport.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Continue storage and Receipt Access queueing for a prepared issuance.
+     */
+open func processReceiptIssuance(counterparty: String, receiptId: String)async throws  -> FfiReceiptIssuanceView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_process_receipt_issuance(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(receiptId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiReceiptIssuanceView_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1609,6 +1774,146 @@ open func publishPublicContact(publicKey: String)async throws  -> FfiContactReco
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeFfiContactRecord_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List Receipt Access across non-blocked counterparties, newest first.
+     */
+open func receiptAccess()async throws  -> [FfiReceiptAccessView]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_receipt_access(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiReceiptAccessView.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List Receipt Access received from one counterparty.
+     */
+open func receiptAccessFrom(counterparty: String)async throws  -> [FfiReceiptAccessView]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_receipt_access_from(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiReceiptAccessView.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List indexed Receipt Access records for one counterparty.
+     */
+open func receiptAccessRecords(counterparty: String)async throws  -> [FfiReceiptAccessView]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_receipt_access_records(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiReceiptAccessView.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List local receipt issuance records for one counterparty.
+     */
+open func receiptIssuanceRecords(counterparty: String)async throws  -> [FfiReceiptIssuanceView]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_receipt_issuance_records(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiReceiptIssuanceView.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List decrypted Receipt records for one issuer, newest first.
+     */
+open func receiptRecords(issuer: String)async throws  -> [FfiReceiptRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_receipt_records(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(issuer)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiReceiptRecord.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List decrypted receipts across non-blocked issuers, newest first.
+     */
+open func receipts()async throws  -> [FfiReceiptRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_receipts(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiReceiptRecord.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * List decrypted receipts from one issuer, newest first.
+     */
+open func receiptsFrom(issuer: String)async throws  -> [FfiReceiptRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_receipts_from(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(issuer)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiReceiptRecord.lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1829,6 +2134,26 @@ open func restoreBackupState(backup: FfiSdkBackupBlob)async throws  -> FfiRestor
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeFfiRestoreReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
+     */
+open func retrieveReceipt(counterparty: String, receiptId: String)async throws  -> FfiReceiptRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_retrieve_receipt(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(receiptId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiReceiptRecord_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -9530,6 +9855,701 @@ public func FfiConverterTypeFfiQueuedPrivateMessage_lower(_ value: FfiQueuedPriv
 
 
 /**
+ * App-facing view of an indexed Receipt Access event.
+ */
+public struct FfiReceiptAccessView {
+    /**
+     * Counterparty that sent the Receipt Access event.
+     */
+    public var counterparty: String
+    /**
+     * Receipt Access Event ID.
+     */
+    public var eventId: String
+    /**
+     * Receipt ID.
+     */
+    public var receiptId: String
+    /**
+     * Payment Reference copied from Receipt Access.
+     */
+    public var paymentReference: FfiPaymentReference
+    /**
+     * Optional Payment Request ID copied from Receipt Access.
+     */
+    public var paymentRequestId: String?
+    /**
+     * Optional Billing Period copied from Receipt Access.
+     */
+    public var billingPeriod: FfiBillingPeriod?
+    /**
+     * Current retrieval state for the referenced receipt.
+     */
+    public var retrievalStatus: FfiReceiptRetrievalStatus
+    /**
+     * Last retrieval attempt time as RFC3339 text.
+     */
+    public var retrievalAttemptedAt: String?
+    /**
+     * Successful retrieval/decryption time as RFC3339 text.
+     */
+    public var retrievedAt: String?
+    /**
+     * Receive time of the indexed stream item as RFC3339 text.
+     */
+    public var receivedAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty that sent the Receipt Access event.
+         */counterparty: String,
+        /**
+         * Receipt Access Event ID.
+         */eventId: String,
+        /**
+         * Receipt ID.
+         */receiptId: String,
+        /**
+         * Payment Reference copied from Receipt Access.
+         */paymentReference: FfiPaymentReference,
+        /**
+         * Optional Payment Request ID copied from Receipt Access.
+         */paymentRequestId: String?,
+        /**
+         * Optional Billing Period copied from Receipt Access.
+         */billingPeriod: FfiBillingPeriod?,
+        /**
+         * Current retrieval state for the referenced receipt.
+         */retrievalStatus: FfiReceiptRetrievalStatus,
+        /**
+         * Last retrieval attempt time as RFC3339 text.
+         */retrievalAttemptedAt: String?,
+        /**
+         * Successful retrieval/decryption time as RFC3339 text.
+         */retrievedAt: String?,
+        /**
+         * Receive time of the indexed stream item as RFC3339 text.
+         */receivedAt: String) {
+        self.counterparty = counterparty
+        self.eventId = eventId
+        self.receiptId = receiptId
+        self.paymentReference = paymentReference
+        self.paymentRequestId = paymentRequestId
+        self.billingPeriod = billingPeriod
+        self.retrievalStatus = retrievalStatus
+        self.retrievalAttemptedAt = retrievalAttemptedAt
+        self.retrievedAt = retrievedAt
+        self.receivedAt = receivedAt
+    }
+}
+
+#if compiler(>=6)
+extension FfiReceiptAccessView: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceiptAccessView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptAccessView {
+        return
+            try FfiReceiptAccessView(
+                counterparty: FfiConverterString.read(from: &buf),
+                eventId: FfiConverterString.read(from: &buf),
+                receiptId: FfiConverterString.read(from: &buf),
+                paymentReference: FfiConverterTypeFfiPaymentReference.read(from: &buf),
+                paymentRequestId: FfiConverterOptionString.read(from: &buf),
+                billingPeriod: FfiConverterOptionTypeFfiBillingPeriod.read(from: &buf),
+                retrievalStatus: FfiConverterTypeFfiReceiptRetrievalStatus.read(from: &buf),
+                retrievalAttemptedAt: FfiConverterOptionString.read(from: &buf),
+                retrievedAt: FfiConverterOptionString.read(from: &buf),
+                receivedAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReceiptAccessView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterString.write(value.eventId, into: &buf)
+        FfiConverterString.write(value.receiptId, into: &buf)
+        FfiConverterTypeFfiPaymentReference.write(value.paymentReference, into: &buf)
+        FfiConverterOptionString.write(value.paymentRequestId, into: &buf)
+        FfiConverterOptionTypeFfiBillingPeriod.write(value.billingPeriod, into: &buf)
+        FfiConverterTypeFfiReceiptRetrievalStatus.write(value.retrievalStatus, into: &buf)
+        FfiConverterOptionString.write(value.retrievalAttemptedAt, into: &buf)
+        FfiConverterOptionString.write(value.retrievedAt, into: &buf)
+        FfiConverterString.write(value.receivedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptAccessView_lift(_ buf: RustBuffer) throws -> FfiReceiptAccessView {
+    return try FfiConverterTypeFfiReceiptAccessView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptAccessView_lower(_ value: FfiReceiptAccessView) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptAccessView.lower(value)
+}
+
+
+/**
+ * Payment Amount fields copied into receipts.
+ */
+public struct FfiReceiptAmount {
+    /**
+     * Decimal amount text.
+     */
+    public var value: String
+    /**
+     * Asset code or unit.
+     */
+    public var asset: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Decimal amount text.
+         */value: String,
+        /**
+         * Asset code or unit.
+         */asset: String) {
+        self.value = value
+        self.asset = asset
+    }
+}
+
+#if compiler(>=6)
+extension FfiReceiptAmount: Sendable {}
+#endif
+
+
+extension FfiReceiptAmount: Equatable, Hashable {
+    public static func ==(lhs: FfiReceiptAmount, rhs: FfiReceiptAmount) -> Bool {
+        if lhs.value != rhs.value {
+            return false
+        }
+        if lhs.asset != rhs.asset {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(value)
+        hasher.combine(asset)
+    }
+}
+
+extension FfiReceiptAmount: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceiptAmount: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptAmount {
+        return
+            try FfiReceiptAmount(
+                value: FfiConverterString.read(from: &buf),
+                asset: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReceiptAmount, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.value, into: &buf)
+        FfiConverterString.write(value.asset, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptAmount_lift(_ buf: RustBuffer) throws -> FfiReceiptAmount {
+    return try FfiConverterTypeFfiReceiptAmount.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptAmount_lower(_ value: FfiReceiptAmount) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptAmount.lower(value)
+}
+
+
+/**
+ * Caller-provided receipt fields.
+ */
+public struct FfiReceiptDraft {
+    /**
+     * Optional caller-stable Receipt ID.
+     */
+    public var receiptId: String?
+    /**
+     * Payment Reference being receipted.
+     */
+    public var paymentReference: FfiPaymentReference
+    /**
+     * Optional Payment Request ID this receipt corresponds to.
+     */
+    public var paymentRequestId: String?
+    /**
+     * Optional Billing Period for recurring Payment Request receipts.
+     */
+    public var billingPeriod: FfiBillingPeriod?
+    /**
+     * Optional Payment Endpoint Identifier used for the payment.
+     */
+    public var paymentEndpointIdentifier: String?
+    /**
+     * Optional Payment Amount being receipted.
+     */
+    public var amount: FfiReceiptAmount?
+    /**
+     * Caller-defined Receipt Metadata encoded as a JSON object.
+     */
+    public var metadataJson: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Optional caller-stable Receipt ID.
+         */receiptId: String?,
+        /**
+         * Payment Reference being receipted.
+         */paymentReference: FfiPaymentReference,
+        /**
+         * Optional Payment Request ID this receipt corresponds to.
+         */paymentRequestId: String?,
+        /**
+         * Optional Billing Period for recurring Payment Request receipts.
+         */billingPeriod: FfiBillingPeriod?,
+        /**
+         * Optional Payment Endpoint Identifier used for the payment.
+         */paymentEndpointIdentifier: String?,
+        /**
+         * Optional Payment Amount being receipted.
+         */amount: FfiReceiptAmount?,
+        /**
+         * Caller-defined Receipt Metadata encoded as a JSON object.
+         */metadataJson: String) {
+        self.receiptId = receiptId
+        self.paymentReference = paymentReference
+        self.paymentRequestId = paymentRequestId
+        self.billingPeriod = billingPeriod
+        self.paymentEndpointIdentifier = paymentEndpointIdentifier
+        self.amount = amount
+        self.metadataJson = metadataJson
+    }
+}
+
+#if compiler(>=6)
+extension FfiReceiptDraft: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptDraft {
+        return
+            try FfiReceiptDraft(
+                receiptId: FfiConverterOptionString.read(from: &buf),
+                paymentReference: FfiConverterTypeFfiPaymentReference.read(from: &buf),
+                paymentRequestId: FfiConverterOptionString.read(from: &buf),
+                billingPeriod: FfiConverterOptionTypeFfiBillingPeriod.read(from: &buf),
+                paymentEndpointIdentifier: FfiConverterOptionString.read(from: &buf),
+                amount: FfiConverterOptionTypeFfiReceiptAmount.read(from: &buf),
+                metadataJson: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReceiptDraft, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.receiptId, into: &buf)
+        FfiConverterTypeFfiPaymentReference.write(value.paymentReference, into: &buf)
+        FfiConverterOptionString.write(value.paymentRequestId, into: &buf)
+        FfiConverterOptionTypeFfiBillingPeriod.write(value.billingPeriod, into: &buf)
+        FfiConverterOptionString.write(value.paymentEndpointIdentifier, into: &buf)
+        FfiConverterOptionTypeFfiReceiptAmount.write(value.amount, into: &buf)
+        FfiConverterString.write(value.metadataJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptDraft_lift(_ buf: RustBuffer) throws -> FfiReceiptDraft {
+    return try FfiConverterTypeFfiReceiptDraft.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptDraft_lower(_ value: FfiReceiptDraft) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptDraft.lower(value)
+}
+
+
+/**
+ * App-facing view of local receipt issuance progress.
+ */
+public struct FfiReceiptIssuanceView {
+    /**
+     * Counterparty that should receive Receipt Access.
+     */
+    public var counterparty: String
+    /**
+     * Receipt ID.
+     */
+    public var receiptId: String
+    /**
+     * Receipt Access Event ID.
+     */
+    public var receiptAccessEventId: String
+    /**
+     * Payment Reference copied from the Receipt.
+     */
+    public var paymentReference: FfiPaymentReference
+    /**
+     * Optional Payment Request ID copied from the Receipt.
+     */
+    public var paymentRequestId: String?
+    /**
+     * Optional Billing Period copied from the Receipt.
+     */
+    public var billingPeriod: FfiBillingPeriod?
+    /**
+     * Optional Payment Endpoint Identifier copied from the Receipt.
+     */
+    public var paymentEndpointIdentifier: String?
+    /**
+     * Optional Payment Amount copied from the Receipt.
+     */
+    public var amount: FfiReceiptAmount?
+    /**
+     * Current issuance status.
+     */
+    public var status: FfiReceiptIssuanceStatus
+    /**
+     * Outbound private message id that carries Receipt Access, once queued.
+     */
+    public var outboundMessageId: UInt64?
+    /**
+     * Creation time as RFC3339 text.
+     */
+    public var createdAt: String
+    /**
+     * Last status update time as RFC3339 text.
+     */
+    public var updatedAt: String
+    /**
+     * Time the Encrypted Receipt was stored as RFC3339 text.
+     */
+    public var storedAt: String?
+    /**
+     * Time Receipt Access was queued for private delivery as RFC3339 text.
+     */
+    public var accessQueuedAt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty that should receive Receipt Access.
+         */counterparty: String,
+        /**
+         * Receipt ID.
+         */receiptId: String,
+        /**
+         * Receipt Access Event ID.
+         */receiptAccessEventId: String,
+        /**
+         * Payment Reference copied from the Receipt.
+         */paymentReference: FfiPaymentReference,
+        /**
+         * Optional Payment Request ID copied from the Receipt.
+         */paymentRequestId: String?,
+        /**
+         * Optional Billing Period copied from the Receipt.
+         */billingPeriod: FfiBillingPeriod?,
+        /**
+         * Optional Payment Endpoint Identifier copied from the Receipt.
+         */paymentEndpointIdentifier: String?,
+        /**
+         * Optional Payment Amount copied from the Receipt.
+         */amount: FfiReceiptAmount?,
+        /**
+         * Current issuance status.
+         */status: FfiReceiptIssuanceStatus,
+        /**
+         * Outbound private message id that carries Receipt Access, once queued.
+         */outboundMessageId: UInt64?,
+        /**
+         * Creation time as RFC3339 text.
+         */createdAt: String,
+        /**
+         * Last status update time as RFC3339 text.
+         */updatedAt: String,
+        /**
+         * Time the Encrypted Receipt was stored as RFC3339 text.
+         */storedAt: String?,
+        /**
+         * Time Receipt Access was queued for private delivery as RFC3339 text.
+         */accessQueuedAt: String?) {
+        self.counterparty = counterparty
+        self.receiptId = receiptId
+        self.receiptAccessEventId = receiptAccessEventId
+        self.paymentReference = paymentReference
+        self.paymentRequestId = paymentRequestId
+        self.billingPeriod = billingPeriod
+        self.paymentEndpointIdentifier = paymentEndpointIdentifier
+        self.amount = amount
+        self.status = status
+        self.outboundMessageId = outboundMessageId
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.storedAt = storedAt
+        self.accessQueuedAt = accessQueuedAt
+    }
+}
+
+#if compiler(>=6)
+extension FfiReceiptIssuanceView: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceiptIssuanceView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptIssuanceView {
+        return
+            try FfiReceiptIssuanceView(
+                counterparty: FfiConverterString.read(from: &buf),
+                receiptId: FfiConverterString.read(from: &buf),
+                receiptAccessEventId: FfiConverterString.read(from: &buf),
+                paymentReference: FfiConverterTypeFfiPaymentReference.read(from: &buf),
+                paymentRequestId: FfiConverterOptionString.read(from: &buf),
+                billingPeriod: FfiConverterOptionTypeFfiBillingPeriod.read(from: &buf),
+                paymentEndpointIdentifier: FfiConverterOptionString.read(from: &buf),
+                amount: FfiConverterOptionTypeFfiReceiptAmount.read(from: &buf),
+                status: FfiConverterTypeFfiReceiptIssuanceStatus.read(from: &buf),
+                outboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
+                createdAt: FfiConverterString.read(from: &buf),
+                updatedAt: FfiConverterString.read(from: &buf),
+                storedAt: FfiConverterOptionString.read(from: &buf),
+                accessQueuedAt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReceiptIssuanceView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterString.write(value.receiptId, into: &buf)
+        FfiConverterString.write(value.receiptAccessEventId, into: &buf)
+        FfiConverterTypeFfiPaymentReference.write(value.paymentReference, into: &buf)
+        FfiConverterOptionString.write(value.paymentRequestId, into: &buf)
+        FfiConverterOptionTypeFfiBillingPeriod.write(value.billingPeriod, into: &buf)
+        FfiConverterOptionString.write(value.paymentEndpointIdentifier, into: &buf)
+        FfiConverterOptionTypeFfiReceiptAmount.write(value.amount, into: &buf)
+        FfiConverterTypeFfiReceiptIssuanceStatus.write(value.status, into: &buf)
+        FfiConverterOptionUInt64.write(value.outboundMessageId, into: &buf)
+        FfiConverterString.write(value.createdAt, into: &buf)
+        FfiConverterString.write(value.updatedAt, into: &buf)
+        FfiConverterOptionString.write(value.storedAt, into: &buf)
+        FfiConverterOptionString.write(value.accessQueuedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptIssuanceView_lift(_ buf: RustBuffer) throws -> FfiReceiptIssuanceView {
+    return try FfiConverterTypeFfiReceiptIssuanceView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptIssuanceView_lower(_ value: FfiReceiptIssuanceView) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptIssuanceView.lower(value)
+}
+
+
+/**
+ * Decrypted Receipt record stored by the SDK.
+ */
+public struct FfiReceiptRecord {
+    /**
+     * Counterparty that issued the Receipt Access event.
+     */
+    public var issuer: String
+    /**
+     * Receipt Access Event ID used for retrieval.
+     */
+    public var receiptAccessEventId: String
+    /**
+     * Receipt ID.
+     */
+    public var receiptId: String
+    /**
+     * Payment Reference copied from the decrypted Receipt.
+     */
+    public var paymentReference: FfiPaymentReference
+    /**
+     * Optional Payment Request ID copied from the decrypted Receipt.
+     */
+    public var paymentRequestId: String?
+    /**
+     * Optional Billing Period copied from the decrypted Receipt.
+     */
+    public var billingPeriod: FfiBillingPeriod?
+    /**
+     * Recipient public key from the decrypted Receipt.
+     */
+    public var recipientPublicKey: String
+    /**
+     * Optional Payment Endpoint Identifier copied from the decrypted Receipt.
+     */
+    public var paymentEndpointIdentifier: String?
+    /**
+     * Optional Payment Amount copied from the decrypted Receipt.
+     */
+    public var amount: FfiReceiptAmount?
+    /**
+     * Caller-defined Receipt Metadata encoded as a JSON object.
+     */
+    public var metadataJson: String
+    /**
+     * Successful retrieval/decryption time as RFC3339 text.
+     */
+    public var retrievedAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty that issued the Receipt Access event.
+         */issuer: String,
+        /**
+         * Receipt Access Event ID used for retrieval.
+         */receiptAccessEventId: String,
+        /**
+         * Receipt ID.
+         */receiptId: String,
+        /**
+         * Payment Reference copied from the decrypted Receipt.
+         */paymentReference: FfiPaymentReference,
+        /**
+         * Optional Payment Request ID copied from the decrypted Receipt.
+         */paymentRequestId: String?,
+        /**
+         * Optional Billing Period copied from the decrypted Receipt.
+         */billingPeriod: FfiBillingPeriod?,
+        /**
+         * Recipient public key from the decrypted Receipt.
+         */recipientPublicKey: String,
+        /**
+         * Optional Payment Endpoint Identifier copied from the decrypted Receipt.
+         */paymentEndpointIdentifier: String?,
+        /**
+         * Optional Payment Amount copied from the decrypted Receipt.
+         */amount: FfiReceiptAmount?,
+        /**
+         * Caller-defined Receipt Metadata encoded as a JSON object.
+         */metadataJson: String,
+        /**
+         * Successful retrieval/decryption time as RFC3339 text.
+         */retrievedAt: String) {
+        self.issuer = issuer
+        self.receiptAccessEventId = receiptAccessEventId
+        self.receiptId = receiptId
+        self.paymentReference = paymentReference
+        self.paymentRequestId = paymentRequestId
+        self.billingPeriod = billingPeriod
+        self.recipientPublicKey = recipientPublicKey
+        self.paymentEndpointIdentifier = paymentEndpointIdentifier
+        self.amount = amount
+        self.metadataJson = metadataJson
+        self.retrievedAt = retrievedAt
+    }
+}
+
+#if compiler(>=6)
+extension FfiReceiptRecord: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceiptRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptRecord {
+        return
+            try FfiReceiptRecord(
+                issuer: FfiConverterString.read(from: &buf),
+                receiptAccessEventId: FfiConverterString.read(from: &buf),
+                receiptId: FfiConverterString.read(from: &buf),
+                paymentReference: FfiConverterTypeFfiPaymentReference.read(from: &buf),
+                paymentRequestId: FfiConverterOptionString.read(from: &buf),
+                billingPeriod: FfiConverterOptionTypeFfiBillingPeriod.read(from: &buf),
+                recipientPublicKey: FfiConverterString.read(from: &buf),
+                paymentEndpointIdentifier: FfiConverterOptionString.read(from: &buf),
+                amount: FfiConverterOptionTypeFfiReceiptAmount.read(from: &buf),
+                metadataJson: FfiConverterString.read(from: &buf),
+                retrievedAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReceiptRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.issuer, into: &buf)
+        FfiConverterString.write(value.receiptAccessEventId, into: &buf)
+        FfiConverterString.write(value.receiptId, into: &buf)
+        FfiConverterTypeFfiPaymentReference.write(value.paymentReference, into: &buf)
+        FfiConverterOptionString.write(value.paymentRequestId, into: &buf)
+        FfiConverterOptionTypeFfiBillingPeriod.write(value.billingPeriod, into: &buf)
+        FfiConverterString.write(value.recipientPublicKey, into: &buf)
+        FfiConverterOptionString.write(value.paymentEndpointIdentifier, into: &buf)
+        FfiConverterOptionTypeFfiReceiptAmount.write(value.amount, into: &buf)
+        FfiConverterString.write(value.metadataJson, into: &buf)
+        FfiConverterString.write(value.retrievedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptRecord_lift(_ buf: RustBuffer) throws -> FfiReceiptRecord {
+    return try FfiConverterTypeFfiReceiptRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptRecord_lower(_ value: FfiReceiptRecord) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptRecord.lower(value)
+}
+
+
+/**
  * Payment-method-specific receiving detail returned by the payment adapter.
  */
 public struct FfiReceivingDetail {
@@ -11843,6 +12863,228 @@ extension FfiPublicationStatus: Codable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Local receipt issuance state.
+ */
+
+public enum FfiReceiptIssuanceStatus {
+
+    /**
+     * Encrypted Receipt has not been stored yet.
+     */
+    case pendingStorage
+    /**
+     * Encrypted Receipt was stored, but Receipt Access has not been queued yet.
+     */
+    case stored
+    /**
+     * Receipt Access was queued for private delivery.
+     */
+    case accessQueued
+    /**
+     * Last storage or queueing attempt failed.
+     */
+    case failed
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension FfiReceiptIssuanceStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceiptIssuanceStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiReceiptIssuanceStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptIssuanceStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .pendingStorage
+
+        case 2: return .stored
+
+        case 3: return .accessQueued
+
+        case 4: return .failed
+
+        case 5: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiReceiptIssuanceStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .pendingStorage:
+            writeInt(&buf, Int32(1))
+
+
+        case .stored:
+            writeInt(&buf, Int32(2))
+
+
+        case .accessQueued:
+            writeInt(&buf, Int32(3))
+
+
+        case .failed:
+            writeInt(&buf, Int32(4))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptIssuanceStatus_lift(_ buf: RustBuffer) throws -> FfiReceiptIssuanceStatus {
+    return try FfiConverterTypeFfiReceiptIssuanceStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptIssuanceStatus_lower(_ value: FfiReceiptIssuanceStatus) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptIssuanceStatus.lower(value)
+}
+
+
+extension FfiReceiptIssuanceStatus: Equatable, Hashable {}
+
+extension FfiReceiptIssuanceStatus: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Receipt retrieval state for an indexed Receipt Access event.
+ */
+
+public enum FfiReceiptRetrievalStatus {
+
+    /**
+     * Receipt Access has been indexed, but retrieval has not succeeded yet.
+     */
+    case pending
+    /**
+     * Encrypted Receipt was fetched and decrypted.
+     */
+    case retrieved
+    /**
+     * Receipt Location was missing on the issuer homeserver.
+     */
+    case notFound
+    /**
+     * Retrieval or decryption failed.
+     */
+    case failed
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension FfiReceiptRetrievalStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceiptRetrievalStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiReceiptRetrievalStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceiptRetrievalStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .pending
+
+        case 2: return .retrieved
+
+        case 3: return .notFound
+
+        case 4: return .failed
+
+        case 5: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiReceiptRetrievalStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .pending:
+            writeInt(&buf, Int32(1))
+
+
+        case .retrieved:
+            writeInt(&buf, Int32(2))
+
+
+        case .notFound:
+            writeInt(&buf, Int32(3))
+
+
+        case .failed:
+            writeInt(&buf, Int32(4))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptRetrievalStatus_lift(_ buf: RustBuffer) throws -> FfiReceiptRetrievalStatus {
+    return try FfiConverterTypeFfiReceiptRetrievalStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceiptRetrievalStatus_lower(_ value: FfiReceiptRetrievalStatus) -> RustBuffer {
+    return FfiConverterTypeFfiReceiptRetrievalStatus.lower(value)
+}
+
+
+extension FfiReceiptRetrievalStatus: Equatable, Hashable {}
+
+extension FfiReceiptRetrievalStatus: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Scope used when asking a payment adapter for receiving details.
  */
 
@@ -12653,6 +13895,30 @@ fileprivate struct FfiConverterOptionTypeFfiPubkyProfileRecord: FfiConverterRust
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiReceiptAmount: FfiConverterRustBuffer {
+    typealias SwiftType = FfiReceiptAmount?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiReceiptAmount.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiReceiptAmount.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiSdkStateBlobSnapshot: FfiConverterRustBuffer {
     typealias SwiftType = FfiSdkStateBlobSnapshot?
 
@@ -13148,6 +14414,81 @@ fileprivate struct FfiConverterSequenceTypeFfiPubkyProfileLink: FfiConverterRust
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiReceiptAccessView: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiReceiptAccessView]
+
+    public static func write(_ value: [FfiReceiptAccessView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiReceiptAccessView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiReceiptAccessView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiReceiptAccessView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiReceiptAccessView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiReceiptIssuanceView: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiReceiptIssuanceView]
+
+    public static func write(_ value: [FfiReceiptIssuanceView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiReceiptIssuanceView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiReceiptIssuanceView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiReceiptIssuanceView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiReceiptIssuanceView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiReceiptRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiReceiptRecord]
+
+    public static func write(_ value: [FfiReceiptRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiReceiptRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiReceiptRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiReceiptRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiReceiptRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiReceivingDetail: FfiConverterRustBuffer {
     typealias SwiftType = [FfiReceivingDetail]
 
@@ -13380,6 +14721,15 @@ public func derivePubkySecretKey(seed: Data, runtimeLabel: String)throws  -> Ffi
 })
 }
 /**
+ * Generate a fresh Receipt ID.
+ */
+public func generateReceiptId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_func_generate_receipt_id($0
+    )
+})
+}
+/**
  * Parse an auth deep link into public request details.
  */
 public func parsePubkyAuthUrl(authUrl: String)throws  -> FfiPubkyAuthDetails  {
@@ -13455,6 +14805,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_derive_pubky_secret_key() != 37697) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_generate_receipt_id() != 34487) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_parse_pubky_auth_url() != 567) {
@@ -13541,6 +14894,15 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_initiate_link_with_peer() != 54115) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_issue_receipt() != 3322) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_issued_receipts() != 50665) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_issued_receipts_to() != 40853) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 57246) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13559,10 +14921,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 36875) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 41997) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_process_outbound_private_messages() != 52525) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_process_pending_private_messages() != 56244) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_process_receipt_issuance() != 34977) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 14281) {
@@ -13578,6 +14946,27 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 49322) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access() != 27958) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access_from() != 17149) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access_records() != 37465) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_issuance_records() != 32382) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_records() != 27396) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipts() != 46308) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipts_from() != 46186) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages() != 45996) {
@@ -13611,6 +15000,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 30409) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 7511) {
