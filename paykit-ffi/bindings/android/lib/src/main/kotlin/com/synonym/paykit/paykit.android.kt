@@ -1392,6 +1392,12 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1665,6 +1671,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaymentreference_export_text() != 10144.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffiprivatejsonobject_export_text() != 41754.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffiprivateoperationerror_category() != 32940.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1768,6 +1777,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_constructor_ffipaymentreference_new() != 26530.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_constructor_ffiprivatejsonobject_new() != 62907.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295.toShort()) {
@@ -2029,6 +2041,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaymentreference_export_text(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiprivatejsonobject_export_text(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffiprivateoperationerror_category(
     ): Short
     @JvmStatic
@@ -2132,6 +2147,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_constructor_ffipaymentreference_new(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffiprivatejsonobject_new(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new(
@@ -2582,6 +2600,26 @@ internal object UniffiLib : Library {
     ): Pointer?
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaymentreference_export_text(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_clone_ffiprivatejsonobject(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_free_ffiprivatejsonobject(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffiprivatejsonobject_new(
+        `text`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiprivatejsonobject_export_text(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
@@ -5470,6 +5508,166 @@ public object FfiConverterTypeFfiPaymentReference: FfiConverter<FfiPaymentRefere
     override fun allocationSize(value: FfiPaymentReference): ULong = 8UL
 
     override fun write(value: FfiPaymentReference, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(lower(value).toLong())
+    }
+}
+
+
+
+/**
+ * Private JSON object with redacted debug output.
+ */
+public open class FfiPrivateJsonObject: Disposable, FfiPrivateJsonObjectInterface {
+
+    public constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    public constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(null))
+    }
+    /**
+     * Create a private JSON object after validating it.
+     */
+    public constructor(`text`: kotlin.String) : this(
+        uniffiRustCallWithError(PaykitFfiExceptionErrorHandler) { uniffiRustCallStatus ->
+            UniffiLib.uniffi_paykit_fn_constructor_ffiprivatejsonobject_new(
+                FfiConverterString.lower(`text`),
+                uniffiRustCallStatus,
+            )
+        }!!
+    )
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed: kotlinx.atomicfu.AtomicBoolean = kotlinx.atomicfu.atomic(false)
+    private val callCounter: kotlinx.atomicfu.AtomicLong = kotlinx.atomicfu.atomic(1L)
+
+    private val lock = kotlinx.atomicfu.locks.ReentrantLock()
+
+    private fun <T> synchronized(block: () -> T): T {
+        lock.lock()
+        try {
+            return block()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    override fun close() {
+        synchronized { this.destroy() }
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.value
+            if (c == 0L) {
+                throw IllegalStateException("${this::class::simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this::class::simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiPointerDestroyer(private val pointer: Pointer?) : Disposable {
+        override fun destroy() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.uniffi_paykit_fn_free_ffiprivatejsonobject(ptr, status)
+                }
+            }
+        }
+    }
+
+    public fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall { status ->
+            UniffiLib.uniffi_paykit_fn_clone_ffiprivatejsonobject(pointer!!, status)
+        }!!
+    }
+
+
+    /**
+     * Export the JSON text for explicit app display, storage, or payment execution.
+     */
+    public override fun `exportText`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiprivatejsonobject_export_text(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+
+
+
+
+
+
+    public companion object
+
+}
+
+
+
+
+
+public object FfiConverterTypeFfiPrivateJsonObject: FfiConverter<FfiPrivateJsonObject, Pointer> {
+
+    override fun lower(value: FfiPrivateJsonObject): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): FfiPrivateJsonObject {
+        return FfiPrivateJsonObject(value)
+    }
+
+    override fun read(buf: ByteBuffer): FfiPrivateJsonObject {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(buf.getLong().toPointer())
+    }
+
+    override fun allocationSize(value: FfiPrivateJsonObject): ULong = 8UL
+
+    override fun write(value: FfiPrivateJsonObject, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(lower(value).toLong())
@@ -8598,7 +8796,7 @@ public object FfiConverterTypeFfiPaymentProofRecord: FfiConverterRustBuffer<FfiP
             FfiConverterTypeFfiPaymentReference.read(buf),
             FfiConverterOptionalTypeFfiBillingPeriod.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeFfiPrivateJsonObject.read(buf),
             FfiConverterString.read(buf),
         )
     }
@@ -8611,7 +8809,7 @@ public object FfiConverterTypeFfiPaymentProofRecord: FfiConverterRustBuffer<FfiP
             FfiConverterTypeFfiPaymentReference.allocationSize(value.`paymentReference`) +
             FfiConverterOptionalTypeFfiBillingPeriod.allocationSize(value.`billingPeriod`) +
             FfiConverterString.allocationSize(value.`paymentEndpointIdentifier`) +
-            FfiConverterString.allocationSize(value.`proofJson`) +
+            FfiConverterTypeFfiPrivateJsonObject.allocationSize(value.`proof`) +
             FfiConverterString.allocationSize(value.`recordedAt`)
     )
 
@@ -8623,7 +8821,7 @@ public object FfiConverterTypeFfiPaymentProofRecord: FfiConverterRustBuffer<FfiP
         FfiConverterTypeFfiPaymentReference.write(value.`paymentReference`, buf)
         FfiConverterOptionalTypeFfiBillingPeriod.write(value.`billingPeriod`, buf)
         FfiConverterString.write(value.`paymentEndpointIdentifier`, buf)
-        FfiConverterString.write(value.`proofJson`, buf)
+        FfiConverterTypeFfiPrivateJsonObject.write(value.`proof`, buf)
         FfiConverterString.write(value.`recordedAt`, buf)
     }
 }
@@ -8636,20 +8834,20 @@ public object FfiConverterTypeFfiPaymentProofSubmission: FfiConverterRustBuffer<
         return FfiPaymentProofSubmission(
             FfiConverterOptionalTypeFfiBillingPeriod.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeFfiPrivateJsonObject.read(buf),
         )
     }
 
     override fun allocationSize(value: FfiPaymentProofSubmission): ULong = (
             FfiConverterOptionalTypeFfiBillingPeriod.allocationSize(value.`billingPeriod`) +
             FfiConverterString.allocationSize(value.`paymentEndpointIdentifier`) +
-            FfiConverterString.allocationSize(value.`proofJson`)
+            FfiConverterTypeFfiPrivateJsonObject.allocationSize(value.`proof`)
     )
 
     override fun write(value: FfiPaymentProofSubmission, buf: ByteBuffer) {
         FfiConverterOptionalTypeFfiBillingPeriod.write(value.`billingPeriod`, buf)
         FfiConverterString.write(value.`paymentEndpointIdentifier`, buf)
-        FfiConverterString.write(value.`proofJson`, buf)
+        FfiConverterTypeFfiPrivateJsonObject.write(value.`proof`, buf)
     }
 }
 
@@ -8827,7 +9025,7 @@ public object FfiConverterTypeFfiPaymentRequestTerms: FfiConverterRustBuffer<Ffi
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalTypeFfiPaymentRequestRecurrence.read(buf),
             FfiConverterSequenceString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeFfiPrivateJsonObject.read(buf),
         )
     }
 
@@ -8837,7 +9035,7 @@ public object FfiConverterTypeFfiPaymentRequestTerms: FfiConverterRustBuffer<Ffi
             FfiConverterOptionalString.allocationSize(value.`proposalExpiresAt`) +
             FfiConverterOptionalTypeFfiPaymentRequestRecurrence.allocationSize(value.`recurrence`) +
             FfiConverterSequenceString.allocationSize(value.`acceptedPaymentEndpointIdentifiers`) +
-            FfiConverterString.allocationSize(value.`metadataJson`)
+            FfiConverterTypeFfiPrivateJsonObject.allocationSize(value.`metadata`)
     )
 
     override fun write(value: FfiPaymentRequestTerms, buf: ByteBuffer) {
@@ -8846,7 +9044,7 @@ public object FfiConverterTypeFfiPaymentRequestTerms: FfiConverterRustBuffer<Ffi
         FfiConverterOptionalString.write(value.`proposalExpiresAt`, buf)
         FfiConverterOptionalTypeFfiPaymentRequestRecurrence.write(value.`recurrence`, buf)
         FfiConverterSequenceString.write(value.`acceptedPaymentEndpointIdentifiers`, buf)
-        FfiConverterString.write(value.`metadataJson`, buf)
+        FfiConverterTypeFfiPrivateJsonObject.write(value.`metadata`, buf)
     }
 }
 
@@ -9270,7 +9468,7 @@ public object FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer<FfiReceipt
             FfiConverterOptionalTypeFfiBillingPeriod.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalTypeFfiReceiptAmount.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeFfiPrivateJsonObject.read(buf),
         )
     }
 
@@ -9281,7 +9479,7 @@ public object FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer<FfiReceipt
             FfiConverterOptionalTypeFfiBillingPeriod.allocationSize(value.`billingPeriod`) +
             FfiConverterOptionalString.allocationSize(value.`paymentEndpointIdentifier`) +
             FfiConverterOptionalTypeFfiReceiptAmount.allocationSize(value.`amount`) +
-            FfiConverterString.allocationSize(value.`metadataJson`)
+            FfiConverterTypeFfiPrivateJsonObject.allocationSize(value.`metadata`)
     )
 
     override fun write(value: FfiReceiptDraft, buf: ByteBuffer) {
@@ -9291,7 +9489,7 @@ public object FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer<FfiReceipt
         FfiConverterOptionalTypeFfiBillingPeriod.write(value.`billingPeriod`, buf)
         FfiConverterOptionalString.write(value.`paymentEndpointIdentifier`, buf)
         FfiConverterOptionalTypeFfiReceiptAmount.write(value.`amount`, buf)
-        FfiConverterString.write(value.`metadataJson`, buf)
+        FfiConverterTypeFfiPrivateJsonObject.write(value.`metadata`, buf)
     }
 }
 
@@ -9368,7 +9566,7 @@ public object FfiConverterTypeFfiReceiptRecord: FfiConverterRustBuffer<FfiReceip
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalTypeFfiReceiptAmount.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeFfiPrivateJsonObject.read(buf),
             FfiConverterString.read(buf),
         )
     }
@@ -9383,7 +9581,7 @@ public object FfiConverterTypeFfiReceiptRecord: FfiConverterRustBuffer<FfiReceip
             FfiConverterString.allocationSize(value.`recipientPublicKey`) +
             FfiConverterOptionalString.allocationSize(value.`paymentEndpointIdentifier`) +
             FfiConverterOptionalTypeFfiReceiptAmount.allocationSize(value.`amount`) +
-            FfiConverterString.allocationSize(value.`metadataJson`) +
+            FfiConverterTypeFfiPrivateJsonObject.allocationSize(value.`metadata`) +
             FfiConverterString.allocationSize(value.`retrievedAt`)
     )
 
@@ -9397,7 +9595,7 @@ public object FfiConverterTypeFfiReceiptRecord: FfiConverterRustBuffer<FfiReceip
         FfiConverterString.write(value.`recipientPublicKey`, buf)
         FfiConverterOptionalString.write(value.`paymentEndpointIdentifier`, buf)
         FfiConverterOptionalTypeFfiReceiptAmount.write(value.`amount`, buf)
-        FfiConverterString.write(value.`metadataJson`, buf)
+        FfiConverterTypeFfiPrivateJsonObject.write(value.`metadata`, buf)
         FfiConverterString.write(value.`retrievedAt`, buf)
     }
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use paykit_lib::ReceiptId;
 
 use crate::{
+    json::FfiPrivateJsonObject,
     payment_requests::{FfiBillingPeriod, FfiPaymentReference},
     sdk::FfiPaykitSdk,
     PaykitFfiError,
@@ -42,7 +43,7 @@ pub struct FfiReceiptDraft {
     /// Optional Payment Amount being receipted.
     pub amount: Option<FfiReceiptAmount>,
     /// Caller-defined Receipt Metadata encoded as a JSON object.
-    pub metadata_json: String,
+    pub metadata: Arc<FfiPrivateJsonObject>,
 }
 
 /// Local receipt issuance state.
@@ -155,7 +156,7 @@ pub struct FfiReceiptRecord {
     /// Optional Payment Amount copied from the decrypted Receipt.
     pub amount: Option<FfiReceiptAmount>,
     /// Caller-defined Receipt Metadata encoded as a JSON object.
-    pub metadata_json: String,
+    pub metadata: Arc<FfiPrivateJsonObject>,
     /// Successful retrieval/decryption time as RFC3339 text.
     pub retrieved_at: String,
 }

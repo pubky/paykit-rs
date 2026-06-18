@@ -7,9 +7,11 @@ use paykit_sdk::{
     AmountRecord, ReceiptAccessView, ReceiptDraftBuilder, ReceiptIssuanceStatus,
     ReceiptIssuanceView, ReceiptRecord, ReceiptRetrievalStatus,
 };
-use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use crate::{errors::validation_error, payment_requests::FfiPaymentReference, PaykitFfiError};
+use crate::{
+    errors::validation_error, json::FfiPrivateJsonObject, payment_requests::FfiPaymentReference,
+    PaykitFfiError,
+};
 
 use super::{
     FfiReceiptAccessView, FfiReceiptAmount, FfiReceiptDraft, FfiReceiptIssuanceStatus,
@@ -80,10 +82,7 @@ impl TryFrom<FfiReceiptDraft> for ReceiptDraft {
         if let Some(amount) = value.amount {
             builder = builder.with_amount(amount.try_into()?);
         }
-        builder = builder.with_metadata(parse_json_object(
-            "Receipt Draft metadata_json",
-            &value.metadata_json,
-        )?);
+        builder = builder.with_metadata(value.metadata.parse_map("Receipt Draft metadata")?);
         builder.build().map_err(Into::into)
     }
 }
@@ -146,7 +145,7 @@ impl TryFrom<ReceiptRecord> for FfiReceiptRecord {
             recipient_public_key: value.recipient_public_key.to_string(),
             payment_endpoint_identifier: value.payment_endpoint_identifier,
             amount: value.amount.map(Into::into),
-            metadata_json: json_object_to_string("Receipt metadata", &value.metadata)?,
+            metadata: FfiPrivateJsonObject::from_json_map("Receipt metadata", &value.metadata)?,
             retrieved_at: value.retrieved_at.to_rfc3339(),
         })
     }
@@ -186,22 +185,4 @@ fn parse_payment_request_id(value: String) -> Result<PaymentRequestId, PaykitFfi
 
 fn parse_endpoint_identifier(value: String) -> Result<PaymentEndpointIdentifier, PaykitFfiError> {
     PaymentEndpointIdentifier::new(value).map_err(|err| validation_error(err.to_string()))
-}
-
-fn parse_json_object(
-    label: &'static str,
-    raw: &str,
-) -> Result<JsonMap<String, JsonValue>, PaykitFfiError> {
-    serde_json::from_str::<JsonMap<String, JsonValue>>(raw)
-        .map_err(|err| validation_error(format!("{label} must be a JSON object: {err}")))
-}
-
-fn json_object_to_string(
-    label: &'static str,
-    value: &JsonMap<String, JsonValue>,
-) -> Result<String, PaykitFfiError> {
-    serde_json::to_string(value).map_err(|err| PaykitFfiError::Protocol {
-        code: "serialization".into(),
-        context: format!("{label} could not be serialized: {err}"),
-    })
 }

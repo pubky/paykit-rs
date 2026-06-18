@@ -544,6 +544,22 @@ public interface FfiPaymentReferenceInterface {
 
 
 /**
+ * Private JSON object with redacted debug output.
+ */
+public interface FfiPrivateJsonObjectInterface {
+
+    /**
+     * Export the JSON text for explicit app display, storage, or payment execution.
+     */
+    public fun `exportText`(): kotlin.String
+
+    public companion object
+}
+
+
+
+
+/**
  * Private workflow error with redacted default context.
  */
 public interface FfiPrivateOperationErrorInterface {
@@ -1689,7 +1705,7 @@ public data class FfiPaymentProofRecord (
     /**
      * Method-specific proof object encoded as JSON.
      */
-    val `proofJson`: kotlin.String,
+    val `proof`: FfiPrivateJsonObject,
     /**
      * Local record time for this proof as RFC3339 text.
      */
@@ -1704,7 +1720,7 @@ public data class FfiPaymentProofRecord (
             this.`paymentReference`,
             this.`billingPeriod`,
             this.`paymentEndpointIdentifier`,
-            this.`proofJson`,
+            this.`proof`,
             this.`recordedAt`,
         )
     }
@@ -1716,7 +1732,7 @@ public data class FfiPaymentProofRecord (
 /**
  * Method-specific Payment Proof submission data.
  */
-@kotlinx.serialization.Serializable
+
 public data class FfiPaymentProofSubmission (
     /**
      * Billing Period for recurring Payment Requests.
@@ -1729,8 +1745,15 @@ public data class FfiPaymentProofSubmission (
     /**
      * Method-specific proof object encoded as JSON.
      */
-    val `proofJson`: kotlin.String
-) {
+    val `proof`: FfiPrivateJsonObject
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`billingPeriod`,
+            this.`paymentEndpointIdentifier`,
+            this.`proof`,
+        )
+    }
     public companion object
 }
 
@@ -1965,7 +1988,7 @@ public data class FfiPaymentRequestTerms (
     /**
      * Application-specific metadata encoded as a JSON object.
      */
-    val `metadataJson`: kotlin.String
+    val `metadata`: FfiPrivateJsonObject
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1974,7 +1997,7 @@ public data class FfiPaymentRequestTerms (
             this.`proposalExpiresAt`,
             this.`recurrence`,
             this.`acceptedPaymentEndpointIdentifiers`,
-            this.`metadataJson`,
+            this.`metadata`,
         )
     }
     public companion object
@@ -2463,7 +2486,7 @@ public data class FfiReceiptDraft (
     /**
      * Caller-defined Receipt Metadata encoded as a JSON object.
      */
-    val `metadataJson`: kotlin.String
+    val `metadata`: FfiPrivateJsonObject
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2473,7 +2496,7 @@ public data class FfiReceiptDraft (
             this.`billingPeriod`,
             this.`paymentEndpointIdentifier`,
             this.`amount`,
-            this.`metadataJson`,
+            this.`metadata`,
         )
     }
     public companion object
@@ -2610,7 +2633,7 @@ public data class FfiReceiptRecord (
     /**
      * Caller-defined Receipt Metadata encoded as a JSON object.
      */
-    val `metadataJson`: kotlin.String,
+    val `metadata`: FfiPrivateJsonObject,
     /**
      * Successful retrieval/decryption time as RFC3339 text.
      */
@@ -2627,7 +2650,7 @@ public data class FfiReceiptRecord (
             this.`recipientPublicKey`,
             this.`paymentEndpointIdentifier`,
             this.`amount`,
-            this.`metadataJson`,
+            this.`metadata`,
             this.`retrievedAt`,
         )
     }

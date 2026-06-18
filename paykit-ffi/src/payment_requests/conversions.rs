@@ -9,9 +9,8 @@ use paykit_sdk::{
     PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
     PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord, PubkyPublicKey,
 };
-use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use crate::{errors::validation_error, PaykitFfiError};
+use crate::{errors::validation_error, json::FfiPrivateJsonObject, PaykitFfiError};
 
 use super::{
     FfiBillingPeriod, FfiPaymentProofRecord, FfiPaymentProofSubmission, FfiPaymentReference,
@@ -171,7 +170,7 @@ impl TryFrom<FfiPaymentRequestTerms> for PaymentRequestTerms {
                 .into_iter()
                 .map(parse_endpoint_identifier)
                 .collect::<Result<Vec<_>, _>>()?,
-            metadata: parse_json_object("Payment Request metadata_json", &value.metadata_json)?,
+            metadata: value.metadata.parse_map("Payment Request metadata")?,
         })
     }
 }
@@ -188,7 +187,10 @@ impl TryFrom<PaymentRequestTermsRecord> for FfiPaymentRequestTerms {
             proposal_expires_at: value.proposal_expires_at,
             recurrence: value.recurrence.map(Into::into),
             accepted_payment_endpoint_identifiers: value.accepted_payment_endpoint_identifiers,
-            metadata_json: json_object_to_string("Payment Request metadata", &value.metadata)?,
+            metadata: FfiPrivateJsonObject::from_json_map(
+                "Payment Request metadata",
+                &value.metadata,
+            )?,
         })
     }
 }
@@ -207,7 +209,7 @@ impl TryFrom<PaymentProofRecord> for FfiPaymentProofRecord {
             )),
             billing_period: value.billing_period.map(Into::into),
             payment_endpoint_identifier: value.payment_endpoint_identifier,
-            proof_json: json_object_to_string("Payment Proof proof", &value.proof)?,
+            proof: FfiPrivateJsonObject::from_json_map("Payment Proof proof", &value.proof)?,
             recorded_at: value.recorded_at.to_rfc3339(),
         })
     }
@@ -250,7 +252,7 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
 pub(super) struct ParsedPaymentProofSubmission {
     pub(super) billing_period: Option<BillingPeriod>,
     pub(super) payment_endpoint_identifier: PaymentEndpointIdentifier,
-    pub(super) proof: JsonMap<String, JsonValue>,
+    pub(super) proof: serde_json::Map<String, serde_json::Value>,
 }
 
 impl TryFrom<FfiPaymentProofSubmission> for ParsedPaymentProofSubmission {
@@ -262,7 +264,7 @@ impl TryFrom<FfiPaymentProofSubmission> for ParsedPaymentProofSubmission {
             payment_endpoint_identifier: parse_endpoint_identifier(
                 value.payment_endpoint_identifier,
             )?,
-            proof: parse_json_object("Payment Proof proof_json", &value.proof_json)?,
+            proof: value.proof.parse_map("Payment Proof proof")?,
         })
     }
 }
@@ -297,22 +299,4 @@ fn parse_recurrence_unit(value: &str) -> Result<RecurrenceUnit, PaykitFfiError> 
             "unsupported Recurrence unit '{value}'"
         ))),
     }
-}
-
-fn parse_json_object(
-    label: &'static str,
-    raw: &str,
-) -> Result<JsonMap<String, JsonValue>, PaykitFfiError> {
-    serde_json::from_str::<JsonMap<String, JsonValue>>(raw)
-        .map_err(|err| validation_error(format!("{label} must be a JSON object: {err}")))
-}
-
-fn json_object_to_string(
-    label: &'static str,
-    value: &JsonMap<String, JsonValue>,
-) -> Result<String, PaykitFfiError> {
-    serde_json::to_string(value).map_err(|err| PaykitFfiError::Protocol {
-        code: "serialization".into(),
-        context: format!("{label} could not be serialized: {err}"),
-    })
 }

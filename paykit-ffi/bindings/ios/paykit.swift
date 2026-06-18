@@ -2627,6 +2627,151 @@ public func FfiConverterTypeFfiPaymentReference_lower(_ value: FfiPaymentReferen
 
 
 /**
+ * Private JSON object with redacted debug output.
+ */
+public protocol FfiPrivateJsonObjectProtocol: AnyObject, Sendable {
+
+    /**
+     * Export the JSON text for explicit app display, storage, or payment execution.
+     */
+    func exportText()  -> String
+
+}
+/**
+ * Private JSON object with redacted debug output.
+ */
+open class FfiPrivateJsonObject: FfiPrivateJsonObjectProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffiprivatejsonobject(self.pointer, $0) }
+    }
+    /**
+     * Create a private JSON object after validating it.
+     */
+public convenience init(text: String)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_constructor_ffiprivatejsonobject_new(
+        FfiConverterString.lower(text),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffiprivatejsonobject(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Export the JSON text for explicit app display, storage, or payment execution.
+     */
+open func exportText() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiprivatejsonobject_export_text(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPrivateJsonObject: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = FfiPrivateJsonObject
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> FfiPrivateJsonObject {
+        return FfiPrivateJsonObject(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: FfiPrivateJsonObject) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivateJsonObject {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: FfiPrivateJsonObject, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivateJsonObject_lift(_ pointer: UnsafeMutableRawPointer) throws -> FfiPrivateJsonObject {
+    return try FfiConverterTypeFfiPrivateJsonObject.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivateJsonObject_lower(_ value: FfiPrivateJsonObject) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeFfiPrivateJsonObject.lower(value)
+}
+
+
+
+
+
+
+/**
  * Private workflow error with redacted default context.
  */
 public protocol FfiPrivateOperationErrorProtocol: AnyObject, Sendable {
@@ -7672,7 +7817,7 @@ public struct FfiPaymentProofRecord {
     /**
      * Method-specific proof object encoded as JSON.
      */
-    public var proofJson: String
+    public var proof: FfiPrivateJsonObject
     /**
      * Local record time for this proof as RFC3339 text.
      */
@@ -7704,7 +7849,7 @@ public struct FfiPaymentProofRecord {
          */paymentEndpointIdentifier: String,
         /**
          * Method-specific proof object encoded as JSON.
-         */proofJson: String,
+         */proof: FfiPrivateJsonObject,
         /**
          * Local record time for this proof as RFC3339 text.
          */recordedAt: String) {
@@ -7715,7 +7860,7 @@ public struct FfiPaymentProofRecord {
         self.paymentReference = paymentReference
         self.billingPeriod = billingPeriod
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
-        self.proofJson = proofJson
+        self.proof = proof
         self.recordedAt = recordedAt
     }
 }
@@ -7740,7 +7885,7 @@ public struct FfiConverterTypeFfiPaymentProofRecord: FfiConverterRustBuffer {
                 paymentReference: FfiConverterTypeFfiPaymentReference.read(from: &buf),
                 billingPeriod: FfiConverterOptionTypeFfiBillingPeriod.read(from: &buf),
                 paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
-                proofJson: FfiConverterString.read(from: &buf),
+                proof: FfiConverterTypeFfiPrivateJsonObject.read(from: &buf),
                 recordedAt: FfiConverterString.read(from: &buf)
         )
     }
@@ -7753,7 +7898,7 @@ public struct FfiConverterTypeFfiPaymentProofRecord: FfiConverterRustBuffer {
         FfiConverterTypeFfiPaymentReference.write(value.paymentReference, into: &buf)
         FfiConverterOptionTypeFfiBillingPeriod.write(value.billingPeriod, into: &buf)
         FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
-        FfiConverterString.write(value.proofJson, into: &buf)
+        FfiConverterTypeFfiPrivateJsonObject.write(value.proof, into: &buf)
         FfiConverterString.write(value.recordedAt, into: &buf)
     }
 }
@@ -7789,7 +7934,7 @@ public struct FfiPaymentProofSubmission {
     /**
      * Method-specific proof object encoded as JSON.
      */
-    public var proofJson: String
+    public var proof: FfiPrivateJsonObject
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7802,40 +7947,16 @@ public struct FfiPaymentProofSubmission {
          */paymentEndpointIdentifier: String,
         /**
          * Method-specific proof object encoded as JSON.
-         */proofJson: String) {
+         */proof: FfiPrivateJsonObject) {
         self.billingPeriod = billingPeriod
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
-        self.proofJson = proofJson
+        self.proof = proof
     }
 }
 
 #if compiler(>=6)
 extension FfiPaymentProofSubmission: Sendable {}
 #endif
-
-
-extension FfiPaymentProofSubmission: Equatable, Hashable {
-    public static func ==(lhs: FfiPaymentProofSubmission, rhs: FfiPaymentProofSubmission) -> Bool {
-        if lhs.billingPeriod != rhs.billingPeriod {
-            return false
-        }
-        if lhs.paymentEndpointIdentifier != rhs.paymentEndpointIdentifier {
-            return false
-        }
-        if lhs.proofJson != rhs.proofJson {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(billingPeriod)
-        hasher.combine(paymentEndpointIdentifier)
-        hasher.combine(proofJson)
-    }
-}
-
-extension FfiPaymentProofSubmission: Codable {}
 
 
 
@@ -7848,14 +7969,14 @@ public struct FfiConverterTypeFfiPaymentProofSubmission: FfiConverterRustBuffer 
             try FfiPaymentProofSubmission(
                 billingPeriod: FfiConverterOptionTypeFfiBillingPeriod.read(from: &buf),
                 paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
-                proofJson: FfiConverterString.read(from: &buf)
+                proof: FfiConverterTypeFfiPrivateJsonObject.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiPaymentProofSubmission, into buf: inout [UInt8]) {
         FfiConverterOptionTypeFfiBillingPeriod.write(value.billingPeriod, into: &buf)
         FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
-        FfiConverterString.write(value.proofJson, into: &buf)
+        FfiConverterTypeFfiPrivateJsonObject.write(value.proof, into: &buf)
     }
 }
 
@@ -8504,7 +8625,7 @@ public struct FfiPaymentRequestTerms {
     /**
      * Application-specific metadata encoded as a JSON object.
      */
-    public var metadataJson: String
+    public var metadata: FfiPrivateJsonObject
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8526,13 +8647,13 @@ public struct FfiPaymentRequestTerms {
          */acceptedPaymentEndpointIdentifiers: [String],
         /**
          * Application-specific metadata encoded as a JSON object.
-         */metadataJson: String) {
+         */metadata: FfiPrivateJsonObject) {
         self.amount = amount
         self.paymentReference = paymentReference
         self.proposalExpiresAt = proposalExpiresAt
         self.recurrence = recurrence
         self.acceptedPaymentEndpointIdentifiers = acceptedPaymentEndpointIdentifiers
-        self.metadataJson = metadataJson
+        self.metadata = metadata
     }
 }
 
@@ -8554,7 +8675,7 @@ public struct FfiConverterTypeFfiPaymentRequestTerms: FfiConverterRustBuffer {
                 proposalExpiresAt: FfiConverterOptionString.read(from: &buf),
                 recurrence: FfiConverterOptionTypeFfiPaymentRequestRecurrence.read(from: &buf),
                 acceptedPaymentEndpointIdentifiers: FfiConverterSequenceString.read(from: &buf),
-                metadataJson: FfiConverterString.read(from: &buf)
+                metadata: FfiConverterTypeFfiPrivateJsonObject.read(from: &buf)
         )
     }
 
@@ -8564,7 +8685,7 @@ public struct FfiConverterTypeFfiPaymentRequestTerms: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.proposalExpiresAt, into: &buf)
         FfiConverterOptionTypeFfiPaymentRequestRecurrence.write(value.recurrence, into: &buf)
         FfiConverterSequenceString.write(value.acceptedPaymentEndpointIdentifiers, into: &buf)
-        FfiConverterString.write(value.metadataJson, into: &buf)
+        FfiConverterTypeFfiPrivateJsonObject.write(value.metadata, into: &buf)
     }
 }
 
@@ -10072,7 +10193,7 @@ public struct FfiReceiptDraft {
     /**
      * Caller-defined Receipt Metadata encoded as a JSON object.
      */
-    public var metadataJson: String
+    public var metadata: FfiPrivateJsonObject
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -10097,14 +10218,14 @@ public struct FfiReceiptDraft {
          */amount: FfiReceiptAmount?,
         /**
          * Caller-defined Receipt Metadata encoded as a JSON object.
-         */metadataJson: String) {
+         */metadata: FfiPrivateJsonObject) {
         self.receiptId = receiptId
         self.paymentReference = paymentReference
         self.paymentRequestId = paymentRequestId
         self.billingPeriod = billingPeriod
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
         self.amount = amount
-        self.metadataJson = metadataJson
+        self.metadata = metadata
     }
 }
 
@@ -10127,7 +10248,7 @@ public struct FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer {
                 billingPeriod: FfiConverterOptionTypeFfiBillingPeriod.read(from: &buf),
                 paymentEndpointIdentifier: FfiConverterOptionString.read(from: &buf),
                 amount: FfiConverterOptionTypeFfiReceiptAmount.read(from: &buf),
-                metadataJson: FfiConverterString.read(from: &buf)
+                metadata: FfiConverterTypeFfiPrivateJsonObject.read(from: &buf)
         )
     }
 
@@ -10138,7 +10259,7 @@ public struct FfiConverterTypeFfiReceiptDraft: FfiConverterRustBuffer {
         FfiConverterOptionTypeFfiBillingPeriod.write(value.billingPeriod, into: &buf)
         FfiConverterOptionString.write(value.paymentEndpointIdentifier, into: &buf)
         FfiConverterOptionTypeFfiReceiptAmount.write(value.amount, into: &buf)
-        FfiConverterString.write(value.metadataJson, into: &buf)
+        FfiConverterTypeFfiPrivateJsonObject.write(value.metadata, into: &buf)
     }
 }
 
@@ -10388,7 +10509,7 @@ public struct FfiReceiptRecord {
     /**
      * Caller-defined Receipt Metadata encoded as a JSON object.
      */
-    public var metadataJson: String
+    public var metadata: FfiPrivateJsonObject
     /**
      * Successful retrieval/decryption time as RFC3339 text.
      */
@@ -10426,7 +10547,7 @@ public struct FfiReceiptRecord {
          */amount: FfiReceiptAmount?,
         /**
          * Caller-defined Receipt Metadata encoded as a JSON object.
-         */metadataJson: String,
+         */metadata: FfiPrivateJsonObject,
         /**
          * Successful retrieval/decryption time as RFC3339 text.
          */retrievedAt: String) {
@@ -10439,7 +10560,7 @@ public struct FfiReceiptRecord {
         self.recipientPublicKey = recipientPublicKey
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
         self.amount = amount
-        self.metadataJson = metadataJson
+        self.metadata = metadata
         self.retrievedAt = retrievedAt
     }
 }
@@ -10466,7 +10587,7 @@ public struct FfiConverterTypeFfiReceiptRecord: FfiConverterRustBuffer {
                 recipientPublicKey: FfiConverterString.read(from: &buf),
                 paymentEndpointIdentifier: FfiConverterOptionString.read(from: &buf),
                 amount: FfiConverterOptionTypeFfiReceiptAmount.read(from: &buf),
-                metadataJson: FfiConverterString.read(from: &buf),
+                metadata: FfiConverterTypeFfiPrivateJsonObject.read(from: &buf),
                 retrievedAt: FfiConverterString.read(from: &buf)
         )
     }
@@ -10481,7 +10602,7 @@ public struct FfiConverterTypeFfiReceiptRecord: FfiConverterRustBuffer {
         FfiConverterString.write(value.recipientPublicKey, into: &buf)
         FfiConverterOptionString.write(value.paymentEndpointIdentifier, into: &buf)
         FfiConverterOptionTypeFfiReceiptAmount.write(value.amount, into: &buf)
-        FfiConverterString.write(value.metadataJson, into: &buf)
+        FfiConverterTypeFfiPrivateJsonObject.write(value.metadata, into: &buf)
         FfiConverterString.write(value.retrievedAt, into: &buf)
     }
 }
@@ -14982,6 +15103,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaymentreference_export_text() != 10144) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffiprivatejsonobject_export_text() != 41754) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffiprivateoperationerror_category() != 32940) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15085,6 +15209,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipaymentreference_new() != 26530) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffiprivatejsonobject_new() != 62907) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295) {

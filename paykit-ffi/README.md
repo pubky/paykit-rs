@@ -17,7 +17,7 @@ on low-level `paykit-lib` protocol bindings.
 
 - `FfiPaykitSdk` — stateful SDK runtime handle.
 - `FfiSdkStateBlobStore` — platform callback interface for opaque SDK state
-  blob load/save/clear.
+  blob load/save.
 - `FfiSdkPubkySessionProvider` — platform callback interface for live Pubky
   session access and public storage availability.
 - `FfiSdkPaymentAdapter` — platform callback interface for receiving details,

@@ -29,7 +29,7 @@ fn test_receipt_draft_parses_inputs() {
             value: "25.50".into(),
             asset: "usd".into(),
         }),
-        metadata_json: r#"{"order":"123"}"#.into(),
+        metadata: Arc::new(FfiPrivateJsonObject::new(r#"{"order":"123"}"#.into()).unwrap()),
     };
 
     let parsed = paykit_lib::ReceiptDraft::try_from(draft).unwrap();
@@ -58,7 +58,7 @@ fn test_receipt_draft_rejects_non_object_metadata() {
         billing_period: None,
         payment_endpoint_identifier: None,
         amount: None,
-        metadata_json: "[]".into(),
+        metadata: Arc::new(FfiPrivateJsonObject::from_unchecked_text("[]".into())),
     };
 
     assert!(matches!(
@@ -149,7 +149,8 @@ fn test_receipt_record_serializes_metadata() {
 
     let ffi = FfiReceiptRecord::try_from(record).unwrap();
 
-    assert!(ffi.metadata_json.contains("\"source\":\"test\""));
+    assert!(ffi.metadata.export_text().contains("\"source\":\"test\""));
     assert_eq!(ffi.payment_reference.export_text(), "invoice secret");
     assert!(!format!("{:?}", ffi.payment_reference).contains("invoice secret"));
+    assert!(!format!("{:?}", ffi.metadata).contains("test"));
 }

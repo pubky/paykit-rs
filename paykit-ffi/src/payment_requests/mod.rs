@@ -3,8 +3,8 @@ use std::{fmt, sync::Arc};
 use paykit_lib::PaymentReference;
 
 use crate::{
-    errors::validation_error, payment_resolution::FfiOutboundPrivateMessageStatus,
-    sdk::FfiPaykitSdk, PaykitFfiError,
+    errors::validation_error, json::FfiPrivateJsonObject,
+    payment_resolution::FfiOutboundPrivateMessageStatus, sdk::FfiPaykitSdk, PaykitFfiError,
 };
 
 mod conversions;
@@ -100,7 +100,7 @@ pub struct FfiPaymentRequestTerms {
     /// Accepted Payment Endpoint Identifier strings.
     pub accepted_payment_endpoint_identifiers: Vec<String>,
     /// Application-specific metadata encoded as a JSON object.
-    pub metadata_json: String,
+    pub metadata: Arc<FfiPrivateJsonObject>,
 }
 
 /// Local role for one Payment Request.
@@ -172,7 +172,7 @@ pub struct FfiPaymentProofRecord {
     /// Payment Endpoint Identifier used for payment.
     pub payment_endpoint_identifier: String,
     /// Method-specific proof object encoded as JSON.
-    pub proof_json: String,
+    pub proof: Arc<FfiPrivateJsonObject>,
     /// Local record time for this proof as RFC3339 text.
     pub recorded_at: String,
 }
@@ -232,7 +232,7 @@ pub struct FfiPaymentProofSubmission {
     /// Payment Endpoint Identifier used for payment.
     pub payment_endpoint_identifier: String,
     /// Method-specific proof object encoded as JSON.
-    pub proof_json: String,
+    pub proof: Arc<FfiPrivateJsonObject>,
 }
 
 #[uniffi::export]

@@ -351,7 +351,7 @@ from unrelated identity status fields.
 
 Binding tests should cover:
 
-- SDK state blob load/save/clear behavior
+- SDK state blob load/save behavior
 - atomic save failure preserving the previous blob
 - stale state blob revision conflicts
 - session capability transitions
