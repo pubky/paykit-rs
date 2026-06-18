@@ -4633,14 +4633,6 @@ public protocol FfiSdkStateBlobStore: AnyObject, Sendable {
      */
     func saveStateBlobAtomically(blob: FfiSdkStateBlob, expectedRevision: String?) throws  -> String
 
-    /**
-     * Atomically clear the SDK state blob.
-     *
-     * The platform store should reject the clear if the stored revision does
-     * not match `expected_revision`.
-     */
-    func clearStateBlob(expectedRevision: String?) throws  -> String
-
 }
 /**
  * Platform-owned durable blob store for SDK state.
@@ -4722,20 +4714,6 @@ open func saveStateBlobAtomically(blob: FfiSdkStateBlob, expectedRevision: Strin
 })
 }
 
-    /**
-     * Atomically clear the SDK state blob.
-     *
-     * The platform store should reject the clear if the stored revision does
-     * not match `expected_revision`.
-     */
-open func clearStateBlob(expectedRevision: String?)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
-    uniffi_paykit_fn_method_ffisdkstateblobstore_clear_state_blob(self.uniffiClonePointer(),
-        FfiConverterOptionString.lower(expectedRevision),$0
-    )
-})
-}
-
 
 }
 
@@ -4786,31 +4764,6 @@ fileprivate struct UniffiCallbackInterfaceFfiSdkStateBlobStore {
                 }
                 return try uniffiObj.saveStateBlobAtomically(
                      blob: try FfiConverterTypeFfiSdkStateBlob_lift(blob),
-                     expectedRevision: try FfiConverterOptionString.lift(expectedRevision)
-                )
-            }
-
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypePaykitFfiError_lower
-            )
-        },
-        clearStateBlob: { (
-            uniffiHandle: UInt64,
-            expectedRevision: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> String in
-                guard let uniffiObj = try? FfiConverterTypeFfiSdkStateBlobStore.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.clearStateBlob(
                      expectedRevision: try FfiConverterOptionString.lift(expectedRevision)
                 )
             }
@@ -15114,9 +15067,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically() != 4172) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_paykit_checksum_method_ffisdkstateblobstore_clear_state_blob() != 747) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_new() != 15447) {

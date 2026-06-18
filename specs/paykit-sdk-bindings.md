@@ -4,12 +4,12 @@
 
 Define the platform binding surface for Paykit SDK.
 
-Paykit SDK bindings should replace the old app-facing mobile FFI surface with a
-stateful SDK runtime for Swift, Kotlin, and React Native apps. Platform
-integrators should not need to reimplement SDK state-machine rules or combine
-low-level `paykit-lib` calls themselves. The bindings should make common Paykit
-workflows easy, while keeping sensitive low-level state and protocol escape
-hatches out of the default app API.
+Paykit SDK bindings should provide the app-facing mobile surface for Swift,
+Kotlin, and React Native apps. Platform integrators should not need to
+reimplement SDK state-machine rules or combine low-level `paykit-lib` calls
+themselves. The bindings should make common Paykit workflows easy, while
+keeping sensitive low-level state and protocol escape hatches out of the
+default app API.
 
 ## Design Principles
 
@@ -29,9 +29,9 @@ hatches out of the default app API.
 
 ## Architecture
 
-Bindings should be an SDK-facing integration surface above `paykit-sdk`. The
-existing mobile binding crates can be reset around this surface instead of
-adding a second long-term FFI layer.
+Bindings should be an SDK-facing integration surface above `paykit-sdk`.
+Mobile binding crates should expose this surface rather than a parallel
+protocol-level API.
 
 ```text
 paykit-sdk/
@@ -45,10 +45,7 @@ paykit-react-native/
 ```
 
 Platform apps should depend on SDK bindings as the normal Paykit integration
-surface. The previous low-level mobile FFI should not remain as an equal
-parallel API. Since mobile bindings are still pre-production, the binding layer
-can be reset around the SDK shape instead of preserving a migration path for the
-old low-level surface.
+surface. Protocol-level helpers should not remain as an equal parallel API.
 
 Low-level `paykit-lib` functionality should only be exposed again when there is
 a concrete SDK workflow, diagnostic export, or protocol-only use case that
@@ -90,17 +87,16 @@ revision token:
 ```text
 load_state_blob() -> { bytes?, revision }
 save_state_blob_atomically(bytes, expected_revision) -> new_revision
-clear_state_blob(expected_revision) -> new_revision
 ```
 
 The Rust side should turn those callbacks into the real SDK storage adapter and
 own transaction semantics internally. Platform code should only provide durable
-loading, checked atomic replacement, and deletion.
+loading and checked atomic replacement.
 
 The SDK state blob is an internal, versioned serialization of SDK storage state.
 It is not the public SDK backup export format. Bindings should treat it as an
 opaque `SdkStateBlob`, and Rust should own schema validation and
-migration.
+version handling.
 
 Each SDK storage transaction should load the current blob, mutate the full
 logical state in Rust, then save the replacement with the loaded revision. If
@@ -109,12 +105,6 @@ conflict instead of overwriting newer state. Bindings may also use a
 per-identity platform lock, but the lock must cover the full load/mutate/save
 transaction across app processes, extensions, services, and native modules that
 share the same state blob.
-
-Destructive clears must be conditional too. `clear_state_blob` should check the
-expected revision and advance the revision, or bindings should model clear as
-saving an empty/signed-out tombstone blob with the expected revision. A stale
-clear must not delete newer state written by another handle, and a stale save
-after a successful clear must fail instead of recreating deleted state.
 
 Storage requirements for platform apps:
 
@@ -382,8 +372,8 @@ misconstruction.
 
 ## Non-Goals
 
-- Do not maintain the old low-level mobile FFI as a second app-facing Paykit
-  API.
+- Do not maintain a low-level mobile protocol FFI as a second app-facing
+  Paykit API.
 - Do not expose the full Rust `StorageTransaction` trait to platform apps.
 - Do not make platform apps parse raw Private Application Messages for normal
   workflows.
@@ -395,8 +385,8 @@ misconstruction.
 
 ## Implementation Decisions
 
-- Start SDK bindings from a clean SDK-first FFI surface. Old low-level exports
-  may be removed rather than wrapped or kept for migration.
+- Start SDK bindings from a clean SDK-first FFI surface. Protocol-only exports
+  should be added intentionally, not preserved by default.
 - The first mobile storage implementation should use app-provided state blob
   callbacks. First-party file/keychain helpers can be added later only if one
   generic helper clearly fits multiple apps and does not hide platform security

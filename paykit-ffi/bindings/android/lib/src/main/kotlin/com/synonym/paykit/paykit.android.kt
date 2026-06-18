@@ -928,9 +928,6 @@ internal interface UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod0: com.sun.j
 internal interface UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod1: com.sun.jna.Callback {
     public fun callback(`uniffiHandle`: Long,`blob`: Pointer?,`expectedRevision`: RustBufferByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-internal interface UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod2: com.sun.jna.Callback {
-    public fun callback(`uniffiHandle`: Long,`expectedRevision`: RustBufferByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
-}
 @Structure.FieldOrder("currentReceivingDetails", "reserveReceivingDetails", "cancelReceivingDetailReservation", "selectPaymentEndpointIds", "buildPaymentTarget", "uniffiFree")
 internal open class UniffiVTableCallbackInterfaceFfiSdkPaymentAdapterStruct(
     @JvmField public var `currentReceivingDetails`: UniffiCallbackInterfaceFfiSdkPaymentAdapterMethod0?,
@@ -1029,11 +1026,10 @@ internal fun UniffiVTableCallbackInterfaceFfiSdkPubkySessionProvider.uniffiSetVa
 }
 
 internal typealias UniffiVTableCallbackInterfaceFfiSdkPubkySessionProviderUniffiByValue = UniffiVTableCallbackInterfaceFfiSdkPubkySessionProviderStruct.UniffiByValue
-@Structure.FieldOrder("loadStateBlob", "saveStateBlobAtomically", "clearStateBlob", "uniffiFree")
+@Structure.FieldOrder("loadStateBlob", "saveStateBlobAtomically", "uniffiFree")
 internal open class UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreStruct(
     @JvmField public var `loadStateBlob`: UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod0?,
     @JvmField public var `saveStateBlobAtomically`: UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod1?,
-    @JvmField public var `clearStateBlob`: UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod2?,
     @JvmField public var `uniffiFree`: UniffiCallbackInterfaceFree?,
 ) : com.sun.jna.Structure() {
     internal constructor(): this(
@@ -1042,8 +1038,6 @@ internal open class UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreStruct(
 
         `saveStateBlobAtomically` = null,
 
-        `clearStateBlob` = null,
-
         `uniffiFree` = null,
 
     )
@@ -1051,9 +1045,8 @@ internal open class UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreStruct(
     internal class UniffiByValue(
         `loadStateBlob`: UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod0?,
         `saveStateBlobAtomically`: UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod1?,
-        `clearStateBlob`: UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod2?,
         `uniffiFree`: UniffiCallbackInterfaceFree?,
-    ): UniffiVTableCallbackInterfaceFfiSdkStateBlobStore(`loadStateBlob`,`saveStateBlobAtomically`,`clearStateBlob`,`uniffiFree`,), Structure.ByValue
+    ): UniffiVTableCallbackInterfaceFfiSdkStateBlobStore(`loadStateBlob`,`saveStateBlobAtomically`,`uniffiFree`,), Structure.ByValue
 }
 
 internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStore = UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreStruct
@@ -1061,19 +1054,15 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStore = UniffiVTa
 internal fun UniffiVTableCallbackInterfaceFfiSdkStateBlobStore.uniffiSetValue(other: UniffiVTableCallbackInterfaceFfiSdkStateBlobStore) {
     `loadStateBlob` = other.`loadStateBlob`
     `saveStateBlobAtomically` = other.`saveStateBlobAtomically`
-    `clearStateBlob` = other.`clearStateBlob`
     `uniffiFree` = other.`uniffiFree`
 }
 internal fun UniffiVTableCallbackInterfaceFfiSdkStateBlobStore.uniffiSetValue(other: UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValue) {
     `loadStateBlob` = other.`loadStateBlob`
     `saveStateBlobAtomically` = other.`saveStateBlobAtomically`
-    `clearStateBlob` = other.`clearStateBlob`
     `uniffiFree` = other.`uniffiFree`
 }
 
 internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValue = UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreStruct.UniffiByValue
-
-
 
 
 
@@ -1763,9 +1752,6 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically() != 4172.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffisdkstateblobstore_clear_state_blob() != 747.toShort()) {
-            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-        }
         if (uniffi_paykit_checksum_constructor_ffipaykitsdk_new() != 15447.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -2128,9 +2114,6 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically(
-    ): Short
-    @JvmStatic
-    external fun uniffi_paykit_checksum_method_ffisdkstateblobstore_clear_state_blob(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_constructor_ffipaykitsdk_new(
@@ -2920,12 +2903,6 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffisdkstateblobstore_save_state_blob_atomically(
         `ptr`: Pointer?,
         `blob`: Pointer?,
-        `expectedRevision`: RustBufferByValue,
-        uniffiCallStatus: UniffiRustCallStatus,
-    ): RustBufferByValue
-    @JvmStatic
-    external fun uniffi_paykit_fn_method_ffisdkstateblobstore_clear_state_blob(
-        `ptr`: Pointer?,
         `expectedRevision`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
@@ -7750,25 +7727,6 @@ public open class FfiSdkStateBlobStoreImpl: Disposable, FfiSdkStateBlobStore {
         })
     }
 
-    /**
-     * Atomically clear the SDK state blob.
-     *
-     * The platform store should reject the clear if the stored revision does
-     * not match `expected_revision`.
-     */
-    @Throws(PaykitFfiException::class)
-    public override fun `clearStateBlob`(`expectedRevision`: kotlin.String?): kotlin.String {
-        return FfiConverterString.lift(callWithPointer {
-            uniffiRustCallWithError(PaykitFfiExceptionErrorHandler) { uniffiRustCallStatus ->
-                UniffiLib.uniffi_paykit_fn_method_ffisdkstateblobstore_clear_state_blob(
-                    it,
-                    FfiConverterOptionalString.lower(`expectedRevision`),
-                    uniffiRustCallStatus,
-                )
-            }
-        })
-    }
-
 
 
 
@@ -7858,29 +7816,6 @@ internal object uniffiCallbackInterfaceFfiSdkStateBlobStore {
             ) { e: PaykitFfiException -> FfiConverterTypePaykitFfiError.lower(e) }
         }
     }
-    internal object `clearStateBlob`: UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod2 {
-        override fun callback (
-            `uniffiHandle`: Long,
-            `expectedRevision`: RustBufferByValue,
-            `uniffiOutReturn`: RustBuffer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
-            val uniffiObj = FfiConverterTypeFfiSdkStateBlobStore.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`clearStateBlob`(
-                    FfiConverterOptionalString.lift(`expectedRevision`),
-                )
-            }
-            val writeReturn = { uniffiResultValue: kotlin.String ->
-                uniffiOutReturn.setValue(FfiConverterString.lower(uniffiResultValue))
-            }
-            uniffiTraitInterfaceCallWithError(
-                uniffiCallStatus,
-                makeCall,
-                writeReturn,
-            ) { e: PaykitFfiException -> FfiConverterTypePaykitFfiError.lower(e) }
-        }
-    }
     internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeFfiSdkStateBlobStore.handleMap.remove(handle)
@@ -7890,7 +7825,6 @@ internal object uniffiCallbackInterfaceFfiSdkStateBlobStore {
     internal val vtable = UniffiVTableCallbackInterfaceFfiSdkStateBlobStore(
         `loadStateBlob`,
         `saveStateBlobAtomically`,
-        `clearStateBlob`,
         uniffiFree,
     )
 

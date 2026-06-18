@@ -321,13 +321,6 @@ typedef void (*UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod1)(uint64_t, voi
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_FFI_SDK_STATE_BLOB_STORE_METHOD2
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_FFI_SDK_STATE_BLOB_STORE_METHOD2
-typedef void (*UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod2)(uint64_t, RustBuffer, RustBuffer* _Nonnull,
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_FFI_SDK_PAYMENT_ADAPTER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_FFI_SDK_PAYMENT_ADAPTER
 typedef struct UniffiVTableCallbackInterfaceFfiSdkPaymentAdapter {
@@ -355,7 +348,6 @@ typedef struct UniffiVTableCallbackInterfaceFfiSdkPubkySessionProvider {
 typedef struct UniffiVTableCallbackInterfaceFfiSdkStateBlobStore {
     UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod0 _Nonnull loadStateBlob;
     UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod1 _Nonnull saveStateBlobAtomically;
-    UniffiCallbackInterfaceFfiSdkStateBlobStoreMethod2 _Nonnull clearStateBlob;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceFfiSdkStateBlobStore;
 
@@ -1064,11 +1056,6 @@ RustBuffer uniffi_paykit_fn_method_ffisdkstateblobstore_load_state_blob(void*_No
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_METHOD_FFISDKSTATEBLOBSTORE_SAVE_STATE_BLOB_ATOMICALLY
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_METHOD_FFISDKSTATEBLOBSTORE_SAVE_STATE_BLOB_ATOMICALLY
 RustBuffer uniffi_paykit_fn_method_ffisdkstateblobstore_save_state_blob_atomically(void*_Nonnull ptr, void*_Nonnull blob, RustBuffer expected_revision, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_METHOD_FFISDKSTATEBLOBSTORE_CLEAR_STATE_BLOB
-#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_METHOD_FFISDKSTATEBLOBSTORE_CLEAR_STATE_BLOB
-RustBuffer uniffi_paykit_fn_method_ffisdkstateblobstore_clear_state_blob(void*_Nonnull ptr, RustBuffer expected_revision, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_CORE_SESSION_CAPABILITIES
@@ -2044,12 +2031,6 @@ uint16_t uniffi_paykit_checksum_method_ffisdkstateblobstore_load_state_blob(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_METHOD_FFISDKSTATEBLOBSTORE_SAVE_STATE_BLOB_ATOMICALLY
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_METHOD_FFISDKSTATEBLOBSTORE_SAVE_STATE_BLOB_ATOMICALLY
 uint16_t uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically(void
-
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_METHOD_FFISDKSTATEBLOBSTORE_CLEAR_STATE_BLOB
-#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_METHOD_FFISDKSTATEBLOBSTORE_CLEAR_STATE_BLOB
-uint16_t uniffi_paykit_checksum_method_ffisdkstateblobstore_clear_state_blob(void
 
 );
 #endif

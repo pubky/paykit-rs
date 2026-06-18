@@ -55,13 +55,6 @@ async fn test_state_blob_save_error_preserves_code() {
         ) -> Result<String, PaykitFfiError> {
             Err(self.error.clone())
         }
-
-        fn clear_state_blob(
-            &self,
-            _expected_revision: Option<String>,
-        ) -> Result<String, PaykitFfiError> {
-            Err(self.error.clone())
-        }
     }
 
     for (code, context) in [

@@ -825,15 +825,6 @@ public interface FfiSdkStateBlobStore {
     @Throws(PaykitFfiException::class)
     public fun `saveStateBlobAtomically`(`blob`: FfiSdkStateBlob, `expectedRevision`: kotlin.String?): kotlin.String
 
-    /**
-     * Atomically clear the SDK state blob.
-     *
-     * The platform store should reject the clear if the stored revision does
-     * not match `expected_revision`.
-     */
-    @Throws(PaykitFfiException::class)
-    public fun `clearStateBlob`(`expectedRevision`: kotlin.String?): kotlin.String
-
     public companion object
 }
 
