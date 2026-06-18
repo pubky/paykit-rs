@@ -85,10 +85,7 @@ fn test_parse_capabilities_rejects_invalid_entries() {
             .to_string(),
         PAYKIT_SESSION_CAPABILITIES
     );
-    assert_eq!(
-        PAYKIT_SESSION_CAPABILITIES,
-        format!("{}:rw", paykit_lib::PAYKIT_PATH_PREFIX)
-    );
+    assert_eq!(PAYKIT_SESSION_CAPABILITIES, "/pub/paykit/:rw");
     assert!(parse_capabilities("/:rw,not-a-capability").is_err());
     assert!(parse_capabilities("/:rw,").is_err());
     assert!(parse_capabilities(",/:rw").is_err());
@@ -98,7 +95,7 @@ fn test_parse_capabilities_rejects_invalid_entries() {
 #[test]
 fn test_validate_auth_url_capabilities_requires_exact_match() {
     let auth_url =
-        "pubkyauth://signin?caps=/pub/paykit/v0/:rw&relay=https://httprelay.pubky.app/inbox/&secret=e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3s";
+        "pubkyauth://signin?caps=/pub/paykit/:rw&relay=https://httprelay.pubky.app/inbox/&secret=e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3s";
 
     assert!(validate_auth_url_capabilities(auth_url, PAYKIT_SESSION_CAPABILITIES).is_ok());
     assert!(validate_auth_url_capabilities(auth_url, "/:rw").is_err());

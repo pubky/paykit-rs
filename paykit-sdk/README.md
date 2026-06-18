@@ -109,6 +109,9 @@ Common workflows:
   exposing live access through a `PubkySessionProvider`; exported session
   secrets and auth URLs must be treated as secret material, and session export
   is an explicit call on the bootstrap result
+- when deriving a Pubky key from a wallet seed, use a stable app/runtime label
+  such as `bitkit.to`; the same seed and label derive the same key, while
+  changing the label derives a different Paykit runtime identity
 - call `receive_private_messages` before deriving private Payment Lists,
   Payment Requests, Receipt Access state, or resolving a contact payment when
   the freshest private endpoints matter

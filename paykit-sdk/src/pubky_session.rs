@@ -15,8 +15,8 @@ use crate::{
     PaykitSdkError, Result,
 };
 
-/// Default Pubky capabilities needed for core Paykit public storage writes.
-pub const PAYKIT_SESSION_CAPABILITIES: &str = "/pub/paykit/v0/:rw";
+/// Default Pubky capabilities needed for Paykit public storage writes.
+pub const PAYKIT_SESSION_CAPABILITIES: &str = "/pub/paykit/:rw";
 
 /// Parsed Pubky resource with a normalized owner and path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

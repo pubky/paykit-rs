@@ -298,12 +298,15 @@ session access consumed by the provider. It covers common Pubky account/session
 workflows: signup, signin, session-secret import, auth handoff
 start/resume/approve helpers, and `pubky://` resource normalization. Full SDK
 runtime auth should use `config.required_session_capabilities()` as the expected
-scope for auth start/resume/approve, completion, and session import. The core
-Paykit capability constant only covers the versioned Paykit Protocol paths.
+scope for auth start/resume/approve, completion, and session import. The
+default Paykit capability covers the public Paykit namespace used by protocol
+paths and SDK-managed Paykit public data.
 `PubkyLocalSecretKey` also provides app/runtime-domain-separated seed
 derivation and public-key-from-secret helpers for apps that choose that key
-convention. Exported session secrets and auth URLs are secret-bearing values
-and must be stored or displayed only for their intended short-lived flow.
+convention. The `runtime_label` must be a stable app/runtime label such as
+`bitkit.to`; changing it derives a different Paykit runtime identity from the
+same wallet seed. Exported session secrets and auth URLs are secret-bearing
+values and must be stored or displayed only for their intended short-lived flow.
 Bindings should wrap these helpers so mobile apps do not need a second Pubky
 SDK dependency for ordinary Paykit onboarding.
 
@@ -330,9 +333,9 @@ profile/contact namespace segment. For example, `profile_namespace =
 such as public Payment Endpoints, and it does not create app-specific private
 runtime isolation under one shared key. The app should request the capability
 scope returned by `PaykitSdkConfig::required_session_capabilities()` and
-validate imported/completed sessions against that same scope. That scope
-includes public contact marker writes only when public contact sharing is
-enabled in the SDK configuration.
+validate imported/completed sessions against that same scope. The default
+namespace is covered by `/pub/paykit/:rw`; a custom profile/contact namespace
+adds the matching `/pub/<namespace>/:rw` capability.
 
 `image_uri` may point at the configured blob prefix or another public image
 location. The SDK can publish/delete Paykit blobs under the configured blob

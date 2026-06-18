@@ -127,17 +127,14 @@ impl PaykitSdkConfig {
 
     /// Return the Pubky session capabilities required by this SDK configuration.
     pub fn required_session_capabilities(&self) -> String {
-        let mut capabilities = vec![
-            PAYKIT_SESSION_CAPABILITIES.to_string(),
-            format!("{}:rw", self.paykit_profile_path()),
-            format!("{}:rw", self.paykit_profile_blob_path_prefix()),
-        ];
-
-        if self.public_contact_sharing == PublicContactSharingPolicy::ConfiguredPublicNamespace {
-            capabilities.push(format!("{}:rw", self.public_contact_path_prefix()));
+        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
+            return PAYKIT_SESSION_CAPABILITIES.to_string();
         }
 
-        capabilities.join(",")
+        format!(
+            "{},/pub/{}:rw",
+            PAYKIT_SESSION_CAPABILITIES, self.profile_namespace
+        )
     }
 }
 
