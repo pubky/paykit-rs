@@ -142,114 +142,13 @@ where
         lease: PeerLinkOperationLease,
         session_access: PubkySessionAccess,
     ) -> Result<OutboundPrivateSendReport> {
-        let secret_key = *session_access
-            .local_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
-                source: None,
-            })?
-            .as_bytes();
-        let remote_public_key = counterparty.to_public_key()?;
-        let stored_link_state = self
-            .storage
-            .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
-            .await?
-            .ok_or_else(|| {
-                PaykitSdkError::RecoveryRequired(format!(
-                    "no Encrypted Link state for counterparty {counterparty}"
-                ))
-            })?;
-        let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
-            let now = self.clock.now();
-            let mark = mark_recovery_required_with_lease(
-                &self.storage,
-                counterparty.clone(),
-                lease.clone(),
-                now,
-            )
+        let (mut link, mut link_state) = self
+            .restore_link_for_outbound_send(&counterparty, &lease, &session_access)
             .await?;
-            let _ = self
-                .publish_local_recovery_marker_with_session(
-                    &counterparty,
-                    &session_access,
-                    mark.new_episode,
-                )
-                .await;
-            return Err(PaykitSdkError::RecoveryRequired(format!(
-                "no active Encrypted Link snapshot for counterparty {counterparty}"
-            )));
-        };
-        let snapshot = match paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes) {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                let now = self.clock.now();
-                let mark = mark_recovery_required_with_lease(
-                    &self.storage,
-                    counterparty.clone(),
-                    lease.clone(),
-                    now,
-                )
-                .await?;
-                let _ = self
-                    .publish_local_recovery_marker_with_session(
-                        &counterparty,
-                        &session_access,
-                        mark.new_episode,
-                    )
-                    .await;
-                return Err(err.into());
-            }
-        };
-        let mut link = match paykit_lib::restore_encrypted_link(
-            session_access.session.clone(),
-            secret_key,
-            &remote_public_key,
-            session_access.outbox_client.clone(),
-            snapshot,
-        )
-        .await
-        {
-            Ok(link) => link,
-            Err(err) => {
-                let now = self.clock.now();
-                let mark = mark_recovery_required_with_lease(
-                    &self.storage,
-                    counterparty.clone(),
-                    lease.clone(),
-                    now,
-                )
-                .await?;
-                let _ = self
-                    .publish_local_recovery_marker_with_session(
-                        &counterparty,
-                        &session_access,
-                        mark.new_episode,
-                    )
-                    .await;
-                return Err(err.into());
-            }
-        };
-        let mut link_state = stored_link_state;
 
         loop {
             let now = self.clock.now();
-            let lease_timeout = ChronoDuration::from_std(
-                self.config.outbound_private_send_lease_timeout,
-            )
-            .map_err(|err| {
-                PaykitSdkError::Policy(format!(
-                    "invalid outbound private send lease timeout: {err}"
-                ))
-            })?;
-            let retry_backoff = ChronoDuration::from_std(
-                self.config.outbound_private_retry_backoff,
-            )
-            .map_err(|err| {
-                PaykitSdkError::Policy(format!("invalid outbound private retry backoff: {err}"))
-            })?;
-            let stale_before = now - lease_timeout;
-            let failed_retry_after = now - retry_backoff;
+            let (stale_before, failed_retry_after) = self.outbound_retry_thresholds(now)?;
             let sending = claim_next_outbound_private_message_with_peer_lease(
                 &self.storage,
                 &counterparty,
@@ -268,160 +167,37 @@ where
             };
             report.attempted.push(sending.outbound_message_id);
 
-            if let Err(err) = validate_queued_outbound_private_message(&sending) {
-                let now = self.clock.now();
-                let error = err.to_string();
-                let failed = mark_outbound_invalid(sending, error.clone(), now);
-                self.storage
-                    .transaction({
-                        let failed = failed.clone();
-                        let lease = lease.clone();
-                        move |tx| {
-                            crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                            tx.save_outbound_private_message(failed)?;
-                            Ok(())
-                        }
-                    })
-                    .await?;
-                report.failed.push(OutboundPrivateSendFailure {
-                    outbound_message_id: failed.outbound_message_id,
-                    error,
-                });
-                report.reservation_cleanup_failures.extend(
-                    self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
-                        .await,
-                );
+            let Some(sending) = self
+                .claimed_message_ready_for_send(&counterparty, sending, &lease, &mut report, now)
+                .await?
+            else {
                 continue;
-            }
-
-            if sending.kind == PrivateMessageKind::PrivatePaymentList.as_str() {
-                let expired_releases = expired_outbound_reservation_cancellations(
-                    &self.storage,
-                    &counterparty,
-                    sending.outbound_message_id,
-                    now,
-                )
-                .await?;
-                if !expired_releases.is_empty() {
-                    let now = self.clock.now();
-                    let error =
-                        "Payment Endpoint Reservation expired before private list send".to_owned();
-                    let failed = mark_outbound_invalid(sending, error.clone(), now);
-                    self.storage
-                        .transaction({
-                            let failed = failed.clone();
-                            let lease = lease.clone();
-                            move |tx| {
-                                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                                tx.save_outbound_private_message(failed)?;
-                                Ok(())
-                            }
-                        })
-                        .await?;
-                    report.failed.push(OutboundPrivateSendFailure {
-                        outbound_message_id: failed.outbound_message_id,
-                        error,
-                    });
-                    report.reservation_cleanup_failures.extend(
-                        self.cancel_reservation_records(expired_releases, Some(&lease))
-                            .await,
-                    );
-                    report.reservation_cleanup_failures.extend(
-                        self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
-                            .await,
-                    );
-                    continue;
-                }
-            }
+            };
 
             match link
                 .send_private_application_message_json(&sending.raw_json)
                 .await
             {
                 Ok(()) => {
-                    let now = self.clock.now();
-                    let sent = mark_outbound_sent(sending, now);
-                    link_state.link_snapshot = Some(link.serialize());
-                    link_state.handshake_snapshot = None;
-                    link_state.handshake_role = None;
-                    link_state.generation = link_state.generation.saturating_add(1);
-                    link_state.checkpointed_at = now;
-                    self.storage
-                        .transaction({
-                            let sent = sent.clone();
-                            let link_state = link_state.clone();
-                            let lease = lease.clone();
-                            move |tx| {
-                                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                                tx.save_outbound_private_message(sent)?;
-                                tx.save_encrypted_link_state(link_state);
-                                Ok(())
-                            }
-                        })
-                        .await?;
-                    report.sent.push(sent.outbound_message_id);
+                    self.record_private_send_success(
+                        sending,
+                        &link,
+                        &mut link_state,
+                        &lease,
+                        &mut report,
+                    )
+                    .await?;
                 }
                 Err(err) => {
-                    let requires_recovery = err.is_non_retryable_private_send_error();
-                    let now = self.clock.now();
-                    let error = err.to_string();
-                    if requires_recovery {
-                        let failed = mark_outbound_recovery_required(sending, error.clone(), now);
-                        let (failed, mark) = self
-                            .storage
-                            .transaction({
-                                let failed = failed.clone();
-                                let lease = lease.clone();
-                                let counterparty = counterparty.clone();
-                                move |tx| {
-                                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                                    let mark = mark_recovery_required_in_transaction(
-                                        tx,
-                                        &counterparty,
-                                        now,
-                                    )?;
-                                    tx.save_outbound_private_message(failed.clone())?;
-                                    Ok((failed, mark))
-                                }
-                            })
-                            .await?;
-                        report.failed.push(OutboundPrivateSendFailure {
-                            outbound_message_id: failed.outbound_message_id,
-                            error,
-                        });
-                        self.record_outbound_recovery_marker_result(
-                            &mut report,
-                            &counterparty,
-                            &session_access,
-                            mark.new_episode,
-                            Some(failed.outbound_message_id),
-                        )
-                        .await;
-                    } else {
-                        let failed = mark_outbound_failed(sending, error.clone(), now);
-                        self.storage
-                            .transaction({
-                                let failed = failed.clone();
-                                let lease = lease.clone();
-                                move |tx| {
-                                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                                    tx.save_outbound_private_message(failed)?;
-                                    Ok(())
-                                }
-                            })
-                            .await?;
-                        report.failed.push(OutboundPrivateSendFailure {
-                            outbound_message_id: failed.outbound_message_id,
-                            error,
-                        });
-                        report.reservation_cleanup_failures.extend(
-                            self.cancel_terminal_private_list_reservations(
-                                &counterparty,
-                                Some(&lease),
-                            )
-                            .await,
-                        );
-                    }
+                    self.record_private_send_error(
+                        &counterparty,
+                        sending,
+                        err,
+                        &lease,
+                        &session_access,
+                        &mut report,
+                    )
+                    .await?;
                     break;
                 }
             }
@@ -432,6 +208,268 @@ where
         }
 
         Ok(report)
+    }
+
+    async fn restore_link_for_outbound_send(
+        &self,
+        counterparty: &PubkyPublicKey,
+        lease: &PeerLinkOperationLease,
+        session_access: &PubkySessionAccess,
+    ) -> Result<(paykit_lib::EncryptedLink, EncryptedLinkStateRecord)> {
+        let secret_key = *session_access
+            .local_secret_key
+            .as_ref()
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
+                source: None,
+            })?
+            .as_bytes();
+        let remote_public_key = counterparty.to_public_key()?;
+        let stored_link_state = self
+            .storage
+            .transaction(|tx| Ok(tx.encrypted_link_state(counterparty)))
+            .await?
+            .ok_or_else(|| {
+                PaykitSdkError::RecoveryRequired(format!(
+                    "no Encrypted Link state for counterparty {counterparty}"
+                ))
+            })?;
+        let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
+            self.mark_outbound_link_recovery_required(counterparty, lease, session_access)
+                .await?;
+            return Err(PaykitSdkError::RecoveryRequired(format!(
+                "no active Encrypted Link snapshot for counterparty {counterparty}"
+            )));
+        };
+        let snapshot = match paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                self.mark_outbound_link_recovery_required(counterparty, lease, session_access)
+                    .await?;
+                return Err(err.into());
+            }
+        };
+        let link = match paykit_lib::restore_encrypted_link(
+            session_access.session.clone(),
+            secret_key,
+            &remote_public_key,
+            session_access.outbox_client.clone(),
+            snapshot,
+        )
+        .await
+        {
+            Ok(link) => link,
+            Err(err) => {
+                self.mark_outbound_link_recovery_required(counterparty, lease, session_access)
+                    .await?;
+                return Err(err.into());
+            }
+        };
+        Ok((link, stored_link_state))
+    }
+
+    async fn mark_outbound_link_recovery_required(
+        &self,
+        counterparty: &PubkyPublicKey,
+        lease: &PeerLinkOperationLease,
+        session_access: &PubkySessionAccess,
+    ) -> Result<()> {
+        let mark = mark_recovery_required_with_lease(
+            &self.storage,
+            counterparty.clone(),
+            lease.clone(),
+            self.clock.now(),
+        )
+        .await?;
+        let _ = self
+            .publish_local_recovery_marker_with_session(
+                counterparty,
+                session_access,
+                mark.new_episode,
+            )
+            .await;
+        Ok(())
+    }
+
+    fn outbound_retry_thresholds(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+        let lease_timeout = ChronoDuration::from_std(
+            self.config.outbound_private_send_lease_timeout,
+        )
+        .map_err(|err| {
+            PaykitSdkError::Policy(format!(
+                "invalid outbound private send lease timeout: {err}"
+            ))
+        })?;
+        let retry_backoff = ChronoDuration::from_std(self.config.outbound_private_retry_backoff)
+            .map_err(|err| {
+                PaykitSdkError::Policy(format!("invalid outbound private retry backoff: {err}"))
+            })?;
+        Ok((now - lease_timeout, now - retry_backoff))
+    }
+
+    async fn claimed_message_ready_for_send(
+        &self,
+        counterparty: &PubkyPublicKey,
+        sending: OutboundPrivateMessageRecord,
+        lease: &PeerLinkOperationLease,
+        report: &mut OutboundPrivateSendReport,
+        now: DateTime<Utc>,
+    ) -> Result<Option<OutboundPrivateMessageRecord>> {
+        if let Err(err) = validate_queued_outbound_private_message(&sending) {
+            let error = err.to_string();
+            let failed = mark_outbound_invalid(sending, error.clone(), self.clock.now());
+            let failed = self.save_outbound_with_lease(failed, lease).await?;
+            report.failed.push(OutboundPrivateSendFailure {
+                outbound_message_id: failed.outbound_message_id,
+                error,
+            });
+            report.reservation_cleanup_failures.extend(
+                self.cancel_terminal_private_list_reservations(counterparty, Some(lease))
+                    .await,
+            );
+            return Ok(None);
+        }
+
+        if sending.kind != PrivateMessageKind::PrivatePaymentList.as_str() {
+            return Ok(Some(sending));
+        }
+
+        let expired_releases = expired_outbound_reservation_cancellations(
+            &self.storage,
+            counterparty,
+            sending.outbound_message_id,
+            now,
+        )
+        .await?;
+        if expired_releases.is_empty() {
+            return Ok(Some(sending));
+        }
+
+        let error = "Payment Endpoint Reservation expired before private list send".to_owned();
+        let failed = mark_outbound_invalid(sending, error.clone(), self.clock.now());
+        let failed = self.save_outbound_with_lease(failed, lease).await?;
+        report.failed.push(OutboundPrivateSendFailure {
+            outbound_message_id: failed.outbound_message_id,
+            error,
+        });
+        report.reservation_cleanup_failures.extend(
+            self.cancel_reservation_records(expired_releases, Some(lease))
+                .await,
+        );
+        report.reservation_cleanup_failures.extend(
+            self.cancel_terminal_private_list_reservations(counterparty, Some(lease))
+                .await,
+        );
+        Ok(None)
+    }
+
+    async fn record_private_send_success(
+        &self,
+        sending: OutboundPrivateMessageRecord,
+        link: &paykit_lib::EncryptedLink,
+        link_state: &mut EncryptedLinkStateRecord,
+        lease: &PeerLinkOperationLease,
+        report: &mut OutboundPrivateSendReport,
+    ) -> Result<()> {
+        let now = self.clock.now();
+        let sent = mark_outbound_sent(sending, now);
+        link_state.link_snapshot = Some(link.serialize());
+        link_state.handshake_snapshot = None;
+        link_state.handshake_role = None;
+        link_state.generation = link_state.generation.saturating_add(1);
+        link_state.checkpointed_at = now;
+        self.storage
+            .transaction({
+                let sent = sent.clone();
+                let link_state = link_state.clone();
+                let lease = lease.clone();
+                move |tx| {
+                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                    tx.save_outbound_private_message(sent.clone())?;
+                    tx.save_encrypted_link_state(link_state);
+                    Ok(())
+                }
+            })
+            .await?;
+        report.sent.push(sent.outbound_message_id);
+        Ok(())
+    }
+
+    async fn record_private_send_error(
+        &self,
+        counterparty: &PubkyPublicKey,
+        sending: OutboundPrivateMessageRecord,
+        err: paykit_lib::PaykitError,
+        lease: &PeerLinkOperationLease,
+        session_access: &PubkySessionAccess,
+        report: &mut OutboundPrivateSendReport,
+    ) -> Result<()> {
+        let requires_recovery = err.is_non_retryable_private_send_error();
+        let now = self.clock.now();
+        let error = err.to_string();
+        if requires_recovery {
+            let failed = mark_outbound_recovery_required(sending, error.clone(), now);
+            let (failed, mark) = self
+                .storage
+                .transaction({
+                    let failed = failed.clone();
+                    let lease = lease.clone();
+                    let counterparty = counterparty.clone();
+                    move |tx| {
+                        crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                        let mark = mark_recovery_required_in_transaction(tx, &counterparty, now)?;
+                        tx.save_outbound_private_message(failed.clone())?;
+                        Ok((failed, mark))
+                    }
+                })
+                .await?;
+            report.failed.push(OutboundPrivateSendFailure {
+                outbound_message_id: failed.outbound_message_id,
+                error,
+            });
+            self.record_outbound_recovery_marker_result(
+                report,
+                counterparty,
+                session_access,
+                mark.new_episode,
+                Some(failed.outbound_message_id),
+            )
+            .await;
+            return Ok(());
+        }
+
+        let failed = mark_outbound_failed(sending, error.clone(), now);
+        let failed = self.save_outbound_with_lease(failed, lease).await?;
+        report.failed.push(OutboundPrivateSendFailure {
+            outbound_message_id: failed.outbound_message_id,
+            error,
+        });
+        report.reservation_cleanup_failures.extend(
+            self.cancel_terminal_private_list_reservations(counterparty, Some(lease))
+                .await,
+        );
+        Ok(())
+    }
+
+    async fn save_outbound_with_lease(
+        &self,
+        record: OutboundPrivateMessageRecord,
+        lease: &PeerLinkOperationLease,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        self.storage
+            .transaction({
+                let record = record.clone();
+                let lease = lease.clone();
+                move |tx| {
+                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                    tx.save_outbound_private_message(record.clone())?;
+                    Ok(record)
+                }
+            })
+            .await
     }
 
     async fn record_outbound_recovery_marker_result(

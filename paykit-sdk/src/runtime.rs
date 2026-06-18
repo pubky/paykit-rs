@@ -111,6 +111,7 @@ mod payment_requests;
 mod payment_resolution;
 mod private_lists;
 mod private_stream;
+mod profiles;
 mod public_endpoints;
 mod receipts;
 mod recovery;
