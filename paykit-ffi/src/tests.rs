@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use paykit_sdk::storage::{StorageAdapter, StorageState};
 use paykit_sdk::PaykitSdkConfig;
@@ -17,17 +17,15 @@ fn test_default_config_round_trips_to_sdk_config() {
 }
 
 #[test]
-fn test_required_capabilities_include_public_contact_scope_when_enabled() {
+fn test_required_capabilities_include_custom_namespace_scope() {
     let mut config = default_config();
     config.public_contact_sharing = FfiPublicContactSharingPolicy::ConfiguredPublicNamespace;
     config.profile_namespace = "bitkit.to".into();
 
     let capabilities = required_session_capabilities(config).unwrap();
 
-    assert!(capabilities.contains("/pub/paykit/v0/:rw"));
-    assert!(capabilities.contains("/pub/bitkit.to/profile.json:rw"));
-    assert!(capabilities.contains("/pub/bitkit.to/blobs/:rw"));
-    assert!(capabilities.contains("/pub/bitkit.to/contacts/:rw"));
+    assert!(capabilities.contains("/pub/paykit/:rw"));
+    assert!(capabilities.contains("/pub/bitkit.to:rw"));
 }
 
 #[test]
@@ -102,6 +100,11 @@ fn test_blob_debug_redacts_bytes() {
     let state = FfiSdkStateBlob::new(vec![1, 2, 3]);
     let backup = FfiSdkBackupBlob::new(vec![4, 5, 6, 7]);
     let secret = FfiPubkyLocalSecretKey::new(vec![8; 32]);
+    let payment_payload = FfiPaymentPayload::new("bc1qexample".into());
+    let attribution = FfiReservationAttribution::new(HashMap::from([(
+        "backend_reference".into(),
+        "internal-reservation-1".into(),
+    )]));
 
     assert_eq!(format!("{state:?}"), "FfiSdkStateBlob(<redacted:3 bytes>)");
     assert_eq!(
@@ -111,6 +114,14 @@ fn test_blob_debug_redacts_bytes() {
     assert_eq!(
         format!("{secret:?}"),
         "FfiPubkyLocalSecretKey(<redacted:32 bytes>)"
+    );
+    assert_eq!(
+        format!("{payment_payload:?}"),
+        "FfiPaymentPayload(<redacted:11 bytes>)"
+    );
+    assert_eq!(
+        format!("{attribution:?}"),
+        "FfiReservationAttribution(<redacted:1 fields>)"
     );
 }
 

@@ -2,6 +2,7 @@
 
 mod config;
 mod errors;
+mod payment_adapter;
 mod profiles;
 mod sdk;
 mod secrets;
@@ -13,6 +14,7 @@ mod tests;
 
 pub use config::*;
 pub use errors::PaykitFfiError;
+pub use payment_adapter::*;
 pub use profiles::*;
 pub use sdk::*;
 pub use secrets::*;

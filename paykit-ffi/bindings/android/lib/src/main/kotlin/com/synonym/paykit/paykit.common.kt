@@ -247,6 +247,28 @@ public interface FfiPaykitSdkInterface {
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `syncPublicContactMarkers`(): List<FfiContactRecord>
 
+    /**
+     * Publish current public receiving details and remove stale SDK-managed endpoints.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncPublicEndpoints`(): FfiEndpointSyncReport
+
+    public companion object
+}
+
+
+
+
+/**
+ * Payment adapter payload text with redacted debug output.
+ */
+public interface FfiPaymentPayloadInterface {
+
+    /**
+     * Export the payload text for payment adapter execution.
+     */
+    public fun `exportText`(): kotlin.String
+
     public companion object
 }
 
@@ -367,6 +389,22 @@ public interface FfiPubkySessionBootstrapInterface {
 
 
 /**
+ * Reservation attribution metadata with redacted debug output.
+ */
+public interface FfiReservationAttributionInterface {
+
+    /**
+     * Export attribution fields for payment adapter cleanup.
+     */
+    public fun `exportFields`(): Map<kotlin.String, kotlin.String>
+
+    public companion object
+}
+
+
+
+
+/**
  * SDK backup blob owned by the app.
  */
 public interface FfiSdkBackupBlobInterface {
@@ -375,6 +413,47 @@ public interface FfiSdkBackupBlobInterface {
      * Export the raw bytes for app-controlled backup storage.
      */
     public fun `exportBytes`(): kotlin.ByteArray
+
+    public companion object
+}
+
+
+
+
+/**
+ * Platform-owned payment adapter callbacks.
+ */
+public interface FfiSdkPaymentAdapter {
+
+    /**
+     * Return current receiving details for a scope.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `currentReceivingDetails`(`scope`: FfiReceivingDetailScope): List<FfiReceivingDetail>
+
+    /**
+     * Reserve receiving details for a counterparty's Private Payment List.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `reserveReceivingDetails`(`counterparty`: kotlin.String): List<FfiPaymentEndpointReservation>?
+
+    /**
+     * Cancel a previously reserved receiving detail.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `cancelReceivingDetailReservation`(`cancellation`: FfiPaymentEndpointReservationCancellation)
+
+    /**
+     * Return payable candidate ids in adapter-preferred order.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `selectPaymentEndpointIds`(`request`: FfiPaymentEndpointSelectionRequest): List<kotlin.String>
+
+    /**
+     * Build a payment target from a payable endpoint.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `buildPaymentTarget`(`endpoint`: FfiPaymentEndpointCandidate): FfiPaymentTarget
 
     public companion object
 }
@@ -572,6 +651,52 @@ public data class FfiContactUpdate (
 
 
 /**
+ * One public endpoint changed during sync.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiEndpointSyncChange (
+    /**
+     * Payment Endpoint Identifier.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Resulting local publication status.
+     */
+    val `status`: FfiPublicationStatus,
+    /**
+     * Error text for failed changes.
+     */
+    val `error`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Summary returned after public Payment Endpoint sync.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiEndpointSyncReport (
+    /**
+     * Endpoints successfully published or updated.
+     */
+    val `published`: List<FfiEndpointSyncChange>,
+    /**
+     * Endpoints successfully removed.
+     */
+    val `removed`: List<FfiEndpointSyncChange>,
+    /**
+     * Endpoints that failed to publish or remove.
+     */
+    val `failed`: List<FfiEndpointSyncChange>
+) {
+    public companion object
+}
+
+
+
+/**
  * Current identity status returned to apps.
  */
 @kotlinx.serialization.Serializable
@@ -732,6 +857,190 @@ public data class FfiPaykitSdkConfig (
      */
     val `outboundPrivateRetryBackoffSecs`: kotlin.ULong
 ) {
+    public companion object
+}
+
+
+
+/**
+ * Optional amount context for endpoint selection.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPaymentAmountContext (
+    /**
+     * Decimal amount text.
+     */
+    val `value`: kotlin.String,
+    /**
+     * Asset code or unit.
+     */
+    val `asset`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Candidate endpoint passed to the payment adapter.
+ */
+
+public data class FfiPaymentEndpointCandidate (
+    /**
+     * Opaque candidate id for this callback request.
+     */
+    val `candidateId`: kotlin.String,
+    /**
+     * Counterparty that published the endpoint.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Where the endpoint was discovered.
+     */
+    val `source`: FfiPaymentEndpointSource,
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: FfiPaymentPayload
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`candidateId`,
+            this.`counterparty`,
+            this.`source`,
+            this.`identifier`,
+            this.`payload`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Receiving detail reserved by the payment adapter.
+ */
+
+public data class FfiPaymentEndpointReservation (
+    /**
+     * Adapter-stable reservation id.
+     */
+    val `reservationId`: kotlin.String,
+    /**
+     * Reserved receiving detail.
+     */
+    val `receivingDetail`: FfiReceivingDetail,
+    /**
+     * Optional reservation expiry as RFC3339 text.
+     */
+    val `expiresAt`: kotlin.String?,
+    /**
+     * Adapter attribution metadata.
+     */
+    val `attribution`: FfiReservationAttribution
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`reservationId`,
+            this.`receivingDetail`,
+            this.`expiresAt`,
+            this.`attribution`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Request passed to cancel a receiving-detail reservation.
+ */
+
+public data class FfiPaymentEndpointReservationCancellation (
+    /**
+     * Adapter-stable reservation id.
+     */
+    val `reservationId`: kotlin.String,
+    /**
+     * Counterparty the reservation was intended for.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Payment Endpoint Identifier.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Hash of the reserved endpoint payload.
+     */
+    val `payloadHash`: kotlin.String,
+    /**
+     * Adapter attribution metadata from the reservation.
+     */
+    val `attribution`: FfiReservationAttribution
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`reservationId`,
+            this.`counterparty`,
+            this.`identifier`,
+            this.`payloadHash`,
+            this.`attribution`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Request passed to the payment adapter for payable endpoint ordering.
+ */
+
+public data class FfiPaymentEndpointSelectionRequest (
+    /**
+     * Counterparty being paid.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Optional amount context.
+     */
+    val `amount`: FfiPaymentAmountContext?,
+    /**
+     * Candidate endpoints in SDK preference order.
+     */
+    val `candidates`: List<FfiPaymentEndpointCandidate>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`amount`,
+            this.`candidates`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Payment-method-specific execution payload produced by the adapter.
+ */
+
+public data class FfiPaymentTarget (
+    /**
+     * Method-specific target payload.
+     */
+    val `payload`: FfiPaymentPayload
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`payload`,
+        )
+    }
     public companion object
 }
 
@@ -904,6 +1213,50 @@ public data class FfiPubkySessionBootstrapResult (
             this.`capability`,
         )
     }
+    public companion object
+}
+
+
+
+/**
+ * Payment-method-specific receiving detail returned by the payment adapter.
+ */
+
+public data class FfiReceivingDetail (
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: FfiPaymentPayload
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`identifier`,
+            this.`payload`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Receiving-detail request scope passed to the payment adapter.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiReceivingDetailScope (
+    /**
+     * Scope kind.
+     */
+    val `kind`: FfiReceivingDetailScopeKind,
+    /**
+     * Counterparty public key for private scopes.
+     */
+    val `counterparty`: kotlin.String?
+) {
     public companion object
 }
 
@@ -1084,6 +1437,33 @@ public enum class FfiEndpointManagementScope {
 
 
 /**
+ * Source of a discovered Payment Endpoint candidate.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiPaymentEndpointSource {
+
+    /**
+     * Endpoint came from a counterparty-specific Private Payment List.
+     */
+    PRIVATE_PAYMENT_LIST,
+    /**
+     * Endpoint came from a public Payment Endpoint.
+     */
+    PUBLIC_PAYMENT_ENDPOINT,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
  * Kind of Pubky auth request represented by a deep link.
  */
 
@@ -1203,6 +1583,33 @@ public enum class FfiPublicationStatus {
      * Last publication or removal attempt failed.
      */
     FAILED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Scope used when asking a payment adapter for receiving details.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiReceivingDetailScopeKind {
+
+    /**
+     * Details intended for public Payment Endpoints.
+     */
+    PUBLIC,
+    /**
+     * Details intended for one counterparty's Private Payment List.
+     */
+    PRIVATE,
     /**
      * SDK returned a value this binding version does not understand.
      */
