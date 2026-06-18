@@ -7,9 +7,9 @@ The generated bindings expose the SDK runtime foundation: configuration, Pubky
 session bootstrap helpers, opaque SDK state storage callbacks, payment adapter
 callbacks, identity initialization/sign-out, SDK backup/restore, public Payment
 Endpoint sync, Paykit Profile and Contact Record workflows, and public Pubky
-read helpers. Product workflows such as private links, payment requests,
-receipts, and contact payment resolution belong on the SDK surface rather than
-on low-level `paykit-lib` protocol bindings.
+read helpers. Product workflows such as private links, payment requests, and
+contact payment resolution belong on the SDK surface rather than on low-level
+`paykit-lib` protocol bindings.
 
 ## Exported Surface
 
@@ -72,6 +72,21 @@ context. Raw diagnostic details require an explicit debug export method.
 
 Private endpoint payloads and payment targets use `FfiPaymentPayload`, so raw
 payment-method data is exported only through explicit payload methods.
+
+### Payment Requests
+
+- `FfiPaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
+  `rejectPaymentRequest`, `cancelPaymentRequest`, and `submitPaymentProof` —
+  queue Payment Request lifecycle events through the SDK outbound stream.
+- `FfiPaykitSdk.paymentRequests`, `paymentRequestsWith`,
+  `receivedPaymentRequestsFrom`, `listPaymentRequests`,
+  `activeRecurringPaymentRequests`, and `actionableReceivedPaymentRequests` —
+  inspect SDK-derived Payment Request records.
+- `FfiPaymentReference` — redacted Payment Reference object with explicit text
+  export for payment execution or display.
+
+Returned records reflect local stream and outbound queue state. Outbound
+statuses still indicate whether a queued event has been sent.
 
 ### Pubky Session Bootstrap
 

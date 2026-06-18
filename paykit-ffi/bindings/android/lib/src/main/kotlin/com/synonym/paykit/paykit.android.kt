@@ -1347,6 +1347,34 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1416,10 +1444,22 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 32868.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 49281.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests() != 10342.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_active_recurring_payment_requests() != 2902.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 20770.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 3462.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410.toShort()) {
@@ -1473,7 +1513,16 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 57246.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 51945.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests() != 9060.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests_with() != 33620.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 36875.toShort()) {
@@ -1483,6 +1532,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_process_pending_private_messages() != 56244.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 14281.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 29039.toShort()) {
@@ -1503,7 +1555,13 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers() != 15229.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 24822.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 29974.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request() != 8097.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 19304.toShort()) {
@@ -1530,6 +1588,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_sign_out() != 28715.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 59922.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers() != 39954.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1540,6 +1601,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaymentpayload_export_text() != 53824.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaymentreference_export_text() != 10144.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffiprivateoperationerror_category() != 32940.toShort()) {
@@ -1647,6 +1711,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_constructor_ffipaymentpayload_new() != 12481.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_constructor_ffipaymentreference_new() != 26530.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1702,10 +1769,22 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_active_recurring_payment_requests(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_block_peer(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_config(
@@ -1759,7 +1838,16 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests_with(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties(
@@ -1769,6 +1857,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_process_pending_private_messages(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker(
@@ -1789,7 +1880,13 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact(
@@ -1816,6 +1913,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_sign_out(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers(
     ): Short
     @JvmStatic
@@ -1826,6 +1926,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaymentpayload_export_text(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaymentreference_export_text(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffiprivateoperationerror_category(
@@ -1933,6 +2036,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_constructor_ffipaymentpayload_new(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffipaymentreference_new(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new(
     ): Short
     @JvmStatic
@@ -2023,6 +2129,20 @@ internal object UniffiLib : Library {
         `counterparty`: RustBufferByValue,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_accept_payment_request(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+        `paymentRequestId`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_actionable_received_payment_requests(
+        `ptr`: Pointer?,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_active_recurring_payment_requests(
+        `ptr`: Pointer?,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_advance_link_handshake(
         `ptr`: Pointer?,
         `counterparty`: RustBufferByValue,
@@ -2031,6 +2151,13 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_block_peer(
         `ptr`: Pointer?,
         `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_cancel_payment_request(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+        `paymentRequestId`: RustBufferByValue,
+        `reason`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_config(
@@ -2113,7 +2240,21 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_list_payment_requests(
+        `ptr`: Pointer?,
+        `filter`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_observe_encrypted_link_recovery_marker(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_payment_requests(
+        `ptr`: Pointer?,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_payment_requests_with(
         `ptr`: Pointer?,
         `counterparty`: RustBufferByValue,
     ): Long
@@ -2129,6 +2270,12 @@ internal object UniffiLib : Library {
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_process_pending_private_messages(
         `ptr`: Pointer?,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_propose_payment_request(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+        `terms`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_publish_encrypted_link_recovery_marker(
@@ -2161,9 +2308,21 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_received_payment_requests_from(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_refresh_contact_paykit_profile(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_reject_payment_request(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+        `paymentRequestId`: RustBufferByValue,
+        `reason`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_remove_contact(
@@ -2206,6 +2365,13 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_submit_payment_proof(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+        `paymentRequestId`: RustBufferByValue,
+        `proof`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_sync_public_contact_markers(
         `ptr`: Pointer?,
     ): Long
@@ -2235,6 +2401,26 @@ internal object UniffiLib : Library {
     ): Pointer?
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaymentpayload_export_text(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_clone_ffipaymentreference(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_free_ffipaymentreference(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffipaymentreference_new(
+        `text`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaymentreference_export_text(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
@@ -3236,6 +3422,74 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
     }
 
     /**
+     * Queue acceptance for a received Payment Request and return local derived state.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `acceptPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String): FfiPaymentRequestRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_accept_payment_request(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                    FfiConverterString.lower(`paymentRequestId`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiPaymentRequestRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Return received Payment Requests that need a local payer response.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `actionableReceivedPaymentRequests`(): List<FfiPaymentRequestRecord> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_actionable_received_payment_requests(
+                    thisPtr,
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceTypeFfiPaymentRequestRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Return accepted recurring Payment Requests across non-blocked counterparties.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `activeRecurringPaymentRequests`(): List<FfiPaymentRequestRecord> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_active_recurring_payment_requests(
+                    thisPtr,
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceTypeFfiPaymentRequestRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Advance the stored Encrypted Link Handshake for one counterparty.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -3276,6 +3530,31 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterTypeFfiLinkedPeerRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Queue cancellation for a known non-terminal Payment Request.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `cancelPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): FfiPaymentRequestRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_cancel_payment_request(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                    FfiConverterString.lower(`paymentRequestId`),
+                    FfiConverterOptionalString.lower(`reason`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiPaymentRequestRecord.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -3660,6 +3939,29 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
     }
 
     /**
+     * Return Payment Requests matching a local SDK filter.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `listPaymentRequests`(`filter`: FfiPaymentRequestFilter): List<FfiPaymentRequestRecord> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_list_payment_requests(
+                    thisPtr,
+                    FfiConverterTypeFfiPaymentRequestFilter.lower(`filter`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceTypeFfiPaymentRequestRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Observe a counterparty's public recovery marker.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -3677,6 +3979,51 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Return all Payment Requests across non-blocked counterparties.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `paymentRequests`(): List<FfiPaymentRequestRecord> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_payment_requests(
+                    thisPtr,
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceTypeFfiPaymentRequestRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Return Payment Requests involving one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `paymentRequestsWith`(`counterparty`: kotlin.String): List<FfiPaymentRequestRecord> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_payment_requests_with(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceTypeFfiPaymentRequestRecord.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -3744,6 +4091,30 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterSequenceTypeFfiOutboundPrivateCounterpartySendReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Queue a new Payment Request proposal and return local derived state.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `proposePaymentRequest`(`counterparty`: kotlin.String, `terms`: FfiPaymentRequestTerms): FfiPaymentRequestRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_propose_payment_request(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                    FfiConverterTypeFfiPaymentRequestTerms.lower(`terms`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiPaymentRequestRecord.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -3888,6 +4259,29 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
     }
 
     /**
+     * Return inbound Payment Requests received from one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `receivedPaymentRequestsFrom`(`counterparty`: kotlin.String): List<FfiPaymentRequestRecord> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_received_payment_requests_from(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceTypeFfiPaymentRequestRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -3905,6 +4299,31 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterOptionalTypeFfiContactRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Queue rejection for a received Payment Request and return local derived state.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `rejectPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): FfiPaymentRequestRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_reject_payment_request(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                    FfiConverterString.lower(`paymentRequestId`),
+                    FfiConverterOptionalString.lower(`reason`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiPaymentRequestRecord.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -4089,6 +4508,31 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterTypeFfiIdentityStatus.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Queue a Payment Proof for an accepted Payment Request.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `submitPaymentProof`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `proof`: FfiPaymentProofSubmission): FfiPaymentRequestRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_submit_payment_proof(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                    FfiConverterString.lower(`paymentRequestId`),
+                    FfiConverterTypeFfiPaymentProofSubmission.lower(`proof`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiPaymentRequestRecord.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -4407,6 +4851,166 @@ public object FfiConverterTypeFfiPaymentPayload: FfiConverter<FfiPaymentPayload,
     override fun allocationSize(value: FfiPaymentPayload): ULong = 8UL
 
     override fun write(value: FfiPaymentPayload, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(lower(value).toLong())
+    }
+}
+
+
+
+/**
+ * Payment Reference text with redacted debug output.
+ */
+public open class FfiPaymentReference: Disposable, FfiPaymentReferenceInterface {
+
+    public constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    public constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(null))
+    }
+    /**
+     * Create a Payment Reference after validating it.
+     */
+    public constructor(`text`: kotlin.String) : this(
+        uniffiRustCallWithError(PaykitFfiExceptionErrorHandler) { uniffiRustCallStatus ->
+            UniffiLib.uniffi_paykit_fn_constructor_ffipaymentreference_new(
+                FfiConverterString.lower(`text`),
+                uniffiRustCallStatus,
+            )
+        }!!
+    )
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed: kotlinx.atomicfu.AtomicBoolean = kotlinx.atomicfu.atomic(false)
+    private val callCounter: kotlinx.atomicfu.AtomicLong = kotlinx.atomicfu.atomic(1L)
+
+    private val lock = kotlinx.atomicfu.locks.ReentrantLock()
+
+    private fun <T> synchronized(block: () -> T): T {
+        lock.lock()
+        try {
+            return block()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    override fun close() {
+        synchronized { this.destroy() }
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.value
+            if (c == 0L) {
+                throw IllegalStateException("${this::class::simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this::class::simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiPointerDestroyer(private val pointer: Pointer?) : Disposable {
+        override fun destroy() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.uniffi_paykit_fn_free_ffipaymentreference(ptr, status)
+                }
+            }
+        }
+    }
+
+    public fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall { status ->
+            UniffiLib.uniffi_paykit_fn_clone_ffipaymentreference(pointer!!, status)
+        }!!
+    }
+
+
+    /**
+     * Export the reference text for explicit payment execution or display.
+     */
+    public override fun `exportText`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaymentreference_export_text(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+
+
+
+
+
+
+    public companion object
+
+}
+
+
+
+
+
+public object FfiConverterTypeFfiPaymentReference: FfiConverter<FfiPaymentReference, Pointer> {
+
+    override fun lower(value: FfiPaymentReference): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): FfiPaymentReference {
+        return FfiPaymentReference(value)
+    }
+
+    override fun read(buf: ByteBuffer): FfiPaymentReference {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(buf.getLong().toPointer())
+    }
+
+    override fun allocationSize(value: FfiPaymentReference): ULong = 8UL
+
+    override fun write(value: FfiPaymentReference, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(lower(value).toLong())
@@ -6816,6 +7420,28 @@ internal object uniffiCallbackInterfaceFfiSdkStateBlobStore {
 
 
 
+public object FfiConverterTypeFfiBillingPeriod: FfiConverterRustBuffer<FfiBillingPeriod> {
+    override fun read(buf: ByteBuffer): FfiBillingPeriod {
+        return FfiBillingPeriod(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiBillingPeriod): ULong = (
+            FfiConverterString.allocationSize(value.`startsAt`) +
+            FfiConverterString.allocationSize(value.`endsAt`)
+    )
+
+    override fun write(value: FfiBillingPeriod, buf: ByteBuffer) {
+        FfiConverterString.write(value.`startsAt`, buf)
+        FfiConverterString.write(value.`endsAt`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiContactPaymentResolution: FfiConverterRustBuffer<FfiContactPaymentResolution> {
     override fun read(buf: ByteBuffer): FfiContactPaymentResolution {
         return FfiContactPaymentResolution(
@@ -7546,6 +8172,271 @@ public object FfiConverterTypeFfiPaymentEndpointSelectionRequest: FfiConverterRu
 
 
 
+public object FfiConverterTypeFfiPaymentProofRecord: FfiConverterRustBuffer<FfiPaymentProofRecord> {
+    override fun read(buf: ByteBuffer): FfiPaymentProofRecord {
+        return FfiPaymentProofRecord(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterTypeFfiPaymentReference.read(buf),
+            FfiConverterOptionalTypeFfiBillingPeriod.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPaymentProofRecord): ULong = (
+            FfiConverterString.allocationSize(value.`eventId`) +
+            FfiConverterOptionalULong.allocationSize(value.`outboundMessageId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`outboundStatus`) +
+            FfiConverterOptionalULong.allocationSize(value.`streamItemId`) +
+            FfiConverterTypeFfiPaymentReference.allocationSize(value.`paymentReference`) +
+            FfiConverterOptionalTypeFfiBillingPeriod.allocationSize(value.`billingPeriod`) +
+            FfiConverterString.allocationSize(value.`paymentEndpointIdentifier`) +
+            FfiConverterString.allocationSize(value.`proofJson`) +
+            FfiConverterString.allocationSize(value.`recordedAt`)
+    )
+
+    override fun write(value: FfiPaymentProofRecord, buf: ByteBuffer) {
+        FfiConverterString.write(value.`eventId`, buf)
+        FfiConverterOptionalULong.write(value.`outboundMessageId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`outboundStatus`, buf)
+        FfiConverterOptionalULong.write(value.`streamItemId`, buf)
+        FfiConverterTypeFfiPaymentReference.write(value.`paymentReference`, buf)
+        FfiConverterOptionalTypeFfiBillingPeriod.write(value.`billingPeriod`, buf)
+        FfiConverterString.write(value.`paymentEndpointIdentifier`, buf)
+        FfiConverterString.write(value.`proofJson`, buf)
+        FfiConverterString.write(value.`recordedAt`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiPaymentProofSubmission: FfiConverterRustBuffer<FfiPaymentProofSubmission> {
+    override fun read(buf: ByteBuffer): FfiPaymentProofSubmission {
+        return FfiPaymentProofSubmission(
+            FfiConverterOptionalTypeFfiBillingPeriod.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPaymentProofSubmission): ULong = (
+            FfiConverterOptionalTypeFfiBillingPeriod.allocationSize(value.`billingPeriod`) +
+            FfiConverterString.allocationSize(value.`paymentEndpointIdentifier`) +
+            FfiConverterString.allocationSize(value.`proofJson`)
+    )
+
+    override fun write(value: FfiPaymentProofSubmission, buf: ByteBuffer) {
+        FfiConverterOptionalTypeFfiBillingPeriod.write(value.`billingPeriod`, buf)
+        FfiConverterString.write(value.`paymentEndpointIdentifier`, buf)
+        FfiConverterString.write(value.`proofJson`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiPaymentRequestAmount: FfiConverterRustBuffer<FfiPaymentRequestAmount> {
+    override fun read(buf: ByteBuffer): FfiPaymentRequestAmount {
+        return FfiPaymentRequestAmount(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPaymentRequestAmount): ULong = (
+            FfiConverterString.allocationSize(value.`value`) +
+            FfiConverterString.allocationSize(value.`asset`)
+    )
+
+    override fun write(value: FfiPaymentRequestAmount, buf: ByteBuffer) {
+        FfiConverterString.write(value.`value`, buf)
+        FfiConverterString.write(value.`asset`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiPaymentRequestFilter: FfiConverterRustBuffer<FfiPaymentRequestFilter> {
+    override fun read(buf: ByteBuffer): FfiPaymentRequestFilter {
+        return FfiPaymentRequestFilter(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiPaymentRequestLocalRole.read(buf),
+            FfiConverterSequenceTypeFfiPaymentRequestLifecycleState.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPaymentRequestFilter): ULong = (
+            FfiConverterOptionalString.allocationSize(value.`counterparty`) +
+            FfiConverterOptionalTypeFfiPaymentRequestLocalRole.allocationSize(value.`localRole`) +
+            FfiConverterSequenceTypeFfiPaymentRequestLifecycleState.allocationSize(value.`states`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`recurring`) +
+            FfiConverterBoolean.allocationSize(value.`receivedOnly`)
+    )
+
+    override fun write(value: FfiPaymentRequestFilter, buf: ByteBuffer) {
+        FfiConverterOptionalString.write(value.`counterparty`, buf)
+        FfiConverterOptionalTypeFfiPaymentRequestLocalRole.write(value.`localRole`, buf)
+        FfiConverterSequenceTypeFfiPaymentRequestLifecycleState.write(value.`states`, buf)
+        FfiConverterOptionalBoolean.write(value.`recurring`, buf)
+        FfiConverterBoolean.write(value.`receivedOnly`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiPaymentRequestRecord: FfiConverterRustBuffer<FfiPaymentRequestRecord> {
+    override fun read(buf: ByteBuffer): FfiPaymentRequestRecord {
+        return FfiPaymentRequestRecord(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeFfiPaymentRequestLocalRole.read(buf),
+            FfiConverterTypeFfiPaymentRequestLifecycleState.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiPaymentRequestTerms.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterSequenceTypeFfiPaymentProofRecord.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPaymentRequestRecord): ULong = (
+            FfiConverterString.allocationSize(value.`counterparty`) +
+            FfiConverterString.allocationSize(value.`paymentRequestId`) +
+            FfiConverterOptionalTypeFfiPaymentRequestLocalRole.allocationSize(value.`localRole`) +
+            FfiConverterTypeFfiPaymentRequestLifecycleState.allocationSize(value.`state`) +
+            FfiConverterOptionalULong.allocationSize(value.`proposalStreamItemId`) +
+            FfiConverterOptionalULong.allocationSize(value.`proposalOutboundMessageId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`proposalOutboundStatus`) +
+            FfiConverterOptionalString.allocationSize(value.`proposalEventId`) +
+            FfiConverterOptionalTypeFfiPaymentRequestTerms.allocationSize(value.`terms`) +
+            FfiConverterOptionalString.allocationSize(value.`acceptedEventId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`acceptedOutboundStatus`) +
+            FfiConverterOptionalString.allocationSize(value.`rejectedEventId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`rejectedOutboundStatus`) +
+            FfiConverterOptionalString.allocationSize(value.`canceledEventId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`canceledOutboundStatus`) +
+            FfiConverterSequenceTypeFfiPaymentProofRecord.allocationSize(value.`paymentProofs`) +
+            FfiConverterOptionalULong.allocationSize(value.`lastStreamItemId`) +
+            FfiConverterOptionalULong.allocationSize(value.`lastOutboundMessageId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`lastOutboundStatus`) +
+            FfiConverterOptionalString.allocationSize(value.`lastEventAt`) +
+            FfiConverterOptionalString.allocationSize(value.`invalidReason`)
+    )
+
+    override fun write(value: FfiPaymentRequestRecord, buf: ByteBuffer) {
+        FfiConverterString.write(value.`counterparty`, buf)
+        FfiConverterString.write(value.`paymentRequestId`, buf)
+        FfiConverterOptionalTypeFfiPaymentRequestLocalRole.write(value.`localRole`, buf)
+        FfiConverterTypeFfiPaymentRequestLifecycleState.write(value.`state`, buf)
+        FfiConverterOptionalULong.write(value.`proposalStreamItemId`, buf)
+        FfiConverterOptionalULong.write(value.`proposalOutboundMessageId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`proposalOutboundStatus`, buf)
+        FfiConverterOptionalString.write(value.`proposalEventId`, buf)
+        FfiConverterOptionalTypeFfiPaymentRequestTerms.write(value.`terms`, buf)
+        FfiConverterOptionalString.write(value.`acceptedEventId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`acceptedOutboundStatus`, buf)
+        FfiConverterOptionalString.write(value.`rejectedEventId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`rejectedOutboundStatus`, buf)
+        FfiConverterOptionalString.write(value.`canceledEventId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`canceledOutboundStatus`, buf)
+        FfiConverterSequenceTypeFfiPaymentProofRecord.write(value.`paymentProofs`, buf)
+        FfiConverterOptionalULong.write(value.`lastStreamItemId`, buf)
+        FfiConverterOptionalULong.write(value.`lastOutboundMessageId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`lastOutboundStatus`, buf)
+        FfiConverterOptionalString.write(value.`lastEventAt`, buf)
+        FfiConverterOptionalString.write(value.`invalidReason`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiPaymentRequestRecurrence: FfiConverterRustBuffer<FfiPaymentRequestRecurrence> {
+    override fun read(buf: ByteBuffer): FfiPaymentRequestRecurrence {
+        return FfiPaymentRequestRecurrence(
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPaymentRequestRecurrence): ULong = (
+            FfiConverterUInt.allocationSize(value.`every`) +
+            FfiConverterString.allocationSize(value.`unit`) +
+            FfiConverterString.allocationSize(value.`startsAt`) +
+            FfiConverterString.allocationSize(value.`anchor`) +
+            FfiConverterOptionalString.allocationSize(value.`endsAt`)
+    )
+
+    override fun write(value: FfiPaymentRequestRecurrence, buf: ByteBuffer) {
+        FfiConverterUInt.write(value.`every`, buf)
+        FfiConverterString.write(value.`unit`, buf)
+        FfiConverterString.write(value.`startsAt`, buf)
+        FfiConverterString.write(value.`anchor`, buf)
+        FfiConverterOptionalString.write(value.`endsAt`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiPaymentRequestTerms: FfiConverterRustBuffer<FfiPaymentRequestTerms> {
+    override fun read(buf: ByteBuffer): FfiPaymentRequestTerms {
+        return FfiPaymentRequestTerms(
+            FfiConverterTypeFfiPaymentRequestAmount.read(buf),
+            FfiConverterTypeFfiPaymentReference.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiPaymentRequestRecurrence.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPaymentRequestTerms): ULong = (
+            FfiConverterTypeFfiPaymentRequestAmount.allocationSize(value.`amount`) +
+            FfiConverterTypeFfiPaymentReference.allocationSize(value.`paymentReference`) +
+            FfiConverterOptionalString.allocationSize(value.`proposalExpiresAt`) +
+            FfiConverterOptionalTypeFfiPaymentRequestRecurrence.allocationSize(value.`recurrence`) +
+            FfiConverterSequenceString.allocationSize(value.`acceptedPaymentEndpointIdentifiers`) +
+            FfiConverterString.allocationSize(value.`metadataJson`)
+    )
+
+    override fun write(value: FfiPaymentRequestTerms, buf: ByteBuffer) {
+        FfiConverterTypeFfiPaymentRequestAmount.write(value.`amount`, buf)
+        FfiConverterTypeFfiPaymentReference.write(value.`paymentReference`, buf)
+        FfiConverterOptionalString.write(value.`proposalExpiresAt`, buf)
+        FfiConverterOptionalTypeFfiPaymentRequestRecurrence.write(value.`recurrence`, buf)
+        FfiConverterSequenceString.write(value.`acceptedPaymentEndpointIdentifiers`, buf)
+        FfiConverterString.write(value.`metadataJson`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiPaymentTarget: FfiConverterRustBuffer<FfiPaymentTarget> {
     override fun read(buf: ByteBuffer): FfiPaymentTarget {
         return FfiPaymentTarget(
@@ -8248,6 +9139,42 @@ public object FfiConverterTypeFfiPaymentEndpointSource: FfiConverterRustBuffer<F
 
 
 
+public object FfiConverterTypeFfiPaymentRequestLifecycleState: FfiConverterRustBuffer<FfiPaymentRequestLifecycleState> {
+    override fun read(buf: ByteBuffer): FfiPaymentRequestLifecycleState = try {
+        FfiPaymentRequestLifecycleState.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FfiPaymentRequestLifecycleState): ULong = 4UL
+
+    override fun write(value: FfiPaymentRequestLifecycleState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+public object FfiConverterTypeFfiPaymentRequestLocalRole: FfiConverterRustBuffer<FfiPaymentRequestLocalRole> {
+    override fun read(buf: ByteBuffer): FfiPaymentRequestLocalRole = try {
+        FfiPaymentRequestLocalRole.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FfiPaymentRequestLocalRole): ULong = 4UL
+
+    override fun write(value: FfiPaymentRequestLocalRole, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 public object FfiConverterTypeFfiPubkyAuthRequestKind: FfiConverterRustBuffer<FfiPubkyAuthRequestKind> {
     override fun read(buf: ByteBuffer): FfiPubkyAuthRequestKind = try {
         FfiPubkyAuthRequestKind.entries[buf.getInt() - 1]
@@ -8519,6 +9446,35 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
 
 
 
+public object FfiConverterOptionalBoolean: FfiConverterRustBuffer<kotlin.Boolean?> {
+    override fun read(buf: ByteBuffer): kotlin.Boolean? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterBoolean.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Boolean?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterBoolean.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Boolean?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterBoolean.write(value, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
@@ -8657,6 +9613,35 @@ public object FfiConverterOptionalTypeFfiPubkySessionAccess: FfiConverterRustBuf
         } else {
             buf.put(1)
             FfiConverterTypeFfiPubkySessionAccess.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiBillingPeriod: FfiConverterRustBuffer<FfiBillingPeriod?> {
+    override fun read(buf: ByteBuffer): FfiBillingPeriod? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiBillingPeriod.read(buf)
+    }
+
+    override fun allocationSize(value: FfiBillingPeriod?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiBillingPeriod.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiBillingPeriod?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiBillingPeriod.write(value, buf)
         }
     }
 }
@@ -8896,6 +9881,64 @@ public object FfiConverterOptionalTypeFfiPaymentAmountContext: FfiConverterRustB
 
 
 
+public object FfiConverterOptionalTypeFfiPaymentRequestRecurrence: FfiConverterRustBuffer<FfiPaymentRequestRecurrence?> {
+    override fun read(buf: ByteBuffer): FfiPaymentRequestRecurrence? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiPaymentRequestRecurrence.read(buf)
+    }
+
+    override fun allocationSize(value: FfiPaymentRequestRecurrence?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiPaymentRequestRecurrence.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiPaymentRequestRecurrence?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiPaymentRequestRecurrence.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiPaymentRequestTerms: FfiConverterRustBuffer<FfiPaymentRequestTerms?> {
+    override fun read(buf: ByteBuffer): FfiPaymentRequestTerms? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiPaymentRequestTerms.read(buf)
+    }
+
+    override fun allocationSize(value: FfiPaymentRequestTerms?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiPaymentRequestTerms.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiPaymentRequestTerms?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiPaymentRequestTerms.write(value, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterOptionalTypeFfiPrivatePaymentListView: FfiConverterRustBuffer<FfiPrivatePaymentListView?> {
     override fun read(buf: ByteBuffer): FfiPrivatePaymentListView? {
         if (buf.get().toInt() == 0) {
@@ -9063,6 +10106,64 @@ public object FfiConverterOptionalTypeFfiEncryptedLinkHandshakeRole: FfiConverte
         } else {
             buf.put(1)
             FfiConverterTypeFfiEncryptedLinkHandshakeRole.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus: FfiConverterRustBuffer<FfiOutboundPrivateMessageStatus?> {
+    override fun read(buf: ByteBuffer): FfiOutboundPrivateMessageStatus? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiOutboundPrivateMessageStatus.read(buf)
+    }
+
+    override fun allocationSize(value: FfiOutboundPrivateMessageStatus?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiOutboundPrivateMessageStatus.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiOutboundPrivateMessageStatus?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiOutboundPrivateMessageStatus.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiPaymentRequestLocalRole: FfiConverterRustBuffer<FfiPaymentRequestLocalRole?> {
+    override fun read(buf: ByteBuffer): FfiPaymentRequestLocalRole? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiPaymentRequestLocalRole.read(buf)
+    }
+
+    override fun allocationSize(value: FfiPaymentRequestLocalRole?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiPaymentRequestLocalRole.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiPaymentRequestLocalRole?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiPaymentRequestLocalRole.write(value, buf)
         }
     }
 }
@@ -9349,6 +10450,56 @@ public object FfiConverterSequenceTypeFfiPaymentEndpointReservation: FfiConverte
 
 
 
+public object FfiConverterSequenceTypeFfiPaymentProofRecord: FfiConverterRustBuffer<List<FfiPaymentProofRecord>> {
+    override fun read(buf: ByteBuffer): List<FfiPaymentProofRecord> {
+        val len = buf.getInt()
+        return List<FfiPaymentProofRecord>(len) {
+            FfiConverterTypeFfiPaymentProofRecord.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiPaymentProofRecord>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiPaymentProofRecord.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiPaymentProofRecord>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiPaymentProofRecord.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeFfiPaymentRequestRecord: FfiConverterRustBuffer<List<FfiPaymentRequestRecord>> {
+    override fun read(buf: ByteBuffer): List<FfiPaymentRequestRecord> {
+        val len = buf.getInt()
+        return List<FfiPaymentRequestRecord>(len) {
+            FfiConverterTypeFfiPaymentRequestRecord.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiPaymentRequestRecord>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiPaymentRequestRecord.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiPaymentRequestRecord>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiPaymentRequestRecord.write(it, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterSequenceTypeFfiPrivatePaymentListEndpoint: FfiConverterRustBuffer<List<FfiPrivatePaymentListEndpoint>> {
     override fun read(buf: ByteBuffer): List<FfiPrivatePaymentListEndpoint> {
         val len = buf.getInt()
@@ -9517,6 +10668,31 @@ public object FfiConverterSequenceTypeFfiResolvedPaymentEndpoint: FfiConverterRu
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFfiResolvedPaymentEndpoint.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeFfiPaymentRequestLifecycleState: FfiConverterRustBuffer<List<FfiPaymentRequestLifecycleState>> {
+    override fun read(buf: ByteBuffer): List<FfiPaymentRequestLifecycleState> {
+        val len = buf.getInt()
+        return List<FfiPaymentRequestLifecycleState>(len) {
+            FfiConverterTypeFfiPaymentRequestLifecycleState.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiPaymentRequestLifecycleState>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiPaymentRequestLifecycleState.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiPaymentRequestLifecycleState>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiPaymentRequestLifecycleState.write(it, buf)
         }
     }
 }
