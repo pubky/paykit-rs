@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    linked_peers::LinkedPeerState,
+    domain::linked_peers::LinkedPeerState,
     storage::{LinkedPeerRecord, StorageAdapter},
     PubkyPublicKey, Result,
 };

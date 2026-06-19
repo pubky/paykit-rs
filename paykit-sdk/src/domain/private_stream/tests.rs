@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 
 use super::*;
 use crate::{
-    linked_peers::LinkedPeerState,
+    domain::linked_peers::LinkedPeerState,
     storage::{EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord},
     PaykitSdkError, PrivateStreamParseStatus,
 };
@@ -195,7 +195,7 @@ async fn test_persist_private_stream_batch_indexes_receipt_access() {
     .await
     .unwrap();
 
-    let records = crate::receipts::receipt_access_records(&storage, &counterparty)
+    let records = crate::domain::receipts::receipt_access_records(&storage, &counterparty)
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
@@ -211,11 +211,14 @@ async fn test_persist_private_stream_batch_indexes_receipt_access() {
     assert!(debug.contains("<redacted>"));
     assert!(!debug.contains(&records[0].key));
 
-    let indexed =
-        crate::receipts::receipt_access_record_by_receipt_id(&storage, &counterparty, receipt_id)
-            .await
-            .unwrap()
-            .unwrap();
+    let indexed = crate::domain::receipts::receipt_access_record_by_receipt_id(
+        &storage,
+        &counterparty,
+        receipt_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(indexed.event_id, event_id);
 }
 
@@ -246,7 +249,7 @@ async fn test_persist_private_stream_batch_dedupes_receipt_access_index() {
     .await
     .unwrap();
 
-    let records = crate::receipts::receipt_access_records(&storage, &counterparty)
+    let records = crate::domain::receipts::receipt_access_records(&storage, &counterparty)
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
@@ -289,7 +292,7 @@ async fn test_persist_private_stream_batch_skips_malformed_receipt_access_index(
         snapshot.private_stream_items[0].parse_status,
         PrivateStreamParseStatus::MalformedRecognized
     );
-    let records = crate::receipts::receipt_access_records(&storage, &counterparty)
+    let records = crate::domain::receipts::receipt_access_records(&storage, &counterparty)
         .await
         .unwrap();
     assert!(records.is_empty());

@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use paykit_lib::PrivateMessageKind;
 
 use crate::{
+    domain::outbound_private::OutboundPrivateMessageStatus,
     identity::PubkyPublicKey,
-    outbound_private::OutboundPrivateMessageStatus,
     storage::{OutboundPrivateMessageRecord, StorageState},
 };
 

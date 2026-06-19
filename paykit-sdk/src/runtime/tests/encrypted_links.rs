@@ -41,7 +41,7 @@ async fn test_initiate_link_with_peer_requires_session_before_using_stored_link(
 async fn test_initiate_link_with_peer_preserves_untrusted_linking_state_without_session() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    crate::linked_peers::save_link_handshake_state(
+    crate::domain::linked_peers::save_link_handshake_state(
         &storage,
         counterparty.clone(),
         EncryptedLinkHandshakeRole::Initiator,
@@ -71,7 +71,7 @@ async fn test_initiate_link_with_peer_preserves_untrusted_linking_state_without_
 async fn test_recovery_required_peer_allows_relink_attempt() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    crate::linked_peers::save_linked_peer_state(
+    crate::domain::linked_peers::save_linked_peer_state(
         &storage,
         counterparty.clone(),
         LinkedPeerState::RecoveryRequired,

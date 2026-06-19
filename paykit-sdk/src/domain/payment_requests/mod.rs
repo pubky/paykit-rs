@@ -19,10 +19,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
-    outbound_private::enqueue_private_message,
-    outbound_private::OutboundPrivateMessageStatus,
-    private_stream::payload_hash,
-    records::{AmountRecord, BillingPeriodRecord},
+    domain::outbound_private::enqueue_private_message,
+    domain::outbound_private::OutboundPrivateMessageStatus,
+    domain::private_stream::payload_hash,
+    domain::records::{AmountRecord, BillingPeriodRecord},
     storage::{
         EventDedupRecord, OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageAdapter,
     },

@@ -19,9 +19,9 @@ pub(crate) use records::NewPrivateStreamItemDetails;
 
 use crate::{
     backup::ValidatedStorageState,
-    contacts::ContactRecord,
+    domain::contacts::ContactRecord,
+    domain::receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
     identity::{IdentityState, PubkyPublicKey},
-    receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
     PaykitSdkError, Result,
 };
 
