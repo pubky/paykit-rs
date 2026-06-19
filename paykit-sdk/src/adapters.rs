@@ -5,11 +5,10 @@ use std::{collections::HashMap, fmt};
 
 use crate::{identity::PubkyPublicKey, PaykitSdkError, PubkySessionAccess, Result};
 
-/// Provides live Pubky session access to the SDK.
+/// Provides live Pubky session access to one app-owned Paykit runtime.
 ///
-/// The provider owns platform-specific auth handoff, secure persistence, and
-/// key rotation. The SDK consumes the returned Pubky access for Paykit
-/// workflows.
+/// The provider is the boundary where the app or bindings expose current Pubky
+/// access from platform storage and auth flows.
 #[async_trait]
 pub trait PubkySessionProvider: Send + Sync {
     /// Load live Pubky access for storage and Encrypted Link workflows.
@@ -26,7 +25,11 @@ pub trait PubkySessionProvider: Send + Sync {
     async fn clear_session_access(&self) -> Result<()>;
 }
 
-/// Adapter for payment-method-specific endpoint publication and selection.
+/// Adapter for payment-method-specific receiving and payment-target selection.
+///
+/// Paykit SDK routes endpoints and private messages, but payment execution,
+/// settlement detection, proof validation, balances, fees, and method-specific
+/// risk policy remain adapter or application responsibilities.
 #[async_trait]
 pub trait PaymentAdapter: Send + Sync {
     /// Return current receiving details for a scope.

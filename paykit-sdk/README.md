@@ -18,6 +18,13 @@ Payment execution, settlement detection, balances, route policy, product UI,
 and app backup transport stay outside the SDK and are provided by application
 or payment-adapter code.
 
+The SDK is designed around an app-owned Paykit runtime model. One SDK runtime
+represents one app or receiver runtime with its own Paykit state: Encrypted
+Links, private stream checkpoints, outbound queues, receipts, requests,
+reservations, recovery state, and backup data. Multiple apps can be linked or
+aggregated explicitly, but they do not share one private Paykit runtime by
+default.
+
 ## Current Scope
 
 Implemented in this Rust SDK crate:
@@ -49,6 +56,12 @@ Apps construct `PaykitSdk` with three pieces:
   during sign-out
 - a `PaymentAdapter` that supplies receiving details, endpoint selection, and
   payment-target construction
+
+The session provider is only the boundary for live Pubky access. It is not a
+requirement to use Ring or another wallet as an identity coordinator before an
+app can use Paykit. The app or binding layer decides how session material is
+created, stored, unlocked, or imported, then exposes the current access to the
+SDK.
 
 Typical startup:
 
@@ -122,7 +135,9 @@ Paykit Protocol route. By default the SDK uses:
 
 Apps can set `profile_namespace` to use their own public app namespace, such as
 `bitkit.to`. That changes only these SDK profile/contact helper paths. Public
-Payment Endpoints stay under `/pub/paykit/v0/`.
+Payment Endpoints stay under `/pub/paykit/v0/`, and Encrypted Link/private
+runtime state is still owned by this SDK runtime. `profile_namespace` is not a
+shared-runtime selector or app-specific core Paykit path prefix.
 
 The SDK rejects `pubky.app` as a configured profile namespace only as a local
 guardrail against accidental writes through Paykit helpers. It is not a

@@ -67,13 +67,15 @@ impl From<PubkyPublicKey> for String {
     }
 }
 
-/// Pubky capability state visible to Paykit workflows.
+/// Pubky capability state for one app-owned Paykit runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PubkyIdentityCapability {
     /// No Pubky identity is initialized, or explicit sign-out completed.
     SignedOut,
     /// Public Pubky operations may work, but private links cannot be established.
+    ///
+    /// Private Link workflows require `PrivateLinkCapable`.
     PublicOnly,
     /// Public operations and Encrypted Links can work.
     PrivateLinkCapable,
@@ -120,7 +122,7 @@ impl From<[u8; 32]> for PubkyLocalSecretKey {
     }
 }
 
-/// Live Pubky access used by SDK workflows that touch Pubky storage or links.
+/// Live Pubky access used by one SDK runtime for Pubky storage or links.
 ///
 /// Providers must ensure the optional local secret key belongs to the local
 /// session public key. The SDK treats a present secret key as private-link
@@ -168,7 +170,7 @@ impl fmt::Debug for PubkySessionAccess {
     }
 }
 
-/// Durable identity state tracked by the SDK.
+/// Durable identity state tracked by one SDK runtime.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityState {
     /// Current local public key, when signed in.

@@ -15,6 +15,9 @@ default app API.
 - Expose SDK workflows, not raw storage internals.
 - Keep the Rust SDK responsible for durable state transitions, ordering,
   dedupe, recovery, and validation.
+- Preserve the app-owned runtime model. One binding handle represents one app,
+  wallet, or receiver runtime; bindings should not require Ring, another
+  wallet, or a shared identity coordinator before an app can use Paykit.
 - Keep platform APIs ergonomic and hard to construct incorrectly.
 - Treat storage, session access, payment execution, and UI as app-provided
   integration points.
@@ -43,7 +46,7 @@ not need them for ordinary Paykit runtime workflows.
 
 ## Runtime Handle
 
-Bindings should expose one opaque SDK handle per local Pubky identity.
+Bindings should expose one opaque SDK handle per app-owned local Paykit runtime.
 
 The handle should own:
 
@@ -118,6 +121,12 @@ devtools/logging exposure, and can add bridge-size and performance risks.
 
 Bindings should make session capability explicit.
 
+The session binding is the boundary where the app exposes live Pubky access to
+its own Paykit runtime. It should not be modeled as a global identity
+coordinator shared by all Paykit apps. A binding may support Ring or other auth
+handoff flows, but ordinary Paykit integration should not require users to
+install or authorize through another app first.
+
 The platform session provider should return one of:
 
 - no live session access
@@ -133,11 +142,11 @@ later.
 
 The binding-level session API should not ask Swift, Kotlin, or React Native to
 construct Rust `pubky::PubkySession` or `pubky::Pubky` values directly. For
-ordinary app use, SDK bindings should own Pubky session construction from
-app-provided session material, imported session secrets, or an opaque Ring/auth
-handoff result. If a platform binding cannot own that construction, it must make
-the required Pubky binding dependency explicit instead of implying that no Pubky
-integration is needed.
+ordinary app use, SDK bindings should turn app-provided session material,
+imported session secrets, or an auth handoff result into the Rust Pubky access
+needed by the SDK. If a platform binding cannot own that construction, it must
+make the required Pubky binding dependency explicit instead of implying that no
+Pubky integration is needed.
 
 The session provider should expose only the platform state the SDK needs:
 
@@ -290,7 +299,7 @@ backup data.
 
 Bindings should expose high-level workflows before low-level records:
 
-- initialize identity
+- initialize runtime
 - sign out
 - sync public Payment Endpoints
 - publish/fetch Paykit Profile
