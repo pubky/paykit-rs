@@ -34,6 +34,7 @@ fn test_config_builds_default_profile_namespace_paths() {
         config.public_contact_path(&public_key),
         format!("/pub/paykit/contacts/{}.json", public_key.as_str())
     );
+    assert_eq!(config.required_session_capabilities(), "/pub/paykit/:rw");
 }
 
 #[test]
@@ -53,6 +54,20 @@ fn test_config_allows_custom_profile_namespace_segment() {
         config.public_contact_path_prefix(),
         "/pub/bitkit.to/contacts/"
     );
+    assert_eq!(
+        config.required_session_capabilities(),
+        "/pub/paykit/:rw,/pub/bitkit.to:rw"
+    );
+}
+
+#[test]
+fn test_config_uses_namespace_capability_when_public_contact_sharing_enabled() {
+    let config = PaykitSdkConfig {
+        public_contact_sharing: PublicContactSharingPolicy::ConfiguredPublicNamespace,
+        ..PaykitSdkConfig::default()
+    };
+
+    assert_eq!(config.required_session_capabilities(), "/pub/paykit/:rw");
 }
 
 #[test]

@@ -63,7 +63,7 @@ The system should have three main layers:
   validation.
 - Paykit SDK runtime: durable state, private stream routing, lifecycle
   derivation, endpoint publication, contact payment resolution, retries,
-  recovery, Pubky session/capability handling, Pubky-backed Paykit
+  recovery, Pubky session bootstrap/capability handling, Pubky-backed Paykit
   profile/contact metadata, and app-facing APIs.
 - Payment adapter layer: receiving-detail generation, payable endpoint
   ordering, payment-target construction, method/provider state, and activity
@@ -133,8 +133,10 @@ Module responsibilities:
 - `storage`: durable records, transaction interface, and in-memory test
   storage.
 - `records`: shared durable record field types.
-- `identity`: SDK-owned Pubky session capability state and identity
-  refresh/import/export workflows.
+- `identity`: SDK-owned Pubky session capability state, identity refresh state,
+  and local Pubky key helpers.
+- `pubky_session`: Pubky signup, signin, session import, auth handoff, and
+  `pubky://` normalization helpers.
 - `endpoints`: public Payment Endpoint publication, cleanup, and remote public
   Payment List reads.
 - `publication`: shared local publication status values for SDK-managed public
@@ -291,6 +293,23 @@ sign-out APIs itself. The provider is the narrow platform hook for secure
 storage and auth-session handoff, not a separate Pubky SDK or identity product
 that integrators must use.
 
+Rust integrations can use `PubkySessionBootstrap` to create or import the live
+session access consumed by the provider. It covers common Pubky account/session
+workflows: signup, signin, session-secret import, auth handoff
+start/resume/approve helpers, and `pubky://` resource normalization. Full SDK
+runtime auth should use `config.required_session_capabilities()` as the expected
+scope for auth start/resume/approve, completion, and session import. The
+default Paykit capability covers the public Paykit namespace used by protocol
+paths and SDK-managed Paykit public data.
+`PubkyLocalSecretKey` also provides app/runtime-domain-separated seed
+derivation and public-key-from-secret helpers for apps that choose that key
+convention. The `runtime_label` must be a stable app/runtime label such as
+`bitkit.to`; changing it derives a different Paykit runtime identity from the
+same wallet seed. Exported session secrets and auth URLs are secret-bearing
+values and must be stored or displayed only for their intended short-lived flow.
+Bindings should wrap these helpers so mobile apps do not need a second Pubky
+SDK dependency for ordinary Paykit onboarding.
+
 ### Paykit Profile And Contact Namespace
 
 The SDK provides default Pubky-backed Paykit-facing profile metadata so
@@ -312,7 +331,11 @@ profile/contact namespace segment. For example, `profile_namespace =
 `/pub/bitkit.to/profile.json`, `/pub/bitkit.to/blobs/...`, and
 `/pub/bitkit.to/contacts/...`. This does not change core Paykit Protocol paths
 such as public Payment Endpoints, and it does not create app-specific private
-runtime isolation under one shared key.
+runtime isolation under one shared key. The app should request the capability
+scope returned by `PaykitSdkConfig::required_session_capabilities()` and
+validate imported/completed sessions against that same scope. The default
+namespace is covered by `/pub/paykit/:rw`; a custom profile/contact namespace
+adds the matching `/pub/<namespace>/:rw` capability.
 
 `image_uri` may point at the configured blob prefix or another public image
 location. The SDK can publish/delete Paykit blobs under the configured blob
@@ -1031,7 +1054,7 @@ Backup should not include:
 - app cloud transport details
 - product-specific profile/contact data outside SDK Contact Records
 - payment-provider secrets unless explicitly provided by the payment adapter
-- seed material unless Paykit standardizes that policy
+- wallet seed material
 
 Restore flow:
 
@@ -1251,7 +1274,7 @@ These should stay outside Paykit SDK:
 - product profile/contact UI
 - localized copy and navigation
 - app backup transport and cloud sync
-- seed/secret derivation policy unless standardized
+- payment-provider seed/secret derivation policy
 - shared identity coordination or cross-app aggregation policy
 
 ## Test Plan

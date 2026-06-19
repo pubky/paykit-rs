@@ -1,9 +1,16 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use paykit_lib::PublicKey;
+use pubky::{Capabilities, Capability};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use zeroize::Zeroize;
+
+const PUBKY_DERIVATION_CONTEXT: &[u8] = b"paykit/pubky";
+const BIP39_SEED_BYTES: usize = 64;
+const MAX_DERIVATION_LABEL_BYTES: usize = 128;
 
 /// Pubky public key string used by SDK records.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -81,7 +88,7 @@ pub enum PubkyIdentityCapability {
     PrivateLinkCapable,
 }
 
-/// Local Pubky secret key used for Encrypted Links.
+/// Local Pubky secret key used for Pubky sessions and Encrypted Links.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PubkyLocalSecretKey([u8; 32]);
 
@@ -94,6 +101,62 @@ impl PubkyLocalSecretKey {
     /// Borrow the secret key bytes.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// Parse a 32-byte secret key from hex text.
+    pub fn from_hex(value: &str) -> crate::Result<Self> {
+        let mut bytes = [0; 32];
+        hex::decode_to_slice(value, &mut bytes).map_err(|err| {
+            let context = if value.len() != 64 {
+                "Pubky secret key hex must decode to 32 bytes".into()
+            } else {
+                format!("invalid Pubky secret key hex: {err}")
+            };
+            crate::PaykitSdkError::Identity {
+                context,
+                source: None,
+            }
+        })?;
+        Ok(Self::new(bytes))
+    }
+
+    /// Derive a local Pubky secret key from a 64-byte wallet seed.
+    ///
+    /// `runtime_label` must be stable and app/runtime-specific, such as a
+    /// product namespace. Different labels derive different Pubky keys from the
+    /// same wallet seed.
+    pub fn derive_from_seed(seed: &[u8], runtime_label: &str) -> crate::Result<Self> {
+        if seed.len() != BIP39_SEED_BYTES {
+            return Err(crate::PaykitSdkError::Identity {
+                context: format!(
+                    "Pubky seed derivation requires {BIP39_SEED_BYTES} bytes, got {}",
+                    seed.len()
+                ),
+                source: None,
+            });
+        }
+        validate_derivation_label(runtime_label)?;
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(seed).map_err(|err| {
+            crate::PaykitSdkError::Identity {
+                context: format!("create Pubky key derivation MAC: {err}"),
+                source: None,
+            }
+        })?;
+        mac.update(PUBKY_DERIVATION_CONTEXT);
+        mac.update(&[0]);
+        mac.update(runtime_label.as_bytes());
+        let bytes: [u8; 32] = mac.finalize().into_bytes().into();
+        Ok(Self::new(bytes))
+    }
+
+    /// Return the Pubky public key for this secret key.
+    pub fn public_key(&self) -> PubkyPublicKey {
+        PubkyPublicKey::from_public_key(&self.keypair().public_key())
+    }
+
+    pub(crate) fn keypair(&self) -> pubky::Keypair {
+        pubky::Keypair::from_secret(&self.0)
     }
 
     /// Consume the wrapper and return the secret key bytes.
@@ -122,11 +185,34 @@ impl From<[u8; 32]> for PubkyLocalSecretKey {
     }
 }
 
+fn validate_derivation_label(value: &str) -> crate::Result<()> {
+    if value.is_empty() {
+        return Err(crate::PaykitSdkError::Identity {
+            context: "Pubky derivation label must not be empty".into(),
+            source: None,
+        });
+    }
+    if value.len() > MAX_DERIVATION_LABEL_BYTES {
+        return Err(crate::PaykitSdkError::Identity {
+            context: format!(
+                "Pubky derivation label must not exceed {MAX_DERIVATION_LABEL_BYTES} bytes"
+            ),
+            source: None,
+        });
+    }
+    if !value.is_ascii() || value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(crate::PaykitSdkError::Identity {
+            context: "Pubky derivation label must be printable ASCII".into(),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
 /// Live Pubky access used by one SDK runtime for Pubky storage or links.
 ///
-/// Providers must ensure the optional local secret key belongs to the local
-/// session public key. The SDK treats a present secret key as private-link
-/// capability.
+/// The SDK validates that a present local secret key belongs to the session
+/// public key before using it for private-link capability.
 #[derive(Clone)]
 pub struct PubkySessionAccess {
     /// Authenticated Pubky session for local homeserver writes.
@@ -145,19 +231,97 @@ impl PubkySessionAccess {
         ))
     }
 
-    /// Return the Paykit capability implied by this access.
-    pub fn capability(&self) -> PubkyIdentityCapability {
-        if self.private_link_capable() {
+    /// Validate that the local secret key, when present, belongs to the session.
+    pub fn validate(&self) -> crate::Result<()> {
+        let Some(local_secret_key) = &self.local_secret_key else {
+            return Ok(());
+        };
+
+        let session_public_key = self.public_key()?;
+        if local_secret_key.public_key() != session_public_key {
+            return Err(crate::PaykitSdkError::Identity {
+                context: "local Pubky secret key does not match session public key".into(),
+                source: None,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate local secret ownership and required Pubky write capabilities.
+    pub fn validate_for_capabilities(&self, required_capabilities: &str) -> crate::Result<()> {
+        self.validate()?;
+        validate_session_capabilities(self.session.info().capabilities(), required_capabilities)
+    }
+
+    /// Return the Paykit capability implied by this access and capability scope.
+    pub fn capability_for_capabilities(
+        &self,
+        required_capabilities: &str,
+    ) -> crate::Result<PubkyIdentityCapability> {
+        self.validate_for_capabilities(required_capabilities)?;
+        Ok(if self.private_link_capable_unchecked() {
             PubkyIdentityCapability::PrivateLinkCapable
         } else {
             PubkyIdentityCapability::PublicOnly
-        }
+        })
     }
 
-    /// Whether this access can establish Encrypted Links.
-    pub fn private_link_capable(&self) -> bool {
+    /// Report whether this validated access can establish Encrypted Links.
+    pub fn private_link_capable_for_capabilities(
+        &self,
+        required_capabilities: &str,
+    ) -> crate::Result<bool> {
+        self.validate_for_capabilities(required_capabilities)?;
+        Ok(self.private_link_capable_unchecked())
+    }
+
+    fn private_link_capable_unchecked(&self) -> bool {
         self.local_secret_key.is_some()
     }
+}
+
+fn validate_session_capabilities(
+    actual_capabilities: &[Capability],
+    required_capabilities: &str,
+) -> crate::Result<()> {
+    let actual = Capabilities::from(actual_capabilities.to_vec()).normalize();
+    let required = crate::pubky_session::parse_capabilities(required_capabilities)?;
+    let missing = required
+        .as_slice()
+        .iter()
+        .filter(|required| {
+            !actual
+                .as_slice()
+                .iter()
+                .any(|actual| capability_covers(actual, required))
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::PaykitSdkError::Identity {
+            context: format!(
+                "Pubky session is missing required Paykit capabilities: {}",
+                missing.join(",")
+            ),
+            source: None,
+        })
+    }
+}
+
+fn capability_covers(actual: &Capability, required: &Capability) -> bool {
+    scope_covers(&actual.scope, &required.scope)
+        && required
+            .actions
+            .iter()
+            .all(|required_action| actual.actions.contains(required_action))
+}
+
+fn scope_covers(parent: &str, child: &str) -> bool {
+    parent == child || (parent.ends_with('/') && child.starts_with(parent))
 }
 
 impl fmt::Debug for PubkySessionAccess {

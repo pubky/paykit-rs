@@ -233,9 +233,12 @@ where
         let _identity_guard = self.claim_identity_operation("initialize")?;
         let (session, state) = self.load_session_access_and_refresh_identity().await?;
         let live_session_available = session.is_some();
+        let required_capabilities = self.config.required_session_capabilities();
         let private_link_capable = session
             .as_ref()
-            .is_some_and(PubkySessionAccess::private_link_capable);
+            .map(|session| session.private_link_capable_for_capabilities(&required_capabilities))
+            .transpose()?
+            .unwrap_or(false);
 
         Ok(InitializationReport {
             identity: IdentityStatus::from_state(
@@ -324,8 +327,9 @@ where
             return Ok((session, state));
         };
 
+        let required_capabilities = self.config.required_session_capabilities();
         let public_key = Some(session_access.public_key()?);
-        let capability = session_access.capability();
+        let capability = session_access.capability_for_capabilities(&required_capabilities)?;
         let state = self
             .storage
             .transaction(move |tx| {
@@ -399,6 +403,7 @@ where
                 source: None,
             });
         }
+        session_access.validate_for_capabilities(&self.config.required_session_capabilities())?;
         Ok(session_access)
     }
 
@@ -408,13 +413,21 @@ where
         let Some(state) = self.storage.load_identity_state().await? else {
             return Ok(None);
         };
+        if let Some(session) = &session {
+            session.validate()?;
+        }
+        let required_capabilities = self.config.required_session_capabilities();
         let matching_session = session
             .as_ref()
             .filter(|session| session.public_key().ok().as_ref() == state.public_key.as_ref());
+        let private_link_capable = matching_session
+            .map(|session| session.private_link_capable_for_capabilities(&required_capabilities))
+            .transpose()?
+            .unwrap_or(false);
         Ok(Some(IdentityStatus::from_state(
             &state,
             matching_session.is_some(),
-            matching_session.is_some_and(PubkySessionAccess::private_link_capable),
+            private_link_capable,
         )))
     }
 

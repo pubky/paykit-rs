@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::identity::PubkyPublicKey;
+use crate::{identity::PubkyPublicKey, pubky_session::PAYKIT_SESSION_CAPABILITIES};
 
 /// Default namespace segment for SDK profile/contact public data.
 ///
@@ -122,6 +122,18 @@ impl PaykitSdkConfig {
             "{}{}.json",
             self.public_contact_path_prefix(),
             public_key.as_str()
+        )
+    }
+
+    /// Return the Pubky session capabilities required by this SDK configuration.
+    pub fn required_session_capabilities(&self) -> String {
+        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
+            return PAYKIT_SESSION_CAPABILITIES.to_string();
+        }
+
+        format!(
+            "{},/pub/{}:rw",
+            PAYKIT_SESSION_CAPABILITIES, self.profile_namespace
         )
     }
 }

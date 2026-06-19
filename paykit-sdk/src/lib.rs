@@ -13,6 +13,7 @@ mod outbound_private;
 mod payment_requests;
 mod private_lists;
 mod private_stream;
+mod pubky_session;
 mod publication;
 mod receipts;
 mod records;
@@ -77,6 +78,12 @@ pub use private_lists::PrivatePaymentListView;
 pub use private_stream::{
     EventIdConflict, PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,
     PrivateStreamParseStatus,
+};
+#[doc(inline)]
+pub use pubky_session::{
+    parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthDetails,
+    PubkyAuthRequest, PubkyAuthRequestKind, PubkyResourceRef, PubkySessionBootstrap,
+    PubkySessionBootstrapResult, PubkySessionSecret, PAYKIT_SESSION_CAPABILITIES,
 };
 #[doc(inline)]
 pub use publication::PublicationStatus;

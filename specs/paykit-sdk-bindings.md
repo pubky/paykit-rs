@@ -144,9 +144,18 @@ The binding-level session API should not ask Swift, Kotlin, or React Native to
 construct Rust `pubky::PubkySession` or `pubky::Pubky` values directly. For
 ordinary app use, SDK bindings should turn app-provided session material,
 imported session secrets, or an auth handoff result into the Rust Pubky access
-needed by the SDK. If a platform binding cannot own that construction, it must
-make the required Pubky binding dependency explicit instead of implying that no
-Pubky integration is needed.
+needed by the SDK. SDK bindings use `PubkySessionBootstrap` for signup, signin,
+session import, capability-checked auth handoff, and `pubky://` normalization.
+Binding helpers should request the capability scope returned by the active
+`PaykitSdkConfig` and validate completed/imported sessions against that same
+scope.
+`PubkyLocalSecretKey` exposes app/runtime-domain-separated key derivation and
+public-key-from-secret helpers. Platform bindings should wrap those helpers
+where the platform has no better native primitive. Auth URLs and exported
+session secrets are secret-bearing values, so bindings should avoid exposing
+them through ordinary logs or debug output. If a platform binding cannot own
+that construction, it must make the required Pubky binding dependency explicit
+instead of implying that no Pubky integration is needed.
 
 The session provider should expose only the platform state the SDK needs:
 

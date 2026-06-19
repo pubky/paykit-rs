@@ -151,7 +151,8 @@ where
     ///
     /// Cleanup is allowed even when public contact sharing is disabled, so an
     /// app can stop publishing markers and still remove previously published
-    /// markers.
+    /// markers. The active session still needs write access to the configured
+    /// public contact marker path.
     pub async fn remove_public_contact(
         &self,
         public_key: PubkyPublicKey,

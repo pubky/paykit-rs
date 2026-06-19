@@ -30,7 +30,8 @@ default.
 Implemented in this Rust SDK crate:
 
 - SDK runtime facade and atomic storage adapter contract
-- Pubky identity capability tracking and sign-out handling
+- Pubky session bootstrap helpers, identity capability tracking, and sign-out
+  handling
 - public Payment Endpoint sync
 - Encrypted Link setup, private stream intake, outbound retries, and recovery
   marker workflows
@@ -89,6 +90,8 @@ Common workflows:
 - call `initialize` on startup to refresh identity capability from the Pubky
   provider when live session access is available
 - call `sync_public_endpoints` after local receiving details change
+- request and validate `config.required_session_capabilities()` for full SDK
+  auth/session handoff
 - set `profile_namespace` to a namespace segment such as `bitkit.to` when
   profile/contact helpers should publish under `/pub/bitkit.to/...`
 - use `publish_paykit_profile` / `fetch_paykit_profile` for configured
@@ -101,6 +104,14 @@ Common workflows:
   profile and follows data
 - use `resolve_contact_profile` when contact display should prefer Paykit
   Profile and fall back to Pubky Profile
+- use `PubkySessionBootstrap` for common Pubky signup, signin, session import,
+  capability-checked auth handoff, and `pubky://` normalization flows before
+  exposing live access through a `PubkySessionProvider`; exported session
+  secrets and auth URLs must be treated as secret material, and session export
+  is an explicit call on the bootstrap result
+- when deriving a Pubky key from a wallet seed, use a stable app/runtime label
+  such as `bitkit.to`; the same seed and label derive the same key, while
+  changing the label derives a different Paykit runtime identity
 - call `receive_private_messages` before deriving private Payment Lists,
   Payment Requests, Receipt Access state, or resolving a contact payment when
   the freshest private endpoints matter

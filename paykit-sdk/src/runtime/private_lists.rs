@@ -17,9 +17,12 @@ where
             return Ok(None);
         }
         self.ensure_peer_not_blocked(counterparty).await?;
+        let required_capabilities = self.config.required_session_capabilities();
         if session_access
             .as_ref()
-            .is_some_and(PubkySessionAccess::private_link_capable)
+            .map(|session| session.private_link_capable_for_capabilities(&required_capabilities))
+            .transpose()?
+            .unwrap_or(false)
         {
             self.observe_remote_recovery_marker_for_cached_private_state(
                 counterparty,
