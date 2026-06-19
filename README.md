@@ -76,7 +76,7 @@ Paykit can describe many kinds of payment details as long as payer and payee
 understand the same Payment Endpoint Identifiers. The recommended identifier
 convention is documented in
 [specs/payment-endpoint-identifier.md](specs/payment-endpoint-identifier.md).
-The convention is recommended for interoperability, but the current library only
+The convention is recommended for interoperability, but the library only
 enforces structural path-safety validation.
 
 ### Public Payment Lists
@@ -186,9 +186,9 @@ Payment processors can use Paykit to expose the Payment Endpoints they support,
 retrieve Payment Lists for payees, and apply their own Payment Selection Policy
 before executing a payment through their existing infrastructure.
 
-### Current Boundaries
+### Boundaries
 
-Paykit currently does not:
+`paykit-lib` and platform bindings do not:
 
 - execute payments
 - choose the final Payment Endpoint for a payer
@@ -199,13 +199,19 @@ Paykit currently does not:
 - manage Pubky session creation, authorization scope, key rotation, or account
   recovery
 
-These responsibilities remain with the integrating application, the Pubky SDK,
-or future higher-level Paykit components.
+`paykit-sdk` is the Rust runtime layer for SDK-managed local
+state such as endpoint sync, Encrypted Link snapshots, private stream intake,
+Private Payment Lists, Paykit Profiles, Paykit Blob helpers, read-only Pubky
+app profile/follows helpers, local Contact Records, and contact payment resolution. Payment
+execution, settlement detection, product UI, and platform session storage
+remain with the integrating application and its adapters.
 
 ## Library Crates
 
 - [`paykit-lib`](paykit-lib/) is the canonical Rust Paykit Library. It consumes
   concrete Pubky SDK handles and keeps no global application state.
+- [`paykit-sdk`](paykit-sdk/) is the Rust SDK runtime for stateful Paykit
+  workflows.
 - [`paykit-ffi`](paykit-ffi/) exposes UniFFI bindings for Swift and Kotlin.
 - [`paykit-react-native`](paykit-react-native/) wraps the generated bindings for
   React Native.
@@ -252,12 +258,12 @@ message.
 
 #### Receive Private Application Messages
 
-`EncryptedLink::receive_private_application_messages` returns the currently
-available Private Application Message batch in send order. SDK/runtime code should persist
+`EncryptedLink::receive_private_application_messages` returns the available
+Private Application Message batch in send order. SDK/runtime code should persist
 and route that raw stream, then use stateless parsers such as
 `parse_private_payment_list_json`, `parse_payment_request_event_message`,
-and `parse_receipt_access_event_message`. The raw JSON is preserved even when
-parsed `version`/`kind` header fields are missing or malformed.
+and `parse_receipt_access_event_message`. The raw payload is preserved even
+when parsed `version`/`kind` header fields are missing or malformed.
 
 #### Exchange Payment Requests
 
@@ -265,9 +271,9 @@ Payment Request protocol messages are Event Messages. Use
 `EncryptedLink::receive_private_application_messages` when deriving durable
 state across multiple Private Message Kinds. Payment Request events can
 then be parsed with `parse_payment_request_event_message`, which keeps the
-canonical kind, raw JSON payload, and parse result so malformed recognized
-messages can be persisted before the app persists an advanced Encrypted Link
-snapshot or treats them as handled.
+canonical kind, raw payload, and parse result so malformed recognized messages
+can be persisted before the app persists an advanced Encrypted Link snapshot or
+treats them as handled.
 
 For outbound idempotency, SDK/runtime code can call
 `serialize_payment_request_event` and persist the exact JSON payload before
@@ -289,15 +295,16 @@ it with the Receipt Access sender/issuer context when retrieving the Encrypted
 Receipt.
 
 Private Application Messages share one ordered encrypted stream. The raw stream
-API returns every syntactically valid Private Application Message in send order. Callers
-that trigger side effects from Event Messages must persist and reconcile their
+API returns every received Private Application Message plaintext payload in
+send order, including malformed JSON payloads. Callers that trigger side
+effects from Event Messages must persist and reconcile their
 own handled/unhandled event state before persisting a snapshot whose read
 counter has advanced past those messages. If event state is persisted but the
 snapshot is not, replay is expected; Event Messages should be deduped by
 `event_id`, while Receipt Access can also be reconciled by Receipt ID and caller
 receipt state.
 
-Current v0.2 private Paykit wire messages are closed-world JSON objects:
+Paykit v0.2 private wire messages are closed-world JSON objects:
 unknown fields are rejected unless a field is explicitly defined as an open JSON
 object, such as Payment Request `metadata`, Payment Proof `proof`, or Receipt
 Metadata.

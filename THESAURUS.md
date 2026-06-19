@@ -7,7 +7,7 @@
 ## Bounded Contexts
 
 ### Paykit
-- **Definition**: The whole Paykit system/product, including Paykit Protocol, Paykit Library, future Paykit SDK/runtime work, private payments, receipts, Payment Requests, and related components.
+- **Definition**: The whole Paykit system/product, including Paykit Protocol, Paykit Library, Paykit SDK/runtime work, private payments, receipts, Payment Requests, and related components.
 - **NOT**: Only the protocol layer or only the Rust library.
 - **Synonyms to AVOID**: Paykit SDK when referring to the whole product or current stateless library
 - **Related terms**: Paykit Protocol, Paykit Library, Paykit SDK, Payment Request
@@ -25,16 +25,48 @@
 - **Related terms**: Paykit Protocol, Paykit SDK, Language Bindings
 
 ### Paykit SDK
-- **Definition**: A planned/future stateful integration layer above Paykit Library for durable Encrypted Link state, private stream routing, event logs, recovery behavior, Payment Request lifecycle state, receipt indexing, and ergonomic wallet/payment-processor workflows.
-- **NOT**: A current core component of Paykit architecture.
+- **Definition**: The stateful integration layer above Paykit Library for durable Encrypted Link state, private stream routing, event logs, recovery behavior, Payment Request lifecycle state, receipt indexing, and ergonomic wallet/payment-processor workflows.
+- **NOT**: Paykit Library, Paykit Protocol, or payment execution/settlement logic.
 - **Synonyms to AVOID**: Paykit core, Paykit runtime core, Pubky SDK
 - **Related terms**: Paykit, Paykit Library, Language Bindings
 
 ### Language Bindings
-- **Definition**: Distribution/integration surfaces under Paykit Library for languages or platforms such as Swift, Kotlin, and React Native.
+- **Definition**: Distribution/integration surfaces for Paykit Library or Paykit SDK in languages or platforms such as Swift, Kotlin, and React Native.
 - **NOT**: First-class Paykit architecture components.
 - **Synonyms to AVOID**: Paykit SDK
-- **Related terms**: Paykit Library
+- **Related terms**: Paykit Library, Paykit SDK
+
+## SDK Terms
+
+### Paykit Profile
+- **Definition**: Public Paykit-facing display metadata published by a Pubky identity under the SDK configured profile path, with a small shared display core and optional app-owned `extra` JSON object.
+- **NOT**: A product-specific profile page, app account record, Pubky app profile, or Payment Endpoint.
+- **Synonyms to AVOID**: Payment Profile when referring to SDK display metadata
+- **Related terms**: Paykit SDK, Paykit Blob, Pubky Profile, Pubky Routing, Contact Record
+
+### Paykit Blob
+- **Definition**: Public file bytes published by the Paykit SDK under the SDK configured blob prefix, usually referenced by Paykit Profile fields.
+- **NOT**: Arbitrary Pubky file hosting, image rendering/cache state, or private SDK backup data.
+- **Synonyms to AVOID**: Pubky Blob when referring to SDK-scoped blob paths
+- **Related terms**: Paykit SDK, Paykit Profile, Pubky Routing
+
+### Pubky Profile
+- **Definition**: Public profile metadata read from the Pubky app namespace, such as `/pub/pubky.app/profile.json`.
+- **NOT**: Paykit Profile or Payment Endpoint metadata.
+- **Synonyms to AVOID**: Paykit Profile when referring to Pubky app profile data
+- **Related terms**: Paykit SDK, Paykit Profile, Contact Record
+
+### Contact Record
+- **Definition**: A local SDK record for a saved Pubky public key, optional local label, cached Paykit Profile, and contact-related SDK state.
+- **NOT**: A public social graph requirement, Pubky Profile import result, or a Payment List.
+- **Synonyms to AVOID**: contact payment option
+- **Related terms**: Paykit SDK, Paykit Profile, Pubky Profile, Public Contact Marker
+
+### Public Contact Marker
+- **Definition**: An optional public Pubky marker published by explicit SDK policy to indicate a saved contact in the SDK configured profile/contact namespace.
+- **NOT**: The default Contact Record storage model or proof of an active Encrypted Link.
+- **Synonyms to AVOID**: public contact record when referring to the marker only
+- **Related terms**: Contact Record, Paykit Profile, Paykit SDK
 
 ## Core Protocol Terms
 
@@ -58,7 +90,7 @@
 
 ### Payment Endpoint Identifier
 - **Definition**: The canonical machine-readable identifier for a payment endpoint type, such as `btc-lightning-bolt12` or `eur-sepa-iban`.
-- **NOT**: The full Payment Endpoint or the payload/credential itself.
+- **NOT**: The full Payment Endpoint, the payload/credential itself, or reserved Paykit storage path segments such as `private` or `encrypted-link-recovery`.
 - **Synonyms to AVOID**: method id, payment method id
 - **Related terms**: Payment Endpoint, Payment Method, Asset, Rail, Endpoint Format
 
@@ -129,6 +161,12 @@
 - **NOT**: A Payment Request ID, Payment Reference, relationship identifier, or a hash of the Event Message payload.
 - **Synonyms to AVOID**: event reference, message reference when naming the protocol identifier
 - **Related terms**: Event Message, Payment Request, Payment Request ID
+
+### Encrypted Link Recovery Marker
+- **Definition**: A minimal public Pubky marker that one peer publishes to signal that a counterparty should relink an Encrypted Link. Marker paths are pairwise-derived; marker payloads carry only version, kind, recovery attempt ID, and creation time.
+- **NOT**: A Private Application Message, payment message, recovery transcript, or proof that the counterparty received the marker.
+- **Synonyms to AVOID**: private recovery marker, recovery message when naming the public marker concept
+- **Related terms**: Encrypted Link, Linked Peer, Paykit SDK
 
 ### Private Payment List
 - **Definition**: A versioned encrypted Paykit message carrying a complete Payment List shared with a Linked Peer. Latest-State Message semantics apply; a newer Private Payment List supersedes older queued Private Payment List messages.
@@ -300,6 +338,7 @@ Current/core:
 - Paykit
 - Paykit Protocol
 - Paykit Library
+- Paykit SDK
 - Pubky Routing
 
 Protocol concepts:
@@ -334,7 +373,7 @@ Protocol concepts:
 - Encrypted Link Handshake
 
 Future/planned:
-- Paykit SDK
+- Paykit SDK platform bindings
 
 Implementation/legacy details:
 - Paykit FFI
