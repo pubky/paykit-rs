@@ -106,7 +106,7 @@ impl EncryptedLink {
         &self.recipient
     }
 
-    async fn send_private_application_message(
+    async fn send_private_application_message_with_context(
         &mut self,
         plaintext: &[u8],
         context: &'static str,
@@ -124,17 +124,17 @@ impl EncryptedLink {
         &mut self,
         plaintext: &[u8],
     ) -> Result<()> {
-        self.send_private_application_message(plaintext, "Private Payment List")
+        self.send_private_application_message_with_context(plaintext, "Private Payment List")
             .await
     }
 
     pub(crate) async fn send_receipt_access_message(&mut self, plaintext: &[u8]) -> Result<()> {
-        self.send_private_application_message(plaintext, "Receipt Access")
+        self.send_private_application_message_with_context(plaintext, "Receipt Access")
             .await
     }
 
     pub(crate) async fn send_payment_request_message(&mut self, plaintext: &[u8]) -> Result<()> {
-        self.send_private_application_message(plaintext, "Payment Request")
+        self.send_private_application_message_with_context(plaintext, "Payment Request")
             .await
     }
 
@@ -142,7 +142,7 @@ impl EncryptedLink {
         &mut self,
         plaintext: &[u8],
     ) -> Result<()> {
-        self.send_private_application_message(plaintext, "Payment Request Acceptance")
+        self.send_private_application_message_with_context(plaintext, "Payment Request Acceptance")
             .await
     }
 
@@ -150,7 +150,7 @@ impl EncryptedLink {
         &mut self,
         plaintext: &[u8],
     ) -> Result<()> {
-        self.send_private_application_message(plaintext, "Payment Request Rejection")
+        self.send_private_application_message_with_context(plaintext, "Payment Request Rejection")
             .await
     }
 
@@ -158,13 +158,36 @@ impl EncryptedLink {
         &mut self,
         plaintext: &[u8],
     ) -> Result<()> {
-        self.send_private_application_message(plaintext, "Payment Request Cancellation")
-            .await
+        self.send_private_application_message_with_context(
+            plaintext,
+            "Payment Request Cancellation",
+        )
+        .await
     }
 
     pub(crate) async fn send_payment_proof_message(&mut self, plaintext: &[u8]) -> Result<()> {
-        self.send_private_application_message(plaintext, "Payment Proof")
+        self.send_private_application_message_with_context(plaintext, "Payment Proof")
             .await
+    }
+
+    /// Send one raw JSON Private Application Message.
+    ///
+    /// This is the low-level send counterpart to
+    /// [`receive_private_application_messages`](Self::receive_private_application_messages).
+    /// It validates only the generic `version` and `kind` envelope fields; it
+    /// does not require a known Paykit kind or validate known Paykit message
+    /// bodies. Use the typed serializers or SDK queue for protocol-managed
+    /// Paykit messages.
+    ///
+    /// Higher-level callers should persist the exact JSON before sending when
+    /// retrying the same message matters.
+    pub async fn send_private_application_message_json(&mut self, raw_json: &str) -> Result<()> {
+        validate_private_application_message_json(raw_json)?;
+        self.send_private_application_message_with_context(
+            raw_json.as_bytes(),
+            "Private Application Message",
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -172,11 +195,14 @@ impl EncryptedLink {
         &mut self,
         plaintext: &[u8],
     ) -> Result<()> {
-        self.send_private_application_message(plaintext, "raw test Private Application Message")
-            .await
+        self.send_private_application_message_with_context(
+            plaintext,
+            "raw test Private Application Message",
+        )
+        .await
     }
 
-    /// Receive currently available Private Application Messages in stream order.
+    /// Receive available Private Application Messages in stream order.
     ///
     /// The Noise read checkpoint advances past the returned messages. Callers
     /// that need crash-safe Event Message handling should persist returned
@@ -187,6 +213,26 @@ impl EncryptedLink {
     ) -> Result<Vec<PrivateApplicationMessage>> {
         private_application_message::receive_private_application_messages(&mut self.encryptor).await
     }
+}
+
+fn validate_private_application_message_json(raw_json: &str) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw_json).map_err(|err| PaykitError::Validation(err.to_string()))?;
+    if value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .is_none_or(|version| u8::try_from(version).is_err())
+    {
+        return Err(PaykitError::Validation(
+            "Private Application Message version must be a u8 integer".into(),
+        ));
+    }
+    if !value.get("kind").is_some_and(serde_json::Value::is_string) {
+        return Err(PaykitError::Validation(
+            "Private Application Message kind must be a string".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Default maximum number of automatic Private Application Message
@@ -300,4 +346,19 @@ async fn restore_encrypted_link_inner(
         remote_pubkey.clone(),
         config,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_private_application_message_json_requires_header() {
+        assert!(validate_private_application_message_json(
+            r#"{"version":1,"kind":"paykit.private_payment_list"}"#
+        )
+        .is_ok());
+        assert!(validate_private_application_message_json(r#"{"version":1}"#).is_err());
+        assert!(validate_private_application_message_json(r#"{"kind":"paykit.test"}"#).is_err());
+    }
 }

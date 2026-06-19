@@ -1,7 +1,7 @@
 use tracing::{debug, instrument};
 
 use crate::{
-    error::map_error, EncryptedLink, PaykitError, PrivateMessageKind, Result,
+    error::map_error, EncryptedLink, PaykitError, PrivateMessageKind, PublicKey, Result,
     PAYKIT_PRIVATE_PATH_PREFIX,
 };
 
@@ -71,6 +71,19 @@ impl ReceiptAccess {
 /// must be handled as sensitive data.
 #[instrument(skip(link, draft))]
 pub fn prepare_receipt(link: &EncryptedLink, draft: ReceiptDraft) -> Result<PreparedReceipt> {
+    prepare_receipt_for_recipient(link.recipient().clone(), draft)
+}
+
+/// Prepare a plaintext Receipt, Encrypted Receipt, and Receipt Access
+/// descriptor for an explicit recipient public key.
+///
+/// This is useful for stateful runtimes that queue Receipt Access delivery
+/// separately from receipt preparation.
+#[instrument(skip(recipient_public_key, draft))]
+pub fn prepare_receipt_for_recipient(
+    recipient_public_key: PublicKey,
+    draft: ReceiptDraft,
+) -> Result<PreparedReceipt> {
     debug!("preparing encrypted receipt");
     draft.validate_request_context()?;
     let receipt_id = draft.receipt_id.unwrap_or_else(ReceiptId::new_v4);
@@ -87,7 +100,7 @@ pub fn prepare_receipt(link: &EncryptedLink, draft: ReceiptDraft) -> Result<Prep
         payment_reference: payment_reference.clone(),
         payment_request_id: payment_request_id.clone(),
         billing_period: billing_period.clone(),
-        recipient_public_key: link.recipient().clone(),
+        recipient_public_key,
         payment_endpoint_identifier: draft.payment_endpoint_identifier,
         amount: draft.amount,
         metadata: draft.metadata,
