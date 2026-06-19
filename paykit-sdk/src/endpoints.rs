@@ -131,3 +131,6 @@ pub(crate) fn failed_record(
         last_error: Some(error),
     }
 }
+
+#[cfg(test)]
+mod tests;

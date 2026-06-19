@@ -458,3 +458,6 @@ where
     let event = PaymentRequestEvent::Proof(event.clone());
     enqueue_payment_request_event(storage, counterparty, &event, now).await
 }
+
+#[cfg(test)]
+mod tests;

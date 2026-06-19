@@ -527,3 +527,6 @@ impl SdkBackupState {
             || !self.receipt_issuance_records.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests;

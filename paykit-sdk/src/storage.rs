@@ -319,3 +319,6 @@ pub(crate) fn require_peer_link_operation_lease(
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests;

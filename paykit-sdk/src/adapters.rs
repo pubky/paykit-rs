@@ -245,3 +245,6 @@ impl fmt::Debug for PaymentTarget {
 fn redacted_payload(payload: &str) -> String {
     format!("<redacted:{} bytes>", payload.len())
 }
+
+#[cfg(test)]
+mod tests;

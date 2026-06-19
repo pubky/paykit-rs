@@ -379,3 +379,6 @@ fn private_application_message(
         raw_json: raw_json.to_owned(),
     }
 }
+
+#[cfg(test)]
+mod tests;
