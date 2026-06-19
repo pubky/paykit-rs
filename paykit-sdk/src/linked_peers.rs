@@ -67,7 +67,7 @@ where
         .await
 }
 
-fn default_linked_peer(counterparty: PubkyPublicKey) -> LinkedPeerRecord {
+pub(crate) fn default_linked_peer(counterparty: PubkyPublicKey) -> LinkedPeerRecord {
     LinkedPeerRecord {
         counterparty,
         state: LinkedPeerState::NotLinked,
