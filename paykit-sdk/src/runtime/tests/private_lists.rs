@@ -82,6 +82,142 @@ async fn test_sync_contact_private_payment_lists_reports_contact_and_clear_failu
 }
 
 #[tokio::test]
+async fn test_sync_private_payment_lists_with_reservations_reports_queue_failures() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        PrivateListPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let report = sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![PrivatePaymentListReservationUpdate {
+                counterparty: counterparty.clone(),
+                reservations: vec![PaymentEndpointReservation {
+                    reservation_id: "reservation-1".into(),
+                    receiving_detail: ReceivingDetail {
+                        identifier: "btc-lightning-bolt11".into(),
+                        payload: "ln-reserved".into(),
+                    },
+                    expires_at: None,
+                    attribution: HashMap::from([("payment_hash".into(), "hash-1".into())]),
+                }],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+
+    assert!(report.queued.is_empty());
+    assert!(report.cleared.is_empty());
+    assert_eq!(report.failed_to_queue.len(), 1);
+    assert_eq!(report.failed_to_queue[0].counterparty, counterparty);
+    assert!(report.failed_to_deliver.is_empty());
+}
+
+#[tokio::test]
+async fn test_enqueue_private_payment_list_with_reservations_cancels_on_preflight_error() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    let canceled = Arc::new(Mutex::new(Vec::new()));
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        InvalidReservedPrivateListPaymentAdapter {
+            canceled: canceled.clone(),
+        },
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .enqueue_private_payment_list_with_reservations(
+            counterparty,
+            vec![PaymentEndpointReservation {
+                reservation_id: "reservation-1".into(),
+                receiving_detail: ReceivingDetail {
+                    identifier: "btc-lightning-bolt11".into(),
+                    payload: "ln-reserved".into(),
+                },
+                expires_at: None,
+                attribution: HashMap::new(),
+            }],
+        )
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert_eq!(*canceled.lock().unwrap(), vec!["reservation-1".to_string()]);
+}
+
+#[tokio::test]
+async fn test_sync_private_payment_lists_with_reservations_reports_duplicate_updates() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    let canceled = Arc::new(Mutex::new(Vec::new()));
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        InvalidReservedPrivateListPaymentAdapter {
+            canceled: canceled.clone(),
+        },
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let report = sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![
+                PrivatePaymentListReservationUpdate {
+                    counterparty: counterparty.clone(),
+                    reservations: vec![PaymentEndpointReservation {
+                        reservation_id: "reservation-1".into(),
+                        receiving_detail: ReceivingDetail {
+                            identifier: "btc-lightning-bolt11".into(),
+                            payload: "one".into(),
+                        },
+                        expires_at: None,
+                        attribution: HashMap::new(),
+                    }],
+                },
+                PrivatePaymentListReservationUpdate {
+                    counterparty,
+                    reservations: vec![PaymentEndpointReservation {
+                        reservation_id: "reservation-2".into(),
+                        receiving_detail: ReceivingDetail {
+                            identifier: "btc-onchain-address".into(),
+                            payload: "two".into(),
+                        },
+                        expires_at: None,
+                        attribution: HashMap::new(),
+                    }],
+                },
+            ],
+            false,
+        )
+        .await
+        .unwrap();
+
+    assert!(report.queued.is_empty());
+    assert!(report.cleared.is_empty());
+    assert_eq!(report.failed_to_queue.len(), 2);
+    assert!(report.failed_to_queue.iter().all(|change| change
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("duplicate Private Payment List update"))));
+    assert_eq!(
+        *canceled.lock().unwrap(),
+        vec!["reservation-1".to_string(), "reservation-2".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn test_enqueue_private_payment_list_uses_fallback_details() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

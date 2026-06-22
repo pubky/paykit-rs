@@ -175,11 +175,13 @@ where
 
     /// Prepare private contact state, then resolve payable endpoints.
     ///
-    /// This is the app-facing "pay contact" workflow. It tries to advance the
-    /// private link, receive private messages, and process pending outbound
-    /// private messages before resolving endpoints. When public endpoints are
-    /// included, private preparation failures are reported and public fallback
-    /// can still be returned.
+    /// This is the app-facing "pay contact" workflow. It refreshes the live
+    /// session capability, ensures or advances the private link when possible,
+    /// receives pending private messages, processes pending outbound private
+    /// messages, then resolves endpoints private-first. Public endpoints are
+    /// included only when `include_public_endpoints` is true; in that mode,
+    /// private preparation failures are reported and public fallback can still
+    /// be returned.
     pub async fn prepare_and_resolve_contact_payment(
         &self,
         counterparty: PubkyPublicKey,

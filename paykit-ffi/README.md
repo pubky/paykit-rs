@@ -83,16 +83,22 @@ context. Raw diagnostic details require an explicit debug export method.
   explicit complete private list for one counterparty.
 - `FfiPaykitSdk.clearPrivatePaymentList` — queue an empty private list for one
   counterparty.
+- `FfiPaykitSdk.clearPrivatePaymentListAndProcessOutbound` — queue an empty
+  private list and attempt delivery for that counterparty.
 - `FfiPaykitSdk.syncContactPrivatePaymentLists` — queue current private lists
   for saved contacts and optionally clear linked peers that are no longer
   saved contacts.
 - `FfiPaykitSdk.syncContactPrivatePaymentListsAndProcessOutbound` — queue
   contact private lists and attempt outbound delivery in one app-facing call.
+- `FfiPaykitSdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound` —
+  queue reservation-backed private lists supplied by the app and attempt
+  delivery, with per-counterparty queue and delivery failures.
 - `FfiPaykitSdk.currentPrivatePaymentList` — inspect the latest cached Private
   Payment List view for one counterparty.
 - `FfiPaykitSdk.prepareAndResolveContactPayment` — app-facing payment setup:
-  advance private link state, receive private messages, process pending
-  outbound messages, then resolve private-first with optional public fallback.
+  refresh live session capability, ensure or advance private link state,
+  receive private messages, process pending outbound messages, then resolve
+  private-first with optional public fallback.
 - `FfiPaykitSdk.resolveContactPayment` — resolve payable private and optional
   public Payment Endpoints into adapter-built payment targets.
 - `FfiPaykitSdk.resolvePrivateContactPayment` and
@@ -105,6 +111,10 @@ The reservation callback returns `FfiReceivingDetailReservationResponse`:
 `UseCurrentReceivingDetails` means the SDK should call regular current
 receiving details, while `Reservations` means use exactly the supplied list,
 including an empty list.
+
+For direct reservation publication, pass one
+`FfiPrivatePaymentListReservationUpdate` per counterparty. An empty reservation
+list means "publish an empty Private Payment List for this counterparty".
 
 ### Payment Requests
 

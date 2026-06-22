@@ -4,14 +4,16 @@ use paykit_sdk::{
     storage::OutboundPrivateMessageRecord, ContactPaymentResolution,
     ContactPaymentResolutionPrivateState, ContactPaymentResolutionRequest,
     ContactPaymentResolutionStatus, OutboundPrivateMessageStatus, PaymentTarget,
-    PreparedContactPayment, PrivatePaymentListSyncAndSendReport, PrivatePaymentListSyncChange,
-    PrivatePaymentListSyncReport, PrivatePaymentListView, ResolvedPaymentEndpoint,
+    PreparedContactPayment, PrivatePaymentListDeliveryFailure, PrivatePaymentListReservationUpdate,
+    PrivatePaymentListSyncAndSendReport, PrivatePaymentListSyncChange,
+    PrivatePaymentListSyncDeliveryReport, PrivatePaymentListSyncReport, PrivatePaymentListView,
+    ResolvedPaymentEndpoint,
 };
 
 use crate::{
     payment_adapter::{
-        FfiPaymentAmountContext, FfiPaymentEndpointSource, FfiPaymentPayload, FfiPaymentTarget,
-        FfiReceivingDetail,
+        FfiPaymentAmountContext, FfiPaymentEndpointReservation, FfiPaymentEndpointSource,
+        FfiPaymentPayload, FfiPaymentTarget, FfiReceivingDetail,
     },
     private_links::{
         FfiLinkedPeerHandshakeReport, FfiOutboundPrivateCounterpartySendReport,
@@ -106,6 +108,43 @@ pub struct FfiPrivatePaymentListSyncAndSendReport {
     pub sync: FfiPrivatePaymentListSyncReport,
     /// Outbound send reports produced after queueing.
     pub outbound: Vec<FfiOutboundPrivateCounterpartySendReport>,
+}
+
+/// Reservation-backed Private Payment List update for one counterparty.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPrivatePaymentListReservationUpdate {
+    /// Counterparty that should receive the Private Payment List.
+    pub counterparty: String,
+    /// Complete reserved receiving details to share with this counterparty.
+    ///
+    /// An empty list queues an empty Private Payment List for this counterparty.
+    pub reservations: Vec<FfiPaymentEndpointReservation>,
+}
+
+/// Failed delivery after a Private Payment List was queued.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPrivatePaymentListDeliveryFailure {
+    /// Counterparty whose outbound delivery failed.
+    pub counterparty: String,
+    /// Outbound message id, when the failure is tied to one message.
+    pub outbound_message_id: Option<u64>,
+    /// Reservation id, when the failure is tied to reservation cleanup.
+    pub reservation_id: Option<String>,
+    /// Delivery or cleanup error.
+    pub error: Arc<FfiPrivateOperationError>,
+}
+
+/// Report from queueing and delivering Private Payment Lists.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPrivatePaymentListSyncDeliveryReport {
+    /// Counterparties that had a non-empty Private Payment List queued.
+    pub queued: Vec<FfiPrivatePaymentListSyncChange>,
+    /// Counterparties that had an empty Private Payment List queued.
+    pub cleared: Vec<FfiPrivatePaymentListSyncChange>,
+    /// Counterparties that could not be queued or cleared.
+    pub failed_to_queue: Vec<FfiPrivatePaymentListSyncChange>,
+    /// Counterparties queued successfully but failed during outbound delivery.
+    pub failed_to_deliver: Vec<FfiPrivatePaymentListDeliveryFailure>,
 }
 
 /// One counterparty result from a Private Payment List sync.
@@ -267,6 +306,18 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Queue an empty Private Payment List and process that counterparty's queue.
+    pub async fn clear_private_payment_list_and_process_outbound(
+        &self,
+        counterparty: String,
+    ) -> Result<FfiPrivatePaymentListSyncDeliveryReport, PaykitFfiError> {
+        self.runtime
+            .clear_private_payment_list_and_process_outbound(parse_public_key(counterparty)?)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
     /// Queue Private Payment List updates for saved local contacts.
     pub async fn sync_contact_private_payment_lists(
         &self,
@@ -286,6 +337,26 @@ impl FfiPaykitSdk {
     ) -> Result<FfiPrivatePaymentListSyncAndSendReport, PaykitFfiError> {
         self.runtime
             .sync_contact_private_payment_lists_and_process_outbound(clear_unlisted_linked_peers)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Queue reservation-backed Private Payment Lists and process their queues.
+    pub async fn sync_private_payment_lists_with_reservations_and_process_outbound(
+        &self,
+        updates: Vec<FfiPrivatePaymentListReservationUpdate>,
+        clear_unlisted_linked_peers: bool,
+    ) -> Result<FfiPrivatePaymentListSyncDeliveryReport, PaykitFfiError> {
+        let updates = updates
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, PaykitFfiError>>()?;
+        self.runtime
+            .sync_private_payment_lists_with_reservations_and_process_outbound(
+                updates,
+                clear_unlisted_linked_peers,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -333,6 +404,11 @@ impl FfiPaykitSdk {
     }
 
     /// Prepare private contact state, then resolve payable endpoints.
+    ///
+    /// The SDK refreshes live session capability, ensures or advances the
+    /// private link when possible, receives pending private messages, processes
+    /// pending outbound private messages, then resolves endpoints private-first.
+    /// Public endpoints are included only when requested.
     pub async fn prepare_and_resolve_contact_payment(
         &self,
         counterparty: String,
@@ -453,6 +529,21 @@ impl From<PrivatePaymentListSyncAndSendReport> for FfiPrivatePaymentListSyncAndS
     }
 }
 
+impl From<PrivatePaymentListSyncDeliveryReport> for FfiPrivatePaymentListSyncDeliveryReport {
+    fn from(value: PrivatePaymentListSyncDeliveryReport) -> Self {
+        Self {
+            queued: value.queued.into_iter().map(Into::into).collect(),
+            cleared: value.cleared.into_iter().map(Into::into).collect(),
+            failed_to_queue: value.failed_to_queue.into_iter().map(Into::into).collect(),
+            failed_to_deliver: value
+                .failed_to_deliver
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
 impl From<PrivatePaymentListSyncChange> for FfiPrivatePaymentListSyncChange {
     fn from(value: PrivatePaymentListSyncChange) -> Self {
         Self {
@@ -460,6 +551,37 @@ impl From<PrivatePaymentListSyncChange> for FfiPrivatePaymentListSyncChange {
             outbound_message_id: value.outbound_message_id,
             error: value.error,
         }
+    }
+}
+
+impl From<PrivatePaymentListDeliveryFailure> for FfiPrivatePaymentListDeliveryFailure {
+    fn from(value: PrivatePaymentListDeliveryFailure) -> Self {
+        Self {
+            counterparty: app_public_key(&value.counterparty),
+            outbound_message_id: value.outbound_message_id,
+            reservation_id: value.reservation_id,
+            error: private_error(
+                "private_payment_list_delivery",
+                "delivery_failed",
+                "private payment list delivery failed",
+                value.error,
+            ),
+        }
+    }
+}
+
+impl TryFrom<FfiPrivatePaymentListReservationUpdate> for PrivatePaymentListReservationUpdate {
+    type Error = PaykitFfiError;
+
+    fn try_from(value: FfiPrivatePaymentListReservationUpdate) -> Result<Self, Self::Error> {
+        Ok(Self {
+            counterparty: parse_public_key(value.counterparty)?,
+            reservations: value
+                .reservations
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<paykit_sdk::Result<Vec<_>>>()?,
+        })
     }
 }
 
@@ -551,6 +673,7 @@ fn private_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::payment_adapter::FfiReservationAttribution;
     use chrono::Utc;
     use paykit_sdk::PaymentEndpointCandidate;
     use std::collections::HashMap;
@@ -654,5 +777,57 @@ mod tests {
 
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("private queue failure"));
+    }
+
+    #[test]
+    fn test_private_payment_list_reservation_update_converts() {
+        let update = FfiPrivatePaymentListReservationUpdate {
+            counterparty: public_key().to_app_key(),
+            reservations: vec![FfiPaymentEndpointReservation {
+                reservation_id: "reservation-1".into(),
+                receiving_detail: FfiReceivingDetail {
+                    identifier: "btc-lightning-bolt11".into(),
+                    payload: Arc::new(FfiPaymentPayload::new("ln-reserved".into())),
+                },
+                expires_at: None,
+                attribution: Arc::new(FfiReservationAttribution::new(HashMap::from([(
+                    "payment_hash".into(),
+                    "hash-1".into(),
+                )]))),
+            }],
+        };
+
+        let update = PrivatePaymentListReservationUpdate::try_from(update).unwrap();
+
+        assert_eq!(update.reservations.len(), 1);
+        assert_eq!(update.reservations[0].reservation_id, "reservation-1");
+        assert_eq!(
+            update.reservations[0].receiving_detail.payload,
+            "ln-reserved"
+        );
+        assert_eq!(
+            update.reservations[0].attribution.get("payment_hash"),
+            Some(&"hash-1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_private_payment_list_delivery_failure_redacts_error() {
+        let failure =
+            FfiPrivatePaymentListDeliveryFailure::from(PrivatePaymentListDeliveryFailure {
+                counterparty: public_key(),
+                outbound_message_id: Some(7),
+                reservation_id: Some("reservation-1".into()),
+                error: "private delivery failure".into(),
+            });
+
+        assert_eq!(failure.outbound_message_id, Some(7));
+        assert_eq!(failure.reservation_id.as_deref(), Some("reservation-1"));
+        assert_eq!(failure.error.category(), "private_payment_list_delivery");
+        assert_eq!(
+            failure.error.export_debug_details(),
+            "private delivery failure"
+        );
+        assert!(!format!("{failure:?}").contains("private delivery failure"));
     }
 }

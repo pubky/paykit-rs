@@ -130,6 +130,21 @@ shape: one value means "use current receiving details", and another means "use
 exactly this reservation list". An empty reservation list is then a deliberate
 empty private publication, not the same thing as no adapter response.
 
+Bindings should also expose a direct reservation publication workflow for apps
+that reserve receiving details outside the SDK callback:
+
+- input: one counterparty plus the complete reserved receiving details for
+  that counterparty
+- empty reservation list: queue an empty Private Payment List for that
+  counterparty
+- output: per-counterparty queue and delivery failures, so apps do not have to
+  merge queue reports with outbound-send reports manually
+
+The app-facing contact payment preparation helper must document its sequence:
+refresh live session capability, ensure or advance the private link when
+possible, receive private messages, process pending outbound private messages,
+then resolve endpoints private-first with optional public fallback.
+
 React Native bindings should keep SDK state blob storage in the native module by
 default. Passing `SdkStateBlob` bytes through the JavaScript bridge
 should be an explicit advanced mode because it creates extra copies, increases

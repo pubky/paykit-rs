@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use crate::domain::outbound_private::enqueue_private_message;
 use crate::{
-    domain::adapters::ReceivingDetail,
+    domain::adapters::{PaymentEndpointReservation, ReceivingDetail},
     domain::endpoints::normalize_receiving_details,
     domain::outbound_private::{
         enqueue_private_message_with_link_lease, OutboundPrivateCounterpartySendReport,
@@ -103,6 +103,77 @@ impl fmt::Debug for PrivatePaymentListSyncAndSendReport {
         f.debug_struct("PrivatePaymentListSyncAndSendReport")
             .field("sync", &self.sync)
             .field("outbound", &self.outbound.len())
+            .finish()
+    }
+}
+
+/// Reservation-backed Private Payment List update for one counterparty.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivatePaymentListReservationUpdate {
+    /// Counterparty that should receive the Private Payment List.
+    pub counterparty: PubkyPublicKey,
+    /// Complete reserved receiving details to share with this counterparty.
+    ///
+    /// An empty list queues an empty Private Payment List for this counterparty.
+    pub reservations: Vec<PaymentEndpointReservation>,
+}
+
+impl fmt::Debug for PrivatePaymentListReservationUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivatePaymentListReservationUpdate")
+            .field("counterparty", &self.counterparty.redacted_app_key())
+            .field("reservations", &self.reservations.len())
+            .finish()
+    }
+}
+
+/// Failed delivery after a Private Payment List was queued.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivatePaymentListDeliveryFailure {
+    /// Counterparty whose outbound delivery failed.
+    pub counterparty: PubkyPublicKey,
+    /// Outbound message id, when the failure is tied to one message.
+    pub outbound_message_id: Option<u64>,
+    /// Reservation id, when the failure is tied to reservation cleanup.
+    pub reservation_id: Option<String>,
+    /// Delivery or cleanup error.
+    pub error: String,
+}
+
+impl fmt::Debug for PrivatePaymentListDeliveryFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivatePaymentListDeliveryFailure")
+            .field("counterparty", &self.counterparty.redacted_app_key())
+            .field("outbound_message_id", &self.outbound_message_id)
+            .field("reservation_id", &self.reservation_id)
+            .field(
+                "error",
+                &format_args!("<redacted:{} bytes>", self.error.len()),
+            )
+            .finish()
+    }
+}
+
+/// Mobile-friendly report from queueing and delivering Private Payment Lists.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivatePaymentListSyncDeliveryReport {
+    /// Counterparties that had a non-empty Private Payment List queued.
+    pub queued: Vec<PrivatePaymentListSyncChange>,
+    /// Counterparties that had an empty Private Payment List queued.
+    pub cleared: Vec<PrivatePaymentListSyncChange>,
+    /// Counterparties that could not be queued or cleared.
+    pub failed_to_queue: Vec<PrivatePaymentListSyncChange>,
+    /// Counterparties queued successfully but failed during outbound delivery.
+    pub failed_to_deliver: Vec<PrivatePaymentListDeliveryFailure>,
+}
+
+impl fmt::Debug for PrivatePaymentListSyncDeliveryReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivatePaymentListSyncDeliveryReport")
+            .field("queued", &self.queued.len())
+            .field("cleared", &self.cleared.len())
+            .field("failed_to_queue", &self.failed_to_queue.len())
+            .field("failed_to_deliver", &self.failed_to_deliver.len())
             .finish()
     }
 }

@@ -55,8 +55,9 @@ pub use domain::payment_requests::{
 };
 #[doc(inline)]
 pub use domain::private_lists::{
+    PrivatePaymentListDeliveryFailure, PrivatePaymentListReservationUpdate,
     PrivatePaymentListSyncAndSendReport, PrivatePaymentListSyncChange,
-    PrivatePaymentListSyncReport, PrivatePaymentListView,
+    PrivatePaymentListSyncDeliveryReport, PrivatePaymentListSyncReport, PrivatePaymentListView,
 };
 #[doc(inline)]
 pub use domain::private_stream::{

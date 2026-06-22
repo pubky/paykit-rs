@@ -169,6 +169,10 @@ acknowledgement. Non-retryable link-state failures still pause the peer for
 recovery. Superseded reservation cleanup failures are reported separately and do
 not block delivery of current outbound messages.
 
+Private Payment List helpers support adapter-reserved receiving details. Apps
+can queue reservation-backed lists directly when they already hold reservation
+metadata, including an empty list to clear a counterparty's private list.
+
 Storage implementations must commit raw private stream items, derived indexes,
 and the advanced Encrypted Link snapshot atomically. If storage cannot provide
 that transaction boundary, it should fail the receive operation instead of

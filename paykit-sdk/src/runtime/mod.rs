@@ -76,8 +76,9 @@ use crate::{
     domain::private_lists::{
         current_private_payment_list as load_current_private_payment_list,
         enqueue_private_payment_list_with_link_lease as enqueue_private_payment_list_message_with_link_lease,
+        PrivatePaymentListDeliveryFailure, PrivatePaymentListReservationUpdate,
         PrivatePaymentListSyncAndSendReport, PrivatePaymentListSyncChange,
-        PrivatePaymentListSyncReport,
+        PrivatePaymentListSyncDeliveryReport, PrivatePaymentListSyncReport,
     },
     domain::private_stream::{
         persist_private_stream_batch_with_link_lease, PrivateStreamCounterpartyIntakeReport,

@@ -567,6 +567,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func clearPrivatePaymentList(counterparty: String) async throws  -> FfiQueuedPrivateMessage
 
     /**
+     * Queue an empty Private Payment List and process that counterparty's queue.
+     */
+    func clearPrivatePaymentListAndProcessOutbound(counterparty: String) async throws  -> FfiPrivatePaymentListSyncDeliveryReport
+
+    /**
      * Return this runtime's configuration.
      */
     func config()  -> FfiPaykitSdkConfig
@@ -718,6 +723,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Prepare private contact state, then resolve payable endpoints.
+     *
+     * The SDK refreshes live session capability, ensures or advances the
+     * private link when possible, receives pending private messages, processes
+     * pending outbound private messages, then resolves endpoints private-first.
+     * Public endpoints are included only when requested.
      */
     func prepareAndResolveContactPayment(counterparty: String, amount: FfiPaymentAmountContext?, includePublicEndpoints: Bool, maxAdvanceSteps: UInt32) async throws  -> FfiPreparedContactPayment
 
@@ -910,6 +920,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Queue contact Private Payment Lists and process pending private messages.
      */
     func syncContactPrivatePaymentListsAndProcessOutbound(clearUnlistedLinkedPeers: Bool) async throws  -> FfiPrivatePaymentListSyncAndSendReport
+
+    /**
+     * Queue reservation-backed Private Payment Lists and process their queues.
+     */
+    func syncPrivatePaymentListsWithReservationsAndProcessOutbound(updates: [FfiPrivatePaymentListReservationUpdate], clearUnlistedLinkedPeers: Bool) async throws  -> FfiPrivatePaymentListSyncDeliveryReport
 
     /**
      * Retry pending public Contact Marker publication/removal work.
@@ -1204,6 +1219,26 @@ open func clearPrivatePaymentList(counterparty: String)async throws  -> FfiQueue
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeFfiQueuedPrivateMessage_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Queue an empty Private Payment List and process that counterparty's queue.
+     */
+open func clearPrivatePaymentListAndProcessOutbound(counterparty: String)async throws  -> FfiPrivatePaymentListSyncDeliveryReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiPrivatePaymentListSyncDeliveryReport_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1800,6 +1835,11 @@ open func pendingOutboundPrivateCounterparties()async throws  -> [String]  {
 
     /**
      * Prepare private contact state, then resolve payable endpoints.
+     *
+     * The SDK refreshes live session capability, ensures or advances the
+     * private link when possible, receives pending private messages, processes
+     * pending outbound private messages, then resolves endpoints private-first.
+     * Public endpoints are included only when requested.
      */
 open func prepareAndResolveContactPayment(counterparty: String, amount: FfiPaymentAmountContext?, includePublicEndpoints: Bool, maxAdvanceSteps: UInt32)async throws  -> FfiPreparedContactPayment  {
     return
@@ -2564,6 +2604,26 @@ open func syncContactPrivatePaymentListsAndProcessOutbound(clearUnlistedLinkedPe
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeFfiPrivatePaymentListSyncAndSendReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Queue reservation-backed Private Payment Lists and process their queues.
+     */
+open func syncPrivatePaymentListsWithReservationsAndProcessOutbound(updates: [FfiPrivatePaymentListReservationUpdate], clearUnlistedLinkedPeers: Bool)async throws  -> FfiPrivatePaymentListSyncDeliveryReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound(
+                    self.uniffiClonePointer(),
+                    FfiConverterSequenceTypeFfiPrivatePaymentListReservationUpdate.lower(updates),FfiConverterBool.lower(clearUnlistedLinkedPeers)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiPrivatePaymentListSyncDeliveryReport_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -9250,6 +9310,93 @@ public func FfiConverterTypeFfiPreparedContactPayment_lower(_ value: FfiPrepared
 
 
 /**
+ * Failed delivery after a Private Payment List was queued.
+ */
+public struct FfiPrivatePaymentListDeliveryFailure {
+    /**
+     * Counterparty whose outbound delivery failed.
+     */
+    public var counterparty: String
+    /**
+     * Outbound message id, when the failure is tied to one message.
+     */
+    public var outboundMessageId: UInt64?
+    /**
+     * Reservation id, when the failure is tied to reservation cleanup.
+     */
+    public var reservationId: String?
+    /**
+     * Delivery or cleanup error.
+     */
+    public var error: FfiPrivateOperationError
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty whose outbound delivery failed.
+         */counterparty: String,
+        /**
+         * Outbound message id, when the failure is tied to one message.
+         */outboundMessageId: UInt64?,
+        /**
+         * Reservation id, when the failure is tied to reservation cleanup.
+         */reservationId: String?,
+        /**
+         * Delivery or cleanup error.
+         */error: FfiPrivateOperationError) {
+        self.counterparty = counterparty
+        self.outboundMessageId = outboundMessageId
+        self.reservationId = reservationId
+        self.error = error
+    }
+}
+
+#if compiler(>=6)
+extension FfiPrivatePaymentListDeliveryFailure: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPrivatePaymentListDeliveryFailure: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivatePaymentListDeliveryFailure {
+        return
+            try FfiPrivatePaymentListDeliveryFailure(
+                counterparty: FfiConverterString.read(from: &buf),
+                outboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
+                reservationId: FfiConverterOptionString.read(from: &buf),
+                error: FfiConverterTypeFfiPrivateOperationError.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPrivatePaymentListDeliveryFailure, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterOptionUInt64.write(value.outboundMessageId, into: &buf)
+        FfiConverterOptionString.write(value.reservationId, into: &buf)
+        FfiConverterTypeFfiPrivateOperationError.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentListDeliveryFailure_lift(_ buf: RustBuffer) throws -> FfiPrivatePaymentListDeliveryFailure {
+    return try FfiConverterTypeFfiPrivatePaymentListDeliveryFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentListDeliveryFailure_lower(_ value: FfiPrivatePaymentListDeliveryFailure) -> RustBuffer {
+    return FfiConverterTypeFfiPrivatePaymentListDeliveryFailure.lower(value)
+}
+
+
+/**
  * One endpoint in the latest Private Payment List view.
  */
 public struct FfiPrivatePaymentListEndpoint {
@@ -9313,6 +9460,77 @@ public func FfiConverterTypeFfiPrivatePaymentListEndpoint_lift(_ buf: RustBuffer
 #endif
 public func FfiConverterTypeFfiPrivatePaymentListEndpoint_lower(_ value: FfiPrivatePaymentListEndpoint) -> RustBuffer {
     return FfiConverterTypeFfiPrivatePaymentListEndpoint.lower(value)
+}
+
+
+/**
+ * Reservation-backed Private Payment List update for one counterparty.
+ */
+public struct FfiPrivatePaymentListReservationUpdate {
+    /**
+     * Counterparty that should receive the Private Payment List.
+     */
+    public var counterparty: String
+    /**
+     * Complete reserved receiving details to share with this counterparty.
+     *
+     * An empty list queues an empty Private Payment List for this counterparty.
+     */
+    public var reservations: [FfiPaymentEndpointReservation]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty that should receive the Private Payment List.
+         */counterparty: String,
+        /**
+         * Complete reserved receiving details to share with this counterparty.
+         *
+         * An empty list queues an empty Private Payment List for this counterparty.
+         */reservations: [FfiPaymentEndpointReservation]) {
+        self.counterparty = counterparty
+        self.reservations = reservations
+    }
+}
+
+#if compiler(>=6)
+extension FfiPrivatePaymentListReservationUpdate: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPrivatePaymentListReservationUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivatePaymentListReservationUpdate {
+        return
+            try FfiPrivatePaymentListReservationUpdate(
+                counterparty: FfiConverterString.read(from: &buf),
+                reservations: FfiConverterSequenceTypeFfiPaymentEndpointReservation.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPrivatePaymentListReservationUpdate, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterSequenceTypeFfiPaymentEndpointReservation.write(value.reservations, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentListReservationUpdate_lift(_ buf: RustBuffer) throws -> FfiPrivatePaymentListReservationUpdate {
+    return try FfiConverterTypeFfiPrivatePaymentListReservationUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentListReservationUpdate_lower(_ value: FfiPrivatePaymentListReservationUpdate) -> RustBuffer {
+    return FfiConverterTypeFfiPrivatePaymentListReservationUpdate.lower(value)
 }
 
 
@@ -9481,6 +9699,93 @@ public func FfiConverterTypeFfiPrivatePaymentListSyncChange_lift(_ buf: RustBuff
 #endif
 public func FfiConverterTypeFfiPrivatePaymentListSyncChange_lower(_ value: FfiPrivatePaymentListSyncChange) -> RustBuffer {
     return FfiConverterTypeFfiPrivatePaymentListSyncChange.lower(value)
+}
+
+
+/**
+ * Report from queueing and delivering Private Payment Lists.
+ */
+public struct FfiPrivatePaymentListSyncDeliveryReport {
+    /**
+     * Counterparties that had a non-empty Private Payment List queued.
+     */
+    public var queued: [FfiPrivatePaymentListSyncChange]
+    /**
+     * Counterparties that had an empty Private Payment List queued.
+     */
+    public var cleared: [FfiPrivatePaymentListSyncChange]
+    /**
+     * Counterparties that could not be queued or cleared.
+     */
+    public var failedToQueue: [FfiPrivatePaymentListSyncChange]
+    /**
+     * Counterparties queued successfully but failed during outbound delivery.
+     */
+    public var failedToDeliver: [FfiPrivatePaymentListDeliveryFailure]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparties that had a non-empty Private Payment List queued.
+         */queued: [FfiPrivatePaymentListSyncChange],
+        /**
+         * Counterparties that had an empty Private Payment List queued.
+         */cleared: [FfiPrivatePaymentListSyncChange],
+        /**
+         * Counterparties that could not be queued or cleared.
+         */failedToQueue: [FfiPrivatePaymentListSyncChange],
+        /**
+         * Counterparties queued successfully but failed during outbound delivery.
+         */failedToDeliver: [FfiPrivatePaymentListDeliveryFailure]) {
+        self.queued = queued
+        self.cleared = cleared
+        self.failedToQueue = failedToQueue
+        self.failedToDeliver = failedToDeliver
+    }
+}
+
+#if compiler(>=6)
+extension FfiPrivatePaymentListSyncDeliveryReport: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPrivatePaymentListSyncDeliveryReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivatePaymentListSyncDeliveryReport {
+        return
+            try FfiPrivatePaymentListSyncDeliveryReport(
+                queued: FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(from: &buf),
+                cleared: FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(from: &buf),
+                failedToQueue: FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(from: &buf),
+                failedToDeliver: FfiConverterSequenceTypeFfiPrivatePaymentListDeliveryFailure.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPrivatePaymentListSyncDeliveryReport, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.queued, into: &buf)
+        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.cleared, into: &buf)
+        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.failedToQueue, into: &buf)
+        FfiConverterSequenceTypeFfiPrivatePaymentListDeliveryFailure.write(value.failedToDeliver, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentListSyncDeliveryReport_lift(_ buf: RustBuffer) throws -> FfiPrivatePaymentListSyncDeliveryReport {
+    return try FfiConverterTypeFfiPrivatePaymentListSyncDeliveryReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentListSyncDeliveryReport_lower(_ value: FfiPrivatePaymentListSyncDeliveryReport) -> RustBuffer {
+    return FfiConverterTypeFfiPrivatePaymentListSyncDeliveryReport.lower(value)
 }
 
 
@@ -15327,6 +15632,31 @@ fileprivate struct FfiConverterSequenceTypeFfiPaymentRequestRecord: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiPrivatePaymentListDeliveryFailure: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiPrivatePaymentListDeliveryFailure]
+
+    public static func write(_ value: [FfiPrivatePaymentListDeliveryFailure], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiPrivatePaymentListDeliveryFailure.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPrivatePaymentListDeliveryFailure] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiPrivatePaymentListDeliveryFailure]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiPrivatePaymentListDeliveryFailure.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiPrivatePaymentListEndpoint: FfiConverterRustBuffer {
     typealias SwiftType = [FfiPrivatePaymentListEndpoint]
 
@@ -15344,6 +15674,31 @@ fileprivate struct FfiConverterSequenceTypeFfiPrivatePaymentListEndpoint: FfiCon
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiPrivatePaymentListEndpoint.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiPrivatePaymentListReservationUpdate: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiPrivatePaymentListReservationUpdate]
+
+    public static func write(_ value: [FfiPrivatePaymentListReservationUpdate], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiPrivatePaymentListReservationUpdate.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPrivatePaymentListReservationUpdate] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiPrivatePaymentListReservationUpdate]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiPrivatePaymentListReservationUpdate.read(from: &buf))
         }
         return seq
     }
@@ -15927,6 +16282,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list() != 56925) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 49245) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -16017,7 +16375,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 36875) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_contact_payment() != 61607) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_contact_payment() != 47001) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 41997) {
@@ -16132,6 +16490,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_contact_private_payment_lists_and_process_outbound() != 20754) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound() != 51378) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers() != 39954) {

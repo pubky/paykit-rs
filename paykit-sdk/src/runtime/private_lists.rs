@@ -73,6 +73,50 @@ where
         self.finish_peer_link_operation(lease, result).await
     }
 
+    /// Enqueue a reservation-backed Private Payment List for one counterparty.
+    ///
+    /// An empty reservation list queues an empty Private Payment List. If a
+    /// non-empty reservation list cannot be queued, the SDK asks the payment
+    /// adapter to cancel any unpersisted reservations.
+    pub async fn enqueue_private_payment_list_with_reservations(
+        &self,
+        counterparty: PubkyPublicKey,
+        reservations: Vec<PaymentEndpointReservation>,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        let cancellations = reservations
+            .iter()
+            .map(|reservation| reservation_cancellation(&counterparty, reservation))
+            .collect::<Vec<_>>();
+        let lease = match self.claim_peer_link_operation(&counterparty).await {
+            Ok(lease) => lease,
+            Err(err) => {
+                return self
+                    .cancel_reservations_and_return_queue_error(&cancellations, &counterparty, err)
+                    .await;
+            }
+        };
+        let result = async {
+            self.ensure_private_outbound_ready(&counterparty).await?;
+            queue_private_payment_list_with_reservations_with_link_lease(
+                &self.storage,
+                &counterparty,
+                reservations,
+                self.clock.now(),
+                &lease,
+            )
+            .await
+        }
+        .await;
+        let result = match result {
+            Ok(record) => Ok(record),
+            Err(err) => {
+                self.cancel_reservations_and_return_queue_error(&cancellations, &counterparty, err)
+                    .await
+            }
+        };
+        self.finish_peer_link_operation(lease, result).await
+    }
+
     /// Enqueue an empty Private Payment List for one counterparty.
     ///
     /// This removes locally shared private receiving details after the queued
@@ -96,6 +140,21 @@ where
         }
         .await;
         self.finish_peer_link_operation(lease, result).await
+    }
+
+    /// Queue an empty Private Payment List and process that counterparty's queue.
+    pub async fn clear_private_payment_list_and_process_outbound(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<PrivatePaymentListSyncDeliveryReport> {
+        self.sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![PrivatePaymentListReservationUpdate {
+                counterparty,
+                reservations: Vec::new(),
+            }],
+            false,
+        )
+        .await
     }
 
     /// Queue Private Payment List updates for saved contacts.
@@ -196,6 +255,180 @@ where
             .await?;
         let outbound = self.process_pending_private_messages().await?;
         Ok(PrivatePaymentListSyncAndSendReport { sync, outbound })
+    }
+
+    /// Queue reservation-backed Private Payment Lists and process their queues.
+    ///
+    /// Each update is the complete Private Payment List for one counterparty.
+    /// An update with no reservations queues an empty Private Payment List for
+    /// that counterparty. When `clear_unlisted_linked_peers` is true, linked
+    /// peers that are not included in `updates` also receive empty lists.
+    pub async fn sync_private_payment_lists_with_reservations_and_process_outbound(
+        &self,
+        mut updates: Vec<PrivatePaymentListReservationUpdate>,
+        clear_unlisted_linked_peers: bool,
+    ) -> Result<PrivatePaymentListSyncDeliveryReport> {
+        self.require_initialized_identity("sync reservation-backed Private Payment Lists")
+            .await?;
+
+        updates.sort_by(|left, right| left.counterparty.as_str().cmp(right.counterparty.as_str()));
+        let mut update_counts = HashMap::new();
+        for update in &updates {
+            *update_counts
+                .entry(update.counterparty.clone())
+                .or_insert(0usize) += 1;
+        }
+        let update_counterparties = update_counts.keys().cloned().collect::<HashSet<_>>();
+
+        let mut clear_counterparties = if clear_unlisted_linked_peers {
+            self.linked_private_counterparties_not_in(&update_counterparties)
+                .await?
+        } else {
+            Vec::new()
+        };
+        clear_counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        clear_counterparties.dedup();
+
+        let mut report = PrivatePaymentListSyncDeliveryReport::default();
+        let mut queued_counterparties = Vec::new();
+
+        for update in updates {
+            let counterparty = update.counterparty;
+            let is_clear = update.reservations.is_empty();
+            if update_counts
+                .get(&counterparty)
+                .copied()
+                .unwrap_or_default()
+                > 1
+            {
+                let cancellations = update
+                    .reservations
+                    .iter()
+                    .map(|reservation| reservation_cancellation(&counterparty, reservation))
+                    .collect::<Vec<_>>();
+                let error = format!(
+                    "duplicate Private Payment List update for {}",
+                    counterparty.redacted_app_key()
+                );
+                let error = match self
+                    .cancel_reservations_after_queue_error(&cancellations, &counterparty)
+                    .await
+                {
+                    Ok(()) => error,
+                    Err(cancellation_err) => {
+                        format!("{error}; reservation cleanup also failed: {cancellation_err}")
+                    }
+                };
+                report.failed_to_queue.push(PrivatePaymentListSyncChange {
+                    counterparty,
+                    outbound_message_id: None,
+                    error: Some(error),
+                });
+                continue;
+            }
+            match self
+                .enqueue_private_payment_list_with_reservations(
+                    counterparty.clone(),
+                    update.reservations,
+                )
+                .await
+            {
+                Ok(record) => {
+                    queued_counterparties.push(counterparty.clone());
+                    let change = PrivatePaymentListSyncChange {
+                        counterparty,
+                        outbound_message_id: Some(record.outbound_message_id),
+                        error: None,
+                    };
+                    if is_clear {
+                        report.cleared.push(change);
+                    } else {
+                        report.queued.push(change);
+                    }
+                }
+                Err(err) => report.failed_to_queue.push(PrivatePaymentListSyncChange {
+                    counterparty,
+                    outbound_message_id: None,
+                    error: Some(err.to_string()),
+                }),
+            }
+        }
+
+        for counterparty in clear_counterparties {
+            match self.clear_private_payment_list(counterparty.clone()).await {
+                Ok(record) => {
+                    queued_counterparties.push(counterparty.clone());
+                    report.cleared.push(PrivatePaymentListSyncChange {
+                        counterparty,
+                        outbound_message_id: Some(record.outbound_message_id),
+                        error: None,
+                    });
+                }
+                Err(err) => report.failed_to_queue.push(PrivatePaymentListSyncChange {
+                    counterparty,
+                    outbound_message_id: None,
+                    error: Some(err.to_string()),
+                }),
+            }
+        }
+
+        queued_counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        queued_counterparties.dedup();
+        for counterparty in queued_counterparties {
+            match self
+                .process_outbound_private_messages(counterparty.clone())
+                .await
+            {
+                Ok(send_report) => {
+                    report
+                        .failed_to_deliver
+                        .extend(delivery_failures_from_send_report(
+                            counterparty,
+                            send_report,
+                        ));
+                }
+                Err(err) => report
+                    .failed_to_deliver
+                    .push(PrivatePaymentListDeliveryFailure {
+                        counterparty,
+                        outbound_message_id: None,
+                        reservation_id: None,
+                        error: err.to_string(),
+                    }),
+            }
+        }
+
+        Ok(report)
+    }
+
+    async fn linked_private_counterparties_not_in(
+        &self,
+        keep: &HashSet<PubkyPublicKey>,
+    ) -> Result<Vec<PubkyPublicKey>> {
+        self.storage
+            .transaction({
+                let keep = keep.clone();
+                move |tx| {
+                    let snapshot = tx.export_storage_state();
+                    let active_link_counterparties = snapshot
+                        .encrypted_link_states
+                        .iter()
+                        .filter(|(_, state)| state.link_snapshot.is_some())
+                        .map(|(counterparty, _)| counterparty.clone())
+                        .collect::<HashSet<_>>();
+                    Ok(snapshot
+                        .linked_peers
+                        .into_values()
+                        .filter(|peer| {
+                            peer.state == LinkedPeerState::Linked
+                                && !keep.contains(&peer.counterparty)
+                                && active_link_counterparties.contains(&peer.counterparty)
+                        })
+                        .map(|peer| peer.counterparty)
+                        .collect())
+                }
+            })
+            .await
     }
 
     #[cfg(test)]
@@ -306,6 +539,23 @@ where
                 cancellation_errors.join("; ")
             )))
         }
+    }
+
+    async fn cancel_reservations_and_return_queue_error<T>(
+        &self,
+        cancellations: &[PaymentEndpointReservationCancellation],
+        counterparty: &PubkyPublicKey,
+        err: PaykitSdkError,
+    ) -> Result<T> {
+        if let Err(cancellation_err) = self
+            .cancel_reservations_after_queue_error(cancellations, counterparty)
+            .await
+        {
+            return Err(PaykitSdkError::Policy(format!(
+                "failed to queue reserved receiving details: {err}; reservation cleanup also failed: {cancellation_err}"
+            )));
+        }
+        Err(err)
     }
 
     pub(super) async fn cancel_unattempted_superseded_reservations(
@@ -486,4 +736,40 @@ fn reservation_cancellation(
         payload_hash: reservation_payload_hash(&reservation.receiving_detail.payload),
         attribution: reservation.attribution.clone(),
     }
+}
+
+fn delivery_failures_from_send_report(
+    counterparty: PubkyPublicKey,
+    report: OutboundPrivateSendReport,
+) -> Vec<PrivatePaymentListDeliveryFailure> {
+    let mut failures = Vec::new();
+
+    for failure in report.failed {
+        failures.push(PrivatePaymentListDeliveryFailure {
+            counterparty: counterparty.clone(),
+            outbound_message_id: Some(failure.outbound_message_id),
+            reservation_id: None,
+            error: failure.error,
+        });
+    }
+
+    for failure in report.reservation_cleanup_failures {
+        failures.push(PrivatePaymentListDeliveryFailure {
+            counterparty: counterparty.clone(),
+            outbound_message_id: None,
+            reservation_id: failure.reservation_id,
+            error: failure.error,
+        });
+    }
+
+    for failure in report.recovery_marker_failures {
+        failures.push(PrivatePaymentListDeliveryFailure {
+            counterparty: counterparty.clone(),
+            outbound_message_id: failure.outbound_message_id,
+            reservation_id: None,
+            error: failure.error,
+        });
+    }
+
+    failures
 }
