@@ -249,7 +249,7 @@ pub struct FfiEncryptedLinkRecoveryMarkerReport {
     pub remote_marker_changed: bool,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// List locally tracked Linked Peer records.
     pub async fn linked_peers(&self) -> Result<Vec<FfiLinkedPeerRecord>, PaykitFfiError> {

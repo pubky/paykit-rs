@@ -99,7 +99,7 @@ pub struct FfiPreparedContactPayment {
     pub private_error: Option<Arc<FfiPrivateOperationError>>,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Resolve payable endpoints for one counterparty.
     pub async fn resolve_contact_payment(

@@ -235,7 +235,7 @@ pub struct FfiPaymentProofSubmission {
     pub proof: Arc<FfiPrivateJsonObject>,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Return inbound Payment Requests received from one counterparty.
     pub async fn received_payment_requests_from(

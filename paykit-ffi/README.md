@@ -117,7 +117,9 @@ For direct reservation publication, pass one
 list means "publish an empty Private Payment List for this counterparty".
 Helpers that both queue and attempt delivery return
 `PrivatePaymentListDeliveryReport` with `queued`, `cleared`,
-`failedToQueue`, and `failedToDeliver` groups.
+`failedToQueue`, and `failedToDeliver` groups. A peer whose Encrypted Link is
+`LINKING` can appear in `queued`; the message remains eligible for a later
+outbound worker run after the link becomes `LINKED`.
 
 ### Payment Requests
 

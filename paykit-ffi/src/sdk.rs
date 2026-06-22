@@ -81,7 +81,7 @@ pub struct FfiPaykitSdk {
     state_store: Arc<dyn FfiSdkStateBlobStore>,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Create an SDK runtime from platform storage/session callbacks.
     #[uniffi::constructor]

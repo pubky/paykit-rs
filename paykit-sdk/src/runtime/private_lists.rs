@@ -40,7 +40,8 @@ where
     ) -> Result<OutboundPrivateMessageRecord> {
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = async {
-            self.ensure_private_outbound_ready(&counterparty).await?;
+            self.ensure_private_list_queue_allowed(&counterparty)
+                .await?;
             self.enqueue_private_payment_list_from_receiving_details_with_claim(
                 counterparty,
                 &lease,
@@ -59,7 +60,8 @@ where
     ) -> Result<OutboundPrivateMessageRecord> {
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = async {
-            self.ensure_private_outbound_ready(&counterparty).await?;
+            self.ensure_private_list_queue_allowed(&counterparty)
+                .await?;
             enqueue_private_payment_list_message_with_link_lease(
                 &self.storage,
                 counterparty,
@@ -96,7 +98,8 @@ where
             }
         };
         let result = async {
-            self.ensure_private_outbound_ready(&counterparty).await?;
+            self.ensure_private_list_queue_allowed(&counterparty)
+                .await?;
             queue_private_payment_list_with_reservations_with_link_lease(
                 &self.storage,
                 &counterparty,
@@ -128,7 +131,8 @@ where
     ) -> Result<OutboundPrivateMessageRecord> {
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = async {
-            self.ensure_private_outbound_ready(&counterparty).await?;
+            self.ensure_private_list_queue_allowed(&counterparty)
+                .await?;
             enqueue_private_payment_list_message_with_link_lease(
                 &self.storage,
                 counterparty,
@@ -284,6 +288,9 @@ where
     /// An update with no reservations queues an empty Private Payment List for
     /// that counterparty. When `clear_unlisted_linked_peers` is true, linked
     /// peers that are not included in `updates` also receive empty lists.
+    /// Counterparties with an in-progress Encrypted Link can still have their
+    /// lists queued; they remain eligible for a later outbound worker run after
+    /// the link reaches `Linked`.
     pub async fn sync_private_payment_lists_with_reservations_and_process_outbound(
         &self,
         mut updates: Vec<PrivatePaymentListReservationUpdate>,
@@ -396,6 +403,21 @@ where
         queued_counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         queued_counterparties.dedup();
         for counterparty in queued_counterparties {
+            match self.private_list_delivery_ready(&counterparty).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(err) => {
+                    report
+                        .failed_to_deliver
+                        .push(PrivatePaymentListDeliveryFailure {
+                            counterparty,
+                            outbound_message_id: None,
+                            reservation_id: None,
+                            error: err.to_string(),
+                        });
+                    continue;
+                }
+            }
             match self
                 .process_outbound_private_messages(counterparty.clone())
                 .await
@@ -420,6 +442,29 @@ where
         }
 
         Ok(report)
+    }
+
+    async fn ensure_private_list_queue_allowed(&self, counterparty: &PubkyPublicKey) -> Result<()> {
+        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
+            return Err(PaykitSdkError::Identity {
+                context: "local Pubky identity is not private-link-capable".into(),
+                source: None,
+            });
+        }
+        if session_access.is_none() {
+            return Err(PaykitSdkError::Identity {
+                context: "no Pubky session available".into(),
+                source: None,
+            });
+        }
+        self.private_queue_readiness(counterparty).await.map(|_| ())
+    }
+
+    async fn private_list_delivery_ready(&self, counterparty: &PubkyPublicKey) -> Result<bool> {
+        self.private_queue_readiness(counterparty)
+            .await
+            .map(|readiness| readiness == PrivateQueueReadiness::Ready)
     }
 
     async fn linked_private_counterparties_not_in(

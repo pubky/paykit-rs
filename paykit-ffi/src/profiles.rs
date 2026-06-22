@@ -171,7 +171,7 @@ pub struct FfiContactRecord {
     pub public_contact_last_error: Option<String>,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Publish this identity's Paykit Profile.
     pub async fn publish_paykit_profile(

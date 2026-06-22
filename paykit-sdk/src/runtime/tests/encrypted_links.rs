@@ -68,6 +68,70 @@ async fn test_initiate_link_with_peer_preserves_untrusted_linking_state_without_
 }
 
 #[tokio::test]
+async fn test_private_queue_readiness_allows_linking_peer_with_handshake() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_handshake(&storage, counterparty.clone()).await;
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let readiness = sdk.private_queue_readiness(&counterparty).await.unwrap();
+
+    assert_eq!(readiness, PrivateQueueReadiness::PendingHandshake);
+}
+
+#[tokio::test]
+async fn test_private_queue_readiness_rejects_linking_peer_without_handshake_role() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_linked_peer(LinkedPeerRecord {
+                    counterparty: counterparty.clone(),
+                    state: LinkedPeerState::Linking,
+                    last_sync_at: Some(FixedClock.now()),
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty,
+                    link_snapshot: None,
+                    handshake_snapshot: Some(vec![1, 2, 3]),
+                    handshake_role: None,
+                    generation: 0,
+                    checkpointed_at: FixedClock.now(),
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk.private_queue_readiness(&counterparty).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
+}
+
+#[tokio::test]
 async fn test_recovery_required_peer_allows_relink_attempt() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

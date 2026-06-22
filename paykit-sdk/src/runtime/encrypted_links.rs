@@ -39,6 +39,45 @@ where
         }
     }
 
+    pub(super) async fn private_queue_readiness(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<PrivateQueueReadiness> {
+        let (peer_state, has_active_link, has_restorable_handshake) = self
+            .storage
+            .transaction(|tx| {
+                let peer_state = tx.linked_peer(counterparty).map(|peer| peer.state);
+                let state = tx.encrypted_link_state(counterparty);
+                let has_active_link = state
+                    .as_ref()
+                    .and_then(|state| state.link_snapshot.as_ref())
+                    .is_some();
+                let has_restorable_handshake = state.as_ref().is_some_and(|state| {
+                    state.handshake_snapshot.is_some() && state.handshake_role.is_some()
+                });
+                Ok((peer_state, has_active_link, has_restorable_handshake))
+            })
+            .await?;
+        match peer_state {
+            Some(LinkedPeerState::Linked) if has_active_link => Ok(PrivateQueueReadiness::Ready),
+            Some(LinkedPeerState::Linking) if has_restorable_handshake => {
+                Ok(PrivateQueueReadiness::PendingHandshake)
+            }
+            Some(LinkedPeerState::Linking) => Err(PaykitSdkError::RecoveryRequired(format!(
+                "Encrypted Link Handshake state is incomplete for counterparty {counterparty}"
+            ))),
+            Some(LinkedPeerState::RecoveryRequired) => Err(PaykitSdkError::RecoveryRequired(
+                format!("Encrypted Link recovery is required for counterparty {counterparty}"),
+            )),
+            Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy(format!(
+                "counterparty {counterparty} is blocked"
+            ))),
+            _ => Err(PaykitSdkError::RecoveryRequired(format!(
+                "no active or in-progress Encrypted Link state for counterparty {counterparty}"
+            ))),
+        }
+    }
+
     pub(super) async fn ensure_peer_not_blocked(
         &self,
         counterparty: &PubkyPublicKey,

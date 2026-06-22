@@ -165,7 +165,7 @@ impl fmt::Debug for FfiPrivatePaymentListSyncChange {
     }
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Return the latest valid Private Payment List view for a counterparty.
     pub async fn current_private_payment_list(

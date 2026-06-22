@@ -415,7 +415,7 @@ impl FfiSdkPaymentAdapter for FfiNoopSdkPaymentAdapter {
     }
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     pub async fn sync_public_endpoints(&self) -> Result<FfiEndpointSyncReport, PaykitFfiError> {

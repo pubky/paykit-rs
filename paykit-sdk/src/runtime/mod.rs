@@ -155,6 +155,12 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     identity_operation_in_progress: Arc<Mutex<bool>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivateQueueReadiness {
+    Ready,
+    PendingHandshake,
+}
+
 struct RuntimeOperationGuard {
     in_progress: Arc<Mutex<bool>>,
 }

@@ -167,7 +167,7 @@ pub fn generate_receipt_id() -> String {
     ReceiptId::new_v4().to_string()
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Prepare a receipt issuance and persist it before network side effects.
     pub async fn prepare_receipt_issuance(

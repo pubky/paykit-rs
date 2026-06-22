@@ -653,6 +653,50 @@ async fn seed_private_capable_identity_and_link(
         .unwrap();
 }
 
+async fn seed_private_capable_identity_and_handshake(
+    storage: &InMemoryStorage,
+    counterparty: PubkyPublicKey,
+) {
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(PubkyPublicKey::from_public_key(
+                &pubky::Keypair::random().public_key(),
+            )),
+            capability: PubkyIdentityCapability::PrivateLinkCapable,
+            local_secret_available: true,
+            initialized_at: FixedClock.now(),
+            sign_out_generation: 0,
+        })
+        .await
+        .unwrap();
+    storage
+        .transaction(move |tx| {
+            tx.save_linked_peer(LinkedPeerRecord {
+                counterparty: counterparty.clone(),
+                state: LinkedPeerState::Linking,
+                last_sync_at: Some(FixedClock.now()),
+                last_private_receive_at: None,
+                failure_count: 0,
+                local_recovery_attempt_id: None,
+                local_recovery_marker_created_at: None,
+                local_recovery_marker_last_error: None,
+                remote_recovery_attempt_id: None,
+                remote_recovery_marker_observed_at: None,
+            });
+            tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                counterparty,
+                link_snapshot: None,
+                handshake_snapshot: Some(vec![1, 2, 3]),
+                handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
+                generation: 0,
+                checkpointed_at: FixedClock.now(),
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 mod backup;
 mod contacts;
 mod encrypted_links;

@@ -206,7 +206,7 @@ pub struct FfiPubkySessionBootstrap {
     inner: PubkySessionBootstrap,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPubkySessionBootstrap {
     /// Create a Pubky session bootstrap helper.
     #[uniffi::constructor]
@@ -329,7 +329,7 @@ pub struct FfiPubkyAuthRequest {
     inner: AsyncMutex<Option<PubkyAuthRequest>>,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPubkyAuthRequest {
     /// Return the auth URL to show as a deeplink or QR code.
     pub async fn authorization_url(&self) -> Result<String, PaykitFfiError> {
