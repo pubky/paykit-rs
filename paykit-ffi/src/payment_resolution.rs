@@ -4,15 +4,19 @@ use paykit_sdk::{
     storage::OutboundPrivateMessageRecord, ContactPaymentResolution,
     ContactPaymentResolutionPrivateState, ContactPaymentResolutionRequest,
     ContactPaymentResolutionStatus, OutboundPrivateMessageStatus, PaymentTarget,
-    PrivatePaymentListSyncChange, PrivatePaymentListSyncReport, PrivatePaymentListView,
-    ResolvedPaymentEndpoint,
+    PreparedContactPayment, PrivatePaymentListSyncAndSendReport, PrivatePaymentListSyncChange,
+    PrivatePaymentListSyncReport, PrivatePaymentListView, ResolvedPaymentEndpoint,
 };
 
 use crate::{
     payment_adapter::{
         FfiPaymentAmountContext, FfiPaymentEndpointSource, FfiPaymentPayload, FfiPaymentTarget,
+        FfiReceivingDetail,
     },
-    private_links::FfiPrivateOperationError,
+    private_links::{
+        FfiLinkedPeerHandshakeReport, FfiOutboundPrivateCounterpartySendReport,
+        FfiOutboundPrivateSendReport, FfiPrivateOperationError, FfiPrivateStreamIntakeReport,
+    },
     sdk::FfiPaykitSdk,
     session::{app_public_key, parse_public_key},
     PaykitFfiError,
@@ -95,6 +99,15 @@ pub struct FfiPrivatePaymentListSyncReport {
     pub failed: Vec<FfiPrivatePaymentListSyncChange>,
 }
 
+/// Report from syncing contact Private Payment Lists and processing outbound sends.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPrivatePaymentListSyncAndSendReport {
+    /// Queueing result for contact Private Payment Lists.
+    pub sync: FfiPrivatePaymentListSyncReport,
+    /// Outbound send reports produced after queueing.
+    pub outbound: Vec<FfiOutboundPrivateCounterpartySendReport>,
+}
+
 /// One counterparty result from a Private Payment List sync.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiPrivatePaymentListSyncChange {
@@ -171,6 +184,21 @@ pub struct FfiContactPaymentResolution {
     pub payable_endpoints: Vec<FfiResolvedPaymentEndpoint>,
 }
 
+/// Result of preparing a contact payment and resolving payable endpoints.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPreparedContactPayment {
+    /// Endpoint resolution after preparation.
+    pub resolution: FfiContactPaymentResolution,
+    /// Link handshake/advance report when the SDK attempted private setup.
+    pub link_report: Option<FfiLinkedPeerHandshakeReport>,
+    /// Private receive report when the SDK refreshed the private stream.
+    pub receive_report: Option<FfiPrivateStreamIntakeReport>,
+    /// Outbound send report when the SDK processed pending private messages.
+    pub outbound_report: Option<FfiOutboundPrivateSendReport>,
+    /// Private preparation error when public fallback was allowed.
+    pub private_error: Option<Arc<FfiPrivateOperationError>>,
+}
+
 #[uniffi::export]
 impl FfiPaykitSdk {
     /// Return the latest valid Private Payment List view for a counterparty.
@@ -197,6 +225,26 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Queue an explicit complete Private Payment List for one counterparty.
+    pub async fn enqueue_private_payment_list_with_receiving_details(
+        &self,
+        counterparty: String,
+        receiving_details: Vec<FfiReceivingDetail>,
+    ) -> Result<FfiQueuedPrivateMessage, PaykitFfiError> {
+        let receiving_details = receiving_details
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<paykit_sdk::Result<Vec<_>>>()?;
+        self.runtime
+            .enqueue_private_payment_list_with_receiving_details(
+                parse_public_key(counterparty)?,
+                receiving_details,
+            )
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
     /// Queue an empty Private Payment List for one counterparty.
     pub async fn clear_private_payment_list(
         &self,
@@ -216,6 +264,18 @@ impl FfiPaykitSdk {
     ) -> Result<FfiPrivatePaymentListSyncReport, PaykitFfiError> {
         self.runtime
             .sync_contact_private_payment_lists(clear_unlisted_linked_peers)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Queue contact Private Payment Lists and process pending private messages.
+    pub async fn sync_contact_private_payment_lists_and_process_outbound(
+        &self,
+        clear_unlisted_linked_peers: bool,
+    ) -> Result<FfiPrivatePaymentListSyncAndSendReport, PaykitFfiError> {
+        self.runtime
+            .sync_contact_private_payment_lists_and_process_outbound(clear_unlisted_linked_peers)
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -257,6 +317,26 @@ impl FfiPaykitSdk {
     ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
         self.runtime
             .resolve_public_contact_payment(parse_public_key(counterparty)?, amount.map(Into::into))
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Prepare private contact state, then resolve payable endpoints.
+    pub async fn prepare_and_resolve_contact_payment(
+        &self,
+        counterparty: String,
+        amount: Option<FfiPaymentAmountContext>,
+        include_public_endpoints: bool,
+        max_advance_steps: u32,
+    ) -> Result<FfiPreparedContactPayment, PaykitFfiError> {
+        self.runtime
+            .prepare_and_resolve_contact_payment(
+                parse_public_key(counterparty)?,
+                amount.map(Into::into),
+                include_public_endpoints,
+                max_advance_steps,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -354,12 +434,40 @@ impl From<PrivatePaymentListSyncReport> for FfiPrivatePaymentListSyncReport {
     }
 }
 
+impl From<PrivatePaymentListSyncAndSendReport> for FfiPrivatePaymentListSyncAndSendReport {
+    fn from(value: PrivatePaymentListSyncAndSendReport) -> Self {
+        Self {
+            sync: value.sync.into(),
+            outbound: value.outbound.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl From<PrivatePaymentListSyncChange> for FfiPrivatePaymentListSyncChange {
     fn from(value: PrivatePaymentListSyncChange) -> Self {
         Self {
             counterparty: app_public_key(&value.counterparty),
             outbound_message_id: value.outbound_message_id,
             error: value.error,
+        }
+    }
+}
+
+impl From<PreparedContactPayment> for FfiPreparedContactPayment {
+    fn from(value: PreparedContactPayment) -> Self {
+        Self {
+            resolution: value.resolution.into(),
+            link_report: value.link_report.map(Into::into),
+            receive_report: value.receive_report.map(Into::into),
+            outbound_report: value.outbound_report.map(Into::into),
+            private_error: value.private_error.map(|error| {
+                private_error(
+                    "contact_payment_preparation",
+                    "private_preparation_error",
+                    "private contact payment preparation failed",
+                    error,
+                )
+            }),
         }
     }
 }

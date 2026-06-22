@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::{
-    domain::publication::PublicationStatus, PaykitSdkError, PaymentAmountContext,
-    PaymentEndpointCandidate, PaymentTarget, PubkyPublicKey, Result,
+    domain::linked_peers::LinkedPeerHandshakeReport,
+    domain::outbound_private::OutboundPrivateSendReport,
+    domain::private_stream::PrivateStreamIntakeReport, domain::publication::PublicationStatus,
+    PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate, PaymentTarget, PubkyPublicKey,
+    Result,
 };
 
 /// Default public Paykit profile path.
@@ -668,6 +671,36 @@ pub struct ContactPaymentResolutionRequest {
     pub amount: Option<PaymentAmountContext>,
     /// Include public Payment Endpoints after private candidates.
     pub include_public_endpoints: bool,
+}
+
+/// Result of preparing a contact payment and resolving payable endpoints.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedContactPayment {
+    /// Endpoint resolution after preparation.
+    pub resolution: ContactPaymentResolution,
+    /// Link handshake/advance report when the SDK attempted private setup.
+    pub link_report: Option<LinkedPeerHandshakeReport>,
+    /// Private receive report when the SDK refreshed the private stream.
+    pub receive_report: Option<PrivateStreamIntakeReport>,
+    /// Outbound send report when the SDK processed pending private messages.
+    pub outbound_report: Option<OutboundPrivateSendReport>,
+    /// Private preparation error when public fallback was allowed.
+    pub private_error: Option<String>,
+}
+
+impl fmt::Debug for PreparedContactPayment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedContactPayment")
+            .field("resolution", &self.resolution)
+            .field("link_report", &self.link_report)
+            .field("receive_report", &self.receive_report)
+            .field("outbound_report", &self.outbound_report)
+            .field(
+                "private_error",
+                &self.private_error.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Payment Endpoint paired with the target needed to pay through it.

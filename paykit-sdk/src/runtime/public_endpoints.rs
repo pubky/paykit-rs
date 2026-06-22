@@ -9,16 +9,25 @@ where
 {
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     pub async fn sync_public_endpoints(&self) -> Result<EndpointSyncReport> {
+        let details = self
+            .payment
+            .current_receiving_details(ReceivingDetailScope::Public)
+            .await?;
+        self.sync_public_endpoints_with_receiving_details(details)
+            .await
+    }
+
+    /// Publish explicit public receiving details and remove stale SDK-managed endpoints.
+    pub async fn sync_public_endpoints_with_receiving_details(
+        &self,
+        details: Vec<ReceivingDetail>,
+    ) -> Result<EndpointSyncReport> {
         let _identity_guard = self.claim_identity_operation("sync public endpoints")?;
         let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let details = self
-            .payment
-            .current_receiving_details(ReceivingDetailScope::Public)
-            .await?;
         let desired = normalize_receiving_details(details)?;
         let now = self.clock.now();
         let mut report = EndpointSyncReport::default();

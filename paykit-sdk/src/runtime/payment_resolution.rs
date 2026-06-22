@@ -173,6 +173,90 @@ where
         .await
     }
 
+    /// Prepare private contact state, then resolve payable endpoints.
+    ///
+    /// This is the app-facing "pay contact" workflow. It tries to advance the
+    /// private link, receive private messages, and process pending outbound
+    /// private messages before resolving endpoints. When public endpoints are
+    /// included, private preparation failures are reported and public fallback
+    /// can still be returned.
+    pub async fn prepare_and_resolve_contact_payment(
+        &self,
+        counterparty: PubkyPublicKey,
+        amount: Option<PaymentAmountContext>,
+        include_public_endpoints: bool,
+        max_advance_steps: u32,
+    ) -> Result<PreparedContactPayment> {
+        let mut link_report = None;
+        let mut receive_report = None;
+        let mut outbound_report = None;
+        let mut private_error = None;
+
+        if self.private_payment_preparation_is_available().await? {
+            match self
+                .ensure_link_with_peer(counterparty.clone(), max_advance_steps)
+                .await
+            {
+                Ok(report) => {
+                    link_report = Some(report);
+                    match self.receive_private_messages(counterparty.clone()).await {
+                        Ok(report) => receive_report = Some(report),
+                        Err(err) => {
+                            if !include_public_endpoints {
+                                return Err(err);
+                            }
+                            private_error = Some(err.to_string());
+                        }
+                    }
+                    if private_error.is_none() {
+                        match self
+                            .process_outbound_private_messages(counterparty.clone())
+                            .await
+                        {
+                            Ok(report) => outbound_report = Some(report),
+                            Err(err) => {
+                                if !include_public_endpoints {
+                                    return Err(err);
+                                }
+                                private_error = Some(err.to_string());
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    if !include_public_endpoints {
+                        return Err(err);
+                    }
+                    private_error = Some(err.to_string());
+                }
+            }
+        }
+
+        let mut resolution = self
+            .resolve_contact_payment(ContactPaymentResolutionRequest {
+                counterparty,
+                amount,
+                include_public_endpoints,
+            })
+            .await?;
+        prefer_private_endpoints(&mut resolution);
+
+        Ok(PreparedContactPayment {
+            resolution,
+            link_report,
+            receive_report,
+            outbound_report,
+            private_error,
+        })
+    }
+
+    async fn private_payment_preparation_is_available(&self) -> Result<bool> {
+        let Some(identity) = self.storage.load_identity_state().await? else {
+            return Ok(false);
+        };
+        Ok(identity.capability == PubkyIdentityCapability::PrivateLinkCapable)
+    }
+
     pub(super) async fn recover_private_candidates_for_resolution(
         &self,
         counterparty: &PubkyPublicKey,
@@ -321,6 +405,16 @@ fn private_candidates(
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.identifier.cmp(&right.identifier));
     candidates
+}
+
+pub(super) fn prefer_private_endpoints(resolution: &mut ContactPaymentResolution) {
+    resolution.payable_endpoints.sort_by_key(|endpoint| {
+        if endpoint.endpoint.source == PaymentEndpointSource::PrivatePaymentList {
+            0
+        } else {
+            1
+        }
+    });
 }
 
 pub(super) enum PrivateRecoveryOutcome {

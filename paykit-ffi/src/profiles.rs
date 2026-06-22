@@ -292,6 +292,31 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Resolve public profile metadata, preferring Paykit Profile.
+    pub async fn resolve_profile(
+        &self,
+        public_key: String,
+        allow_pubky_profile_fallback: bool,
+    ) -> Result<Option<FfiContactProfileResolution>, PaykitFfiError> {
+        self.runtime
+            .resolve_profile(parse_public_key(public_key)?, allow_pubky_profile_fallback)
+            .await
+            .map(|resolution| resolution.map(Into::into))
+            .map_err(Into::into)
+    }
+
+    /// Resolve this identity's public profile.
+    pub async fn current_profile(
+        &self,
+        allow_pubky_profile_fallback: bool,
+    ) -> Result<Option<FfiContactProfileResolution>, PaykitFfiError> {
+        self.runtime
+            .current_profile(allow_pubky_profile_fallback)
+            .await
+            .map(|resolution| resolution.map(Into::into))
+            .map_err(Into::into)
+    }
+
     /// Save or update a local Contact Record.
     pub async fn save_contact(
         &self,

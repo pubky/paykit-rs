@@ -182,6 +182,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `currentPrivatePaymentList`(`counterparty`: kotlin.String): FfiPrivatePaymentListView?
 
     /**
+     * Resolve this identity's public profile.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `currentProfile`(`allowPubkyProfileFallback`: kotlin.Boolean): FfiContactProfileResolution?
+
+    /**
      * Delete a blob by `pubky://` URI or configured Paykit profile path.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -204,6 +210,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `enqueuePrivatePaymentList`(`counterparty`: kotlin.String): FfiQueuedPrivateMessage
+
+    /**
+     * Queue an explicit complete Private Payment List for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `enqueuePrivatePaymentListWithReceivingDetails`(`counterparty`: kotlin.String, `receivingDetails`: List<FfiReceivingDetail>): FfiQueuedPrivateMessage
 
     /**
      * Start or advance an Encrypted Link Handshake for one counterparty.
@@ -324,6 +336,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `pendingOutboundPrivateCounterparties`(): List<kotlin.String>
+
+    /**
+     * Prepare private contact state, then resolve payable endpoints.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `prepareAndResolveContactPayment`(`counterparty`: kotlin.String, `amount`: FfiPaymentAmountContext?, `includePublicEndpoints`: kotlin.Boolean, `maxAdvanceSteps`: kotlin.UInt): FfiPreparedContactPayment
 
     /**
      * Prepare a receipt issuance and persist it before network side effects.
@@ -488,6 +506,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `amount`: FfiPaymentAmountContext?): FfiContactPaymentResolution
 
     /**
+     * Resolve public profile metadata, preferring Paykit Profile.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolveProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): FfiContactProfileResolution?
+
+    /**
      * Resolve payable public endpoints for one counterparty.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -524,6 +548,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `signOut`(): FfiIdentityStatus
 
     /**
+     * Return the current platform SDK state revision, when a state blob exists.
+     */
+    @Throws(PaykitFfiException::class)
+    public fun `stateRevision`(): kotlin.String?
+
+    /**
      * Queue a Payment Proof for an accepted Payment Request.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -536,6 +566,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `syncContactPrivatePaymentLists`(`clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListSyncReport
 
     /**
+     * Queue contact Private Payment Lists and process pending private messages.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncContactPrivatePaymentListsAndProcessOutbound`(`clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListSyncAndSendReport
+
+    /**
      * Retry pending public Contact Marker publication/removal work.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -546,6 +582,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `syncPublicEndpoints`(): FfiEndpointSyncReport
+
+    /**
+     * Publish explicit public receiving details and remove stale SDK-managed endpoints.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncPublicEndpointsWithReceivingDetails`(`receivingDetails`: List<FfiReceivingDetail>): FfiEndpointSyncReport
 
     /**
      * Remove a local peer block and return the peer to NotLinked.
@@ -2080,6 +2122,46 @@ public data class FfiPaymentTarget (
 
 
 /**
+ * Result of preparing a contact payment and resolving payable endpoints.
+ */
+
+public data class FfiPreparedContactPayment (
+    /**
+     * Endpoint resolution after preparation.
+     */
+    val `resolution`: FfiContactPaymentResolution,
+    /**
+     * Link handshake/advance report when the SDK attempted private setup.
+     */
+    val `linkReport`: FfiLinkedPeerHandshakeReport?,
+    /**
+     * Private receive report when the SDK refreshed the private stream.
+     */
+    val `receiveReport`: FfiPrivateStreamIntakeReport?,
+    /**
+     * Outbound send report when the SDK processed pending private messages.
+     */
+    val `outboundReport`: FfiOutboundPrivateSendReport?,
+    /**
+     * Private preparation error when public fallback was allowed.
+     */
+    val `privateError`: FfiPrivateOperationError?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`resolution`,
+            this.`linkReport`,
+            this.`receiveReport`,
+            this.`outboundReport`,
+            this.`privateError`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
  * One endpoint in the latest Private Payment List view.
  */
 
@@ -2097,6 +2179,31 @@ public data class FfiPrivatePaymentListEndpoint (
         Disposable.destroy(
             this.`identifier`,
             this.`payload`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Report from syncing contact Private Payment Lists and processing outbound sends.
+ */
+
+public data class FfiPrivatePaymentListSyncAndSendReport (
+    /**
+     * Queueing result for contact Private Payment Lists.
+     */
+    val `sync`: FfiPrivatePaymentListSyncReport,
+    /**
+     * Outbound send reports produced after queueing.
+     */
+    val `outbound`: List<FfiOutboundPrivateCounterpartySendReport>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`sync`,
+            this.`outbound`,
         )
     }
     public companion object

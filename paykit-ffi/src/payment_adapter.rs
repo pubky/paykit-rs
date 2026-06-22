@@ -420,6 +420,22 @@ impl FfiPaykitSdk {
             .map(Into::into)
             .map_err(Into::into)
     }
+
+    /// Publish explicit public receiving details and remove stale SDK-managed endpoints.
+    pub async fn sync_public_endpoints_with_receiving_details(
+        &self,
+        receiving_details: Vec<FfiReceivingDetail>,
+    ) -> Result<FfiEndpointSyncReport, PaykitFfiError> {
+        let receiving_details = receiving_details
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<paykit_sdk::Result<Vec<_>>>()?;
+        self.runtime
+            .sync_public_endpoints_with_receiving_details(receiving_details)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
 }
 
 impl From<ReceivingDetailScope> for FfiReceivingDetailScope {

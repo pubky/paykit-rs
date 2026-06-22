@@ -339,7 +339,10 @@ Bindings should expose high-level workflows before low-level records:
 
 - initialize runtime
 - sign out
-- sync public Payment Endpoints
+- read the SDK state revision before/after mutating workflows so apps can mark
+  backups dirty without remembering every state-changing method name
+- sync public Payment Endpoints, including an explicit receiving-details helper
+  for apps that want to avoid adapter-side mutable setup
 - publish/fetch/delete Paykit Profile
 - upload profile avatar blobs and fetch public Pubky files/text
 - save/list/remove Contact Records
@@ -348,8 +351,14 @@ Bindings should expose high-level workflows before low-level records:
 - receive private messages
 - process outbound private messages
 - publish Private Payment Lists
-- sync Private Payment Lists for saved contacts
-- resolve contact payment, including private-only and public-only helpers
+- sync Private Payment Lists for saved contacts, including a helper that also
+  processes outbound delivery
+- prepare and resolve contact payment as the default mobile "pay contact"
+  workflow: ensure private state when possible, receive private messages,
+  process pending outbound messages, then resolve private-first with optional
+  public fallback
+- resolve contact payment with lower-level private-only and public-only helpers
+  for apps that need explicit source control
 - queue and list Payment Requests
 - submit Payment Proofs with caller-supplied proof data
 - retrieve Receipts

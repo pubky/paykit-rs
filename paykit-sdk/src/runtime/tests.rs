@@ -8,7 +8,7 @@ use std::{
 
 use super::*;
 use super::{
-    payment_resolution::{payable_from_batch, PrivateRecoveryOutcome},
+    payment_resolution::{payable_from_batch, prefer_private_endpoints, PrivateRecoveryOutcome},
     recovery::{local_recovery_marker_belongs_to_current_episode, RecoveryRequiredUpdate},
 };
 use crate::{

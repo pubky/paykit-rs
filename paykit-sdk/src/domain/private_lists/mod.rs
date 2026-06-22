@@ -14,7 +14,9 @@ use crate::domain::outbound_private::enqueue_private_message;
 use crate::{
     domain::adapters::ReceivingDetail,
     domain::endpoints::normalize_receiving_details,
-    domain::outbound_private::enqueue_private_message_with_link_lease,
+    domain::outbound_private::{
+        enqueue_private_message_with_link_lease, OutboundPrivateCounterpartySendReport,
+    },
     domain::private_stream::PrivateStreamParseStatus,
     storage::{
         OutboundPrivateMessageRecord, PeerLinkOperationLease, PrivateStreamItemRecord,
@@ -83,6 +85,24 @@ impl fmt::Debug for PrivatePaymentListSyncChange {
             .field("counterparty", &self.counterparty.redacted_app_key())
             .field("outbound_message_id", &self.outbound_message_id)
             .field("error", &self.error.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+/// Report from syncing contact Private Payment Lists and processing outbound sends.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivatePaymentListSyncAndSendReport {
+    /// Queueing result for contact Private Payment Lists.
+    pub sync: PrivatePaymentListSyncReport,
+    /// Outbound send reports produced after queueing.
+    pub outbound: Vec<OutboundPrivateCounterpartySendReport>,
+}
+
+impl fmt::Debug for PrivatePaymentListSyncAndSendReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivatePaymentListSyncAndSendReport")
+            .field("sync", &self.sync)
+            .field("outbound", &self.outbound.len())
             .finish()
     }
 }

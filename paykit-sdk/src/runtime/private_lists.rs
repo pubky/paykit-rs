@@ -51,6 +51,28 @@ where
         self.finish_peer_link_operation(lease, result).await
     }
 
+    /// Enqueue an explicit complete Private Payment List for one counterparty.
+    pub async fn enqueue_private_payment_list_with_receiving_details(
+        &self,
+        counterparty: PubkyPublicKey,
+        receiving_details: Vec<ReceivingDetail>,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        let lease = self.claim_peer_link_operation(&counterparty).await?;
+        let result = async {
+            self.ensure_private_outbound_ready(&counterparty).await?;
+            enqueue_private_payment_list_message_with_link_lease(
+                &self.storage,
+                counterparty,
+                receiving_details,
+                self.clock.now(),
+                &lease,
+            )
+            .await
+        }
+        .await;
+        self.finish_peer_link_operation(lease, result).await
+    }
+
     /// Enqueue an empty Private Payment List for one counterparty.
     ///
     /// This removes locally shared private receiving details after the queued
@@ -162,6 +184,18 @@ where
         }
 
         Ok(report)
+    }
+
+    /// Queue contact Private Payment Lists and process pending private messages.
+    pub async fn sync_contact_private_payment_lists_and_process_outbound(
+        &self,
+        clear_unlisted_linked_peers: bool,
+    ) -> Result<PrivatePaymentListSyncAndSendReport> {
+        let sync = self
+            .sync_contact_private_payment_lists(clear_unlisted_linked_peers)
+            .await?;
+        let outbound = self.process_pending_private_messages().await?;
+        Ok(PrivatePaymentListSyncAndSendReport { sync, outbound })
     }
 
     #[cfg(test)]

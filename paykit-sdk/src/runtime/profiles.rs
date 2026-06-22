@@ -254,6 +254,28 @@ where
         }
         Ok(None)
     }
+
+    /// Resolve a public profile, preferring Paykit Profile.
+    pub async fn resolve_profile(
+        &self,
+        public_key: PubkyPublicKey,
+        allow_pubky_profile_fallback: bool,
+    ) -> Result<Option<ContactProfileResolution>> {
+        self.resolve_contact_profile(public_key, allow_pubky_profile_fallback)
+            .await
+    }
+
+    /// Resolve this identity's public profile.
+    pub async fn current_profile(
+        &self,
+        allow_pubky_profile_fallback: bool,
+    ) -> Result<Option<ContactProfileResolution>> {
+        let public_key = self
+            .require_initialized_identity("resolve current profile")
+            .await?;
+        self.resolve_profile(public_key, allow_pubky_profile_fallback)
+            .await
+    }
 }
 
 fn avatar_extension(content_type: &str) -> Result<&'static str> {

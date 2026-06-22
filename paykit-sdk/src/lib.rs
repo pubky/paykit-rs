@@ -29,9 +29,10 @@ pub use domain::contacts::{
     ContactPaymentResolution, ContactPaymentResolutionPrivateState,
     ContactPaymentResolutionRequest, ContactPaymentResolutionStatus, ContactProfileResolution,
     ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile,
-    PaykitProfileRecord, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
-    ResolvedPaymentEndpoint, PAYKIT_PROFILE_BLOB_PATH_PREFIX, PAYKIT_PROFILE_PATH,
-    PAYKIT_PUBLIC_CONTACT_PATH_PREFIX, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+    PaykitProfileRecord, PreparedContactPayment, PubkyProfile, PubkyProfileLink,
+    PubkyProfileRecord, ResolvedPaymentEndpoint, PAYKIT_PROFILE_BLOB_PATH_PREFIX,
+    PAYKIT_PROFILE_PATH, PAYKIT_PUBLIC_CONTACT_PATH_PREFIX, PUBKY_FOLLOWS_PATH_PREFIX,
+    PUBKY_PROFILE_PATH,
 };
 #[doc(inline)]
 pub use domain::endpoints::{load_public_endpoint_records, EndpointSyncChange, EndpointSyncReport};
@@ -54,7 +55,8 @@ pub use domain::payment_requests::{
 };
 #[doc(inline)]
 pub use domain::private_lists::{
-    PrivatePaymentListSyncChange, PrivatePaymentListSyncReport, PrivatePaymentListView,
+    PrivatePaymentListSyncAndSendReport, PrivatePaymentListSyncChange,
+    PrivatePaymentListSyncReport, PrivatePaymentListView,
 };
 #[doc(inline)]
 pub use domain::private_stream::{

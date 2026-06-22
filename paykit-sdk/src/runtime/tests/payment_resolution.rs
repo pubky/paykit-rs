@@ -32,6 +32,43 @@ fn test_payable_from_batch_preserves_adapter_order_for_private_and_public() {
     assert_eq!(result, vec![public, private]);
 }
 
+#[test]
+fn test_prepared_resolution_prefers_private_endpoints() {
+    let private = endpoint_candidate("ln-private");
+    let mut public = private.clone();
+    public.source = PaymentEndpointSource::PublicPaymentEndpoint;
+    public.payload = "ln-public".into();
+    let mut resolution = ContactPaymentResolution {
+        status: ContactPaymentResolutionStatus::Payable,
+        private_state: ContactPaymentResolutionPrivateState::Available,
+        payable_endpoints: vec![
+            ResolvedPaymentEndpoint {
+                endpoint: public,
+                target: PaymentTarget {
+                    payload: "public-target".into(),
+                },
+            },
+            ResolvedPaymentEndpoint {
+                endpoint: private,
+                target: PaymentTarget {
+                    payload: "private-target".into(),
+                },
+            },
+        ],
+    };
+
+    prefer_private_endpoints(&mut resolution);
+
+    assert_eq!(
+        resolution.payable_endpoints[0].endpoint.source,
+        PaymentEndpointSource::PrivatePaymentList
+    );
+    assert_eq!(
+        resolution.payable_endpoints[1].endpoint.source,
+        PaymentEndpointSource::PublicPaymentEndpoint
+    );
+}
+
 #[tokio::test]
 async fn test_resolve_candidate_batch_preserves_private_state() {
     let storage = InMemoryStorage::new();
