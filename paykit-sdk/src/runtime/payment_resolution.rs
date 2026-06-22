@@ -137,6 +137,42 @@ where
         .await
     }
 
+    /// Resolve payable private endpoints for one counterparty.
+    pub async fn resolve_private_contact_payment(
+        &self,
+        counterparty: PubkyPublicKey,
+        amount: Option<PaymentAmountContext>,
+    ) -> Result<ContactPaymentResolution> {
+        self.resolve_contact_payment(ContactPaymentResolutionRequest {
+            counterparty,
+            amount,
+            include_public_endpoints: false,
+        })
+        .await
+    }
+
+    /// Resolve payable public endpoints for one counterparty.
+    pub async fn resolve_public_contact_payment(
+        &self,
+        counterparty: PubkyPublicKey,
+        amount: Option<PaymentAmountContext>,
+    ) -> Result<ContactPaymentResolution> {
+        let candidates = self.public_payment_candidates(&counterparty).await?;
+        if candidates.is_empty() {
+            return Ok(status_resolution(
+                ContactPaymentResolutionStatus::NoEndpoint,
+                ContactPaymentResolutionPrivateState::NoPrivateEndpoint,
+            ));
+        }
+        self.resolve_candidate_batch(
+            counterparty,
+            amount,
+            candidates,
+            ContactPaymentResolutionPrivateState::NoPrivateEndpoint,
+        )
+        .await
+    }
+
     pub(super) async fn recover_private_candidates_for_resolution(
         &self,
         counterparty: &PubkyPublicKey,

@@ -120,6 +120,36 @@ async fn test_publish_paykit_blob_requires_session() {
 }
 
 #[tokio::test]
+async fn test_delete_paykit_profile_requires_session() {
+    let sdk = PaykitSdk::with_clock(
+        InMemoryStorage::new(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk.delete_paykit_profile().await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+}
+
+#[tokio::test]
+async fn test_upload_profile_avatar_rejects_unsupported_content_type() {
+    let sdk = PaykitSdk::with_clock(
+        InMemoryStorage::new(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk.upload_profile_avatar(vec![1, 2, 3], "text/plain").await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+}
+
+#[tokio::test]
 async fn test_delete_paykit_blob_requires_initialized_session() {
     let sdk = PaykitSdk::with_clock(
         InMemoryStorage::new(),

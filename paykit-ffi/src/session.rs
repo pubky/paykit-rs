@@ -13,6 +13,18 @@ use crate::config::{default_pubky_client_config, FfiPubkyClientConfig};
 use crate::errors::{ffi_error_to_sdk, identity_error, validation_error, PaykitFfiError};
 use crate::secrets::FfiPubkyLocalSecretKey;
 
+pub(crate) fn parse_public_key(value: String) -> Result<PubkyPublicKey, PaykitFfiError> {
+    PubkyPublicKey::from_raw_or_app_key(value).map_err(Into::into)
+}
+
+pub(crate) fn app_public_key(value: &PubkyPublicKey) -> String {
+    value.to_app_key()
+}
+
+pub(crate) fn raw_public_key(value: &PubkyPublicKey) -> String {
+    value.as_str().to_owned()
+}
+
 /// Pubky capability state for one app-owned Paykit runtime.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FfiPubkyIdentityCapability {
@@ -367,7 +379,25 @@ pub fn pubky_public_key_from_secret(
 ) -> Result<String, PaykitFfiError> {
     Ok(local_secret_from_bytes(local_secret_key.export_bytes())?
         .public_key()
-        .to_string())
+        .to_app_key())
+}
+
+/// Normalize raw z32 or `pubky...` public-key text to app-key form.
+#[uniffi::export]
+pub fn normalize_pubky_public_key(value: String) -> Result<String, PaykitFfiError> {
+    parse_public_key(value).map(|key| key.to_app_key())
+}
+
+/// Normalize raw z32 or `pubky...` public-key text to raw z32 form.
+#[uniffi::export]
+pub fn raw_pubky_public_key(value: String) -> Result<String, PaykitFfiError> {
+    parse_public_key(value).map(|key| raw_public_key(&key))
+}
+
+/// Return a shortened `pubky...` public key for diagnostics.
+#[uniffi::export]
+pub fn redacted_pubky_public_key(value: String) -> Result<String, PaykitFfiError> {
+    parse_public_key(value).map(|key| key.redacted_app_key())
 }
 
 /// Parse an auth deep link into public request details.
@@ -433,7 +463,7 @@ fn bootstrap_result_to_ffi(
             session_secret,
             local_secret_key.as_ref().map(secret_to_ffi),
         )),
-        public_key: result.public_key.to_string(),
+        public_key: app_public_key(&result.public_key),
         capability: result.capability.into(),
     }
 }
@@ -466,7 +496,7 @@ impl From<PubkyAuthDetails> for FfiPubkyAuthDetails {
             kind: value.kind.into(),
             capabilities: value.capabilities,
             relay_url: value.relay_url,
-            homeserver_public_key: value.homeserver_public_key.map(|key| key.to_string()),
+            homeserver_public_key: value.homeserver_public_key.map(|key| key.to_app_key()),
         }
     }
 }
@@ -474,7 +504,7 @@ impl From<PubkyAuthDetails> for FfiPubkyAuthDetails {
 impl From<paykit_sdk::PubkyResourceRef> for FfiPubkyResourceRef {
     fn from(value: paykit_sdk::PubkyResourceRef) -> Self {
         Self {
-            public_key: value.public_key.to_string(),
+            public_key: value.public_key.to_app_key(),
             path: value.path,
             transport_url: value.transport_url,
         }

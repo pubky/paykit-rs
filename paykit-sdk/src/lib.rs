@@ -53,7 +53,9 @@ pub use domain::payment_requests::{
     PaymentRequestTermsRecord,
 };
 #[doc(inline)]
-pub use domain::private_lists::PrivatePaymentListView;
+pub use domain::private_lists::{
+    PrivatePaymentListSyncChange, PrivatePaymentListSyncReport, PrivatePaymentListView,
+};
 #[doc(inline)]
 pub use domain::private_stream::{
     EventIdConflict, PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,

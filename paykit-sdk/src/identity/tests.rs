@@ -92,6 +92,21 @@ fn test_pubky_public_key_validates_and_round_trips_z32() {
 }
 
 #[test]
+fn test_pubky_public_key_accepts_raw_or_app_key() {
+    let public_key = pubky::Keypair::random().public_key();
+    let raw = public_key.z32();
+    let app_key = format!("pubky{raw}");
+
+    let from_raw = PubkyPublicKey::from_raw_or_app_key(&raw).unwrap();
+    let from_app_key = PubkyPublicKey::from_raw_or_app_key(&app_key).unwrap();
+
+    assert_eq!(from_raw, from_app_key);
+    assert_eq!(from_app_key.as_str(), raw);
+    assert_eq!(from_app_key.to_app_key(), app_key);
+    assert!(from_app_key.redacted_app_key().starts_with("pubky"));
+}
+
+#[test]
 fn test_pubky_public_key_rejects_invalid_text() {
     let result = PubkyPublicKey::new("pk-peer");
 

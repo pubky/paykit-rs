@@ -38,6 +38,50 @@ async fn test_enqueue_private_payment_list_requires_private_capable_identity() {
 }
 
 #[tokio::test]
+async fn test_sync_contact_private_payment_lists_reports_contact_and_clear_failures() {
+    let storage = InMemoryStorage::new();
+    let contact = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let unlisted = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_link(&storage, unlisted.clone()).await;
+    storage
+        .transaction({
+            let unlisted = unlisted.clone();
+            move |tx| {
+                let mut peer = default_linked_peer(unlisted.clone());
+                peer.state = LinkedPeerState::Linked;
+                tx.save_linked_peer(peer);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        PrivateListPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+    sdk.save_contact(ContactUpdate {
+        public_key: contact.clone(),
+        label: None,
+    })
+    .await
+    .unwrap();
+
+    let report = sdk.sync_contact_private_payment_lists(true).await.unwrap();
+
+    assert!(report.queued.is_empty());
+    assert!(report.cleared.is_empty());
+    let failed = report
+        .failed
+        .iter()
+        .map(|change| change.counterparty.clone())
+        .collect::<HashSet<_>>();
+    assert_eq!(failed, HashSet::from([contact, unlisted]));
+}
+
+#[tokio::test]
 async fn test_enqueue_private_payment_list_uses_fallback_details() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

@@ -45,6 +45,48 @@ impl fmt::Debug for PrivatePaymentListView {
     }
 }
 
+/// Report from syncing Private Payment Lists for local contacts.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivatePaymentListSyncReport {
+    /// Counterparties that had a current Private Payment List queued.
+    pub queued: Vec<PrivatePaymentListSyncChange>,
+    /// Counterparties that had an empty Private Payment List queued.
+    pub cleared: Vec<PrivatePaymentListSyncChange>,
+    /// Counterparties that could not be queued or cleared.
+    pub failed: Vec<PrivatePaymentListSyncChange>,
+}
+
+impl fmt::Debug for PrivatePaymentListSyncReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivatePaymentListSyncReport")
+            .field("queued", &self.queued.len())
+            .field("cleared", &self.cleared.len())
+            .field("failed", &self.failed.len())
+            .finish()
+    }
+}
+
+/// One counterparty result from a Private Payment List sync.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivatePaymentListSyncChange {
+    /// Counterparty affected by the sync.
+    pub counterparty: PubkyPublicKey,
+    /// Queued outbound message id, when queueing succeeded.
+    pub outbound_message_id: Option<u64>,
+    /// Error text, when queueing failed.
+    pub error: Option<String>,
+}
+
+impl fmt::Debug for PrivatePaymentListSyncChange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivatePaymentListSyncChange")
+            .field("counterparty", &self.counterparty.redacted_app_key())
+            .field("outbound_message_id", &self.outbound_message_id)
+            .field("error", &self.error.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// Load the current Private Payment List view for one counterparty.
 pub(crate) async fn current_private_payment_list<S>(
     storage: &S,

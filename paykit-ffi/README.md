@@ -23,6 +23,8 @@ on low-level `paykit-lib` protocol bindings.
 - `FfiSdkPaymentAdapter` — platform callback interface for receiving details,
   endpoint reservation cleanup, payable endpoint ordering, and payment target
   construction.
+- `FfiPaykitSdk.initialize`, `identityStatus`, and `signOut` — app-facing
+  account/session lifecycle for the current Paykit runtime.
 - `FfiPubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
   session state.
@@ -31,6 +33,14 @@ on low-level `paykit-lib` protocol bindings.
 - `requiredSessionCapabilities(config)` — return Pubky capabilities required by
   a config.
 - `coreSessionCapabilities()` — return the core Paykit Pubky capability scope.
+
+FFI methods accept raw z32 Pubky public keys and `pubky...` app-key strings.
+App-facing records return `pubky...` strings. Use
+`normalizePubkyPublicKey`, `rawPubkyPublicKey`, and
+`redactedPubkyPublicKey` at app boundaries instead of hand-rolled conversion.
+Android also ships pure Kotlin `PaykitPublicKeys` helpers, and Swift ships
+pure `PaykitPublicKeys` helpers, for app code and unit tests that should not
+load the native UniFFI library just to format keys.
 
 ### Public Payment Endpoints
 
@@ -65,13 +75,25 @@ context. Raw diagnostic details require an explicit debug export method.
 
 - `FfiPaykitSdk.enqueuePrivatePaymentList` — queue current private receiving
   details for one counterparty.
+- `FfiPaykitSdk.clearPrivatePaymentList` — queue an empty private list for one
+  counterparty.
+- `FfiPaykitSdk.syncContactPrivatePaymentLists` — queue current private lists
+  for saved contacts and optionally clear linked peers that are no longer
+  saved contacts.
 - `FfiPaykitSdk.currentPrivatePaymentList` — inspect the latest cached Private
   Payment List view for one counterparty.
 - `FfiPaykitSdk.resolveContactPayment` — resolve payable private and optional
   public Payment Endpoints into adapter-built payment targets.
+- `FfiPaykitSdk.resolvePrivateContactPayment` and
+  `resolvePublicContactPayment` — source-specific resolution helpers for apps
+  that want to avoid mixed private/public results.
 
 Private endpoint payloads and payment targets use `FfiPaymentPayload`, so raw
 payment-method data is exported only through explicit payload methods.
+The reservation callback returns `FfiReceivingDetailReservationResponse`:
+`UseCurrentReceivingDetails` means the SDK should call regular current
+receiving details, while `Reservations` means use exactly the supplied list,
+including an empty list.
 
 ### Payment Requests
 
@@ -118,8 +140,10 @@ object.
 
 - `FfiPaykitSdk.publishPaykitProfile` / `fetchPaykitProfile` — write and read
   public Paykit Profiles.
-- `FfiPaykitSdk.publishPaykitBlob`, `deletePaykitBlob`, `fetchPubkyFile`, and
-  `fetchPubkyText` — publish profile blobs and read public Pubky resources.
+- `FfiPaykitSdk.deletePaykitProfile` — remove this identity's Paykit Profile.
+- `FfiPaykitSdk.publishPaykitBlob`, `uploadProfileAvatar`,
+  `deletePaykitBlob`, `fetchPubkyFile`, and `fetchPubkyText` — publish profile
+  blobs and read public Pubky resources.
 - `FfiPaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
   `removeContact` — manage local Contact Records.
 - `FfiPaykitSdk.fetchPubkyProfile`, `fetchPubkyFollows`, and
@@ -138,6 +162,12 @@ app-specific public profile fields without exposing an FFI JSON value model.
 - `FfiSdkBackupBlob` — SDK backup/export payload for app-controlled
   backup flows.
 - `FfiPubkyLocalSecretKey` — local Pubky secret key bytes.
+
+`FfiPaykitSdk.exportBackupString` and `restoreBackupString` are text-form
+wrappers for platforms that prefer a single encoded SDK backup string.
+`encodeSdkStateBlobSnapshot` and `decodeSdkStateBlobSnapshot` are convenience
+helpers for apps that store the opaque state blob and revision in one platform
+record.
 
 These are opaque binding objects. Use their explicit export methods only at
 platform secure-storage or backup boundaries.

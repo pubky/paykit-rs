@@ -153,6 +153,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `cancelPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): FfiPaymentRequestRecord
 
     /**
+     * Queue an empty Private Payment List for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `clearPrivatePaymentList`(`counterparty`: kotlin.String): FfiQueuedPrivateMessage
+
+    /**
      * Return this runtime's configuration.
      */
     public fun `config`(): FfiPaykitSdkConfig
@@ -182,6 +188,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `deletePaykitBlob`(`uriOrPath`: kotlin.String)
 
     /**
+     * Delete this identity's Paykit Profile.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `deletePaykitProfile`()
+
+    /**
      * Return tracked Encrypted Link recovery marker state for a counterparty.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -194,10 +206,22 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `enqueuePrivatePaymentList`(`counterparty`: kotlin.String): FfiQueuedPrivateMessage
 
     /**
+     * Start or advance an Encrypted Link Handshake for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `ensureLinkWithPeer`(`counterparty`: kotlin.String, `maxAdvanceSteps`: kotlin.UInt): FfiLinkedPeerHandshakeReport
+
+    /**
      * Export SDK-managed backup state as an opaque blob.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `exportBackupState`(): FfiSdkBackupBlob
+
+    /**
+     * Export SDK-managed backup state as a hex string.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `exportBackupString`(): kotlin.String
 
     /**
      * Fetch a public Paykit Profile.
@@ -458,10 +482,28 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `resolveContactProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): FfiContactProfileResolution?
 
     /**
+     * Resolve payable private endpoints for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `amount`: FfiPaymentAmountContext?): FfiContactPaymentResolution
+
+    /**
+     * Resolve payable public endpoints for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolvePublicContactPayment`(`counterparty`: kotlin.String, `amount`: FfiPaymentAmountContext?): FfiContactPaymentResolution
+
+    /**
      * Restore SDK-managed backup state from an opaque blob.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `restoreBackupState`(`backup`: FfiSdkBackupBlob): FfiRestoreReport
+
+    /**
+     * Restore SDK-managed backup state from a hex string.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `restoreBackupString`(`backup`: kotlin.String): FfiRestoreReport
 
     /**
      * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
@@ -488,6 +530,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `submitPaymentProof`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `proof`: FfiPaymentProofSubmission): FfiPaymentRequestRecord
 
     /**
+     * Queue Private Payment List updates for saved local contacts.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncContactPrivatePaymentLists`(`clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListSyncReport
+
+    /**
      * Retry pending public Contact Marker publication/removal work.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -504,6 +552,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `unblockPeer`(`counterparty`: kotlin.String): FfiLinkedPeerRecord
+
+    /**
+     * Upload profile avatar bytes and return the published blob record.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `uploadProfileAvatar`(`bytes`: kotlin.ByteArray, `contentType`: kotlin.String): FfiPaykitBlobRecord
 
     public companion object
 }
@@ -750,7 +804,7 @@ public interface FfiSdkPaymentAdapter {
      * Reserve receiving details for a counterparty's Private Payment List.
      */
     @Throws(PaykitFfiException::class)
-    public fun `reserveReceivingDetails`(`counterparty`: kotlin.String): List<FfiPaymentEndpointReservation>?
+    public fun `reserveReceivingDetails`(`counterparty`: kotlin.String): FfiReceivingDetailReservationResponse
 
     /**
      * Cancel a previously reserved receiving detail.
@@ -2051,6 +2105,52 @@ public data class FfiPrivatePaymentListEndpoint (
 
 
 /**
+ * One counterparty result from a Private Payment List sync.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPrivatePaymentListSyncChange (
+    /**
+     * Counterparty affected by the sync.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Queued outbound message id, when queueing succeeded.
+     */
+    val `outboundMessageId`: kotlin.ULong?,
+    /**
+     * Error text, when queueing failed.
+     */
+    val `error`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Report from syncing Private Payment Lists for local contacts.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPrivatePaymentListSyncReport (
+    /**
+     * Counterparties that had a current Private Payment List queued.
+     */
+    val `queued`: List<FfiPrivatePaymentListSyncChange>,
+    /**
+     * Counterparties that had an empty Private Payment List queued.
+     */
+    val `cleared`: List<FfiPrivatePaymentListSyncChange>,
+    /**
+     * Counterparties that could not be queued or cleared.
+     */
+    val `failed`: List<FfiPrivatePaymentListSyncChange>
+) {
+    public companion object
+}
+
+
+
+/**
  * Latest valid Private Payment List view for one counterparty.
  */
 
@@ -2677,6 +2777,31 @@ public data class FfiReceivingDetail (
         Disposable.destroy(
             this.`identifier`,
             this.`payload`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Explicit result for private receiving-detail reservation callbacks.
+ */
+
+public data class FfiReceivingDetailReservationResponse (
+    /**
+     * Response kind.
+     */
+    val `kind`: FfiReceivingDetailReservationResponseKind,
+    /**
+     * Reserved details when `kind` is `Reservations`.
+     */
+    val `reservations`: List<FfiPaymentEndpointReservation>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`kind`,
+            this.`reservations`,
         )
     }
     public companion object
@@ -3447,6 +3572,33 @@ public enum class FfiReceiptRetrievalStatus {
     FAILED,
     /**
      * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Reservation callback result kind.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiReceivingDetailReservationResponseKind {
+
+    /**
+     * Use `current_receiving_details` for this private list.
+     */
+    USE_CURRENT_RECEIVING_DETAILS,
+    /**
+     * Use the reservations carried by this response, including an empty list.
+     */
+    RESERVATIONS,
+    /**
+     * Reserved invalid response kind.
      */
     UNKNOWN;
     public companion object

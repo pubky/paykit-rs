@@ -9,6 +9,8 @@ use sha2::Sha256;
 use zeroize::Zeroize;
 
 const PUBKY_DERIVATION_CONTEXT: &[u8] = b"paykit/pubky";
+const PUBKY_APP_KEY_PREFIX: &str = "pubky";
+const PUBKY_PUBLIC_KEY_Z32_LEN: usize = 52;
 const BIP39_SEED_BYTES: usize = 64;
 const MAX_DERIVATION_LABEL_BYTES: usize = 128;
 
@@ -29,6 +31,16 @@ impl PubkyPublicKey {
         Ok(Self::from_public_key(&public_key))
     }
 
+    /// Create a public key wrapper from canonical z-base32 text or `pubky...` app-key text.
+    pub fn from_raw_or_app_key(value: impl AsRef<str>) -> crate::Result<Self> {
+        let value = value.as_ref().trim();
+        let raw = value
+            .strip_prefix(PUBKY_APP_KEY_PREFIX)
+            .filter(|_| value.len() == PUBKY_APP_KEY_PREFIX.len() + PUBKY_PUBLIC_KEY_Z32_LEN)
+            .unwrap_or(value);
+        Self::new(raw.to_owned())
+    }
+
     /// Create a wrapper from a parsed Pubky public key.
     pub fn from_public_key(public_key: &PublicKey) -> Self {
         Self(public_key.z32())
@@ -45,6 +57,19 @@ impl PubkyPublicKey {
     /// Access the inner public key string.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Return the `pubky...` app-key representation used by product surfaces.
+    pub fn to_app_key(&self) -> String {
+        format!("{PUBKY_APP_KEY_PREFIX}{}", self.0)
+    }
+
+    /// Return a shortened app-key string for diagnostic displays.
+    pub fn redacted_app_key(&self) -> String {
+        let app_key = self.to_app_key();
+        let prefix = &app_key[..PUBKY_APP_KEY_PREFIX.len() + 6];
+        let suffix = &app_key[app_key.len() - 6..];
+        format!("{prefix}...{suffix}")
     }
 }
 

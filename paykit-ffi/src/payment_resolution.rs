@@ -4,7 +4,8 @@ use paykit_sdk::{
     storage::OutboundPrivateMessageRecord, ContactPaymentResolution,
     ContactPaymentResolutionPrivateState, ContactPaymentResolutionRequest,
     ContactPaymentResolutionStatus, OutboundPrivateMessageStatus, PaymentTarget,
-    PrivatePaymentListView, ResolvedPaymentEndpoint,
+    PrivatePaymentListSyncChange, PrivatePaymentListSyncReport, PrivatePaymentListView,
+    ResolvedPaymentEndpoint,
 };
 
 use crate::{
@@ -13,6 +14,7 @@ use crate::{
     },
     private_links::FfiPrivateOperationError,
     sdk::FfiPaykitSdk,
+    session::{app_public_key, parse_public_key},
     PaykitFfiError,
 };
 
@@ -80,6 +82,28 @@ pub struct FfiPrivatePaymentListView {
     pub payment_endpoints: Vec<FfiPrivatePaymentListEndpoint>,
     /// Receive time of the latest valid list as RFC3339 text.
     pub last_refresh_at: Option<String>,
+}
+
+/// Report from syncing Private Payment Lists for local contacts.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPrivatePaymentListSyncReport {
+    /// Counterparties that had a current Private Payment List queued.
+    pub queued: Vec<FfiPrivatePaymentListSyncChange>,
+    /// Counterparties that had an empty Private Payment List queued.
+    pub cleared: Vec<FfiPrivatePaymentListSyncChange>,
+    /// Counterparties that could not be queued or cleared.
+    pub failed: Vec<FfiPrivatePaymentListSyncChange>,
+}
+
+/// One counterparty result from a Private Payment List sync.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPrivatePaymentListSyncChange {
+    /// Counterparty affected by the sync.
+    pub counterparty: String,
+    /// Queued outbound message id, when queueing succeeded.
+    pub outbound_message_id: Option<u64>,
+    /// Error text, when queueing failed.
+    pub error: Option<String>,
 }
 
 /// Result category for contact payment resolution.
@@ -173,6 +197,30 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Queue an empty Private Payment List for one counterparty.
+    pub async fn clear_private_payment_list(
+        &self,
+        counterparty: String,
+    ) -> Result<FfiQueuedPrivateMessage, PaykitFfiError> {
+        self.runtime
+            .clear_private_payment_list(parse_public_key(counterparty)?)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Queue Private Payment List updates for saved local contacts.
+    pub async fn sync_contact_private_payment_lists(
+        &self,
+        clear_unlisted_linked_peers: bool,
+    ) -> Result<FfiPrivatePaymentListSyncReport, PaykitFfiError> {
+        self.runtime
+            .sync_contact_private_payment_lists(clear_unlisted_linked_peers)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
     /// Resolve payable endpoints for one counterparty.
     pub async fn resolve_contact_payment(
         &self,
@@ -180,6 +228,35 @@ impl FfiPaykitSdk {
     ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
         self.runtime
             .resolve_contact_payment(request.try_into()?)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Resolve payable private endpoints for one counterparty.
+    pub async fn resolve_private_contact_payment(
+        &self,
+        counterparty: String,
+        amount: Option<FfiPaymentAmountContext>,
+    ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
+        self.runtime
+            .resolve_private_contact_payment(
+                parse_public_key(counterparty)?,
+                amount.map(Into::into),
+            )
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Resolve payable public endpoints for one counterparty.
+    pub async fn resolve_public_contact_payment(
+        &self,
+        counterparty: String,
+        amount: Option<FfiPaymentAmountContext>,
+    ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
+        self.runtime
+            .resolve_public_contact_payment(parse_public_key(counterparty)?, amount.map(Into::into))
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -205,7 +282,7 @@ impl From<OutboundPrivateMessageRecord> for FfiQueuedPrivateMessage {
     fn from(value: OutboundPrivateMessageRecord) -> Self {
         Self {
             outbound_message_id: value.outbound_message_id,
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             kind: value.kind,
             status: value.status.into(),
             attempt_count: value.attempt_count,
@@ -267,6 +344,26 @@ impl From<ContactPaymentResolutionPrivateState> for FfiContactPaymentResolutionP
     }
 }
 
+impl From<PrivatePaymentListSyncReport> for FfiPrivatePaymentListSyncReport {
+    fn from(value: PrivatePaymentListSyncReport) -> Self {
+        Self {
+            queued: value.queued.into_iter().map(Into::into).collect(),
+            cleared: value.cleared.into_iter().map(Into::into).collect(),
+            failed: value.failed.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<PrivatePaymentListSyncChange> for FfiPrivatePaymentListSyncChange {
+    fn from(value: PrivatePaymentListSyncChange) -> Self {
+        Self {
+            counterparty: app_public_key(&value.counterparty),
+            outbound_message_id: value.outbound_message_id,
+            error: value.error,
+        }
+    }
+}
+
 impl TryFrom<FfiContactPaymentResolutionRequest> for ContactPaymentResolutionRequest {
     type Error = PaykitFfiError;
 
@@ -299,7 +396,7 @@ impl From<PaymentTarget> for FfiPaymentTarget {
 impl From<ResolvedPaymentEndpoint> for FfiResolvedPaymentEndpoint {
     fn from(value: ResolvedPaymentEndpoint) -> Self {
         Self {
-            counterparty: value.endpoint.counterparty.to_string(),
+            counterparty: app_public_key(&value.endpoint.counterparty),
             source: value.endpoint.source.into(),
             identifier: value.endpoint.identifier,
             payload: Arc::new(FfiPaymentPayload::new(value.endpoint.payload)),
@@ -320,10 +417,6 @@ impl From<ContactPaymentResolution> for FfiContactPaymentResolution {
                 .collect(),
         }
     }
-}
-
-fn parse_public_key(value: String) -> Result<paykit_sdk::PubkyPublicKey, PaykitFfiError> {
-    paykit_sdk::PubkyPublicKey::new(value).map_err(Into::into)
 }
 
 fn private_error(

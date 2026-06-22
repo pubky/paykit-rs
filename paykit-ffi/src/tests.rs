@@ -1,4 +1,8 @@
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{
+    any::Any,
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use paykit_sdk::storage::{StorageAdapter, StorageState};
 use paykit_sdk::PaykitSdkConfig;
@@ -37,6 +41,18 @@ fn test_storage_state_blob_round_trips() {
     assert_eq!(decoded, state);
 }
 
+#[test]
+fn test_pubky_public_key_helpers_accept_raw_or_app_key() {
+    let raw = "8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io";
+    let app_key = format!("pubky{raw}");
+
+    assert_eq!(normalize_pubky_public_key(raw.into()).unwrap(), app_key);
+    assert_eq!(raw_pubky_public_key(app_key.clone()).unwrap(), raw);
+    assert!(redacted_pubky_public_key(app_key)
+        .unwrap()
+        .starts_with("pubky"));
+}
+
 #[tokio::test]
 async fn test_state_blob_save_error_preserves_code() {
     struct SaveFailStore {
@@ -65,6 +81,7 @@ async fn test_state_blob_save_error_preserves_code() {
             store: Arc::new(SaveFailStore {
                 error: storage_error(code, context),
             }),
+            transaction_lock: Arc::new(Mutex::new(())),
         };
 
         let err = storage
@@ -86,6 +103,20 @@ async fn test_state_blob_save_error_preserves_code() {
             other => panic!("unexpected error: {other:?}"),
         }
     }
+}
+
+#[test]
+fn test_state_blob_snapshot_encoding_round_trips() {
+    let snapshot = FfiSdkStateBlobSnapshot {
+        blob: Arc::new(FfiSdkStateBlob::new(vec![1, 2, 3])),
+        revision: "revision-1".into(),
+    };
+
+    let encoded = encode_sdk_state_blob_snapshot(snapshot.clone()).unwrap();
+    let decoded = decode_sdk_state_blob_snapshot(encoded).unwrap();
+
+    assert_eq!(decoded.revision, snapshot.revision);
+    assert_eq!(decoded.blob.export_bytes(), snapshot.blob.export_bytes());
 }
 
 #[test]

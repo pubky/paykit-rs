@@ -106,6 +106,12 @@ per-identity platform lock, but the lock must cover the full load/mutate/save
 transaction across app processes, extensions, services, and native modules that
 share the same state blob.
 
+The FFI storage wrapper serializes state-blob transactions inside one runtime
+handle. Platform stores still need checked replacement by revision, especially
+when multiple runtimes or app processes can share the same blob. Bindings may
+offer helpers that encode the blob and revision into one platform record, but
+apps should still treat the contents as opaque SDK state.
+
 Storage requirements for platform apps:
 
 - `save_state_blob_atomically` must either fully replace the previous blob or
@@ -118,6 +124,11 @@ Storage requirements for platform apps:
 This keeps platform integrators away from fragile details such as FIFO queue
 ordering, monotonic IDs, Encrypted Link checkpoint coupling, lease validation,
 dedupe indexes, and backup replacement invariants.
+
+Reservation callbacks should avoid nullable meanings. Use an explicit response
+shape: one value means "use current receiving details", and another means "use
+exactly this reservation list". An empty reservation list is then a deliberate
+empty private publication, not the same thing as no adapter response.
 
 React Native bindings should keep SDK state blob storage in the native module by
 default. Passing `SdkStateBlob` bytes through the JavaScript bridge
@@ -166,6 +177,11 @@ session secrets are secret-bearing values, so bindings should avoid exposing
 them through ordinary logs or debug output. If a platform binding cannot own
 that construction, it must make the required Pubky binding dependency explicit
 instead of implying that no Pubky integration is needed.
+
+Bindings should also provide pure platform public-key formatting helpers for
+ordinary app code and unit tests. Native UniFFI helpers can perform canonical
+SDK validation, but app-wide display/normalization helpers should not require
+native library loading in plain JVM or Swift unit tests.
 
 The session provider should expose only the platform state the SDK needs:
 
@@ -324,18 +340,20 @@ Bindings should expose high-level workflows before low-level records:
 - initialize runtime
 - sign out
 - sync public Payment Endpoints
-- publish/fetch Paykit Profile
+- publish/fetch/delete Paykit Profile
+- upload profile avatar blobs and fetch public Pubky files/text
 - save/list/remove Contact Records
 - sync public contact markers when enabled
 - initiate or advance linked peer state
 - receive private messages
 - process outbound private messages
 - publish Private Payment Lists
-- resolve contact payment
+- sync Private Payment Lists for saved contacts
+- resolve contact payment, including private-only and public-only helpers
 - queue and list Payment Requests
 - submit Payment Proofs with caller-supplied proof data
 - retrieve Receipts
-- export and restore SDK-managed backup state
+- export and restore SDK-managed backup state, including text-form wrappers
 
 Bindings should avoid typed private receive helpers that bypass durable ordered
 stream handling.

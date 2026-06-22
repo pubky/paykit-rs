@@ -51,6 +51,119 @@ where
         self.finish_peer_link_operation(lease, result).await
     }
 
+    /// Enqueue an empty Private Payment List for one counterparty.
+    ///
+    /// This removes locally shared private receiving details after the queued
+    /// message is delivered. It does not cancel payment-method state that was
+    /// already shared with the counterparty.
+    pub async fn clear_private_payment_list(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        let lease = self.claim_peer_link_operation(&counterparty).await?;
+        let result = async {
+            self.ensure_private_outbound_ready(&counterparty).await?;
+            enqueue_private_payment_list_message_with_link_lease(
+                &self.storage,
+                counterparty,
+                Vec::new(),
+                self.clock.now(),
+                &lease,
+            )
+            .await
+        }
+        .await;
+        self.finish_peer_link_operation(lease, result).await
+    }
+
+    /// Queue Private Payment List updates for saved contacts.
+    ///
+    /// Saved contacts receive the current private receiving details. When
+    /// `clear_unlisted_linked_peers` is true, linked peers that are no longer
+    /// saved contacts receive an empty Private Payment List.
+    pub async fn sync_contact_private_payment_lists(
+        &self,
+        clear_unlisted_linked_peers: bool,
+    ) -> Result<PrivatePaymentListSyncReport> {
+        self.require_initialized_identity("sync contact Private Payment Lists")
+            .await?;
+        let (mut contacts, mut clear_counterparties) = self
+            .storage
+            .transaction(|tx| {
+                let mut contacts = tx
+                    .contact_records()
+                    .into_iter()
+                    .map(|record| record.public_key)
+                    .collect::<Vec<_>>();
+                contacts.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+                contacts.dedup();
+
+                let clear_counterparties = if clear_unlisted_linked_peers {
+                    let contact_set = contacts.iter().cloned().collect::<HashSet<_>>();
+                    let snapshot = tx.export_storage_state();
+                    let active_link_counterparties = snapshot
+                        .encrypted_link_states
+                        .iter()
+                        .filter(|(_, state)| state.link_snapshot.is_some())
+                        .map(|(counterparty, _)| counterparty.clone())
+                        .collect::<HashSet<_>>();
+                    snapshot
+                        .linked_peers
+                        .into_values()
+                        .filter(|peer| {
+                            peer.state == LinkedPeerState::Linked
+                                && !contact_set.contains(&peer.counterparty)
+                                && active_link_counterparties.contains(&peer.counterparty)
+                        })
+                        .map(|peer| peer.counterparty)
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                Ok((contacts, clear_counterparties))
+            })
+            .await?;
+
+        clear_counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        clear_counterparties.dedup();
+
+        let mut report = PrivatePaymentListSyncReport::default();
+        for counterparty in contacts.drain(..) {
+            match self
+                .enqueue_private_payment_list(counterparty.clone())
+                .await
+            {
+                Ok(record) => report.queued.push(PrivatePaymentListSyncChange {
+                    counterparty,
+                    outbound_message_id: Some(record.outbound_message_id),
+                    error: None,
+                }),
+                Err(err) => report.failed.push(PrivatePaymentListSyncChange {
+                    counterparty,
+                    outbound_message_id: None,
+                    error: Some(err.to_string()),
+                }),
+            }
+        }
+
+        for counterparty in clear_counterparties {
+            match self.clear_private_payment_list(counterparty.clone()).await {
+                Ok(record) => report.cleared.push(PrivatePaymentListSyncChange {
+                    counterparty,
+                    outbound_message_id: Some(record.outbound_message_id),
+                    error: None,
+                }),
+                Err(err) => report.failed.push(PrivatePaymentListSyncChange {
+                    counterparty,
+                    outbound_message_id: None,
+                    error: Some(err.to_string()),
+                }),
+            }
+        }
+
+        Ok(report)
+    }
+
     #[cfg(test)]
     pub(super) async fn enqueue_private_payment_list_from_receiving_details(
         &self,

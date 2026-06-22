@@ -22,7 +22,7 @@ let package = Package(
             name: "Paykit",
             dependencies: ["PaykitFFI"],
             path: "./paykit-ffi/bindings/ios",
-            sources: ["paykit.swift"]
+            sources: ["paykit.swift", "PaykitPublicKeys.swift"]
         ),
         .binaryTarget(
             name: "PaykitFFI",

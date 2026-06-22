@@ -208,6 +208,54 @@ async fn test_resolve_contact_payment_uses_cached_private_list_for_public_only_i
 }
 
 #[tokio::test]
+async fn test_resolve_private_contact_payment_uses_private_candidates_only() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction(|tx| {
+            tx.save_identity_state(IdentityState {
+                public_key: Some(PubkyPublicKey::from_public_key(
+                    &pubky::Keypair::random().public_key(),
+                )),
+                capability: PubkyIdentityCapability::PublicOnly,
+                local_secret_available: false,
+                initialized_at: FixedClock.now(),
+                sign_out_generation: 0,
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![private_list_message("ln-private")],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .resolve_private_contact_payment(counterparty, None)
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, ContactPaymentResolutionStatus::Payable);
+    assert_eq!(
+        result.payable_endpoints[0].endpoint.source,
+        PaymentEndpointSource::PrivatePaymentList
+    );
+}
+
+#[tokio::test]
 async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_linking() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

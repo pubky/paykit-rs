@@ -562,6 +562,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func cancelPaymentRequest(counterparty: String, paymentRequestId: String, reason: String?) async throws  -> FfiPaymentRequestRecord
 
     /**
+     * Queue an empty Private Payment List for one counterparty.
+     */
+    func clearPrivatePaymentList(counterparty: String) async throws  -> FfiQueuedPrivateMessage
+
+    /**
      * Return this runtime's configuration.
      */
     func config()  -> FfiPaykitSdkConfig
@@ -587,6 +592,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func deletePaykitBlob(uriOrPath: String) async throws
 
     /**
+     * Delete this identity's Paykit Profile.
+     */
+    func deletePaykitProfile() async throws
+
+    /**
      * Return tracked Encrypted Link recovery marker state for a counterparty.
      */
     func encryptedLinkRecoveryMarkerStatus(counterparty: String) async throws  -> FfiEncryptedLinkRecoveryMarkerReport?
@@ -597,9 +607,19 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func enqueuePrivatePaymentList(counterparty: String) async throws  -> FfiQueuedPrivateMessage
 
     /**
+     * Start or advance an Encrypted Link Handshake for one counterparty.
+     */
+    func ensureLinkWithPeer(counterparty: String, maxAdvanceSteps: UInt32) async throws  -> FfiLinkedPeerHandshakeReport
+
+    /**
      * Export SDK-managed backup state as an opaque blob.
      */
     func exportBackupState() async throws  -> FfiSdkBackupBlob
+
+    /**
+     * Export SDK-managed backup state as a hex string.
+     */
+    func exportBackupString() async throws  -> String
 
     /**
      * Fetch a public Paykit Profile.
@@ -817,9 +837,24 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func resolveContactProfile(publicKey: String, allowPubkyProfileFallback: Bool) async throws  -> FfiContactProfileResolution?
 
     /**
+     * Resolve payable private endpoints for one counterparty.
+     */
+    func resolvePrivateContactPayment(counterparty: String, amount: FfiPaymentAmountContext?) async throws  -> FfiContactPaymentResolution
+
+    /**
+     * Resolve payable public endpoints for one counterparty.
+     */
+    func resolvePublicContactPayment(counterparty: String, amount: FfiPaymentAmountContext?) async throws  -> FfiContactPaymentResolution
+
+    /**
      * Restore SDK-managed backup state from an opaque blob.
      */
     func restoreBackupState(backup: FfiSdkBackupBlob) async throws  -> FfiRestoreReport
+
+    /**
+     * Restore SDK-managed backup state from a hex string.
+     */
+    func restoreBackupString(backup: String) async throws  -> FfiRestoreReport
 
     /**
      * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
@@ -842,6 +877,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func submitPaymentProof(counterparty: String, paymentRequestId: String, proof: FfiPaymentProofSubmission) async throws  -> FfiPaymentRequestRecord
 
     /**
+     * Queue Private Payment List updates for saved local contacts.
+     */
+    func syncContactPrivatePaymentLists(clearUnlistedLinkedPeers: Bool) async throws  -> FfiPrivatePaymentListSyncReport
+
+    /**
      * Retry pending public Contact Marker publication/removal work.
      */
     func syncPublicContactMarkers() async throws  -> [FfiContactRecord]
@@ -855,6 +895,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Remove a local peer block and return the peer to NotLinked.
      */
     func unblockPeer(counterparty: String) async throws  -> FfiLinkedPeerRecord
+
+    /**
+     * Upload profile avatar bytes and return the published blob record.
+     */
+    func uploadProfileAvatar(bytes: Data, contentType: String) async throws  -> FfiPaykitBlobRecord
 
 }
 /**
@@ -1109,6 +1154,26 @@ open func cancelPaymentRequest(counterparty: String, paymentRequestId: String, r
 }
 
     /**
+     * Queue an empty Private Payment List for one counterparty.
+     */
+open func clearPrivatePaymentList(counterparty: String)async throws  -> FfiQueuedPrivateMessage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_clear_private_payment_list(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiQueuedPrivateMessage_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Return this runtime's configuration.
      */
 open func config() -> FfiPaykitSdkConfig  {
@@ -1199,6 +1264,26 @@ open func deletePaykitBlob(uriOrPath: String)async throws   {
 }
 
     /**
+     * Delete this identity's Paykit Profile.
+     */
+open func deletePaykitProfile()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_delete_paykit_profile(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Return tracked Encrypted Link recovery marker state for a counterparty.
      */
 open func encryptedLinkRecoveryMarkerStatus(counterparty: String)async throws  -> FfiEncryptedLinkRecoveryMarkerReport?  {
@@ -1239,6 +1324,26 @@ open func enqueuePrivatePaymentList(counterparty: String)async throws  -> FfiQue
 }
 
     /**
+     * Start or advance an Encrypted Link Handshake for one counterparty.
+     */
+open func ensureLinkWithPeer(counterparty: String, maxAdvanceSteps: UInt32)async throws  -> FfiLinkedPeerHandshakeReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_ensure_link_with_peer(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterUInt32.lower(maxAdvanceSteps)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiLinkedPeerHandshakeReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Export SDK-managed backup state as an opaque blob.
      */
 open func exportBackupState()async throws  -> FfiSdkBackupBlob  {
@@ -1254,6 +1359,26 @@ open func exportBackupState()async throws  -> FfiSdkBackupBlob  {
             completeFunc: ffi_paykit_rust_future_complete_pointer,
             freeFunc: ffi_paykit_rust_future_free_pointer,
             liftFunc: FfiConverterTypeFfiSdkBackupBlob_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Export SDK-managed backup state as a hex string.
+     */
+open func exportBackupString()async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_export_backup_string(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -2119,6 +2244,46 @@ open func resolveContactProfile(publicKey: String, allowPubkyProfileFallback: Bo
 }
 
     /**
+     * Resolve payable private endpoints for one counterparty.
+     */
+open func resolvePrivateContactPayment(counterparty: String, amount: FfiPaymentAmountContext?)async throws  -> FfiContactPaymentResolution  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_resolve_private_contact_payment(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterOptionTypeFfiPaymentAmountContext.lower(amount)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiContactPaymentResolution_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Resolve payable public endpoints for one counterparty.
+     */
+open func resolvePublicContactPayment(counterparty: String, amount: FfiPaymentAmountContext?)async throws  -> FfiContactPaymentResolution  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_resolve_public_contact_payment(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterOptionTypeFfiPaymentAmountContext.lower(amount)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiContactPaymentResolution_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Restore SDK-managed backup state from an opaque blob.
      */
 open func restoreBackupState(backup: FfiSdkBackupBlob)async throws  -> FfiRestoreReport  {
@@ -2128,6 +2293,26 @@ open func restoreBackupState(backup: FfiSdkBackupBlob)async throws  -> FfiRestor
                 uniffi_paykit_fn_method_ffipaykitsdk_restore_backup_state(
                     self.uniffiClonePointer(),
                     FfiConverterTypeFfiSdkBackupBlob_lower(backup)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiRestoreReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Restore SDK-managed backup state from a hex string.
+     */
+open func restoreBackupString(backup: String)async throws  -> FfiRestoreReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_restore_backup_string(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(backup)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2219,6 +2404,26 @@ open func submitPaymentProof(counterparty: String, paymentRequestId: String, pro
 }
 
     /**
+     * Queue Private Payment List updates for saved local contacts.
+     */
+open func syncContactPrivatePaymentLists(clearUnlistedLinkedPeers: Bool)async throws  -> FfiPrivatePaymentListSyncReport  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_sync_contact_private_payment_lists(
+                    self.uniffiClonePointer(),
+                    FfiConverterBool.lower(clearUnlistedLinkedPeers)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiPrivatePaymentListSyncReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Retry pending public Contact Marker publication/removal work.
      */
 open func syncPublicContactMarkers()async throws  -> [FfiContactRecord]  {
@@ -2274,6 +2479,26 @@ open func unblockPeer(counterparty: String)async throws  -> FfiLinkedPeerRecord 
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeFfiLinkedPeerRecord_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Upload profile avatar bytes and return the published blob record.
+     */
+open func uploadProfileAvatar(bytes: Data, contentType: String)async throws  -> FfiPaykitBlobRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_upload_profile_avatar(
+                    self.uniffiClonePointer(),
+                    FfiConverterData.lower(bytes),FfiConverterString.lower(contentType)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiPaykitBlobRecord_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -4019,7 +4244,7 @@ public protocol FfiSdkPaymentAdapter: AnyObject, Sendable {
     /**
      * Reserve receiving details for a counterparty's Private Payment List.
      */
-    func reserveReceivingDetails(counterparty: String) throws  -> [FfiPaymentEndpointReservation]?
+    func reserveReceivingDetails(counterparty: String) throws  -> FfiReceivingDetailReservationResponse
 
     /**
      * Cancel a previously reserved receiving detail.
@@ -4106,8 +4331,8 @@ open func currentReceivingDetails(scope: FfiReceivingDetailScope)throws  -> [Ffi
     /**
      * Reserve receiving details for a counterparty's Private Payment List.
      */
-open func reserveReceivingDetails(counterparty: String)throws  -> [FfiPaymentEndpointReservation]?  {
-    return try  FfiConverterOptionSequenceTypeFfiPaymentEndpointReservation.lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+open func reserveReceivingDetails(counterparty: String)throws  -> FfiReceivingDetailReservationResponse  {
+    return try  FfiConverterTypeFfiReceivingDetailReservationResponse_lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
     uniffi_paykit_fn_method_ffisdkpaymentadapter_reserve_receiving_details(self.uniffiClonePointer(),
         FfiConverterString.lower(counterparty),$0
     )
@@ -4191,7 +4416,7 @@ fileprivate struct UniffiCallbackInterfaceFfiSdkPaymentAdapter {
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
             let makeCall = {
-                () throws -> [FfiPaymentEndpointReservation]? in
+                () throws -> FfiReceivingDetailReservationResponse in
                 guard let uniffiObj = try? FfiConverterTypeFfiSdkPaymentAdapter.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
@@ -4201,7 +4426,7 @@ fileprivate struct UniffiCallbackInterfaceFfiSdkPaymentAdapter {
             }
 
 
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionSequenceTypeFfiPaymentEndpointReservation.lower($0) }
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFfiReceivingDetailReservationResponse_lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -8830,6 +9055,208 @@ public func FfiConverterTypeFfiPrivatePaymentListEndpoint_lower(_ value: FfiPriv
 
 
 /**
+ * One counterparty result from a Private Payment List sync.
+ */
+public struct FfiPrivatePaymentListSyncChange {
+    /**
+     * Counterparty affected by the sync.
+     */
+    public var counterparty: String
+    /**
+     * Queued outbound message id, when queueing succeeded.
+     */
+    public var outboundMessageId: UInt64?
+    /**
+     * Error text, when queueing failed.
+     */
+    public var error: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty affected by the sync.
+         */counterparty: String,
+        /**
+         * Queued outbound message id, when queueing succeeded.
+         */outboundMessageId: UInt64?,
+        /**
+         * Error text, when queueing failed.
+         */error: String?) {
+        self.counterparty = counterparty
+        self.outboundMessageId = outboundMessageId
+        self.error = error
+    }
+}
+
+#if compiler(>=6)
+extension FfiPrivatePaymentListSyncChange: Sendable {}
+#endif
+
+
+extension FfiPrivatePaymentListSyncChange: Equatable, Hashable {
+    public static func ==(lhs: FfiPrivatePaymentListSyncChange, rhs: FfiPrivatePaymentListSyncChange) -> Bool {
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.outboundMessageId != rhs.outboundMessageId {
+            return false
+        }
+        if lhs.error != rhs.error {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(counterparty)
+        hasher.combine(outboundMessageId)
+        hasher.combine(error)
+    }
+}
+
+extension FfiPrivatePaymentListSyncChange: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPrivatePaymentListSyncChange: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivatePaymentListSyncChange {
+        return
+            try FfiPrivatePaymentListSyncChange(
+                counterparty: FfiConverterString.read(from: &buf),
+                outboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
+                error: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPrivatePaymentListSyncChange, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterOptionUInt64.write(value.outboundMessageId, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentListSyncChange_lift(_ buf: RustBuffer) throws -> FfiPrivatePaymentListSyncChange {
+    return try FfiConverterTypeFfiPrivatePaymentListSyncChange.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentListSyncChange_lower(_ value: FfiPrivatePaymentListSyncChange) -> RustBuffer {
+    return FfiConverterTypeFfiPrivatePaymentListSyncChange.lower(value)
+}
+
+
+/**
+ * Report from syncing Private Payment Lists for local contacts.
+ */
+public struct FfiPrivatePaymentListSyncReport {
+    /**
+     * Counterparties that had a current Private Payment List queued.
+     */
+    public var queued: [FfiPrivatePaymentListSyncChange]
+    /**
+     * Counterparties that had an empty Private Payment List queued.
+     */
+    public var cleared: [FfiPrivatePaymentListSyncChange]
+    /**
+     * Counterparties that could not be queued or cleared.
+     */
+    public var failed: [FfiPrivatePaymentListSyncChange]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparties that had a current Private Payment List queued.
+         */queued: [FfiPrivatePaymentListSyncChange],
+        /**
+         * Counterparties that had an empty Private Payment List queued.
+         */cleared: [FfiPrivatePaymentListSyncChange],
+        /**
+         * Counterparties that could not be queued or cleared.
+         */failed: [FfiPrivatePaymentListSyncChange]) {
+        self.queued = queued
+        self.cleared = cleared
+        self.failed = failed
+    }
+}
+
+#if compiler(>=6)
+extension FfiPrivatePaymentListSyncReport: Sendable {}
+#endif
+
+
+extension FfiPrivatePaymentListSyncReport: Equatable, Hashable {
+    public static func ==(lhs: FfiPrivatePaymentListSyncReport, rhs: FfiPrivatePaymentListSyncReport) -> Bool {
+        if lhs.queued != rhs.queued {
+            return false
+        }
+        if lhs.cleared != rhs.cleared {
+            return false
+        }
+        if lhs.failed != rhs.failed {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(queued)
+        hasher.combine(cleared)
+        hasher.combine(failed)
+    }
+}
+
+extension FfiPrivatePaymentListSyncReport: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPrivatePaymentListSyncReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPrivatePaymentListSyncReport {
+        return
+            try FfiPrivatePaymentListSyncReport(
+                queued: FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(from: &buf),
+                cleared: FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(from: &buf),
+                failed: FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPrivatePaymentListSyncReport, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.queued, into: &buf)
+        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.cleared, into: &buf)
+        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.failed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentListSyncReport_lift(_ buf: RustBuffer) throws -> FfiPrivatePaymentListSyncReport {
+    return try FfiConverterTypeFfiPrivatePaymentListSyncReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPrivatePaymentListSyncReport_lower(_ value: FfiPrivatePaymentListSyncReport) -> RustBuffer {
+    return FfiConverterTypeFfiPrivatePaymentListSyncReport.lower(value)
+}
+
+
+/**
  * Latest valid Private Payment List view for one counterparty.
  */
 public struct FfiPrivatePaymentListView {
@@ -10687,6 +11114,73 @@ public func FfiConverterTypeFfiReceivingDetail_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeFfiReceivingDetail_lower(_ value: FfiReceivingDetail) -> RustBuffer {
     return FfiConverterTypeFfiReceivingDetail.lower(value)
+}
+
+
+/**
+ * Explicit result for private receiving-detail reservation callbacks.
+ */
+public struct FfiReceivingDetailReservationResponse {
+    /**
+     * Response kind.
+     */
+    public var kind: FfiReceivingDetailReservationResponseKind
+    /**
+     * Reserved details when `kind` is `Reservations`.
+     */
+    public var reservations: [FfiPaymentEndpointReservation]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Response kind.
+         */kind: FfiReceivingDetailReservationResponseKind,
+        /**
+         * Reserved details when `kind` is `Reservations`.
+         */reservations: [FfiPaymentEndpointReservation]) {
+        self.kind = kind
+        self.reservations = reservations
+    }
+}
+
+#if compiler(>=6)
+extension FfiReceivingDetailReservationResponse: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceivingDetailReservationResponse: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceivingDetailReservationResponse {
+        return
+            try FfiReceivingDetailReservationResponse(
+                kind: FfiConverterTypeFfiReceivingDetailReservationResponseKind.read(from: &buf),
+                reservations: FfiConverterSequenceTypeFfiPaymentEndpointReservation.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiReceivingDetailReservationResponse, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiReceivingDetailReservationResponseKind.write(value.kind, into: &buf)
+        FfiConverterSequenceTypeFfiPaymentEndpointReservation.write(value.reservations, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceivingDetailReservationResponse_lift(_ buf: RustBuffer) throws -> FfiReceivingDetailReservationResponse {
+    return try FfiConverterTypeFfiReceivingDetailReservationResponse.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceivingDetailReservationResponse_lower(_ value: FfiReceivingDetailReservationResponse) -> RustBuffer {
+    return FfiConverterTypeFfiReceivingDetailReservationResponse.lower(value)
 }
 
 
@@ -13159,6 +13653,97 @@ extension FfiReceiptRetrievalStatus: Codable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Reservation callback result kind.
+ */
+
+public enum FfiReceivingDetailReservationResponseKind {
+
+    /**
+     * Use `current_receiving_details` for this private list.
+     */
+    case useCurrentReceivingDetails
+    /**
+     * Use the reservations carried by this response, including an empty list.
+     */
+    case reservations
+    /**
+     * Reserved invalid response kind.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension FfiReceivingDetailReservationResponseKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiReceivingDetailReservationResponseKind: FfiConverterRustBuffer {
+    typealias SwiftType = FfiReceivingDetailReservationResponseKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiReceivingDetailReservationResponseKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .useCurrentReceivingDetails
+
+        case 2: return .reservations
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiReceivingDetailReservationResponseKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .useCurrentReceivingDetails:
+            writeInt(&buf, Int32(1))
+
+
+        case .reservations:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceivingDetailReservationResponseKind_lift(_ buf: RustBuffer) throws -> FfiReceivingDetailReservationResponseKind {
+    return try FfiConverterTypeFfiReceivingDetailReservationResponseKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiReceivingDetailReservationResponseKind_lower(_ value: FfiReceivingDetailReservationResponseKind) -> RustBuffer {
+    return FfiConverterTypeFfiReceivingDetailReservationResponseKind.lower(value)
+}
+
+
+extension FfiReceivingDetailReservationResponseKind: Equatable, Hashable {}
+
+extension FfiReceivingDetailReservationResponseKind: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Scope used when asking a payment adapter for receiving details.
  */
 
@@ -14089,30 +14674,6 @@ fileprivate struct FfiConverterOptionTypeFfiPaymentRequestLocalRole: FfiConverte
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterOptionSequenceTypeFfiPaymentEndpointReservation: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiPaymentEndpointReservation]?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterSequenceTypeFfiPaymentEndpointReservation.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterSequenceTypeFfiPaymentEndpointReservation.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterSequenceUInt64: FfiConverterRustBuffer {
     typealias SwiftType = [UInt64]
 
@@ -14430,6 +14991,31 @@ fileprivate struct FfiConverterSequenceTypeFfiPrivatePaymentListEndpoint: FfiCon
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiPrivatePaymentListEndpoint.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiPrivatePaymentListSyncChange]
+
+    public static func write(_ value: [FfiPrivatePaymentListSyncChange], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiPrivatePaymentListSyncChange.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPrivatePaymentListSyncChange] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiPrivatePaymentListSyncChange]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiPrivatePaymentListSyncChange.read(from: &buf))
         }
         return seq
     }
@@ -14766,6 +15352,16 @@ public func coreSessionCapabilities() -> String  {
 })
 }
 /**
+ * Decode an SDK state blob snapshot previously encoded by Paykit FFI.
+ */
+public func decodeSdkStateBlobSnapshot(bytes: Data)throws  -> FfiSdkStateBlobSnapshot  {
+    return try  FfiConverterTypeFfiSdkStateBlobSnapshot_lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_func_decode_sdk_state_blob_snapshot(
+        FfiConverterData.lower(bytes),$0
+    )
+})
+}
+/**
  * Return the default SDK configuration.
  */
 public func defaultConfig() -> FfiPaykitSdkConfig  {
@@ -14795,11 +15391,31 @@ public func derivePubkySecretKey(seed: Data, runtimeLabel: String)throws  -> Ffi
 })
 }
 /**
+ * Encode an SDK state blob snapshot for apps that store blob and revision together.
+ */
+public func encodeSdkStateBlobSnapshot(snapshot: FfiSdkStateBlobSnapshot)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_func_encode_sdk_state_blob_snapshot(
+        FfiConverterTypeFfiSdkStateBlobSnapshot_lower(snapshot),$0
+    )
+})
+}
+/**
  * Generate a fresh Receipt ID.
  */
 public func generateReceiptId() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_paykit_fn_func_generate_receipt_id($0
+    )
+})
+}
+/**
+ * Normalize raw z32 or `pubky...` public-key text to app-key form.
+ */
+public func normalizePubkyPublicKey(value: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_func_normalize_pubky_public_key(
+        FfiConverterString.lower(value),$0
     )
 })
 }
@@ -14830,6 +15446,26 @@ public func pubkyPublicKeyFromSecret(localSecretKey: FfiPubkyLocalSecretKey)thro
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
     uniffi_paykit_fn_func_pubky_public_key_from_secret(
         FfiConverterTypeFfiPubkyLocalSecretKey_lower(localSecretKey),$0
+    )
+})
+}
+/**
+ * Normalize raw z32 or `pubky...` public-key text to raw z32 form.
+ */
+public func rawPubkyPublicKey(value: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_func_raw_pubky_public_key(
+        FfiConverterString.lower(value),$0
+    )
+})
+}
+/**
+ * Return a shortened `pubky...` public key for diagnostics.
+ */
+public func redactedPubkyPublicKey(value: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_func_redacted_pubky_public_key(
+        FfiConverterString.lower(value),$0
     )
 })
 }
@@ -14872,6 +15508,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_core_session_capabilities() != 53661) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_func_decode_sdk_state_blob_snapshot() != 4823) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_default_config() != 40487) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -14881,7 +15520,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_derive_pubky_secret_key() != 37697) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_func_encode_sdk_state_blob_snapshot() != 49508) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_generate_receipt_id() != 34487) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_normalize_pubky_public_key() != 1980) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_parse_pubky_auth_url() != 567) {
@@ -14891,6 +15536,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_pubky_public_key_from_secret() != 41462) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_raw_pubky_public_key() != 57096) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_redacted_pubky_public_key() != 54739) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_required_session_capabilities() != 62729) {
@@ -14920,6 +15571,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list() != 56925) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -14935,13 +15589,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_blob() != 43993) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_profile() != 14091) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 21009) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list() != 42080) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_ensure_link_with_peer() != 53526) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_state() != 29122) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_string() != 15207) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_paykit_profile() != 57253) {
@@ -15073,7 +15736,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 56264) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 37377) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_contact_payment() != 26361) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 30409) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_string() != 23617) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {
@@ -15088,6 +15760,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 59922) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_contact_private_payment_lists() != 14363) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers() != 39954) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15095,6 +15770,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 22658) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_upload_profile_avatar() != 49965) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaymentpayload_export_text() != 53824) {
@@ -15163,7 +15841,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_receiving_details() != 10401) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_reserve_receiving_details() != 26808) {
+    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_reserve_receiving_details() != 30293) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_cancel_receiving_detail_reservation() != 52453) {

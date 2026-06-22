@@ -1,4 +1,7 @@
-use std::{any::Any, sync::Arc};
+use std::{
+    any::Any,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use paykit_sdk::storage::{
@@ -40,6 +43,7 @@ pub trait FfiSdkStateBlobStore: Send + Sync {
 #[derive(Clone)]
 pub(crate) struct FfiSdkStorage {
     pub(crate) store: Arc<dyn FfiSdkStateBlobStore>,
+    pub(crate) transaction_lock: Arc<Mutex<()>>,
 }
 
 #[async_trait]
@@ -48,6 +52,13 @@ impl StorageAdapter for FfiSdkStorage {
         &self,
         f: StorageTransactionCallback<'a>,
     ) -> paykit_sdk::Result<Box<dyn Any + Send>> {
+        let _guard = self
+            .transaction_lock
+            .lock()
+            .map_err(|_| PaykitSdkError::Storage {
+                context: "SDK state transaction lock poisoned".into(),
+                source: None,
+            })?;
         let snapshot = self
             .store
             .load_state_blob()
@@ -84,6 +95,13 @@ struct StorageStateEnvelope {
 struct BackupStateEnvelope {
     version: u32,
     backup: SdkBackupState,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StateBlobSnapshotEnvelope {
+    version: u32,
+    revision: String,
+    blob: Vec<u8>,
 }
 
 pub(crate) fn encode_storage_state(state: &StorageState) -> Result<Vec<u8>, PaykitFfiError> {
@@ -142,4 +160,48 @@ pub(crate) fn decode_backup_state(bytes: &[u8]) -> Result<SdkBackupState, Paykit
         ));
     }
     Ok(envelope.backup)
+}
+
+/// Encode an SDK state blob snapshot for apps that store blob and revision together.
+#[uniffi::export]
+pub fn encode_sdk_state_blob_snapshot(
+    snapshot: FfiSdkStateBlobSnapshot,
+) -> Result<Vec<u8>, PaykitFfiError> {
+    postcard::to_allocvec(&StateBlobSnapshotEnvelope {
+        version: SDK_STATE_BLOB_VERSION,
+        revision: snapshot.revision,
+        blob: snapshot.blob.export_bytes(),
+    })
+    .map_err(|err| {
+        storage_error(
+            "encode_state_snapshot_blob",
+            format!("encode SDK state blob snapshot: {err}"),
+        )
+    })
+}
+
+/// Decode an SDK state blob snapshot previously encoded by Paykit FFI.
+#[uniffi::export]
+pub fn decode_sdk_state_blob_snapshot(
+    bytes: Vec<u8>,
+) -> Result<FfiSdkStateBlobSnapshot, PaykitFfiError> {
+    let envelope: StateBlobSnapshotEnvelope = postcard::from_bytes(&bytes).map_err(|err| {
+        storage_error(
+            "decode_state_snapshot_blob",
+            format!("decode SDK state blob snapshot: {err}"),
+        )
+    })?;
+    if envelope.version != SDK_STATE_BLOB_VERSION {
+        return Err(storage_error(
+            "unsupported_state_snapshot_blob_version",
+            format!(
+                "unsupported SDK state snapshot blob version {}, expected {}",
+                envelope.version, SDK_STATE_BLOB_VERSION
+            ),
+        ));
+    }
+    Ok(FfiSdkStateBlobSnapshot {
+        blob: Arc::new(FfiSdkStateBlob::new(envelope.blob)),
+        revision: envelope.revision,
+    })
 }

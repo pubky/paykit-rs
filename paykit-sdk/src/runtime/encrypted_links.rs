@@ -192,6 +192,109 @@ where
         self.finish_peer_link_operation(lease, result).await
     }
 
+    /// Ensure an Encrypted Link is started or advanced for one counterparty.
+    ///
+    /// The SDK deterministically chooses the local handshake role from the two
+    /// public keys. Existing active links are returned as linked. Existing
+    /// pending handshakes are advanced. `max_advance_steps` bounds how many
+    /// stored handshake advances this call attempts after starting or finding a
+    /// pending handshake.
+    pub async fn ensure_link_with_peer(
+        &self,
+        counterparty: PubkyPublicKey,
+        max_advance_steps: u32,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        let (session_access, _) = self.private_link_session_access().await?;
+        let local_public_key = session_access.public_key()?;
+        if local_public_key == counterparty {
+            return Err(PaykitSdkError::Policy(
+                "cannot establish an Encrypted Link with the local identity".into(),
+            ));
+        }
+        let role = deterministic_handshake_role(&local_public_key, &counterparty);
+        let lease = self.claim_peer_link_operation(&counterparty).await?;
+        let result = self
+            .ensure_link_with_peer_with_claim(counterparty, role, max_advance_steps, lease.clone())
+            .await;
+        self.finish_peer_link_operation(lease, result).await
+    }
+
+    async fn ensure_link_with_peer_with_claim(
+        &self,
+        counterparty: PubkyPublicKey,
+        role: EncryptedLinkHandshakeRole,
+        max_advance_steps: u32,
+        lease: PeerLinkOperationLease,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        let mut report = match self
+            .storage
+            .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
+            .await?
+        {
+            Some(state) if state.link_snapshot.is_some() => {
+                save_linked_peer_state_with_lease(
+                    &self.storage,
+                    counterparty.clone(),
+                    LinkedPeerState::Linked,
+                    lease.clone(),
+                    self.clock.now(),
+                )
+                .await?;
+                LinkedPeerHandshakeReport {
+                    counterparty: counterparty.clone(),
+                    state: LinkedPeerState::Linked,
+                    generation: state.generation,
+                    handshake_role: None,
+                }
+            }
+            Some(state) if state.handshake_snapshot.is_some() => {
+                if state.handshake_role.is_none() {
+                    let mark = mark_recovery_required_with_lease(
+                        &self.storage,
+                        counterparty.clone(),
+                        lease.clone(),
+                        self.clock.now(),
+                    )
+                    .await?;
+                    self.publish_local_recovery_marker_if_possible(&counterparty, mark.new_episode)
+                        .await;
+                    return Err(PaykitSdkError::RecoveryRequired(format!(
+                        "missing Encrypted Link Handshake role for counterparty {counterparty}"
+                    )));
+                }
+                save_linked_peer_state_with_lease(
+                    &self.storage,
+                    counterparty.clone(),
+                    LinkedPeerState::Linking,
+                    lease.clone(),
+                    self.clock.now(),
+                )
+                .await?;
+                LinkedPeerHandshakeReport {
+                    counterparty: counterparty.clone(),
+                    state: LinkedPeerState::Linking,
+                    generation: state.generation,
+                    handshake_role: state.handshake_role,
+                }
+            }
+            _ => {
+                self.start_link_handshake_with_claim(counterparty.clone(), role, lease.clone())
+                    .await?
+            }
+        };
+
+        for _ in 0..max_advance_steps {
+            if report.state == LinkedPeerState::Linked {
+                return Ok(report);
+            }
+            report = self
+                .advance_link_handshake_with_claim(counterparty.clone(), lease.clone())
+                .await?;
+        }
+
+        Ok(report)
+    }
+
     async fn advance_link_handshake_with_claim(
         &self,
         counterparty: PubkyPublicKey,
@@ -542,5 +645,16 @@ fn clear_encrypted_link_state(
             generation: link_state.generation.saturating_add(1),
             checkpointed_at: now,
         });
+    }
+}
+
+fn deterministic_handshake_role(
+    local_public_key: &PubkyPublicKey,
+    counterparty: &PubkyPublicKey,
+) -> EncryptedLinkHandshakeRole {
+    if local_public_key.as_str() < counterparty.as_str() {
+        EncryptedLinkHandshakeRole::Initiator
+    } else {
+        EncryptedLinkHandshakeRole::Responder
     }
 }

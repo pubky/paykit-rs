@@ -1,15 +1,15 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use paykit_sdk::{IdentityStatus, InitializationReport, PaykitSdk, RestoreReport};
 
 use crate::config::{default_pubky_client_config, FfiPaykitSdkConfig, FfiPubkyClientConfig};
-use crate::errors::PaykitFfiError;
+use crate::errors::{validation_error, PaykitFfiError};
 use crate::payment_adapter::{
     FfiNoopSdkPaymentAdapter, FfiSdkPaymentAdapter, FfiSdkPaymentAdapterAdapter,
 };
 use crate::secrets::FfiSdkBackupBlob;
 use crate::session::{
-    pubky_from_config, FfiPubkyIdentityCapability, FfiSdkPubkySessionProvider,
+    app_public_key, pubky_from_config, FfiPubkyIdentityCapability, FfiSdkPubkySessionProvider,
     FfiSdkPubkySessionProviderAdapter,
 };
 use crate::storage::{
@@ -141,7 +141,10 @@ impl FfiPaykitSdk {
         pubky_client: FfiPubkyClientConfig,
     ) -> Result<Self, PaykitFfiError> {
         let pubky = pubky_from_config(&pubky_client)?;
-        let storage = FfiSdkStorage { store: state_store };
+        let storage = FfiSdkStorage {
+            store: state_store,
+            transaction_lock: Arc::new(Mutex::new(())),
+        };
         let session_provider = FfiSdkPubkySessionProviderAdapter {
             provider: session_provider,
             pubky,
@@ -198,6 +201,13 @@ impl FfiPaykitSdk {
         )?)))
     }
 
+    /// Export SDK-managed backup state as a hex string.
+    pub async fn export_backup_string(&self) -> Result<String, PaykitFfiError> {
+        self.export_backup_state()
+            .await
+            .map(|backup| hex::encode(backup.export_bytes()))
+    }
+
     /// Restore SDK-managed backup state from an opaque blob.
     pub async fn restore_backup_state(
         &self,
@@ -210,12 +220,23 @@ impl FfiPaykitSdk {
             .map(Into::into)
             .map_err(Into::into)
     }
+
+    /// Restore SDK-managed backup state from a hex string.
+    pub async fn restore_backup_string(
+        &self,
+        backup: String,
+    ) -> Result<FfiRestoreReport, PaykitFfiError> {
+        let bytes = hex::decode(backup.trim())
+            .map_err(|err| validation_error(format!("invalid SDK backup string: {err}")))?;
+        self.restore_backup_state(Arc::new(FfiSdkBackupBlob::new(bytes)))
+            .await
+    }
 }
 
 impl From<IdentityStatus> for FfiIdentityStatus {
     fn from(value: IdentityStatus) -> Self {
         Self {
-            public_key: value.public_key.map(|key| key.to_string()),
+            public_key: value.public_key.map(|key| app_public_key(&key)),
             capability: value.capability.into(),
             live_session_available: value.live_session_available,
             private_link_capable: value.private_link_capable,
@@ -251,7 +272,7 @@ impl From<RestoreReport> for FfiRestoreReport {
             recovery_required_peers: value
                 .recovery_required_peers
                 .into_iter()
-                .map(|key| key.to_string())
+                .map(|key| app_public_key(&key))
                 .collect(),
         }
     }

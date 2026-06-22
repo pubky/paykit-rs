@@ -1,11 +1,16 @@
 use paykit_sdk::{
     ContactProfileResolution, ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord,
     PaykitProfile, PaykitProfileRecord, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
-    PubkyPublicKey, PublicationStatus,
+    PublicationStatus,
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use crate::{errors::validation_error, sdk::FfiPaykitSdk, PaykitFfiError};
+use crate::{
+    errors::validation_error,
+    sdk::FfiPaykitSdk,
+    session::{app_public_key, parse_public_key},
+    PaykitFfiError,
+};
 
 /// Local publication state for SDK-managed public data.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +197,14 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Delete this identity's Paykit Profile.
+    pub async fn delete_paykit_profile(&self) -> Result<(), PaykitFfiError> {
+        self.runtime
+            .delete_paykit_profile()
+            .await
+            .map_err(Into::into)
+    }
+
     /// Publish a blob under this identity's Paykit profile namespace.
     pub async fn publish_paykit_blob(
         &self,
@@ -200,6 +213,19 @@ impl FfiPaykitSdk {
     ) -> Result<FfiPaykitBlobRecord, PaykitFfiError> {
         self.runtime
             .publish_paykit_blob(blob_name, bytes)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Upload profile avatar bytes and return the published blob record.
+    pub async fn upload_profile_avatar(
+        &self,
+        bytes: Vec<u8>,
+        content_type: String,
+    ) -> Result<FfiPaykitBlobRecord, PaykitFfiError> {
+        self.runtime
+            .upload_profile_avatar(bytes, &content_type)
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -249,7 +275,7 @@ impl FfiPaykitSdk {
         self.runtime
             .fetch_pubky_follows(parse_public_key(public_key)?)
             .await
-            .map(|keys| keys.into_iter().map(|key| key.to_string()).collect())
+            .map(|keys| keys.into_iter().map(|key| app_public_key(&key)).collect())
             .map_err(Into::into)
     }
 
@@ -416,7 +442,7 @@ impl From<PubkyProfile> for FfiPubkyProfile {
 impl From<PaykitProfileRecord> for FfiPaykitProfileRecord {
     fn from(value: PaykitProfileRecord) -> Self {
         Self {
-            public_key: value.public_key.to_string(),
+            public_key: app_public_key(&value.public_key),
             profile: value.profile.into(),
             path: value.path,
             updated_at: value.updated_at.to_rfc3339(),
@@ -427,7 +453,7 @@ impl From<PaykitProfileRecord> for FfiPaykitProfileRecord {
 impl From<PubkyProfileRecord> for FfiPubkyProfileRecord {
     fn from(value: PubkyProfileRecord) -> Self {
         Self {
-            public_key: value.public_key.to_string(),
+            public_key: app_public_key(&value.public_key),
             profile: value.profile.into(),
             path: value.path,
             fetched_at: value.fetched_at.to_rfc3339(),
@@ -438,7 +464,7 @@ impl From<PubkyProfileRecord> for FfiPubkyProfileRecord {
 impl From<ContactProfileResolution> for FfiContactProfileResolution {
     fn from(value: ContactProfileResolution) -> Self {
         Self {
-            public_key: value.public_key.to_string(),
+            public_key: app_public_key(&value.public_key),
             source: value.source.into(),
             display_name: value.display_name,
             image_uri: value.image_uri,
@@ -452,7 +478,7 @@ impl From<ContactProfileResolution> for FfiContactProfileResolution {
 impl From<PaykitBlobRecord> for FfiPaykitBlobRecord {
     fn from(value: PaykitBlobRecord) -> Self {
         Self {
-            public_key: value.public_key.to_string(),
+            public_key: app_public_key(&value.public_key),
             path: value.path,
             uri: value.uri,
             size_bytes: value.size_bytes,
@@ -475,7 +501,7 @@ impl TryFrom<FfiContactUpdate> for ContactUpdate {
 impl From<ContactRecord> for FfiContactRecord {
     fn from(value: ContactRecord) -> Self {
         Self {
-            public_key: value.public_key.to_string(),
+            public_key: app_public_key(&value.public_key),
             label: value.label,
             profile: value.profile.map(Into::into),
             profile_fetched_at: value.profile_fetched_at.map(|time| time.to_rfc3339()),
@@ -520,10 +546,6 @@ impl From<ContactProfileSource> for FfiContactProfileSource {
 fn parse_profile_extra(raw: &str) -> Result<JsonMap<String, JsonValue>, PaykitFfiError> {
     serde_json::from_str::<JsonMap<String, JsonValue>>(raw)
         .map_err(|err| validation_error(format!("profile extra_json must be a JSON object: {err}")))
-}
-
-fn parse_public_key(value: String) -> Result<PubkyPublicKey, PaykitFfiError> {
-    PubkyPublicKey::new(value).map_err(Into::into)
 }
 
 #[cfg(test)]
