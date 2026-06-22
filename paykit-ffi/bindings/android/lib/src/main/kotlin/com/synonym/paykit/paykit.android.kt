@@ -1762,7 +1762,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_contact_private_payment_lists_and_process_outbound() != 36895.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound() != 27890.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound() != 7347.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers() != 39954.toShort()) {
@@ -5695,12 +5695,12 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
      * Queue reservation-backed Private Payment Lists and process their queues.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `syncPrivatePaymentListsWithReservationsAndProcessOutbound`(`updates`: List<PrivatePaymentListReservationUpdate>, `clearUnlistedLinkedPeers`: kotlin.Boolean): PrivatePaymentListDeliveryReport {
+    public override suspend fun `syncPrivatePaymentListsWithReservationsAndProcessOutbound`(`updates`: List<PrivatePaymentListReservationUpdateInput>, `clearUnlistedLinkedPeers`: kotlin.Boolean): PrivatePaymentListDeliveryReport {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound(
                     thisPtr,
-                    FfiConverterSequenceTypePrivatePaymentListReservationUpdate.lower(`updates`),
+                    FfiConverterSequenceTypePrivatePaymentListReservationUpdateInput.lower(`updates`),
                     FfiConverterBoolean.lower(`clearUnlistedLinkedPeers`),
                 )
             },
@@ -9488,6 +9488,37 @@ public object FfiConverterTypePaymentEndpointReservationCancellation: FfiConvert
 
 
 
+public object FfiConverterTypePaymentEndpointReservationInput: FfiConverterRustBuffer<PaymentEndpointReservationInput> {
+    override fun read(buf: ByteBuffer): PaymentEndpointReservationInput {
+        return PaymentEndpointReservationInput(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterMapStringString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PaymentEndpointReservationInput): ULong = (
+            FfiConverterString.allocationSize(value.`reservationId`) +
+            FfiConverterString.allocationSize(value.`identifier`) +
+            FfiConverterString.allocationSize(value.`payload`) +
+            FfiConverterOptionalString.allocationSize(value.`expiresAt`) +
+            FfiConverterMapStringString.allocationSize(value.`attribution`)
+    )
+
+    override fun write(value: PaymentEndpointReservationInput, buf: ByteBuffer) {
+        FfiConverterString.write(value.`reservationId`, buf)
+        FfiConverterString.write(value.`identifier`, buf)
+        FfiConverterString.write(value.`payload`, buf)
+        FfiConverterOptionalString.write(value.`expiresAt`, buf)
+        FfiConverterMapStringString.write(value.`attribution`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypePaymentEndpointSelectionRequest: FfiConverterRustBuffer<PaymentEndpointSelectionRequest> {
     override fun read(buf: ByteBuffer): PaymentEndpointSelectionRequest {
         return PaymentEndpointSelectionRequest(
@@ -9906,22 +9937,22 @@ public object FfiConverterTypePrivatePaymentListEndpoint: FfiConverterRustBuffer
 
 
 
-public object FfiConverterTypePrivatePaymentListReservationUpdate: FfiConverterRustBuffer<PrivatePaymentListReservationUpdate> {
-    override fun read(buf: ByteBuffer): PrivatePaymentListReservationUpdate {
-        return PrivatePaymentListReservationUpdate(
+public object FfiConverterTypePrivatePaymentListReservationUpdateInput: FfiConverterRustBuffer<PrivatePaymentListReservationUpdateInput> {
+    override fun read(buf: ByteBuffer): PrivatePaymentListReservationUpdateInput {
+        return PrivatePaymentListReservationUpdateInput(
             FfiConverterString.read(buf),
-            FfiConverterSequenceTypePaymentEndpointReservation.read(buf),
+            FfiConverterSequenceTypePaymentEndpointReservationInput.read(buf),
         )
     }
 
-    override fun allocationSize(value: PrivatePaymentListReservationUpdate): ULong = (
+    override fun allocationSize(value: PrivatePaymentListReservationUpdateInput): ULong = (
             FfiConverterString.allocationSize(value.`counterparty`) +
-            FfiConverterSequenceTypePaymentEndpointReservation.allocationSize(value.`reservations`)
+            FfiConverterSequenceTypePaymentEndpointReservationInput.allocationSize(value.`reservations`)
     )
 
-    override fun write(value: PrivatePaymentListReservationUpdate, buf: ByteBuffer) {
+    override fun write(value: PrivatePaymentListReservationUpdateInput, buf: ByteBuffer) {
         FfiConverterString.write(value.`counterparty`, buf)
-        FfiConverterSequenceTypePaymentEndpointReservation.write(value.`reservations`, buf)
+        FfiConverterSequenceTypePaymentEndpointReservationInput.write(value.`reservations`, buf)
     }
 }
 
@@ -12267,6 +12298,31 @@ public object FfiConverterSequenceTypePaymentEndpointReservation: FfiConverterRu
 
 
 
+public object FfiConverterSequenceTypePaymentEndpointReservationInput: FfiConverterRustBuffer<List<PaymentEndpointReservationInput>> {
+    override fun read(buf: ByteBuffer): List<PaymentEndpointReservationInput> {
+        val len = buf.getInt()
+        return List<PaymentEndpointReservationInput>(len) {
+            FfiConverterTypePaymentEndpointReservationInput.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<PaymentEndpointReservationInput>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypePaymentEndpointReservationInput.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<PaymentEndpointReservationInput>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypePaymentEndpointReservationInput.write(it, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterSequenceTypePaymentProofRecord: FfiConverterRustBuffer<List<PaymentProofRecord>> {
     override fun read(buf: ByteBuffer): List<PaymentProofRecord> {
         val len = buf.getInt()
@@ -12367,24 +12423,24 @@ public object FfiConverterSequenceTypePrivatePaymentListEndpoint: FfiConverterRu
 
 
 
-public object FfiConverterSequenceTypePrivatePaymentListReservationUpdate: FfiConverterRustBuffer<List<PrivatePaymentListReservationUpdate>> {
-    override fun read(buf: ByteBuffer): List<PrivatePaymentListReservationUpdate> {
+public object FfiConverterSequenceTypePrivatePaymentListReservationUpdateInput: FfiConverterRustBuffer<List<PrivatePaymentListReservationUpdateInput>> {
+    override fun read(buf: ByteBuffer): List<PrivatePaymentListReservationUpdateInput> {
         val len = buf.getInt()
-        return List<PrivatePaymentListReservationUpdate>(len) {
-            FfiConverterTypePrivatePaymentListReservationUpdate.read(buf)
+        return List<PrivatePaymentListReservationUpdateInput>(len) {
+            FfiConverterTypePrivatePaymentListReservationUpdateInput.read(buf)
         }
     }
 
-    override fun allocationSize(value: List<PrivatePaymentListReservationUpdate>): ULong {
+    override fun allocationSize(value: List<PrivatePaymentListReservationUpdateInput>): ULong {
         val sizeForLength = 4UL
-        val sizeForItems = value.sumOf { FfiConverterTypePrivatePaymentListReservationUpdate.allocationSize(it) }
+        val sizeForItems = value.sumOf { FfiConverterTypePrivatePaymentListReservationUpdateInput.allocationSize(it) }
         return sizeForLength + sizeForItems
     }
 
-    override fun write(value: List<PrivatePaymentListReservationUpdate>, buf: ByteBuffer) {
+    override fun write(value: List<PrivatePaymentListReservationUpdateInput>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
-            FfiConverterTypePrivatePaymentListReservationUpdate.write(it, buf)
+            FfiConverterTypePrivatePaymentListReservationUpdateInput.write(it, buf)
         }
     }
 }

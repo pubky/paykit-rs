@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use paykit_sdk::{
     storage::OutboundPrivateMessageRecord, OutboundPrivateMessageStatus,
@@ -8,7 +8,7 @@ use paykit_sdk::{
 };
 
 use crate::{
-    payment_adapter::{FfiPaymentEndpointReservation, FfiPaymentPayload, FfiReceivingDetail},
+    payment_adapter::{parse_rfc3339_utc, FfiPaymentPayload, FfiReceivingDetail},
     private_links::FfiPrivateOperationError,
     sdk::FfiPaykitSdk,
     session::{app_public_key, parse_public_key},
@@ -92,15 +92,30 @@ pub struct FfiPrivatePaymentListSyncReport {
     pub failed: Vec<FfiPrivatePaymentListSyncChange>,
 }
 
-/// Reservation-backed Private Payment List update for one counterparty.
+/// Plain reservation input for one Payment Endpoint.
 #[derive(uniffi::Record, Clone, Debug)]
-pub struct FfiPrivatePaymentListReservationUpdate {
+pub struct FfiPaymentEndpointReservationInput {
+    /// Adapter-stable reservation id.
+    pub reservation_id: String,
+    /// Payment Endpoint Identifier string.
+    pub identifier: String,
+    /// Serialized endpoint payload.
+    pub payload: String,
+    /// Optional reservation expiry as RFC3339 text.
+    pub expires_at: Option<String>,
+    /// Adapter attribution metadata.
+    pub attribution: HashMap<String, String>,
+}
+
+/// Reservation-backed Private Payment List input for one counterparty.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPrivatePaymentListReservationUpdateInput {
     /// Counterparty that should receive the Private Payment List.
     pub counterparty: String,
     /// Complete reserved receiving details to share with this counterparty.
     ///
     /// An empty list queues an empty Private Payment List for this counterparty.
-    pub reservations: Vec<FfiPaymentEndpointReservation>,
+    pub reservations: Vec<FfiPaymentEndpointReservationInput>,
 }
 
 /// Failed delivery after a Private Payment List was queued.
@@ -247,7 +262,7 @@ impl FfiPaykitSdk {
     /// Queue reservation-backed Private Payment Lists and process their queues.
     pub async fn sync_private_payment_lists_with_reservations_and_process_outbound(
         &self,
-        updates: Vec<FfiPrivatePaymentListReservationUpdate>,
+        updates: Vec<FfiPrivatePaymentListReservationUpdateInput>,
         clear_unlisted_linked_peers: bool,
     ) -> Result<FfiPrivatePaymentListDeliveryReport, PaykitFfiError> {
         let updates = updates
@@ -374,10 +389,26 @@ impl From<PrivatePaymentListDeliveryFailure> for FfiPrivatePaymentListDeliveryFa
     }
 }
 
-impl TryFrom<FfiPrivatePaymentListReservationUpdate> for PrivatePaymentListReservationUpdate {
+impl TryFrom<FfiPaymentEndpointReservationInput> for paykit_sdk::PaymentEndpointReservation {
+    type Error = paykit_sdk::PaykitSdkError;
+
+    fn try_from(value: FfiPaymentEndpointReservationInput) -> Result<Self, Self::Error> {
+        Ok(Self {
+            reservation_id: value.reservation_id,
+            receiving_detail: paykit_sdk::ReceivingDetail {
+                identifier: value.identifier,
+                payload: value.payload,
+            },
+            expires_at: value.expires_at.map(parse_rfc3339_utc).transpose()?,
+            attribution: value.attribution,
+        })
+    }
+}
+
+impl TryFrom<FfiPrivatePaymentListReservationUpdateInput> for PrivatePaymentListReservationUpdate {
     type Error = PaykitFfiError;
 
-    fn try_from(value: FfiPrivatePaymentListReservationUpdate) -> Result<Self, Self::Error> {
+    fn try_from(value: FfiPrivatePaymentListReservationUpdateInput) -> Result<Self, Self::Error> {
         Ok(Self {
             counterparty: parse_public_key(value.counterparty)?,
             reservations: value
@@ -403,9 +434,7 @@ fn private_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::payment_adapter::FfiReservationAttribution;
     use chrono::Utc;
-    use std::collections::HashMap;
 
     fn public_key() -> paykit_sdk::PubkyPublicKey {
         parse_public_key("8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io".into()).unwrap()
@@ -474,19 +503,14 @@ mod tests {
 
     #[test]
     fn test_private_payment_list_reservation_update_converts() {
-        let update = FfiPrivatePaymentListReservationUpdate {
+        let update = FfiPrivatePaymentListReservationUpdateInput {
             counterparty: public_key().to_app_key(),
-            reservations: vec![FfiPaymentEndpointReservation {
+            reservations: vec![FfiPaymentEndpointReservationInput {
                 reservation_id: "reservation-1".into(),
-                receiving_detail: FfiReceivingDetail {
-                    identifier: "btc-lightning-bolt11".into(),
-                    payload: Arc::new(FfiPaymentPayload::new("ln-reserved".into())),
-                },
+                identifier: "btc-lightning-bolt11".into(),
+                payload: "ln-reserved".into(),
                 expires_at: None,
-                attribution: Arc::new(FfiReservationAttribution::new(HashMap::from([(
-                    "payment_hash".into(),
-                    "hash-1".into(),
-                )]))),
+                attribution: HashMap::from([("payment_hash".into(), "hash-1".into())]),
             }],
         };
 

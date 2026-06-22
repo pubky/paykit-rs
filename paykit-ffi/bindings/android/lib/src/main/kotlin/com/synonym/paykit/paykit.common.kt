@@ -586,7 +586,7 @@ public interface PaykitSdkInterface {
      * Queue reservation-backed Private Payment Lists and process their queues.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `syncPrivatePaymentListsWithReservationsAndProcessOutbound`(`updates`: List<PrivatePaymentListReservationUpdate>, `clearUnlistedLinkedPeers`: kotlin.Boolean): PrivatePaymentListDeliveryReport
+    public suspend fun `syncPrivatePaymentListsWithReservationsAndProcessOutbound`(`updates`: List<PrivatePaymentListReservationUpdateInput>, `clearUnlistedLinkedPeers`: kotlin.Boolean): PrivatePaymentListDeliveryReport
 
     /**
      * Retry pending public Contact Marker publication/removal work.
@@ -1753,6 +1753,37 @@ public data class PaymentEndpointReservationCancellation (
 
 
 /**
+ * Plain reservation input for one Payment Endpoint.
+ */
+@kotlinx.serialization.Serializable
+public data class PaymentEndpointReservationInput (
+    /**
+     * Adapter-stable reservation id.
+     */
+    val `reservationId`: kotlin.String,
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: kotlin.String,
+    /**
+     * Optional reservation expiry as RFC3339 text.
+     */
+    val `expiresAt`: kotlin.String?,
+    /**
+     * Adapter attribution metadata.
+     */
+    val `attribution`: Map<kotlin.String, kotlin.String>
+) {
+    public companion object
+}
+
+
+
+/**
  * Request passed to the payment adapter for payable endpoint ordering.
  */
 
@@ -2274,10 +2305,10 @@ public data class PrivatePaymentListEndpoint (
 
 
 /**
- * Reservation-backed Private Payment List update for one counterparty.
+ * Reservation-backed Private Payment List input for one counterparty.
  */
-
-public data class PrivatePaymentListReservationUpdate (
+@kotlinx.serialization.Serializable
+public data class PrivatePaymentListReservationUpdateInput (
     /**
      * Counterparty that should receive the Private Payment List.
      */
@@ -2287,14 +2318,8 @@ public data class PrivatePaymentListReservationUpdate (
      *
      * An empty list queues an empty Private Payment List for this counterparty.
      */
-    val `reservations`: List<PaymentEndpointReservation>
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`counterparty`,
-            this.`reservations`,
-        )
-    }
+    val `reservations`: List<PaymentEndpointReservationInput>
+) {
     public companion object
 }
 

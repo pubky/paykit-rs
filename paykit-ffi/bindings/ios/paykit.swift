@@ -924,7 +924,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Queue reservation-backed Private Payment Lists and process their queues.
      */
-    func syncPrivatePaymentListsWithReservationsAndProcessOutbound(updates: [PrivatePaymentListReservationUpdate], clearUnlistedLinkedPeers: Bool) async throws  -> PrivatePaymentListDeliveryReport
+    func syncPrivatePaymentListsWithReservationsAndProcessOutbound(updates: [PrivatePaymentListReservationUpdateInput], clearUnlistedLinkedPeers: Bool) async throws  -> PrivatePaymentListDeliveryReport
 
     /**
      * Retry pending public Contact Marker publication/removal work.
@@ -2611,13 +2611,13 @@ open func syncContactPrivatePaymentListsAndProcessOutbound(clearUnlistedLinkedPe
     /**
      * Queue reservation-backed Private Payment Lists and process their queues.
      */
-open func syncPrivatePaymentListsWithReservationsAndProcessOutbound(updates: [PrivatePaymentListReservationUpdate], clearUnlistedLinkedPeers: Bool)async throws  -> PrivatePaymentListDeliveryReport  {
+open func syncPrivatePaymentListsWithReservationsAndProcessOutbound(updates: [PrivatePaymentListReservationUpdateInput], clearUnlistedLinkedPeers: Bool)async throws  -> PrivatePaymentListDeliveryReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound(
                     self.uniffiClonePointer(),
-                    FfiConverterSequenceTypePrivatePaymentListReservationUpdate.lower(updates),FfiConverterBool.lower(clearUnlistedLinkedPeers)
+                    FfiConverterSequenceTypePrivatePaymentListReservationUpdateInput.lower(updates),FfiConverterBool.lower(clearUnlistedLinkedPeers)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -8156,6 +8156,135 @@ public func FfiConverterTypePaymentEndpointReservationCancellation_lower(_ value
 
 
 /**
+ * Plain reservation input for one Payment Endpoint.
+ */
+public struct PaymentEndpointReservationInput {
+    /**
+     * Adapter-stable reservation id.
+     */
+    public var reservationId: String
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    public var identifier: String
+    /**
+     * Serialized endpoint payload.
+     */
+    public var payload: String
+    /**
+     * Optional reservation expiry as RFC3339 text.
+     */
+    public var expiresAt: String?
+    /**
+     * Adapter attribution metadata.
+     */
+    public var attribution: [String: String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Adapter-stable reservation id.
+         */reservationId: String,
+        /**
+         * Payment Endpoint Identifier string.
+         */identifier: String,
+        /**
+         * Serialized endpoint payload.
+         */payload: String,
+        /**
+         * Optional reservation expiry as RFC3339 text.
+         */expiresAt: String?,
+        /**
+         * Adapter attribution metadata.
+         */attribution: [String: String]) {
+        self.reservationId = reservationId
+        self.identifier = identifier
+        self.payload = payload
+        self.expiresAt = expiresAt
+        self.attribution = attribution
+    }
+}
+
+#if compiler(>=6)
+extension PaymentEndpointReservationInput: Sendable {}
+#endif
+
+
+extension PaymentEndpointReservationInput: Equatable, Hashable {
+    public static func ==(lhs: PaymentEndpointReservationInput, rhs: PaymentEndpointReservationInput) -> Bool {
+        if lhs.reservationId != rhs.reservationId {
+            return false
+        }
+        if lhs.identifier != rhs.identifier {
+            return false
+        }
+        if lhs.payload != rhs.payload {
+            return false
+        }
+        if lhs.expiresAt != rhs.expiresAt {
+            return false
+        }
+        if lhs.attribution != rhs.attribution {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(reservationId)
+        hasher.combine(identifier)
+        hasher.combine(payload)
+        hasher.combine(expiresAt)
+        hasher.combine(attribution)
+    }
+}
+
+extension PaymentEndpointReservationInput: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentEndpointReservationInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentEndpointReservationInput {
+        return
+            try PaymentEndpointReservationInput(
+                reservationId: FfiConverterString.read(from: &buf),
+                identifier: FfiConverterString.read(from: &buf),
+                payload: FfiConverterString.read(from: &buf),
+                expiresAt: FfiConverterOptionString.read(from: &buf),
+                attribution: FfiConverterDictionaryStringString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentEndpointReservationInput, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.reservationId, into: &buf)
+        FfiConverterString.write(value.identifier, into: &buf)
+        FfiConverterString.write(value.payload, into: &buf)
+        FfiConverterOptionString.write(value.expiresAt, into: &buf)
+        FfiConverterDictionaryStringString.write(value.attribution, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentEndpointReservationInput_lift(_ buf: RustBuffer) throws -> PaymentEndpointReservationInput {
+    return try FfiConverterTypePaymentEndpointReservationInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentEndpointReservationInput_lower(_ value: PaymentEndpointReservationInput) -> RustBuffer {
+    return FfiConverterTypePaymentEndpointReservationInput.lower(value)
+}
+
+
+/**
  * Request passed to the payment adapter for payable endpoint ordering.
  */
 public struct PaymentEndpointSelectionRequest {
@@ -9551,9 +9680,9 @@ public func FfiConverterTypePrivatePaymentListEndpoint_lower(_ value: PrivatePay
 
 
 /**
- * Reservation-backed Private Payment List update for one counterparty.
+ * Reservation-backed Private Payment List input for one counterparty.
  */
-public struct PrivatePaymentListReservationUpdate {
+public struct PrivatePaymentListReservationUpdateInput {
     /**
      * Counterparty that should receive the Private Payment List.
      */
@@ -9563,7 +9692,7 @@ public struct PrivatePaymentListReservationUpdate {
      *
      * An empty list queues an empty Private Payment List for this counterparty.
      */
-    public var reservations: [PaymentEndpointReservation]
+    public var reservations: [PaymentEndpointReservationInput]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -9575,33 +9704,53 @@ public struct PrivatePaymentListReservationUpdate {
          * Complete reserved receiving details to share with this counterparty.
          *
          * An empty list queues an empty Private Payment List for this counterparty.
-         */reservations: [PaymentEndpointReservation]) {
+         */reservations: [PaymentEndpointReservationInput]) {
         self.counterparty = counterparty
         self.reservations = reservations
     }
 }
 
 #if compiler(>=6)
-extension PrivatePaymentListReservationUpdate: Sendable {}
+extension PrivatePaymentListReservationUpdateInput: Sendable {}
 #endif
+
+
+extension PrivatePaymentListReservationUpdateInput: Equatable, Hashable {
+    public static func ==(lhs: PrivatePaymentListReservationUpdateInput, rhs: PrivatePaymentListReservationUpdateInput) -> Bool {
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.reservations != rhs.reservations {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(counterparty)
+        hasher.combine(reservations)
+    }
+}
+
+extension PrivatePaymentListReservationUpdateInput: Codable {}
 
 
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypePrivatePaymentListReservationUpdate: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrivatePaymentListReservationUpdate {
+public struct FfiConverterTypePrivatePaymentListReservationUpdateInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrivatePaymentListReservationUpdateInput {
         return
-            try PrivatePaymentListReservationUpdate(
+            try PrivatePaymentListReservationUpdateInput(
                 counterparty: FfiConverterString.read(from: &buf),
-                reservations: FfiConverterSequenceTypePaymentEndpointReservation.read(from: &buf)
+                reservations: FfiConverterSequenceTypePaymentEndpointReservationInput.read(from: &buf)
         )
     }
 
-    public static func write(_ value: PrivatePaymentListReservationUpdate, into buf: inout [UInt8]) {
+    public static func write(_ value: PrivatePaymentListReservationUpdateInput, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterSequenceTypePaymentEndpointReservation.write(value.reservations, into: &buf)
+        FfiConverterSequenceTypePaymentEndpointReservationInput.write(value.reservations, into: &buf)
     }
 }
 
@@ -9609,15 +9758,15 @@ public struct FfiConverterTypePrivatePaymentListReservationUpdate: FfiConverterR
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypePrivatePaymentListReservationUpdate_lift(_ buf: RustBuffer) throws -> PrivatePaymentListReservationUpdate {
-    return try FfiConverterTypePrivatePaymentListReservationUpdate.lift(buf)
+public func FfiConverterTypePrivatePaymentListReservationUpdateInput_lift(_ buf: RustBuffer) throws -> PrivatePaymentListReservationUpdateInput {
+    return try FfiConverterTypePrivatePaymentListReservationUpdateInput.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypePrivatePaymentListReservationUpdate_lower(_ value: PrivatePaymentListReservationUpdate) -> RustBuffer {
-    return FfiConverterTypePrivatePaymentListReservationUpdate.lower(value)
+public func FfiConverterTypePrivatePaymentListReservationUpdateInput_lower(_ value: PrivatePaymentListReservationUpdateInput) -> RustBuffer {
+    return FfiConverterTypePrivatePaymentListReservationUpdateInput.lower(value)
 }
 
 
@@ -15515,6 +15664,31 @@ fileprivate struct FfiConverterSequenceTypePaymentEndpointReservation: FfiConver
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePaymentEndpointReservationInput: FfiConverterRustBuffer {
+    typealias SwiftType = [PaymentEndpointReservationInput]
+
+    public static func write(_ value: [PaymentEndpointReservationInput], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePaymentEndpointReservationInput.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PaymentEndpointReservationInput] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PaymentEndpointReservationInput]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePaymentEndpointReservationInput.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePaymentProofRecord: FfiConverterRustBuffer {
     typealias SwiftType = [PaymentProofRecord]
 
@@ -15615,23 +15789,23 @@ fileprivate struct FfiConverterSequenceTypePrivatePaymentListEndpoint: FfiConver
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypePrivatePaymentListReservationUpdate: FfiConverterRustBuffer {
-    typealias SwiftType = [PrivatePaymentListReservationUpdate]
+fileprivate struct FfiConverterSequenceTypePrivatePaymentListReservationUpdateInput: FfiConverterRustBuffer {
+    typealias SwiftType = [PrivatePaymentListReservationUpdateInput]
 
-    public static func write(_ value: [PrivatePaymentListReservationUpdate], into buf: inout [UInt8]) {
+    public static func write(_ value: [PrivatePaymentListReservationUpdateInput], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypePrivatePaymentListReservationUpdate.write(item, into: &buf)
+            FfiConverterTypePrivatePaymentListReservationUpdateInput.write(item, into: &buf)
         }
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrivatePaymentListReservationUpdate] {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrivatePaymentListReservationUpdateInput] {
         let len: Int32 = try readInt(&buf)
-        var seq = [PrivatePaymentListReservationUpdate]()
+        var seq = [PrivatePaymentListReservationUpdateInput]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            seq.append(try FfiConverterTypePrivatePaymentListReservationUpdate.read(from: &buf))
+            seq.append(try FfiConverterTypePrivatePaymentListReservationUpdateInput.read(from: &buf))
         }
         return seq
     }
@@ -16425,7 +16599,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_contact_private_payment_lists_and_process_outbound() != 36895) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound() != 27890) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound() != 7347) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers() != 39954) {
