@@ -12,6 +12,7 @@ use paykit_sdk::{
     PaymentEndpointSelectionRequest, PaymentEndpointSource, PaymentTarget, PubkyPublicKey,
     ReceivingDetail, ReceivingDetailScope,
 };
+use sha2::{Digest, Sha256};
 
 use crate::{
     errors::{validation_error, PaykitFfiError},
@@ -304,17 +305,21 @@ impl PaymentAdapter for FfiSdkPaymentAdapterAdapter {
         &self,
         request: &PaymentEndpointSelectionRequest,
     ) -> paykit_sdk::Result<Vec<PaymentEndpointCandidate>> {
-        let candidates_by_id = request
-            .candidates
-            .iter()
-            .enumerate()
-            .map(|(index, candidate)| {
-                (
-                    candidate_id(index),
-                    FfiPaymentEndpointCandidate::from_candidate(candidate, candidate_id(index)),
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut seen_candidate_ids = HashSet::new();
+        let mut candidates_by_id = Vec::with_capacity(request.candidates.len());
+        for candidate in &request.candidates {
+            let id = candidate_id(candidate);
+            if !seen_candidate_ids.insert(id.clone()) {
+                return Err(payment_adapter_error(
+                    validation_error("duplicate payment endpoint candidate"),
+                    "select payment endpoints",
+                ));
+            }
+            candidates_by_id.push((
+                id.clone(),
+                FfiPaymentEndpointCandidate::from_candidate(candidate, id),
+            ));
+        }
         let ffi_request = FfiPaymentEndpointSelectionRequest {
             counterparty: app_public_key(&request.counterparty),
             amount: request.amount.clone().map(Into::into),
@@ -360,7 +365,7 @@ impl PaymentAdapter for FfiSdkPaymentAdapterAdapter {
         self.adapter
             .build_payment_target(FfiPaymentEndpointCandidate::from_candidate(
                 endpoint,
-                "candidate".into(),
+                candidate_id(endpoint),
             ))
             .map_err(|err| payment_adapter_error(err, "build payment target"))
             .map(Into::into)
@@ -584,8 +589,25 @@ impl From<EndpointSyncReport> for FfiEndpointSyncReport {
     }
 }
 
-fn candidate_id(index: usize) -> String {
-    format!("candidate-{index}")
+fn candidate_id(candidate: &PaymentEndpointCandidate) -> String {
+    let mut digest = Sha256::new();
+    digest.update(candidate.counterparty.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(payment_endpoint_source_tag(&candidate.source).as_bytes());
+    digest.update([0]);
+    digest.update(candidate.identifier.as_bytes());
+    digest.update([0]);
+    digest.update(candidate.payload.as_bytes());
+    let digest = digest.finalize();
+    format!("candidate-{}", hex::encode(&digest[..16]))
+}
+
+fn payment_endpoint_source_tag(source: &PaymentEndpointSource) -> &'static str {
+    match source {
+        PaymentEndpointSource::PrivatePaymentList => "private",
+        PaymentEndpointSource::PublicPaymentEndpoint => "public",
+        _ => "unknown",
+    }
 }
 
 fn parse_rfc3339_utc(value: String) -> paykit_sdk::Result<DateTime<Utc>> {
@@ -611,10 +633,12 @@ fn payment_adapter_unavailable() -> PaykitFfiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[derive(Default)]
     struct TestPaymentAdapter {
         selected_ids: Vec<String>,
+        built_candidate_ids: Arc<Mutex<Vec<String>>>,
     }
 
     impl FfiSdkPaymentAdapter for TestPaymentAdapter {
@@ -649,7 +673,7 @@ mod tests {
             &self,
             request: FfiPaymentEndpointSelectionRequest,
         ) -> Result<Vec<String>, PaykitFfiError> {
-            assert_eq!(request.candidates[0].candidate_id, "candidate-0");
+            assert!(request.candidates[0].candidate_id.starts_with("candidate-"));
             Ok(self.selected_ids.clone())
         }
 
@@ -657,6 +681,10 @@ mod tests {
             &self,
             endpoint: FfiPaymentEndpointCandidate,
         ) -> Result<FfiPaymentTarget, PaykitFfiError> {
+            self.built_candidate_ids
+                .lock()
+                .unwrap()
+                .push(endpoint.candidate_id.clone());
             Ok(FfiPaymentTarget {
                 payload: Arc::new(FfiPaymentPayload::new(format!(
                     "target:{}",
@@ -680,15 +708,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_select_payment_endpoint_ids_maps_back_to_candidates() {
-        let adapter = FfiSdkPaymentAdapterAdapter {
-            adapter: Arc::new(TestPaymentAdapter {
-                selected_ids: vec!["candidate-1".into()],
-            }),
-        };
         let candidates = vec![
             candidate("btc-mainnet-address"),
             candidate("btc-mainnet-lnurl"),
         ];
+        let adapter = FfiSdkPaymentAdapterAdapter {
+            adapter: Arc::new(TestPaymentAdapter {
+                selected_ids: vec![candidate_id(&candidates[1])],
+                built_candidate_ids: Arc::default(),
+            }),
+        };
         let selected = adapter
             .select_payment_endpoints(&PaymentEndpointSelectionRequest {
                 counterparty: candidates[0].counterparty.clone(),
@@ -709,6 +738,7 @@ mod tests {
         let adapter = FfiSdkPaymentAdapterAdapter {
             adapter: Arc::new(TestPaymentAdapter {
                 selected_ids: vec!["missing".into()],
+                built_candidate_ids: Arc::default(),
             }),
         };
         let candidates = vec![candidate("btc-mainnet-address")];
@@ -729,15 +759,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_payment_target_maps_payload() {
+        let built_candidate_ids = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = candidate("btc-mainnet-address");
+        let expected_id = candidate_id(&endpoint);
         let adapter = FfiSdkPaymentAdapterAdapter {
-            adapter: Arc::new(TestPaymentAdapter::default()),
+            adapter: Arc::new(TestPaymentAdapter {
+                selected_ids: Vec::new(),
+                built_candidate_ids: built_candidate_ids.clone(),
+            }),
         };
-        let target = adapter
-            .build_payment_target(&candidate("btc-mainnet-address"))
-            .await
-            .unwrap();
+        let target = adapter.build_payment_target(&endpoint).await.unwrap();
 
         assert_eq!(target.payload, "target:btc-mainnet-address");
+        assert_eq!(*built_candidate_ids.lock().unwrap(), vec![expected_id]);
     }
 
     #[test]

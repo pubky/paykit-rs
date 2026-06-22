@@ -251,9 +251,7 @@ where
     }
 
     async fn private_payment_preparation_is_available(&self) -> Result<bool> {
-        let Some(identity) = self.storage.load_identity_state().await? else {
-            return Ok(false);
-        };
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         Ok(identity.capability == PubkyIdentityCapability::PrivateLinkCapable)
     }
 

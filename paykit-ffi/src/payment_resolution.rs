@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use paykit_sdk::{
     storage::OutboundPrivateMessageRecord, ContactPaymentResolution,
@@ -109,7 +109,7 @@ pub struct FfiPrivatePaymentListSyncAndSendReport {
 }
 
 /// One counterparty result from a Private Payment List sync.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPrivatePaymentListSyncChange {
     /// Counterparty affected by the sync.
     pub counterparty: String,
@@ -117,6 +117,16 @@ pub struct FfiPrivatePaymentListSyncChange {
     pub outbound_message_id: Option<u64>,
     /// Error text, when queueing failed.
     pub error: Option<String>,
+}
+
+impl fmt::Debug for FfiPrivatePaymentListSyncChange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FfiPrivatePaymentListSyncChange")
+            .field("counterparty", &self.counterparty)
+            .field("outbound_message_id", &self.outbound_message_id)
+            .field("error", &self.error.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Result category for contact payment resolution.
@@ -630,5 +640,19 @@ mod tests {
         assert_eq!(error.code(), "last_send_error");
         assert_eq!(error.export_debug_details(), "private send secret");
         assert!(!format!("{error:?}").contains("private send secret"));
+    }
+
+    #[test]
+    fn test_private_payment_list_sync_change_redacts_error_debug() {
+        let change = FfiPrivatePaymentListSyncChange {
+            counterparty: public_key().to_app_key(),
+            outbound_message_id: None,
+            error: Some("private queue failure".into()),
+        };
+
+        let debug = format!("{change:?}");
+
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("private queue failure"));
     }
 }
