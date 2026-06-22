@@ -66,6 +66,7 @@ gobley-uniffi-bindgen \
 
 echo "Moving Kotlin files to final location..."
 find "$TMP_DIR" -name "*.kt" -exec mv {} "$BASE_DIR/" \;
+./postprocess_bindings.sh "$BASE_DIR"/*.kt
 
 echo "Normalizing generated Kotlin whitespace..."
 find "$BASE_DIR" -name "*.kt" -exec perl -0pi -e 's/[ \t]+(?=\n)//g; s/[ \t]+\z//; s/\n+\z/\n/; $_ .= "\n" unless /\n\z/' {} \;

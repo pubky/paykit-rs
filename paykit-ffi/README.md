@@ -15,23 +15,23 @@ on low-level `paykit-lib` protocol bindings.
 
 ### Runtime
 
-- `FfiPaykitSdk` — stateful SDK runtime handle.
-- `FfiSdkStateBlobStore` — platform callback interface for opaque SDK state
+- `PaykitSdk` — stateful SDK runtime handle.
+- `SdkStateBlobStore` — platform callback interface for opaque SDK state
   blob load/save.
-- `FfiSdkPubkySessionProvider` — platform callback interface for live Pubky
+- `SdkPubkySessionProvider` — platform callback interface for live Pubky
   session access and public storage availability.
-- `FfiSdkPaymentAdapter` — platform callback interface for receiving details,
+- `SdkPaymentAdapter` — platform callback interface for receiving details,
   endpoint reservation cleanup, payable endpoint ordering, and payment target
   construction.
-- `FfiPaykitSdk.initialize`, `identityStatus`, and `signOut` — app-facing
+- `PaykitSdk.initialize`, `identityStatus`, and `signOut` — app-facing
   account/session lifecycle for the current Paykit runtime.
-- `FfiPaykitSdk.stateRevision` — return the platform SDK state revision so
+- `PaykitSdk.stateRevision` — return the platform SDK state revision so
   apps can detect when SDK-managed state changed.
-- `FfiPubkySessionAccess` — opaque Pubky session access material. Use its
+- `PubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
   session state.
-- `defaultConfig()` — return default `FfiPaykitSdkConfig`.
-- `defaultPubkyClientConfig()` — return default `FfiPubkyClientConfig`.
+- `defaultConfig()` — return default `PaykitSdkConfig`.
+- `defaultPubkyClientConfig()` — return default `PubkyClientConfig`.
 - `requiredSessionCapabilities(config)` — return Pubky capabilities required by
   a config.
 - `coreSessionCapabilities()` — return the core Paykit Pubky capability scope.
@@ -46,13 +46,13 @@ load the native UniFFI library just to format keys.
 
 ### Public Payment Endpoints
 
-- `FfiPaykitSdk.withPaymentAdapter` — create a runtime with payment adapter
+- `PaykitSdk.withPaymentAdapter` — create a runtime with payment adapter
   callbacks.
-- `FfiPaykitSdk.syncPublicEndpoints` — publish current public receiving details
+- `PaykitSdk.syncPublicEndpoints` — publish current public receiving details
   and remove stale SDK-managed public Payment Endpoints.
-- `FfiPaykitSdk.syncPublicEndpointsWithReceivingDetails` — publish explicit
+- `PaykitSdk.syncPublicEndpointsWithReceivingDetails` — publish explicit
   public receiving details without relying on adapter-side mutable state.
-- `FfiEndpointSyncReport` — published, removed, and failed endpoint changes.
+- `EndpointSyncReport` — published, removed, and failed endpoint changes.
 
 The payment adapter returns receiving details and candidate ids. Apps execute
 payments outside Paykit; Paykit SDK only routes, records, and validates the
@@ -60,16 +60,16 @@ Paykit-side workflow.
 
 ### Private Links and Stream Processing
 
-- `FfiPaykitSdk.initiateLinkWithPeer`, `acceptLinkWithPeer`, and
+- `PaykitSdk.initiateLinkWithPeer`, `acceptLinkWithPeer`, and
   `advanceLinkHandshake` — establish Encrypted Links with counterparties.
-- `FfiPaykitSdk.linkedPeers`, `blockPeer`, and `unblockPeer` — inspect and
+- `PaykitSdk.linkedPeers`, `blockPeer`, and `unblockPeer` — inspect and
   manage local peer state.
-- `FfiPaykitSdk.receivePrivateMessages` and
+- `PaykitSdk.receivePrivateMessages` and
   `receivePrivateMessagesFromLinkedPeers` — receive and checkpoint private
   stream data.
-- `FfiPaykitSdk.processOutboundPrivateMessages` and
+- `PaykitSdk.processOutboundPrivateMessages` and
   `processPendingPrivateMessages` — send queued private messages.
-- `FfiPaykitSdk.*EncryptedLinkRecoveryMarker*` methods — inspect, publish,
+- `PaykitSdk.*EncryptedLinkRecoveryMarker*` methods — inspect, publish,
   observe, and remove recovery markers.
 
 Private operation errors expose stable category/code fields and redacted
@@ -77,58 +77,58 @@ context. Raw diagnostic details require an explicit debug export method.
 
 ### Private Payment Lists and Payment Resolution
 
-- `FfiPaykitSdk.enqueuePrivatePaymentList` — queue current private receiving
+- `PaykitSdk.enqueuePrivatePaymentList` — queue current private receiving
   details for one counterparty.
-- `FfiPaykitSdk.enqueuePrivatePaymentListWithReceivingDetails` — queue an
+- `PaykitSdk.enqueuePrivatePaymentListWithReceivingDetails` — queue an
   explicit complete private list for one counterparty.
-- `FfiPaykitSdk.clearPrivatePaymentList` — queue an empty private list for one
+- `PaykitSdk.clearPrivatePaymentList` — queue an empty private list for one
   counterparty.
-- `FfiPaykitSdk.clearPrivatePaymentListAndProcessOutbound` — queue an empty
+- `PaykitSdk.clearPrivatePaymentListAndProcessOutbound` — queue an empty
   private list and attempt delivery for that counterparty.
-- `FfiPaykitSdk.syncContactPrivatePaymentLists` — queue current private lists
+- `PaykitSdk.syncContactPrivatePaymentLists` — queue current private lists
   for saved contacts and optionally clear linked peers that are no longer
   saved contacts.
-- `FfiPaykitSdk.syncContactPrivatePaymentListsAndProcessOutbound` — queue
+- `PaykitSdk.syncContactPrivatePaymentListsAndProcessOutbound` — queue
   contact private lists and attempt outbound delivery in one app-facing call.
-- `FfiPaykitSdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound` —
+- `PaykitSdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound` —
   queue reservation-backed private lists supplied by the app and attempt
   delivery, with per-counterparty queue and delivery failures.
-- `FfiPaykitSdk.currentPrivatePaymentList` — inspect the latest cached Private
+- `PaykitSdk.currentPrivatePaymentList` — inspect the latest cached Private
   Payment List view for one counterparty.
-- `FfiPaykitSdk.prepareAndResolveContactPayment` — app-facing payment setup:
+- `PaykitSdk.prepareAndResolveContactPayment` — app-facing payment setup:
   refresh live session capability, ensure or advance private link state,
   receive private messages, process pending outbound messages, then resolve
   private-first with optional public fallback.
-- `FfiPaykitSdk.resolveContactPayment` — resolve payable private and optional
+- `PaykitSdk.resolveContactPayment` — resolve payable private and optional
   public Payment Endpoints into adapter-built payment targets.
-- `FfiPaykitSdk.resolvePrivateContactPayment` and
+- `PaykitSdk.resolvePrivateContactPayment` and
   `resolvePublicContactPayment` — source-specific resolution helpers for apps
   that want to avoid mixed private/public results.
 
-Private endpoint payloads and payment targets use `FfiPaymentPayload`, so raw
+Private endpoint payloads and payment targets use `PaymentPayload`, so raw
 payment-method data is exported only through explicit payload methods.
-The reservation callback returns `FfiReceivingDetailReservationResponse`:
+The reservation callback returns `ReceivingDetailReservationResponse`:
 `UseCurrentReceivingDetails` means the SDK should call regular current
 receiving details, while `Reservations` means use exactly the supplied list,
 including an empty list.
 
 For direct reservation publication, pass one
-`FfiPrivatePaymentListReservationUpdate` per counterparty. An empty reservation
+`PrivatePaymentListReservationUpdate` per counterparty. An empty reservation
 list means "publish an empty Private Payment List for this counterparty".
 Helpers that both queue and attempt delivery return
-`FfiPrivatePaymentListDeliveryReport` with `queued`, `cleared`,
+`PrivatePaymentListDeliveryReport` with `queued`, `cleared`,
 `failedToQueue`, and `failedToDeliver` groups.
 
 ### Payment Requests
 
-- `FfiPaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
+- `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
   `rejectPaymentRequest`, `cancelPaymentRequest`, and `submitPaymentProof` —
   queue Payment Request lifecycle events through the SDK outbound stream.
-- `FfiPaykitSdk.paymentRequests`, `paymentRequestsWith`,
+- `PaykitSdk.paymentRequests`, `paymentRequestsWith`,
   `receivedPaymentRequestsFrom`, `listPaymentRequests`,
   `activeRecurringPaymentRequests`, and `actionableReceivedPaymentRequests` —
   inspect SDK-derived Payment Request records.
-- `FfiPaymentReference` — redacted Payment Reference object with explicit text
+- `PaymentReference` — redacted Payment Reference object with explicit text
   export for payment execution or display.
 
 Returned records reflect local stream and outbound queue state. Outbound
@@ -138,22 +138,22 @@ statuses still indicate whether a queued event has been sent.
 
 - `generateReceiptId` — create a caller-stable Receipt ID for retry-safe
   issuance.
-- `FfiPaykitSdk.prepareReceiptIssuance`, `issueReceipt`, and
+- `PaykitSdk.prepareReceiptIssuance`, `issueReceipt`, and
   `processReceiptIssuance` — persist receipt issuance state, store the
   Encrypted Receipt, and queue Receipt Access.
-- `FfiPaykitSdk.issuedReceipts`, `issuedReceiptsTo`,
+- `PaykitSdk.issuedReceipts`, `issuedReceiptsTo`,
   `receiptIssuanceRecords`, `receiptAccess`, `receiptAccessFrom`,
   `receiptAccessRecords`, `retrieveReceipt`, `receipts`, `receiptsFrom`, and
   `receiptRecords` — inspect issued, indexed, and decrypted receipts.
 
 Receipt Decryption Keys and encrypted payloads stay inside SDK-managed state.
-Payment References are exposed through the redacted `FfiPaymentReference`
+Payment References are exposed through the redacted `PaymentReference`
 object.
 
 ### Pubky Session Bootstrap
 
-- `FfiPubkySessionBootstrap` — create/import Pubky sessions and auth flows.
-- `FfiPubkyAuthRequest` — pending external auth-flow handle.
+- `PubkySessionBootstrap` — create/import Pubky sessions and auth flows.
+- `PubkyAuthRequest` — pending external auth-flow handle.
 - `derivePubkySecretKey(seed, runtimeLabel)` — derive an app/runtime-specific
   Pubky secret key from a 64-byte wallet seed.
 - `pubkyPublicKeyFromSecret(localSecretKey)` — derive a Pubky public key.
@@ -162,36 +162,36 @@ object.
 
 ### Profiles and Contacts
 
-- `FfiPaykitSdk.publishPaykitProfile` / `fetchPaykitProfile` — write and read
+- `PaykitSdk.publishPaykitProfile` / `fetchPaykitProfile` — write and read
   public Paykit Profiles.
-- `FfiPaykitSdk.deletePaykitProfile` — remove this identity's Paykit Profile.
-- `FfiPaykitSdk.publishPaykitBlob`, `uploadProfileAvatar`,
+- `PaykitSdk.deletePaykitProfile` — remove this identity's Paykit Profile.
+- `PaykitSdk.publishPaykitBlob`, `uploadProfileAvatar`,
   `deletePaykitBlob`, `fetchPubkyFile`, and `fetchPubkyText` — publish profile
   blobs and read public Pubky resources.
-- `FfiPaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
+- `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
   `removeContact` — manage local Contact Records.
-- `FfiPaykitSdk.fetchPubkyProfile`, `fetchPubkyFollows`, and
+- `PaykitSdk.fetchPubkyProfile`, `fetchPubkyFollows`, and
   `resolveContactProfile` — read Pubky app profile/follow data and resolve
   contact display metadata.
-- `FfiPaykitSdk.resolveProfile` and `currentProfile` — profile-resolution
+- `PaykitSdk.resolveProfile` and `currentProfile` — profile-resolution
   aliases for non-contact and current-identity screens.
-- `FfiPaykitSdk.publishPublicContact`, `removePublicContact`, and
+- `PaykitSdk.publishPublicContact`, `removePublicContact`, and
   `syncPublicContactMarkers` — opt-in Public Contact Marker workflows.
 
-`FfiPaykitProfile.extraJson` is a JSON object string so apps can carry
+`PaykitProfile.extraJson` is a JSON object string so apps can carry
 app-specific public profile fields without exposing an FFI JSON value model.
 
 ### State and Secret Blobs
 
-- `FfiSdkStateBlob` — internal SDK runtime state for platform durable
+- `SdkStateBlob` — internal SDK runtime state for platform durable
   storage. Store it encrypted or inside platform-protected storage.
-- `FfiSdkBackupBlob` — SDK backup/export payload for app-controlled
+- `SdkBackupBlob` — SDK backup/export payload for app-controlled
   backup flows.
-- `FfiPubkyLocalSecretKey` — local Pubky secret key bytes.
+- `PubkyLocalSecretKey` — local Pubky secret key bytes.
 
-`FfiPaykitSdk.exportBackupString` and `restoreBackupString` are text-form
+`PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.
-`FfiPaykitSdk.stateRevision` lets apps compare the platform state revision
+`PaykitSdk.stateRevision` lets apps compare the platform state revision
 before and after SDK-mutating workflows to mark app backups dirty.
 `encodeSdkStateBlobSnapshot` and `decodeSdkStateBlobSnapshot` are convenience
 helpers for apps that store the opaque state blob and revision in one platform

@@ -37,6 +37,7 @@ cargo run --bin uniffi-bindgen generate \
     || { echo "Failed to generate Swift bindings"; exit 1; }
 
 cp ./src/swift/PaykitPublicKeys.swift ./bindings/ios/PaykitPublicKeys.swift
+./postprocess_bindings.sh ./bindings/ios/paykit.swift
 
 echo "Handling modulemap file..."
 if [ -f bindings/ios/paykitFFI.modulemap ]; then
