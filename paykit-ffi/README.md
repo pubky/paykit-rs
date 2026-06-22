@@ -206,9 +206,20 @@ The app usually keeps one long-lived `PaykitSdk` handle for the current local
 Paykit identity. On startup:
 
 ```text
-sdk = PaykitSdk(stateStore, sessionProvider, config)
+sdk = PaykitSdk.withPaymentAdapter(
+    stateStore,
+    sessionProvider,
+    paymentAdapter,
+    config
+)
 sdk.initialize()
+status = sdk.identityStatus()
 ```
+
+Use `identityStatus` to gate product actions. Public-only sessions can still
+publish public Payment Endpoints and resolve public fallback when requested, but
+apps should not offer private-payment publication or private-link setup unless
+the current identity is private-link-capable.
 
 `SdkStateBlobStore` must persist every blob save atomically. If the app stores
 the SDK blob inside a larger app backup record, compare `stateRevision`
@@ -266,8 +277,9 @@ For normal contact payment UX, use the high-level preparation call:
 ```text
 resolution = sdk.prepareAndResolveContactPayment(
     counterparty,
-    request,
-    includePublicEndpoints
+    amount, // PaymentAmountContext or nil/null
+    includePublicEndpoints,
+    maxAdvanceSteps
 )
 ```
 
