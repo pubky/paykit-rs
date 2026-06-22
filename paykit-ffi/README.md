@@ -115,6 +115,9 @@ including an empty list.
 For direct reservation publication, pass one
 `PrivatePaymentListReservationUpdate` per counterparty. An empty reservation
 list means "publish an empty Private Payment List for this counterparty".
+Mobile bindings also provide `PrivatePaymentListReservationDraft` and
+`PrivatePaymentListReservationUpdateDraft` as pure Swift/Kotlin platform
+values. Convert them to SDK records only at the Paykit call boundary.
 Helpers that both queue and attempt delivery return
 `PrivatePaymentListDeliveryReport` with `queued`, `cleared`,
 `failedToQueue`, and `failedToDeliver` groups.
