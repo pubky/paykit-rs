@@ -200,6 +200,118 @@ record.
 These are opaque binding objects. Use their explicit export methods only at
 platform secure-storage or backup boundaries.
 
+## Mobile Workflow Guide
+
+The app usually keeps one long-lived `PaykitSdk` handle for the current local
+Paykit identity. On startup:
+
+```text
+sdk = PaykitSdk(stateStore, sessionProvider, config)
+sdk.initialize()
+```
+
+`SdkStateBlobStore` must persist every blob save atomically. If the app stores
+the SDK blob inside a larger app backup record, compare `stateRevision`
+before and after SDK-mutating workflows and mark the app backup dirty when it
+changes.
+
+```text
+before = sdk.stateRevision()
+report = sdk.syncPublicEndpointsWithReceivingDetails(details)
+after = sdk.stateRevision()
+
+if after != before:
+    markAppBackupDirty()
+```
+
+### Publish Receive Details
+
+When receiving details change, publish public endpoints and, for saved local
+contacts, queue private lists:
+
+```text
+sdk.syncPublicEndpointsWithReceivingDetails(publicDetails)
+
+updates = [
+    PrivatePaymentListReservationUpdateInput(
+        counterparty,
+        reservations: [
+            PaymentEndpointReservationInput(
+                reservationId,
+                identifier,
+                payload,
+                expiresAt,
+                attribution
+            )
+        ]
+    )
+]
+
+report = sdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound(
+    updates,
+    clearUnlistedLinkedPeers
+)
+```
+
+An empty `reservations` list publishes an empty Private Payment List for that
+counterparty. `failedToQueue` means the SDK did not persist an outbound private
+message for that counterparty. `failedToDeliver` means the SDK queued the
+message, then delivery or reservation cleanup failed; keep the state and retry
+with `processPendingPrivateMessages`.
+
+### Pay A Contact
+
+For normal contact payment UX, use the high-level preparation call:
+
+```text
+resolution = sdk.prepareAndResolveContactPayment(
+    counterparty,
+    request,
+    includePublicEndpoints
+)
+```
+
+This refreshes session capability, advances or starts private link work when
+possible, receives pending private messages, processes pending outbound
+messages, and resolves private endpoints first. Public endpoints are included
+only when the call asks for them. Use `resolution.status` for the overall
+payment outcome and `resolution.privateState` for private-link-specific
+recovery or capability state.
+
+### Backup And Restore
+
+The SDK backup is separate from the live state blob. Store both according to
+the product's backup model:
+
+```text
+backupText = sdk.exportBackupString()
+sdk.restoreBackupString(backupText)
+```
+
+Use `exportBackupString` after SDK state changes when the app wants the user to
+recover Paykit private state after reinstall, sign-out, or device restore.
+Without an SDK backup or live state blob, public Paykit data can be
+rediscovered from Pubky, but private link checkpoints, private stream indexes,
+receipt keys, queued outbound messages, and local Contact Records are not
+derivable from the Pubky public key alone.
+
+### Error And Report Handling
+
+- `PrivateOperationError.category` and `code` are for app branching.
+  `redactedContext` is safe for normal UI/logging. Use `exportDebugDetails`
+  only for explicit diagnostics.
+- `EndpointSyncReport.failed` means public endpoint publication/removal was not
+  fully applied. Keep local receiving details and retry sync later.
+- `PrivatePaymentListDeliveryReport.failedToQueue` is a local persistence or
+  validation problem for that counterparty; show or log it as a blocked update.
+- `PrivatePaymentListDeliveryReport.failedToDeliver` is retryable workflow
+  state unless the nested error says recovery is required. Keep the queued
+  state and let the retry worker continue.
+- Contact payment resolution may return public payment options while
+  `privateState` reports private recovery or unavailable private capability.
+  Treat `status` as the general result and `privateState` as the private
+  transport state.
+
 ## Building
 
 Always build all platforms together:
