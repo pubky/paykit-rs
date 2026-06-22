@@ -162,7 +162,7 @@ public interface FfiPaykitSdkInterface {
      * Queue an empty Private Payment List and process that counterparty's queue.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `clearPrivatePaymentListAndProcessOutbound`(`counterparty`: kotlin.String): FfiPrivatePaymentListSyncDeliveryReport
+    public suspend fun `clearPrivatePaymentListAndProcessOutbound`(`counterparty`: kotlin.String): FfiPrivatePaymentListDeliveryReport
 
     /**
      * Return this runtime's configuration.
@@ -580,13 +580,13 @@ public interface FfiPaykitSdkInterface {
      * Queue contact Private Payment Lists and process pending private messages.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `syncContactPrivatePaymentListsAndProcessOutbound`(`clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListSyncAndSendReport
+    public suspend fun `syncContactPrivatePaymentListsAndProcessOutbound`(`clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListDeliveryReport
 
     /**
      * Queue reservation-backed Private Payment Lists and process their queues.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `syncPrivatePaymentListsWithReservationsAndProcessOutbound`(`updates`: List<FfiPrivatePaymentListReservationUpdate>, `clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListSyncDeliveryReport
+    public suspend fun `syncPrivatePaymentListsWithReservationsAndProcessOutbound`(`updates`: List<FfiPrivatePaymentListReservationUpdate>, `clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListDeliveryReport
 
     /**
      * Retry pending public Contact Marker publication/removal work.
@@ -2214,6 +2214,41 @@ public data class FfiPrivatePaymentListDeliveryFailure (
 
 
 /**
+ * Report from queueing and delivering Private Payment Lists.
+ */
+
+public data class FfiPrivatePaymentListDeliveryReport (
+    /**
+     * Counterparties that had a non-empty Private Payment List queued.
+     */
+    val `queued`: List<FfiPrivatePaymentListSyncChange>,
+    /**
+     * Counterparties that had an empty Private Payment List queued.
+     */
+    val `cleared`: List<FfiPrivatePaymentListSyncChange>,
+    /**
+     * Counterparties that could not be queued or cleared.
+     */
+    val `failedToQueue`: List<FfiPrivatePaymentListSyncChange>,
+    /**
+     * Counterparties queued successfully but failed during outbound delivery.
+     */
+    val `failedToDeliver`: List<FfiPrivatePaymentListDeliveryFailure>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`queued`,
+            this.`cleared`,
+            this.`failedToQueue`,
+            this.`failedToDeliver`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
  * One endpoint in the latest Private Payment List view.
  */
 
@@ -2266,31 +2301,6 @@ public data class FfiPrivatePaymentListReservationUpdate (
 
 
 /**
- * Report from syncing contact Private Payment Lists and processing outbound sends.
- */
-
-public data class FfiPrivatePaymentListSyncAndSendReport (
-    /**
-     * Queueing result for contact Private Payment Lists.
-     */
-    val `sync`: FfiPrivatePaymentListSyncReport,
-    /**
-     * Outbound send reports produced after queueing.
-     */
-    val `outbound`: List<FfiOutboundPrivateCounterpartySendReport>
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`sync`,
-            this.`outbound`,
-        )
-    }
-    public companion object
-}
-
-
-
-/**
  * One counterparty result from a Private Payment List sync.
  */
 @kotlinx.serialization.Serializable
@@ -2308,41 +2318,6 @@ public data class FfiPrivatePaymentListSyncChange (
      */
     val `error`: kotlin.String?
 ) {
-    public companion object
-}
-
-
-
-/**
- * Report from queueing and delivering Private Payment Lists.
- */
-
-public data class FfiPrivatePaymentListSyncDeliveryReport (
-    /**
-     * Counterparties that had a non-empty Private Payment List queued.
-     */
-    val `queued`: List<FfiPrivatePaymentListSyncChange>,
-    /**
-     * Counterparties that had an empty Private Payment List queued.
-     */
-    val `cleared`: List<FfiPrivatePaymentListSyncChange>,
-    /**
-     * Counterparties that could not be queued or cleared.
-     */
-    val `failedToQueue`: List<FfiPrivatePaymentListSyncChange>,
-    /**
-     * Counterparties queued successfully but failed during outbound delivery.
-     */
-    val `failedToDeliver`: List<FfiPrivatePaymentListDeliveryFailure>
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`queued`,
-            this.`cleared`,
-            this.`failedToQueue`,
-            this.`failedToDeliver`,
-        )
-    }
     public companion object
 }
 

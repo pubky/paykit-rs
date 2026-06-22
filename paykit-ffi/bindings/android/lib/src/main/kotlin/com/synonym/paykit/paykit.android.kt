@@ -1552,7 +1552,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list() != 56925.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 49245.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 5141.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410.toShort()) {
@@ -1759,10 +1759,10 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_contact_private_payment_lists() != 14363.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_contact_private_payment_lists_and_process_outbound() != 20754.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_contact_private_payment_lists_and_process_outbound() != 36895.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound() != 51378.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound() != 27890.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers() != 39954.toShort()) {
@@ -4091,7 +4091,7 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
      * Queue an empty Private Payment List and process that counterparty's queue.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `clearPrivatePaymentListAndProcessOutbound`(`counterparty`: kotlin.String): FfiPrivatePaymentListSyncDeliveryReport {
+    public override suspend fun `clearPrivatePaymentListAndProcessOutbound`(`counterparty`: kotlin.String): FfiPrivatePaymentListDeliveryReport {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound(
@@ -4104,7 +4104,7 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
-            { FfiConverterTypeFfiPrivatePaymentListSyncDeliveryReport.lift(it) },
+            { FfiConverterTypeFfiPrivatePaymentListDeliveryReport.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -5672,7 +5672,7 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
      * Queue contact Private Payment Lists and process pending private messages.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `syncContactPrivatePaymentListsAndProcessOutbound`(`clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListSyncAndSendReport {
+    public override suspend fun `syncContactPrivatePaymentListsAndProcessOutbound`(`clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListDeliveryReport {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_sync_contact_private_payment_lists_and_process_outbound(
@@ -5685,7 +5685,7 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
-            { FfiConverterTypeFfiPrivatePaymentListSyncAndSendReport.lift(it) },
+            { FfiConverterTypeFfiPrivatePaymentListDeliveryReport.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -5695,7 +5695,7 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
      * Queue reservation-backed Private Payment Lists and process their queues.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `syncPrivatePaymentListsWithReservationsAndProcessOutbound`(`updates`: List<FfiPrivatePaymentListReservationUpdate>, `clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListSyncDeliveryReport {
+    public override suspend fun `syncPrivatePaymentListsWithReservationsAndProcessOutbound`(`updates`: List<FfiPrivatePaymentListReservationUpdate>, `clearUnlistedLinkedPeers`: kotlin.Boolean): FfiPrivatePaymentListDeliveryReport {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_sync_private_payment_lists_with_reservations_and_process_outbound(
@@ -5709,7 +5709,7 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
-            { FfiConverterTypeFfiPrivatePaymentListSyncDeliveryReport.lift(it) },
+            { FfiConverterTypeFfiPrivatePaymentListDeliveryReport.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -9856,6 +9856,34 @@ public object FfiConverterTypeFfiPrivatePaymentListDeliveryFailure: FfiConverter
 
 
 
+public object FfiConverterTypeFfiPrivatePaymentListDeliveryReport: FfiConverterRustBuffer<FfiPrivatePaymentListDeliveryReport> {
+    override fun read(buf: ByteBuffer): FfiPrivatePaymentListDeliveryReport {
+        return FfiPrivatePaymentListDeliveryReport(
+            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(buf),
+            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(buf),
+            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(buf),
+            FfiConverterSequenceTypeFfiPrivatePaymentListDeliveryFailure.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPrivatePaymentListDeliveryReport): ULong = (
+            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.allocationSize(value.`queued`) +
+            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.allocationSize(value.`cleared`) +
+            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.allocationSize(value.`failedToQueue`) +
+            FfiConverterSequenceTypeFfiPrivatePaymentListDeliveryFailure.allocationSize(value.`failedToDeliver`)
+    )
+
+    override fun write(value: FfiPrivatePaymentListDeliveryReport, buf: ByteBuffer) {
+        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.`queued`, buf)
+        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.`cleared`, buf)
+        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.`failedToQueue`, buf)
+        FfiConverterSequenceTypeFfiPrivatePaymentListDeliveryFailure.write(value.`failedToDeliver`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiPrivatePaymentListEndpoint: FfiConverterRustBuffer<FfiPrivatePaymentListEndpoint> {
     override fun read(buf: ByteBuffer): FfiPrivatePaymentListEndpoint {
         return FfiPrivatePaymentListEndpoint(
@@ -9900,28 +9928,6 @@ public object FfiConverterTypeFfiPrivatePaymentListReservationUpdate: FfiConvert
 
 
 
-public object FfiConverterTypeFfiPrivatePaymentListSyncAndSendReport: FfiConverterRustBuffer<FfiPrivatePaymentListSyncAndSendReport> {
-    override fun read(buf: ByteBuffer): FfiPrivatePaymentListSyncAndSendReport {
-        return FfiPrivatePaymentListSyncAndSendReport(
-            FfiConverterTypeFfiPrivatePaymentListSyncReport.read(buf),
-            FfiConverterSequenceTypeFfiOutboundPrivateCounterpartySendReport.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiPrivatePaymentListSyncAndSendReport): ULong = (
-            FfiConverterTypeFfiPrivatePaymentListSyncReport.allocationSize(value.`sync`) +
-            FfiConverterSequenceTypeFfiOutboundPrivateCounterpartySendReport.allocationSize(value.`outbound`)
-    )
-
-    override fun write(value: FfiPrivatePaymentListSyncAndSendReport, buf: ByteBuffer) {
-        FfiConverterTypeFfiPrivatePaymentListSyncReport.write(value.`sync`, buf)
-        FfiConverterSequenceTypeFfiOutboundPrivateCounterpartySendReport.write(value.`outbound`, buf)
-    }
-}
-
-
-
-
 public object FfiConverterTypeFfiPrivatePaymentListSyncChange: FfiConverterRustBuffer<FfiPrivatePaymentListSyncChange> {
     override fun read(buf: ByteBuffer): FfiPrivatePaymentListSyncChange {
         return FfiPrivatePaymentListSyncChange(
@@ -9941,34 +9947,6 @@ public object FfiConverterTypeFfiPrivatePaymentListSyncChange: FfiConverterRustB
         FfiConverterString.write(value.`counterparty`, buf)
         FfiConverterOptionalULong.write(value.`outboundMessageId`, buf)
         FfiConverterOptionalString.write(value.`error`, buf)
-    }
-}
-
-
-
-
-public object FfiConverterTypeFfiPrivatePaymentListSyncDeliveryReport: FfiConverterRustBuffer<FfiPrivatePaymentListSyncDeliveryReport> {
-    override fun read(buf: ByteBuffer): FfiPrivatePaymentListSyncDeliveryReport {
-        return FfiPrivatePaymentListSyncDeliveryReport(
-            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(buf),
-            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(buf),
-            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.read(buf),
-            FfiConverterSequenceTypeFfiPrivatePaymentListDeliveryFailure.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiPrivatePaymentListSyncDeliveryReport): ULong = (
-            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.allocationSize(value.`queued`) +
-            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.allocationSize(value.`cleared`) +
-            FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.allocationSize(value.`failedToQueue`) +
-            FfiConverterSequenceTypeFfiPrivatePaymentListDeliveryFailure.allocationSize(value.`failedToDeliver`)
-    )
-
-    override fun write(value: FfiPrivatePaymentListSyncDeliveryReport, buf: ByteBuffer) {
-        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.`queued`, buf)
-        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.`cleared`, buf)
-        FfiConverterSequenceTypeFfiPrivatePaymentListSyncChange.write(value.`failedToQueue`, buf)
-        FfiConverterSequenceTypeFfiPrivatePaymentListDeliveryFailure.write(value.`failedToDeliver`, buf)
     }
 }
 

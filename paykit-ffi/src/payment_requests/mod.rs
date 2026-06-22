@@ -4,7 +4,7 @@ use paykit_lib::PaymentReference;
 
 use crate::{
     errors::validation_error, json::FfiPrivateJsonObject,
-    payment_resolution::FfiOutboundPrivateMessageStatus, sdk::FfiPaykitSdk, PaykitFfiError,
+    private_lists::FfiOutboundPrivateMessageStatus, sdk::FfiPaykitSdk, PaykitFfiError,
 };
 
 mod conversions;

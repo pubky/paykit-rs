@@ -115,6 +115,9 @@ including an empty list.
 For direct reservation publication, pass one
 `FfiPrivatePaymentListReservationUpdate` per counterparty. An empty reservation
 list means "publish an empty Private Payment List for this counterparty".
+Helpers that both queue and attempt delivery return
+`FfiPrivatePaymentListDeliveryReport` with `queued`, `cleared`,
+`failedToQueue`, and `failedToDeliver` groups.
 
 ### Payment Requests
 

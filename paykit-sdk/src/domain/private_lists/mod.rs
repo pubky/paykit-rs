@@ -14,9 +14,7 @@ use crate::domain::outbound_private::enqueue_private_message;
 use crate::{
     domain::adapters::{PaymentEndpointReservation, ReceivingDetail},
     domain::endpoints::normalize_receiving_details,
-    domain::outbound_private::{
-        enqueue_private_message_with_link_lease, OutboundPrivateCounterpartySendReport,
-    },
+    domain::outbound_private::enqueue_private_message_with_link_lease,
     domain::private_stream::PrivateStreamParseStatus,
     storage::{
         OutboundPrivateMessageRecord, PeerLinkOperationLease, PrivateStreamItemRecord,
@@ -89,24 +87,6 @@ impl fmt::Debug for PrivatePaymentListSyncChange {
     }
 }
 
-/// Report from syncing contact Private Payment Lists and processing outbound sends.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PrivatePaymentListSyncAndSendReport {
-    /// Queueing result for contact Private Payment Lists.
-    pub sync: PrivatePaymentListSyncReport,
-    /// Outbound send reports produced after queueing.
-    pub outbound: Vec<OutboundPrivateCounterpartySendReport>,
-}
-
-impl fmt::Debug for PrivatePaymentListSyncAndSendReport {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PrivatePaymentListSyncAndSendReport")
-            .field("sync", &self.sync)
-            .field("outbound", &self.outbound.len())
-            .finish()
-    }
-}
-
 /// Reservation-backed Private Payment List update for one counterparty.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivatePaymentListReservationUpdate {
@@ -154,9 +134,9 @@ impl fmt::Debug for PrivatePaymentListDeliveryFailure {
     }
 }
 
-/// Mobile-friendly report from queueing and delivering Private Payment Lists.
+/// Report from queueing and delivering Private Payment Lists.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PrivatePaymentListSyncDeliveryReport {
+pub struct PrivatePaymentListDeliveryReport {
     /// Counterparties that had a non-empty Private Payment List queued.
     pub queued: Vec<PrivatePaymentListSyncChange>,
     /// Counterparties that had an empty Private Payment List queued.
@@ -167,9 +147,9 @@ pub struct PrivatePaymentListSyncDeliveryReport {
     pub failed_to_deliver: Vec<PrivatePaymentListDeliveryFailure>,
 }
 
-impl fmt::Debug for PrivatePaymentListSyncDeliveryReport {
+impl fmt::Debug for PrivatePaymentListDeliveryReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PrivatePaymentListSyncDeliveryReport")
+        f.debug_struct("PrivatePaymentListDeliveryReport")
             .field("queued", &self.queued.len())
             .field("cleared", &self.cleared.len())
             .field("failed_to_queue", &self.failed_to_queue.len())

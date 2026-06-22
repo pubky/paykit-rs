@@ -146,7 +146,7 @@ where
     pub async fn clear_private_payment_list_and_process_outbound(
         &self,
         counterparty: PubkyPublicKey,
-    ) -> Result<PrivatePaymentListSyncDeliveryReport> {
+    ) -> Result<PrivatePaymentListDeliveryReport> {
         self.sync_private_payment_lists_with_reservations_and_process_outbound(
             vec![PrivatePaymentListReservationUpdate {
                 counterparty,
@@ -249,12 +249,33 @@ where
     pub async fn sync_contact_private_payment_lists_and_process_outbound(
         &self,
         clear_unlisted_linked_peers: bool,
-    ) -> Result<PrivatePaymentListSyncAndSendReport> {
+    ) -> Result<PrivatePaymentListDeliveryReport> {
         let sync = self
             .sync_contact_private_payment_lists(clear_unlisted_linked_peers)
             .await?;
+        let mut report = delivery_report_from_sync_report(sync);
         let outbound = self.process_pending_private_messages().await?;
-        Ok(PrivatePaymentListSyncAndSendReport { sync, outbound })
+        for counterparty_report in outbound {
+            if let Some(send_report) = counterparty_report.report {
+                report
+                    .failed_to_deliver
+                    .extend(delivery_failures_from_send_report(
+                        counterparty_report.counterparty.clone(),
+                        send_report,
+                    ));
+            }
+            if let Some(error) = counterparty_report.error {
+                report
+                    .failed_to_deliver
+                    .push(PrivatePaymentListDeliveryFailure {
+                        counterparty: counterparty_report.counterparty,
+                        outbound_message_id: None,
+                        reservation_id: None,
+                        error,
+                    });
+            }
+        }
+        Ok(report)
     }
 
     /// Queue reservation-backed Private Payment Lists and process their queues.
@@ -267,7 +288,7 @@ where
         &self,
         mut updates: Vec<PrivatePaymentListReservationUpdate>,
         clear_unlisted_linked_peers: bool,
-    ) -> Result<PrivatePaymentListSyncDeliveryReport> {
+    ) -> Result<PrivatePaymentListDeliveryReport> {
         self.require_initialized_identity("sync reservation-backed Private Payment Lists")
             .await?;
 
@@ -289,7 +310,7 @@ where
         clear_counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         clear_counterparties.dedup();
 
-        let mut report = PrivatePaymentListSyncDeliveryReport::default();
+        let mut report = PrivatePaymentListDeliveryReport::default();
         let mut queued_counterparties = Vec::new();
 
         for update in updates {
@@ -735,6 +756,17 @@ fn reservation_cancellation(
         identifier: reservation.receiving_detail.identifier.clone(),
         payload_hash: reservation_payload_hash(&reservation.receiving_detail.payload),
         attribution: reservation.attribution.clone(),
+    }
+}
+
+fn delivery_report_from_sync_report(
+    sync: PrivatePaymentListSyncReport,
+) -> PrivatePaymentListDeliveryReport {
+    PrivatePaymentListDeliveryReport {
+        queued: sync.queued,
+        cleared: sync.cleared,
+        failed_to_queue: sync.failed,
+        failed_to_deliver: Vec::new(),
     }
 }
 
