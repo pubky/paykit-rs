@@ -1,6 +1,8 @@
 use super::*;
 use crate::PaymentAmountContext;
 
+const PREPARE_CONTACT_PAYMENT_MAX_SYNC_ROUNDS: usize = 4;
+
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
     S: StorageAdapter,
@@ -185,11 +187,11 @@ where
     ///
     /// This is the app-facing "pay contact" workflow. It refreshes the live
     /// session capability, ensures or advances the private link when possible,
-    /// receives pending private messages, processes pending outbound private
-    /// messages, then resolves endpoints private-first. Public endpoints are
-    /// included only when `include_public_endpoints` is true; in that mode,
-    /// private preparation failures are reported and public fallback can still
-    /// be returned.
+    /// drains currently available private send/receive work for the peer, then
+    /// resolves endpoints private-first. Public endpoints are included only
+    /// when `include_public_endpoints` is true; in that mode, private
+    /// preparation failures are reported and public fallback can still be
+    /// returned.
     pub async fn prepare_and_resolve_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
@@ -209,51 +211,39 @@ where
             {
                 Ok(report) => {
                     link_report = Some(report);
-                    match self
-                        .process_outbound_private_messages(counterparty.clone())
-                        .await
-                    {
-                        Ok(report) => merge_outbound_report(&mut outbound_report, report),
-                        Err(err) => {
-                            if !include_public_endpoints {
-                                return Err(err);
-                            }
-                            private_error = Some(err.to_string());
-                        }
-                    }
-                    if private_error.is_none() {
-                        match self.receive_private_messages(counterparty.clone()).await {
-                            Ok(report) => merge_receive_report(&mut receive_report, report),
-                            Err(err) => {
-                                if !include_public_endpoints {
-                                    return Err(err);
-                                }
-                                private_error = Some(err.to_string());
-                            }
-                        }
-                    }
-                    if private_error.is_none() {
+                    for _ in 0..PREPARE_CONTACT_PAYMENT_MAX_SYNC_ROUNDS {
                         match self
                             .process_outbound_private_messages(counterparty.clone())
                             .await
                         {
-                            Ok(report) => merge_outbound_report(&mut outbound_report, report),
-                            Err(err) => {
-                                if !include_public_endpoints {
-                                    return Err(err);
+                            Ok(report) => {
+                                let outbound_progress = outbound_report_made_progress(&report);
+                                merge_outbound_report(&mut outbound_report, report);
+
+                                match self.receive_private_messages(counterparty.clone()).await {
+                                    Ok(report) => {
+                                        let receive_progress =
+                                            receive_report_made_progress(&report);
+                                        merge_receive_report(&mut receive_report, report);
+                                        if !outbound_progress && !receive_progress {
+                                            break;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        if !include_public_endpoints {
+                                            return Err(err);
+                                        }
+                                        private_error = Some(err.to_string());
+                                        break;
+                                    }
                                 }
-                                private_error = Some(err.to_string());
                             }
-                        }
-                    }
-                    if private_error.is_none() {
-                        match self.receive_private_messages(counterparty.clone()).await {
-                            Ok(report) => merge_receive_report(&mut receive_report, report),
                             Err(err) => {
                                 if !include_public_endpoints {
                                     return Err(err);
                                 }
                                 private_error = Some(err.to_string());
+                                break;
                             }
                         }
                     }
@@ -479,6 +469,14 @@ pub(super) fn merge_receive_report(
     };
     current.stream_item_ids.append(&mut report.stream_item_ids);
     current.event_conflicts.append(&mut report.event_conflicts);
+}
+
+fn outbound_report_made_progress(report: &OutboundPrivateSendReport) -> bool {
+    !report.attempted.is_empty() || !report.sent.is_empty() || !report.failed.is_empty()
+}
+
+fn receive_report_made_progress(report: &PrivateStreamIntakeReport) -> bool {
+    !report.stream_item_ids.is_empty() || !report.event_conflicts.is_empty()
 }
 
 pub(super) enum PrivateRecoveryOutcome {
