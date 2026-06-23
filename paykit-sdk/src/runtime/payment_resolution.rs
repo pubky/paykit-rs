@@ -1,7 +1,7 @@
 use super::*;
 use crate::PaymentAmountContext;
 
-const PREPARE_CONTACT_PAYMENT_MAX_SYNC_ROUNDS: usize = 4;
+const PREPARE_CONTACT_PAYMENT_SYNC_ROUND_LIMIT: usize = 8;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -211,7 +211,7 @@ where
             {
                 Ok(report) => {
                     link_report = Some(report);
-                    for _ in 0..PREPARE_CONTACT_PAYMENT_MAX_SYNC_ROUNDS {
+                    for _ in 0..PREPARE_CONTACT_PAYMENT_SYNC_ROUND_LIMIT {
                         match self
                             .process_outbound_private_messages(counterparty.clone())
                             .await
