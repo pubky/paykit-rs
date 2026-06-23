@@ -111,6 +111,50 @@ impl PubkyProfile {
         }
         Ok(())
     }
+
+    fn drop_invalid_optional_fields(&mut self) {
+        if validate_optional_text(
+            self.bio.as_deref(),
+            "Pubky profile bio",
+            MAX_PUBKY_PROFILE_TEXT_CHARS,
+            true,
+        )
+        .is_err()
+        {
+            self.bio = None;
+        }
+
+        if validate_optional_text(
+            self.image.as_deref(),
+            "Pubky profile image",
+            MAX_PUBKY_PROFILE_URI_CHARS,
+            false,
+        )
+        .is_err()
+        {
+            self.image = None;
+        }
+
+        if validate_optional_text(
+            self.status.as_deref(),
+            "Pubky profile status",
+            MAX_PUBKY_PROFILE_TEXT_CHARS,
+            true,
+        )
+        .is_err()
+        {
+            self.status = None;
+        }
+
+        if let Some(links) = self.links.take() {
+            let valid_links = links
+                .into_iter()
+                .take(MAX_PUBKY_PROFILE_LINKS)
+                .filter(|link| link.validate().is_ok())
+                .collect::<Vec<_>>();
+            self.links = (!valid_links.is_empty()).then_some(valid_links);
+        }
+    }
 }
 
 /// Public profile link from the Pubky app namespace.
@@ -596,8 +640,9 @@ fn validate_paykit_blob_path(blob_prefix: &str, path: &str) -> Result<String> {
 }
 
 pub(crate) fn parse_pubky_profile_json(raw_json: &str) -> Result<PubkyProfile> {
-    let profile = serde_json::from_str::<PubkyProfile>(raw_json)
+    let mut profile = serde_json::from_str::<PubkyProfile>(raw_json)
         .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky profile JSON: {err}")))?;
+    profile.drop_invalid_optional_fields();
     profile.validate()?;
     Ok(profile)
 }

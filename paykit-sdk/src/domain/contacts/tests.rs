@@ -115,10 +115,26 @@ fn test_pubky_profile_json_parses_bitkit_shape() {
 }
 
 #[test]
-fn test_pubky_profile_json_rejects_control_characters() {
+fn test_pubky_profile_json_rejects_control_characters_in_name() {
     let result = parse_pubky_profile_json(r#"{"name":"Alice\nAdmin"}"#);
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+}
+
+#[test]
+fn test_pubky_profile_json_drops_invalid_optional_fields() {
+    let parsed = parse_pubky_profile_json(
+        r#"{"name":"Alice","bio":"Builder\nMaker","image":"\u0001","links":[{"title":"site","url":"https://example.com"},{"title":"bad\nlink","url":"https://example.com/bad"}],"status":"online\nnow"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(parsed.name, "Alice");
+    assert_eq!(parsed.bio, None);
+    assert_eq!(parsed.image, None);
+    assert_eq!(parsed.status, None);
+    let links = parsed.links.unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].title, "site");
 }
 
 #[test]
