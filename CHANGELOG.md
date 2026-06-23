@@ -7,6 +7,31 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc21] - 2026-06-23
+
+### Added
+- Added the `paykit-sdk` crate, a stateful Pubky-backed runtime for Paykit
+  identities, public endpoint publication, Encrypted Links, private streams,
+  Private Payment Lists, Payment Requests, Receipts, contacts, profiles, and
+  SDK-managed backup/restore.
+- Added SDK FFI bindings for iOS and Android, including session bootstrap,
+  state blob storage, payment adapter callbacks, contact payment resolution,
+  private list publication, Payment Request flows, Receipt flows, profile/blob
+  helpers, and backup export/restore.
+- Added Encrypted Link Recovery Marker helpers and paginated Pubky public
+  directory reads in `paykit-lib`.
+- Added `specs/paykit-sdk.md` and `specs/paykit-sdk-bindings.md` to document
+  the SDK architecture and mobile binding direction.
+
+### Changed
+- Public and private payment coordination now keeps durable runtime concerns in
+  `paykit-sdk`, while `paykit-lib` remains the stateless protocol/Pubky helper
+  crate.
+- Mobile bindings now expose SDK-level workflows for the main Bitkit integration
+  paths instead of requiring apps to compose low-level protocol operations.
+- Pubky profile fallback now tolerates invalid optional profile fields by
+  dropping those fields while preserving usable profile data.
+
 ## [0.1.0-rc12] - 2026-06-03
 
 ### Added
@@ -141,7 +166,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc12...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc21...HEAD
+[0.1.0-rc21]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc21
 [0.1.0-rc12]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc12
 [0.1.0-rc2]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc2
 [0.1.0-rc1]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc1
