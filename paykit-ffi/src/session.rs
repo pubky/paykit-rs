@@ -56,6 +56,7 @@ pub enum FfiPubkyAuthRequestKind {
 pub struct FfiPubkySessionAccess {
     pub(crate) session_secret: String,
     pub(crate) local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
+    pub(crate) live_access: Option<PubkySessionAccess>,
 }
 
 impl fmt::Debug for FfiPubkySessionAccess {
@@ -69,6 +70,7 @@ impl fmt::Debug for FfiPubkySessionAccess {
                     .as_ref()
                     .map(|key| format!("<redacted:{} bytes>", key.bytes.len())),
             )
+            .field("live_access", &self.live_access.as_ref().map(|_| "<live>"))
             .finish()
     }
 }
@@ -84,6 +86,7 @@ impl FfiPubkySessionAccess {
         Self {
             session_secret,
             local_secret_key,
+            live_access: None,
         }
     }
 
@@ -169,6 +172,12 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
             .map(|key| local_secret_from_bytes(key.export_bytes()))
             .transpose()
             .map_err(|err| ffi_error_to_sdk(err, "load local Pubky secret key"))?;
+
+        if let Some(live_access) = &access.live_access {
+            let mut live_access = live_access.clone();
+            live_access.local_secret_key = local_secret_key;
+            return Ok(Some(live_access));
+        }
 
         let session =
             PubkySession::import_secret(&access.session_secret, Some(self.pubky.client().clone()))
@@ -458,11 +467,13 @@ fn bootstrap_result_to_ffi(
     local_secret_key: Option<PubkyLocalSecretKey>,
 ) -> FfiPubkySessionBootstrapResult {
     let session_secret = result.export_session_secret().into_inner();
+    let live_access = result.access.clone();
     FfiPubkySessionBootstrapResult {
-        session_access: Arc::new(FfiPubkySessionAccess::new(
+        session_access: Arc::new(FfiPubkySessionAccess {
             session_secret,
-            local_secret_key.as_ref().map(secret_to_ffi),
-        )),
+            local_secret_key: local_secret_key.as_ref().map(secret_to_ffi),
+            live_access: Some(live_access),
+        }),
         public_key: app_public_key(&result.public_key),
         capability: result.capability.into(),
     }

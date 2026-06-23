@@ -43,13 +43,13 @@ const MAX_PUBKY_PROFILE_LINKS: usize = 32;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaykitProfile {
     /// Public display name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub display_name: Option<String>,
     /// Public image pointer such as a Pubky path or URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub image_uri: Option<String>,
     /// App-specific public profile fields.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub extra: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
@@ -59,16 +59,16 @@ pub struct PubkyProfile {
     /// Public display name.
     pub name: String,
     /// Optional profile bio.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub bio: Option<String>,
     /// Optional public image pointer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub image: Option<String>,
     /// Optional public profile links.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub links: Option<Vec<PubkyProfileLink>>,
     /// Optional public status text.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub status: Option<String>,
 }
 

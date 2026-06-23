@@ -23,7 +23,7 @@ use crate::{
         EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
         NewOutboundPrivateMessage, PublicEndpointRecord,
     },
-    OutboundPrivateMessageStatus, PubkySessionAccess,
+    EventIdConflict, OutboundPrivateMessageStatus, PubkySessionAccess,
 };
 use paykit_lib::PrivateApplicationMessage;
 
@@ -34,6 +34,16 @@ impl Clock for FixedClock {
     fn now(&self) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
     }
+}
+
+#[test]
+fn test_public_resource_uri_uses_pubky_scheme() {
+    let public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+
+    assert_eq!(
+        public_resource_uri(&public_key, "/pub/staging.bitkit.to/profile.json"),
+        format!("pubky://{public_key}/pub/staging.bitkit.to/profile.json")
+    );
 }
 
 struct TestPubkySessionProvider {

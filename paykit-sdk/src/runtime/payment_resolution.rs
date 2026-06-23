@@ -81,35 +81,43 @@ where
         }
         let had_private_candidates = !candidates.is_empty();
 
-        if candidates.is_empty() && !request.include_public_endpoints {
+        if candidates.is_empty() && private_allowed {
             if private_state == ContactPaymentResolutionPrivateState::RecoveryPending {
-                return Ok(status_resolution(
-                    ContactPaymentResolutionStatus::NoEndpoint,
-                    private_state,
-                ));
-            }
-            match self
-                .recover_private_candidates_for_resolution(&request.counterparty)
-                .await?
-            {
-                PrivateRecoveryOutcome::Refreshed(refreshed_candidates)
-                    if !refreshed_candidates.is_empty() =>
-                {
-                    candidates = refreshed_candidates;
-                    private_state = ContactPaymentResolutionPrivateState::Available;
-                }
-                PrivateRecoveryOutcome::Pending => {
+                if !request.include_public_endpoints {
                     return Ok(status_resolution(
                         ContactPaymentResolutionStatus::NoEndpoint,
-                        ContactPaymentResolutionPrivateState::RecoveryPending,
+                        private_state,
                     ));
                 }
-                PrivateRecoveryOutcome::PublicOnly => {
-                    private_state = ContactPaymentResolutionPrivateState::PublicOnlySession;
+            } else {
+                match self
+                    .recover_private_candidates_for_resolution(&request.counterparty)
+                    .await?
+                {
+                    PrivateRecoveryOutcome::Refreshed(refreshed_candidates)
+                        if !refreshed_candidates.is_empty() =>
+                    {
+                        candidates = refreshed_candidates;
+                        private_state = ContactPaymentResolutionPrivateState::Available;
+                    }
+                    PrivateRecoveryOutcome::Pending => {
+                        private_state = ContactPaymentResolutionPrivateState::RecoveryPending;
+                        if !request.include_public_endpoints {
+                            return Ok(status_resolution(
+                                ContactPaymentResolutionStatus::NoEndpoint,
+                                private_state,
+                            ));
+                        }
+                    }
+                    PrivateRecoveryOutcome::PublicOnly => {
+                        private_state = ContactPaymentResolutionPrivateState::PublicOnlySession;
+                    }
+                    PrivateRecoveryOutcome::NotNeeded | PrivateRecoveryOutcome::Refreshed(_) => {}
                 }
-                PrivateRecoveryOutcome::NotNeeded | PrivateRecoveryOutcome::Refreshed(_) => {}
             }
-            if private_state == ContactPaymentResolutionPrivateState::PublicOnlySession {
+            if !request.include_public_endpoints
+                && private_state == ContactPaymentResolutionPrivateState::PublicOnlySession
+            {
                 return Ok(status_resolution(
                     ContactPaymentResolutionStatus::NoEndpoint,
                     private_state,
@@ -201,8 +209,11 @@ where
             {
                 Ok(report) => {
                     link_report = Some(report);
-                    match self.receive_private_messages(counterparty.clone()).await {
-                        Ok(report) => receive_report = Some(report),
+                    match self
+                        .process_outbound_private_messages(counterparty.clone())
+                        .await
+                    {
+                        Ok(report) => merge_outbound_report(&mut outbound_report, report),
                         Err(err) => {
                             if !include_public_endpoints {
                                 return Err(err);
@@ -211,11 +222,33 @@ where
                         }
                     }
                     if private_error.is_none() {
+                        match self.receive_private_messages(counterparty.clone()).await {
+                            Ok(report) => merge_receive_report(&mut receive_report, report),
+                            Err(err) => {
+                                if !include_public_endpoints {
+                                    return Err(err);
+                                }
+                                private_error = Some(err.to_string());
+                            }
+                        }
+                    }
+                    if private_error.is_none() {
                         match self
                             .process_outbound_private_messages(counterparty.clone())
                             .await
                         {
-                            Ok(report) => outbound_report = Some(report),
+                            Ok(report) => merge_outbound_report(&mut outbound_report, report),
+                            Err(err) => {
+                                if !include_public_endpoints {
+                                    return Err(err);
+                                }
+                                private_error = Some(err.to_string());
+                            }
+                        }
+                    }
+                    if private_error.is_none() {
+                        match self.receive_private_messages(counterparty.clone()).await {
+                            Ok(report) => merge_receive_report(&mut receive_report, report),
                             Err(err) => {
                                 if !include_public_endpoints {
                                     return Err(err);
@@ -415,6 +448,37 @@ pub(super) fn prefer_private_endpoints(resolution: &mut ContactPaymentResolution
             1
         }
     });
+}
+
+pub(super) fn merge_outbound_report(
+    current: &mut Option<OutboundPrivateSendReport>,
+    mut report: OutboundPrivateSendReport,
+) {
+    let Some(current) = current.as_mut() else {
+        *current = Some(report);
+        return;
+    };
+    current.attempted.append(&mut report.attempted);
+    current.sent.append(&mut report.sent);
+    current.failed.append(&mut report.failed);
+    current
+        .reservation_cleanup_failures
+        .append(&mut report.reservation_cleanup_failures);
+    current
+        .recovery_marker_failures
+        .append(&mut report.recovery_marker_failures);
+}
+
+pub(super) fn merge_receive_report(
+    current: &mut Option<PrivateStreamIntakeReport>,
+    mut report: PrivateStreamIntakeReport,
+) {
+    let Some(current) = current.as_mut() else {
+        *current = Some(report);
+        return;
+    };
+    current.stream_item_ids.append(&mut report.stream_item_ids);
+    current.event_conflicts.append(&mut report.event_conflicts);
 }
 
 pub(super) enum PrivateRecoveryOutcome {

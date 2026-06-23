@@ -482,7 +482,7 @@ async fn fetch_public_text(
     path: &str,
     context: &'static str,
 ) -> Result<Option<String>> {
-    let addr = format!("{public_key}{path}");
+    let addr = public_resource_uri(public_key, path);
     match storage.get(addr).await {
         Ok(resp) => {
             let bytes = resp
@@ -531,7 +531,7 @@ async fn list_public_resources(
 ) -> Result<Vec<pubky::PubkyResource>> {
     const LIST_PAGE_LIMIT: u16 = 100;
 
-    let addr = format!("{public_key}{path}");
+    let addr = public_resource_uri(public_key, path);
     let mut entries = Vec::new();
     let mut cursor = None::<String>;
     loop {
@@ -576,6 +576,10 @@ fn is_pubky_not_found(err: &PubkyError) -> bool {
         PubkyError::Request(RequestError::Server { status, .. })
             if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
     )
+}
+
+fn public_resource_uri(public_key: &PubkyPublicKey, path: &str) -> String {
+    format!("pubky://{public_key}{path}")
 }
 
 #[cfg(test)]
