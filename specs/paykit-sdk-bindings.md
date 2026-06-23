@@ -142,7 +142,7 @@ that reserve receiving details outside the SDK callback:
 
 The app-facing contact payment preparation helper must document its sequence:
 refresh live session capability, ensure or advance the private link when
-possible, receive private messages, process pending outbound private messages,
+possible, drain currently available private send/receive work for the peer,
 then resolve endpoints private-first with optional public fallback.
 
 React Native bindings should keep SDK state blob storage in the native module by
@@ -369,9 +369,9 @@ Bindings should expose high-level workflows before low-level records:
 - sync Private Payment Lists for saved contacts, including a helper that also
   processes outbound delivery
 - prepare and resolve contact payment as the default mobile "pay contact"
-  workflow: ensure private state when possible, receive private messages,
-  process pending outbound messages, then resolve private-first with optional
-  public fallback
+  workflow: ensure private state when possible, drain currently available
+  private send/receive work for the peer, then resolve private-first with
+  optional public fallback
 - resolve contact payment with lower-level private-only and public-only helpers
   for apps that need explicit source control
 - queue and list Payment Requests

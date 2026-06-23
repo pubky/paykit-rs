@@ -131,7 +131,7 @@ fn test_contact_profile_resolution_from_paykit_profile() {
             image_uri: Some("/pub/paykit/blobs/avatar.png".into()),
             extra: None,
         },
-        path: PAYKIT_PROFILE_PATH.into(),
+        path: DEFAULT_PAYKIT_PROFILE_PATH.into(),
         updated_at: chrono::Utc::now(),
     };
 

@@ -177,7 +177,10 @@ afterEvaluate {
 ktlint {
     filter {
         exclude { fileTreeElement ->
-            fileTreeElement.file.toString().contains("main")
+            fileTreeElement.file.toPath().startsWith(project.layout.buildDirectory.asFile.get().toPath())
+        }
+        exclude { fileTreeElement ->
+            fileTreeElement.file.name in setOf("paykit.android.kt", "paykit.common.kt")
         }
     }
 }

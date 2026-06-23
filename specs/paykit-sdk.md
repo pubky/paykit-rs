@@ -78,7 +78,7 @@ The SDK should depend on `paykit-lib`, not replace it. Platform apps should
 prefer SDK bindings for normal product workflows and use `paykit-lib` bindings
 only for low-level protocol operations.
 
-## Current Branch Scope
+## Implemented SDK Scope
 
 The current Rust SDK implementation covers:
 
@@ -95,11 +95,10 @@ The current Rust SDK implementation covers:
 - Paykit-facing profile/contact helpers
 - SDK backup/export/restore validation
 
-This Rust SDK scope does not implement generated platform SDK bindings yet;
-those bindings should wrap this SDK surface as the primary mobile/app
-integration API. First-party durable mobile storage helpers, payment execution,
-settlement confirmation, product UI, app backup transport, multi-device
-checkpoint synchronization, and recurring payment scheduling remain separate
+The workspace also exposes Swift and Kotlin SDK bindings through `paykit-ffi`.
+First-party durable mobile storage helpers, payment execution, settlement
+confirmation, product UI, app backup transport, multi-device checkpoint
+synchronization, and recurring payment scheduling remain separate
 implementation areas unless they are explicitly listed above.
 
 ## Crate Layout
@@ -116,18 +115,18 @@ paykit-sdk/
     identity.rs
     pubky_session.rs
     domain/
-      adapters.rs
-      contacts.rs
-      endpoints.rs
-      endpoint_reservations.rs
-      linked_peers.rs
-      outbound_private.rs
-      payment_requests.rs
-      private_lists.rs
-      private_stream.rs
-      publication.rs
-      receipts.rs
+      adapters/
+      contacts/
+      endpoints/
+      endpoint_reservations/
+      linked_peers/
+      outbound_private/
+      payment_requests/
+      private_lists/
+      private_stream/
+      receipts/
       records.rs
+      publication.rs
       recovery.rs
     runtime/
       mod.rs
@@ -173,16 +172,8 @@ Additional modules should be added only when they have concrete implementation:
 - `scheduler`: optional recurring Payment Request scheduling integration.
 - `telemetry`: structured logs and redaction helpers.
 
-If platform bindings become large, add separate crates:
-
-```text
-paykit-sdk-ffi/
-paykit-sdk-react-native/
-```
-
-Those should expose SDK workflows directly. They can eventually replace most
-app usage of low-level `paykit-ffi`, while keeping `paykit-ffi` available for
-protocol-level integrations.
+Platform bindings live in `paykit-ffi`. Additional wrapper packages can sit on
+top of that binding layer when a platform needs a more idiomatic API.
 
 ## Core Runtime Object
 
@@ -1098,92 +1089,12 @@ Request lifecycle derivation plus checked outbound lifecycle queueing, optional
 Payment Endpoint Reservation records, and backup/export/restore for SDK-managed
 state. Use `paykit-sdk` rustdoc for exact signatures.
 
-Additional SDK operations can extend this surface with methods like:
-
-```rust
-impl PaykitSdk {
-    async fn import_session(&mut self, session_secret: String) -> Result<IdentityStatus>;
-    async fn sign_out(&mut self) -> Result<()>;
-
-    async fn clear_public_endpoints(&mut self) -> Result<EndpointSyncReport>;
-
-    async fn publish_paykit_profile(&self, profile: PaykitProfile) -> Result<PaykitProfileRecord>;
-    async fn fetch_paykit_profile(
-        &self,
-        public_key: PubkyPublicKey,
-    ) -> Result<Option<PaykitProfileRecord>>;
-    async fn publish_paykit_blob(
-        &self,
-        blob_name: String,
-        bytes: Vec<u8>,
-    ) -> Result<PaykitBlobRecord>;
-    async fn delete_paykit_blob(&self, uri_or_path: &str) -> Result<()>;
-    async fn fetch_pubky_file(&self, uri: &str) -> Result<Option<Vec<u8>>>;
-    async fn fetch_pubky_text(&self, uri: &str) -> Result<Option<String>>;
-    async fn fetch_pubky_profile(
-        &self,
-        public_key: PubkyPublicKey,
-    ) -> Result<Option<PubkyProfileRecord>>;
-    async fn fetch_pubky_follows(&self, public_key: PubkyPublicKey) -> Result<Vec<PubkyPublicKey>>;
-    async fn resolve_contact_profile(
-        &self,
-        public_key: PubkyPublicKey,
-        allow_pubky_profile_fallback: bool,
-    ) -> Result<Option<ContactProfileResolution>>;
-
-    async fn sync_contact(&mut self, counterparty: PubkyPublicKey) -> Result<ContactSyncReport>;
-    async fn sync_saved_contacts(&mut self, contacts: Vec<PubkyPublicKey>) -> Result<SyncReport>;
-
-    async fn list_payment_requests(
-        &self,
-        filter: PaymentRequestFilter,
-    ) -> Result<Vec<PaymentRequestRecord>>;
-    async fn payment_requests(&self) -> Result<Vec<PaymentRequestRecord>>;
-    async fn payment_requests_with(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Result<Vec<PaymentRequestRecord>>;
-    async fn received_payment_requests_from(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Result<Vec<PaymentRequestRecord>>;
-    async fn active_recurring_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>>;
-    async fn actionable_received_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>>;
-
-    async fn receipt_access(&self) -> Result<Vec<ReceiptAccessView>>;
-    async fn receipt_access_from(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Result<Vec<ReceiptAccessView>>;
-    async fn receipts(&self) -> Result<Vec<ReceiptRecord>>;
-    async fn receipts_from(&self, issuer: &PubkyPublicKey) -> Result<Vec<ReceiptRecord>>;
-    async fn issued_receipts(&self) -> Result<Vec<ReceiptIssuanceView>>;
-    async fn issued_receipts_to(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Result<Vec<ReceiptIssuanceView>>;
-    async fn retrieve_receipt(
-        &self,
-        counterparty: PubkyPublicKey,
-        receipt_id: &str,
-    ) -> Result<ReceiptRecord>;
-    async fn prepare_receipt_issuance(
-        &self,
-        counterparty: PubkyPublicKey,
-        draft: ReceiptDraft,
-    ) -> Result<ReceiptIssuanceView>;
-    async fn issue_receipt(
-        &self,
-        counterparty: PubkyPublicKey,
-        draft: ReceiptDraft,
-    ) -> Result<ReceiptIssuanceView>;
-    async fn process_receipt_issuance(
-        &self,
-        counterparty: PubkyPublicKey,
-        receipt_id: &str,
-    ) -> Result<ReceiptIssuanceView>;
-}
-```
+Use `paykit-sdk` rustdoc for exact signatures. The main public method families
+cover initialization/sign-out, session bootstrap, public endpoint sync, profile
+and blob helpers, local Contact Records, Pubky profile/follows reads, contact
+payment resolution, linked peer setup, private stream receive, outbound private
+delivery, Private Payment Lists, Payment Requests, Receipts, and SDK
+backup/export/restore.
 
 `ReceiptDraftBuilder` is the ergonomic way to create `ReceiptDraft` values for
 SDK calls. It can generate a Receipt ID before `issue_receipt`, or leave it
@@ -1192,9 +1103,9 @@ and return the ID first.
 
 ## Platform Binding Shape
 
-The SDK should have first-class bindings for mobile and app integrations.
-See [paykit-sdk-bindings.md](paykit-sdk-bindings.md) for the binding-specific
-API plan.
+The workspace exposes first-class Swift and Kotlin SDK bindings through
+`paykit-ffi`. See [paykit-sdk-bindings.md](paykit-sdk-bindings.md) for the
+binding-specific API plan.
 
 Recommended approach:
 
@@ -1330,8 +1241,7 @@ Platform tests:
   app/runtime schedulers.
 - Unknown Private Application Message retention defaults for mobile storage
   budgets.
-- SDK platform bindings as the primary mobile API, with `paykit-ffi` kept for
-  low-level protocol integrations.
+- higher-level platform wrapper/package policy on top of the SDK bindings
 - Multi-app and multi-device Paykit identity synchronization, including how
   active Encrypted Link checkpoints, outbound queues, and recurring Payment
   Request execution coordinate without rewinding private message counters.

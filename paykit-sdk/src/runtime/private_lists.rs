@@ -185,23 +185,10 @@ where
 
                 let clear_counterparties = if clear_unlisted_linked_peers {
                     let contact_set = contacts.iter().cloned().collect::<HashSet<_>>();
-                    let snapshot = tx.export_storage_state();
-                    let active_link_counterparties = snapshot
-                        .encrypted_link_states
-                        .iter()
-                        .filter(|(_, state)| state.link_snapshot.is_some())
-                        .map(|(counterparty, _)| counterparty.clone())
-                        .collect::<HashSet<_>>();
-                    snapshot
-                        .linked_peers
-                        .into_values()
-                        .filter(|peer| {
-                            peer.state == LinkedPeerState::Linked
-                                && !contact_set.contains(&peer.counterparty)
-                                && active_link_counterparties.contains(&peer.counterparty)
-                        })
-                        .map(|peer| peer.counterparty)
-                        .collect::<Vec<_>>()
+                    linked_private_counterparties_not_in_storage_state(
+                        tx.export_storage_state(),
+                        &contact_set,
+                    )
                 } else {
                     Vec::new()
                 };
@@ -476,22 +463,9 @@ where
                 let keep = keep.clone();
                 move |tx| {
                     let snapshot = tx.export_storage_state();
-                    let active_link_counterparties = snapshot
-                        .encrypted_link_states
-                        .iter()
-                        .filter(|(_, state)| state.link_snapshot.is_some())
-                        .map(|(counterparty, _)| counterparty.clone())
-                        .collect::<HashSet<_>>();
-                    Ok(snapshot
-                        .linked_peers
-                        .into_values()
-                        .filter(|peer| {
-                            peer.state == LinkedPeerState::Linked
-                                && !keep.contains(&peer.counterparty)
-                                && active_link_counterparties.contains(&peer.counterparty)
-                        })
-                        .map(|peer| peer.counterparty)
-                        .collect())
+                    Ok(linked_private_counterparties_not_in_storage_state(
+                        snapshot, &keep,
+                    ))
                 }
             })
             .await
@@ -789,6 +763,29 @@ where
             })
             .await
     }
+}
+
+fn linked_private_counterparties_not_in_storage_state(
+    snapshot: crate::storage::StorageState,
+    keep: &HashSet<PubkyPublicKey>,
+) -> Vec<PubkyPublicKey> {
+    let active_link_counterparties = snapshot
+        .encrypted_link_states
+        .iter()
+        .filter(|(_, state)| state.link_snapshot.is_some())
+        .map(|(counterparty, _)| counterparty.clone())
+        .collect::<HashSet<_>>();
+
+    snapshot
+        .linked_peers
+        .into_values()
+        .filter(|peer| {
+            peer.state == LinkedPeerState::Linked
+                && !keep.contains(&peer.counterparty)
+                && active_link_counterparties.contains(&peer.counterparty)
+        })
+        .map(|peer| peer.counterparty)
+        .collect()
 }
 
 fn reservation_cancellation(

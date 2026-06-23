@@ -477,13 +477,33 @@ impl TryFrom<FfiPaymentEndpointReservation> for PaymentEndpointReservation {
     type Error = paykit_sdk::PaykitSdkError;
 
     fn try_from(value: FfiPaymentEndpointReservation) -> Result<Self, Self::Error> {
-        Ok(Self {
-            reservation_id: value.reservation_id,
-            receiving_detail: value.receiving_detail.try_into()?,
-            expires_at: value.expires_at.map(parse_rfc3339_utc).transpose()?,
-            attribution: value.attribution.export_fields(),
-        })
+        let receiving_detail: ReceivingDetail = value.receiving_detail.try_into()?;
+        payment_endpoint_reservation_from_parts(
+            value.reservation_id,
+            receiving_detail.identifier,
+            receiving_detail.payload,
+            value.expires_at,
+            value.attribution.export_fields(),
+        )
     }
+}
+
+pub(crate) fn payment_endpoint_reservation_from_parts(
+    reservation_id: String,
+    identifier: String,
+    payload: String,
+    expires_at: Option<String>,
+    attribution: HashMap<String, String>,
+) -> paykit_sdk::Result<PaymentEndpointReservation> {
+    Ok(PaymentEndpointReservation {
+        reservation_id,
+        receiving_detail: ReceivingDetail {
+            identifier,
+            payload,
+        },
+        expires_at: expires_at.map(parse_rfc3339_utc).transpose()?,
+        attribution,
+    })
 }
 
 impl TryFrom<FfiReceivingDetailReservationResponse> for Option<Vec<PaymentEndpointReservation>> {

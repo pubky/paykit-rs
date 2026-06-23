@@ -8,7 +8,9 @@ use paykit_sdk::{
 };
 
 use crate::{
-    payment_adapter::{parse_rfc3339_utc, FfiPaymentPayload, FfiReceivingDetail},
+    payment_adapter::{
+        payment_endpoint_reservation_from_parts, FfiPaymentPayload, FfiReceivingDetail,
+    },
     private_links::FfiPrivateOperationError,
     sdk::FfiPaykitSdk,
     session::{app_public_key, parse_public_key},
@@ -393,15 +395,13 @@ impl TryFrom<FfiPaymentEndpointReservationInput> for paykit_sdk::PaymentEndpoint
     type Error = paykit_sdk::PaykitSdkError;
 
     fn try_from(value: FfiPaymentEndpointReservationInput) -> Result<Self, Self::Error> {
-        Ok(Self {
-            reservation_id: value.reservation_id,
-            receiving_detail: paykit_sdk::ReceivingDetail {
-                identifier: value.identifier,
-                payload: value.payload,
-            },
-            expires_at: value.expires_at.map(parse_rfc3339_utc).transpose()?,
-            attribution: value.attribution,
-        })
+        payment_endpoint_reservation_from_parts(
+            value.reservation_id,
+            value.identifier,
+            value.payload,
+            value.expires_at,
+            value.attribution,
+        )
     }
 }
 

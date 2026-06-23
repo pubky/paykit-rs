@@ -347,8 +347,8 @@ public interface PaykitSdkInterface {
      * Prepare private contact state, then resolve payable endpoints.
      *
      * The SDK refreshes live session capability, ensures or advances the
-     * private link when possible, receives pending private messages, processes
-     * pending outbound private messages, then resolves endpoints private-first.
+     * private link when possible, drains currently available private
+     * send/receive work for the peer, then resolves endpoints private-first.
      * Public endpoints are included only when requested.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)

@@ -3,10 +3,9 @@ use paykit_sdk::{
     PaykitProfile, PaykitProfileRecord, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
     PublicationStatus,
 };
-use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
-    errors::validation_error,
+    json::parse_json_object,
     sdk::FfiPaykitSdk,
     session::{app_public_key, parse_public_key},
     PaykitFfiError,
@@ -431,9 +430,10 @@ impl From<PaykitProfile> for FfiPaykitProfile {
         Self {
             display_name: value.display_name,
             image_uri: value.image_uri,
-            extra_json: value
-                .extra
-                .map(|extra| serde_json::to_string(&extra).expect("JSON object serializes")),
+            extra_json: value.extra.map(|extra| {
+                serde_json::to_string(&extra)
+                    .expect("profile extra is a serde_json object and serializes")
+            }),
         }
     }
 }
@@ -568,9 +568,10 @@ impl From<ContactProfileSource> for FfiContactProfileSource {
     }
 }
 
-fn parse_profile_extra(raw: &str) -> Result<JsonMap<String, JsonValue>, PaykitFfiError> {
-    serde_json::from_str::<JsonMap<String, JsonValue>>(raw)
-        .map_err(|err| validation_error(format!("profile extra_json must be a JSON object: {err}")))
+fn parse_profile_extra(
+    raw: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, PaykitFfiError> {
+    parse_json_object("profile extra_json", raw)
 }
 
 #[cfg(test)]

@@ -97,8 +97,8 @@ context. Raw diagnostic details require an explicit debug export method.
   Payment List view for one counterparty.
 - `PaykitSdk.prepareAndResolveContactPayment` — app-facing payment setup:
   refresh live session capability, ensure or advance private link state,
-  receive private messages, process pending outbound messages, then resolve
-  private-first with optional public fallback.
+  drain currently available private send/receive work for the peer, then
+  resolve private-first with optional public fallback.
 - `PaykitSdk.resolveContactPayment` — resolve payable private and optional
   public Payment Endpoints into adapter-built payment targets.
 - `PaykitSdk.resolvePrivateContactPayment` and

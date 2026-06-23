@@ -71,7 +71,7 @@ fn test_prepared_resolution_prefers_private_endpoints() {
 }
 
 #[test]
-fn test_merge_outbound_report_preserves_both_passes() {
+fn test_merge_outbound_report_preserves_multiple_rounds() {
     let mut report = Some(OutboundPrivateSendReport {
         attempted: vec![1],
         sent: vec![1],
@@ -100,7 +100,7 @@ fn test_merge_outbound_report_preserves_both_passes() {
 }
 
 #[test]
-fn test_merge_receive_report_preserves_both_passes() {
+fn test_merge_receive_report_preserves_multiple_rounds() {
     let mut report = Some(PrivateStreamIntakeReport {
         receive_batch_id: 1,
         stream_item_ids: vec![10],

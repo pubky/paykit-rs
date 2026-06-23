@@ -1645,7 +1645,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 36875.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_contact_payment() != 47001.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_contact_payment() != 63569.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 41997.toShort()) {
@@ -3847,7 +3847,6 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -4790,8 +4789,8 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
      * Prepare private contact state, then resolve payable endpoints.
      *
      * The SDK refreshes live session capability, ensures or advances the
-     * private link when possible, receives pending private messages, processes
-     * pending outbound private messages, then resolves endpoints private-first.
+     * private link when possible, drains currently available private
+     * send/receive work for the peer, then resolves endpoints private-first.
      * Public endpoints are included only when requested.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -5973,7 +5972,6 @@ public open class PaymentPayload: Disposable, PaymentPayloadInterface {
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -6133,7 +6131,6 @@ public open class PaymentReference: Disposable, PaymentReferenceInterface {
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -6293,7 +6290,6 @@ public open class PrivateJsonObject: Disposable, PrivateJsonObjectInterface {
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -6442,7 +6438,6 @@ public open class PrivateOperationError: Disposable, PrivateOperationErrorInterf
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -6633,7 +6628,6 @@ public open class PubkyAuthRequest: Disposable, PubkyAuthRequestInterface {
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -6825,7 +6819,6 @@ public open class PubkyLocalSecretKey: Disposable, PubkyLocalSecretKeyInterface 
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -6986,7 +6979,6 @@ public open class PubkySessionAccess: Disposable, PubkySessionAccessInterface {
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -7159,7 +7151,6 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -7470,7 +7461,6 @@ public open class ReservationAttribution: Disposable, ReservationAttributionInte
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -7630,7 +7620,6 @@ public open class SdkBackupBlob: Disposable, SdkBackupBlobInterface {
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -7779,7 +7768,6 @@ public open class SdkPaymentAdapterImpl: Disposable, SdkPaymentAdapter {
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -8135,7 +8123,6 @@ public open class SdkPubkySessionProviderImpl: Disposable, SdkPubkySessionProvid
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -8413,7 +8400,6 @@ public open class SdkStateBlob: Disposable, SdkStateBlobInterface {
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
@@ -8562,7 +8548,6 @@ public open class SdkStateBlobStoreImpl: Disposable, SdkStateBlobStore {
 
     override fun destroy() {
         // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
