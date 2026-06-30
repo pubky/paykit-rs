@@ -77,11 +77,8 @@ impl From<PaykitSdkError> for PaykitFfiError {
     }
 }
 
-fn format_context(context: String, source: Option<anyhow::Error>) -> String {
-    match source {
-        Some(source) => format!("{context}: {source:#}"),
-        None => context,
-    }
+fn format_context(context: String, _source: Option<anyhow::Error>) -> String {
+    context
 }
 
 fn callback_ffi_error(source: Option<&anyhow::Error>) -> Option<PaykitFfiError> {

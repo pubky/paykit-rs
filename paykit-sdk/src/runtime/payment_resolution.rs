@@ -434,11 +434,7 @@ fn private_candidates(
 
 pub(super) fn prefer_private_endpoints(resolution: &mut ContactPaymentResolution) {
     resolution.payable_endpoints.sort_by_key(|endpoint| {
-        if endpoint.endpoint.source == PaymentEndpointSource::PrivatePaymentList {
-            0
-        } else {
-            1
-        }
+        endpoint.endpoint.source != PaymentEndpointSource::PrivatePaymentList
     });
 }
 

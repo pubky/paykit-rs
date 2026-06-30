@@ -241,7 +241,7 @@ impl FfiPubkySessionBootstrap {
         signup_code: Option<String>,
     ) -> Result<FfiPubkySessionBootstrapResult, PaykitFfiError> {
         let secret = local_secret_from_bytes(local_secret_key.export_bytes())?;
-        let homeserver = PubkyPublicKey::new(homeserver_public_key)?;
+        let homeserver = parse_public_key(homeserver_public_key)?;
         let result = self
             .inner
             .sign_up(&secret, &homeserver, signup_code.as_deref())
@@ -293,7 +293,7 @@ impl FfiPubkySessionBootstrap {
         homeserver_public_key: String,
         signup_token: Option<String>,
     ) -> Result<Arc<FfiPubkyAuthRequest>, PaykitFfiError> {
-        let homeserver = PubkyPublicKey::new(homeserver_public_key)?;
+        let homeserver = parse_public_key(homeserver_public_key)?;
         Ok(Arc::new(FfiPubkyAuthRequest {
             inner: AsyncMutex::new(Some(self.inner.start_sign_up_auth(
                 &capabilities,

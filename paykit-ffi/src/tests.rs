@@ -197,6 +197,20 @@ fn test_pubky_public_key_helpers_accept_raw_or_app_key() {
         .starts_with("pubky"));
 }
 
+#[test]
+fn test_homeserver_public_key_parser_accepts_emitted_app_key() {
+    let raw_homeserver = "8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io";
+    let app_homeserver = normalize_pubky_public_key(raw_homeserver.into()).unwrap();
+
+    assert!(PubkyPublicKey::new(app_homeserver.clone()).is_err());
+    assert_eq!(
+        crate::session::parse_public_key(app_homeserver)
+            .unwrap()
+            .as_str(),
+        raw_homeserver
+    );
+}
+
 #[tokio::test]
 async fn test_state_blob_save_error_preserves_code() {
     struct SaveFailStore {

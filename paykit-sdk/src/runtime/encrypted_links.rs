@@ -58,18 +58,23 @@ where
                 Ok((peer_state, has_active_link, has_restorable_handshake))
             })
             .await?;
+        let Some(peer_state) = peer_state else {
+            return Err(PaykitSdkError::RecoveryRequired(format!(
+                "no active or in-progress Encrypted Link state for counterparty {counterparty}"
+            )));
+        };
         match peer_state {
-            Some(LinkedPeerState::Linked) if has_active_link => Ok(PrivateQueueReadiness::Ready),
-            Some(LinkedPeerState::Linking) if has_restorable_handshake => {
+            LinkedPeerState::Linked if has_active_link => Ok(PrivateQueueReadiness::Ready),
+            LinkedPeerState::Linking if has_restorable_handshake => {
                 Ok(PrivateQueueReadiness::PendingHandshake)
             }
-            Some(LinkedPeerState::Linking) => Err(PaykitSdkError::RecoveryRequired(format!(
+            LinkedPeerState::Linking => Err(PaykitSdkError::RecoveryRequired(format!(
                 "Encrypted Link Handshake state is incomplete for counterparty {counterparty}"
             ))),
-            Some(LinkedPeerState::RecoveryRequired) => Err(PaykitSdkError::RecoveryRequired(
-                format!("Encrypted Link recovery is required for counterparty {counterparty}"),
-            )),
-            Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy(format!(
+            LinkedPeerState::RecoveryRequired => Err(PaykitSdkError::RecoveryRequired(format!(
+                "Encrypted Link recovery is required for counterparty {counterparty}"
+            ))),
+            LinkedPeerState::Blocked => Err(PaykitSdkError::Policy(format!(
                 "counterparty {counterparty} is blocked"
             ))),
             _ => Err(PaykitSdkError::RecoveryRequired(format!(

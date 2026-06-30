@@ -108,6 +108,8 @@ pub struct OutboundPrivateSendReport {
 }
 
 /// Summary for processing outbound private messages for one counterparty.
+///
+/// SDK-produced values contain either `report` or `error`, never both.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundPrivateCounterpartySendReport {
     /// Counterparty whose queue was processed.
