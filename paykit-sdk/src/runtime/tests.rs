@@ -561,7 +561,7 @@ fn receipt_access_record(counterparty: PubkyPublicKey, receipt_id: &str) -> Rece
         payment_reference: "invoice-2026-0001".into(),
         payment_request_id: None,
         billing_period: None,
-        location: format!("/pub/paykit/v0/private/receipts/{receipt_id}"),
+        location: format!("/pub/paykit/v0/private/bitkit/receipts/{receipt_id}"),
         key: "receipt-secret-key".into(),
         retrieval_status: ReceiptRetrievalStatus::Pending,
         retrieval_attempted_at: None,
@@ -588,7 +588,7 @@ fn receipt_record(
         payment_endpoint_identifier: None,
         amount: None,
         metadata: JsonMap::new(),
-        location: format!("/pub/paykit/v0/private/receipts/{receipt_id}"),
+        location: format!("/pub/paykit/v0/private/bitkit/receipts/{receipt_id}"),
         retrieved_at: FixedClock.now(),
     }
 }

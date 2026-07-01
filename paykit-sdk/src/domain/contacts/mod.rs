@@ -12,11 +12,12 @@ use crate::{
 };
 
 /// Default public Paykit profile path.
-pub const DEFAULT_PAYKIT_PROFILE_PATH: &str = "/pub/paykit/profile.json";
+pub const DEFAULT_PAYKIT_PROFILE_PATH: &str = "/pub/paykit/v0/receivers/paykit/profile.json";
 /// Default public Paykit blob prefix.
-pub const DEFAULT_PAYKIT_PROFILE_BLOB_PATH_PREFIX: &str = "/pub/paykit/blobs/";
+pub const DEFAULT_PAYKIT_PROFILE_BLOB_PATH_PREFIX: &str = "/pub/paykit/v0/receivers/paykit/blobs/";
 /// Default public Paykit contact marker prefix.
-pub const DEFAULT_PAYKIT_PUBLIC_CONTACT_PATH_PREFIX: &str = "/pub/paykit/contacts/";
+pub const DEFAULT_PAYKIT_PUBLIC_CONTACT_PATH_PREFIX: &str =
+    "/pub/paykit/v0/receivers/paykit/contacts/";
 /// Pubky app profile path used by read-only fallback/helper APIs.
 pub const PUBKY_PROFILE_PATH: &str = "/pub/pubky.app/profile.json";
 /// Pubky app follows path used by read-only helper APIs.

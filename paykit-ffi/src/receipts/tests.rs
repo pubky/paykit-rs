@@ -143,7 +143,8 @@ fn test_receipt_record_serializes_metadata() {
             asset: "usd".into(),
         }),
         metadata,
-        location: "/pub/paykit/v0/private/receipts/550e8400-e29b-41d4-a716-446655440000".into(),
+        location: "/pub/paykit/v0/private/bitkit/receipts/550e8400-e29b-41d4-a716-446655440000"
+            .into(),
         retrieved_at: Utc::now(),
     };
 

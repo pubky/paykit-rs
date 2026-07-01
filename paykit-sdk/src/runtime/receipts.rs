@@ -49,7 +49,8 @@ where
 
         let now = self.clock.now();
         let recipient = counterparty.to_public_key()?;
-        let prepared = paykit_lib::prepare_receipt_for_recipient(recipient, draft)?;
+        let prepared =
+            paykit_lib::prepare_receipt_for_recipient(recipient, &self.config.receiver_id, draft)?;
         let record = ReceiptIssuanceRecord::from_prepared(counterparty, prepared, now)?;
         self.storage
             .transaction({

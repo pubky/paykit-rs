@@ -20,7 +20,7 @@ use crate::*;
 
 #[test]
 fn test_default_config_round_trips_to_sdk_config() {
-    let ffi = default_config();
+    let ffi = default_config("bitkit".into()).unwrap();
     let sdk = PaykitSdkConfig::try_from(ffi.clone()).unwrap();
     let round_trip = FfiPaykitSdkConfig::from(sdk);
 
@@ -29,13 +29,14 @@ fn test_default_config_round_trips_to_sdk_config() {
 
 #[test]
 fn test_required_capabilities_include_custom_namespace_scope() {
-    let mut config = default_config();
+    let mut config = default_config("bitkit".into()).unwrap();
     config.public_contact_sharing = FfiPublicContactSharingPolicy::ConfiguredPublicNamespace;
     config.profile_namespace = "bitkit.to".into();
 
     let capabilities = required_session_capabilities(config).unwrap();
 
-    assert!(capabilities.contains("/pub/paykit/:rw"));
+    assert!(capabilities.contains("/pub/paykit/v0/receivers/bitkit/:rw"));
+    assert!(capabilities.contains("/pub/paykit/v0/private/bitkit/:rw"));
     assert!(capabilities.contains("/pub/bitkit.to:rw"));
 }
 
@@ -448,7 +449,7 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
         store,
         provider,
         Arc::new(FfiNoopSdkPaymentAdapter),
-        default_config(),
+        default_config("bitkit".into()).unwrap(),
     )
     .unwrap();
 

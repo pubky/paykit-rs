@@ -57,7 +57,8 @@ fn receipt_access_record(counterparty: PubkyPublicKey) -> ReceiptAccessRecord {
         payment_reference: "invoice-2026-0001".into(),
         payment_request_id: None,
         billing_period: None,
-        location: "/pub/paykit/v0/private/receipts/550e8400-e29b-41d4-a716-446655440000".into(),
+        location: "/pub/paykit/v0/private/bitkit/receipts/550e8400-e29b-41d4-a716-446655440000"
+            .into(),
         key: "receipt-secret".into(),
         retrieval_status: crate::ReceiptRetrievalStatus::Pending,
         retrieval_attempted_at: None,
@@ -82,7 +83,8 @@ fn receipt_record(issuer: PubkyPublicKey) -> ReceiptRecord {
         payment_endpoint_identifier: None,
         amount: None,
         metadata: serde_json::Map::new(),
-        location: "/pub/paykit/v0/private/receipts/550e8400-e29b-41d4-a716-446655440000".into(),
+        location: "/pub/paykit/v0/private/bitkit/receipts/550e8400-e29b-41d4-a716-446655440000"
+            .into(),
         retrieved_at: timestamp(),
     }
 }

@@ -15,6 +15,10 @@ fn public_key() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
+fn receiver_id() -> paykit_lib::PaykitReceiverId {
+    paykit_lib::PaykitReceiverId::new("bitkit").unwrap()
+}
+
 fn identity(public_key: PubkyPublicKey) -> IdentityState {
     IdentityState {
         public_key: Some(public_key),
@@ -114,7 +118,7 @@ fn receipt_access_raw_with_context(
     billing_period: &BillingPeriodRecord,
 ) -> (String, String, String) {
     let receipt_id = ReceiptId::new(receipt_id).unwrap();
-    let location = paykit_lib::ReceiptAccess::location_for(&receipt_id);
+    let location = paykit_lib::ReceiptAccess::location(&receiver_id(), &receipt_id);
     let key = paykit_lib::ReceiptDecryptionKey::generate()
         .as_str()
         .to_owned();

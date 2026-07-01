@@ -46,6 +46,7 @@ where
                 .await?;
             match paykit_lib::set_payment_endpoint(
                 &session_access.session,
+                &self.config.receiver_id,
                 identifier.clone(),
                 payload.clone(),
             )
@@ -111,6 +112,7 @@ where
                 let current = paykit_lib::get_payment_list(
                     &session_access.outbox_client.public_storage(),
                     &local_public_key,
+                    &self.config.receiver_id,
                 )
                 .await?;
                 let remote_identifiers = current
@@ -179,7 +181,13 @@ where
                     }
                 })
                 .await?;
-            match paykit_lib::remove_payment_endpoint(&session_access.session, identifier).await {
+            match paykit_lib::remove_payment_endpoint(
+                &session_access.session,
+                &self.config.receiver_id,
+                identifier,
+            )
+            .await
+            {
                 Ok(()) => {
                     self.storage
                         .transaction({

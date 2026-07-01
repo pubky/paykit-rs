@@ -47,13 +47,16 @@ fn test_parse_pubky_auth_url_rejects_invalid_url() {
 fn test_parse_pubky_resource_normalizes_uri() {
     let public_key = PubkyLocalSecretKey::new([4; 32]).public_key();
     let resource = parse_pubky_resource(&format!(
-        "pubky://{}/pub/paykit/profile.json",
+        "pubky://{}/pub/paykit/v0/receivers/paykit/profile.json",
         public_key.as_str()
     ))
     .unwrap();
 
     assert_eq!(resource.public_key, public_key);
-    assert_eq!(resource.path, "/pub/paykit/profile.json");
+    assert_eq!(
+        resource.path,
+        "/pub/paykit/v0/receivers/paykit/profile.json"
+    );
     assert!(resource.transport_url.starts_with("https://"));
 }
 
@@ -61,13 +64,16 @@ fn test_parse_pubky_resource_normalizes_uri() {
 fn test_parse_pubky_resource_accepts_pubky_identifier_form() {
     let public_key = PubkyLocalSecretKey::new([5; 32]).public_key();
     let resource = parse_pubky_resource(&format!(
-        "pubky{}/pub/paykit/profile.json",
+        "pubky{}/pub/paykit/v0/receivers/paykit/profile.json",
         public_key.as_str()
     ))
     .unwrap();
 
     assert_eq!(resource.public_key, public_key);
-    assert_eq!(resource.path, "/pub/paykit/profile.json");
+    assert_eq!(
+        resource.path,
+        "/pub/paykit/v0/receivers/paykit/profile.json"
+    );
 }
 
 #[test]

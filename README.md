@@ -38,7 +38,7 @@ messages are exchanged through `pubky-noise`.
 Public Payment Endpoint Payloads are stored as separate files under:
 
 ```text
-/pub/paykit/v0/{payment_endpoint_identifier}
+/pub/paykit/v0/receivers/{receiver_id}/endpoints/{payment_endpoint_identifier}
 ```
 
 Public reads use `pubky::PublicStorage`; authenticated writes use
@@ -316,13 +316,14 @@ Metadata.
 
 ### Public Payment Endpoints
 
-- `set_payment_endpoint(session, identifier, payload)`: publish or update one
-  public Payment Endpoint.
-- `remove_payment_endpoint(session, identifier)`: remove one public Payment
-  Endpoint.
-- `get_payment_list(storage, payee)`: fetch the payee's public Payment List.
-- `get_payment_endpoint(storage, payee, identifier)`: fetch one public Payment
-  Endpoint Payload.
+- `set_payment_endpoint(session, receiver_id, identifier, payload)`: publish or
+  update one public Payment Endpoint.
+- `remove_payment_endpoint(session, receiver_id, identifier)`: remove one public
+  Payment Endpoint.
+- `get_payment_list(storage, payee, receiver_id)`: fetch the payee receiver's
+  public Payment List.
+- `get_payment_endpoint(storage, payee, receiver_id, identifier)`: fetch one
+  public Payment Endpoint Payload.
 
 ### Encrypted Links
 
@@ -366,10 +367,10 @@ Metadata.
 
 ### Receipts
 
-- `prepare_receipt(link, draft)`: build the plaintext Receipt, Encrypted Receipt, and Receipt
-  Access descriptor without storing or sending. Receipt drafts may include
-  optional `payment_request_id` and `billing_period` fields for Payment Request
-  correlation.
+- `prepare_receipt(link, receiver_id, draft)`: build the plaintext Receipt,
+  Encrypted Receipt, and Receipt Access descriptor without storing or sending.
+  Receipt drafts may include optional `payment_request_id` and `billing_period`
+  fields for Payment Request correlation.
 - `store_prepared_receipt(session, prepared)`: store a prepared Encrypted
   Receipt at its Receipt Location.
 - `send_receipt_access(link, access)`: send a prepared Receipt Access descriptor

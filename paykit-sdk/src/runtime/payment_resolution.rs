@@ -358,8 +358,12 @@ where
                         .into(),
                     source: None,
                 })?;
-        let payment_list =
-            paykit_lib::get_payment_list(&public_storage, &counterparty.to_public_key()?).await?;
+        let payment_list = paykit_lib::get_payment_list(
+            &public_storage,
+            &counterparty.to_public_key()?,
+            &self.config.receiver_id,
+        )
+        .await?;
         let mut endpoints = payment_list
             .payment_endpoints
             .into_iter()

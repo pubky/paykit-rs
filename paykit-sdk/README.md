@@ -26,6 +26,12 @@ reservations, recovery state, and backup data. Multiple apps can be linked or
 aggregated explicitly, but they do not share one private Paykit runtime by
 default.
 
+Each runtime is configured with one Paykit receiver id. APIs that accept a
+counterparty Pubky key use the same receiver id on the counterparty side. Flows
+that need to address a different receiver folder under the same Pubky identity
+should use an explicit receiver locator API once that routing layer is added,
+rather than treating the Pubky key alone as enough information.
+
 ## Current Scope
 
 Implemented in this Rust SDK crate:
@@ -68,7 +74,7 @@ SDK.
 Typical startup:
 
 ```rust,no_run
-use paykit_sdk::{PaykitSdk, PaykitSdkConfig};
+use paykit_sdk::{PaykitReceiverId, PaykitSdk, PaykitSdkConfig};
 
 # async fn example<S, K, P>(storage: S, pubky: K, payment: P) -> paykit_sdk::Result<()>
 # where
@@ -76,7 +82,8 @@ use paykit_sdk::{PaykitSdk, PaykitSdkConfig};
 #     K: paykit_sdk::PubkySessionProvider,
 #     P: paykit_sdk::PaymentAdapter,
 # {
-let sdk = PaykitSdk::try_new(storage, pubky, payment, PaykitSdkConfig::default())?;
+let config = PaykitSdkConfig::new(PaykitReceiverId::new("bitkit")?);
+let sdk = PaykitSdk::try_new(storage, pubky, payment, config)?;
 let report = sdk.initialize().await?;
 
 if report.identity.private_link_capable {
@@ -139,18 +146,18 @@ Common workflows:
 
 ## Profile And Contact Namespace
 
-The SDK profile/contact namespace is SDK-level Paykit app data, not a core
-Paykit Protocol route. By default the SDK uses:
+The SDK profile/contact namespace is SDK-level Paykit app data. By default the
+SDK uses receiver-scoped Paykit paths:
 
-- `/pub/paykit/profile.json` for Paykit Profile
-- `/pub/paykit/blobs/...` for Paykit Profile blobs
-- `/pub/paykit/contacts/...` for optional Public Contact Markers
+- `/pub/paykit/v0/receivers/{receiver_id}/profile.json` for Paykit Profile
+- `/pub/paykit/v0/receivers/{receiver_id}/blobs/...` for Paykit Profile blobs
+- `/pub/paykit/v0/receivers/{receiver_id}/contacts/...` for optional Public Contact Markers
 
 Apps can set `profile_namespace` to use their own public app namespace, such as
 `bitkit.to`. That changes only these SDK profile/contact helper paths. Public
-Payment Endpoints stay under `/pub/paykit/v0/`, and Encrypted Link/private
-runtime state is still owned by this SDK runtime. `profile_namespace` is not a
-shared-runtime selector or app-specific core Paykit path prefix.
+Payment Endpoints and Encrypted Link/private runtime state stay under the
+configured receiver id. `profile_namespace` is not a shared-runtime selector or
+app-specific core Paykit path prefix.
 
 The SDK rejects `pubky.app` as a configured profile namespace only as a local
 guardrail against accidental writes through Paykit helpers. It is not a

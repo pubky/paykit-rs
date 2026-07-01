@@ -54,6 +54,8 @@ where
             &session_access.session,
             &secret_key,
             &remote_public_key,
+            &self.config.receiver_id,
+            &self.config.receiver_id,
         )
         .await?;
 
@@ -273,6 +275,8 @@ where
             &session_access.session,
             secret_key,
             &remote_public_key,
+            &self.config.receiver_id,
+            &self.config.receiver_id,
             &marker,
         )
         .await
@@ -353,6 +357,8 @@ where
             &public_storage,
             secret_key,
             &remote_public_key,
+            &self.config.receiver_id,
+            &self.config.receiver_id,
         )
         .await?
         else {
@@ -561,6 +567,8 @@ where
             &session_access.session,
             &secret_key,
             &remote_public_key,
+            &self.config.receiver_id,
+            &self.config.receiver_id,
         )
         .await
         {
