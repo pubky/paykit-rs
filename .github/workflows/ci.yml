@@ -128,11 +128,11 @@ jobs:
           EOF
       - name: Publish badge to orphan 'badges' branch
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           mkdir -p /tmp/badge && mv coverage.svg /tmp/badge/
           cd /tmp/badge
           git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -q -b badges
           git add coverage.svg
           git commit -q -m "Update coverage badge"
