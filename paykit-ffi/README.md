@@ -30,7 +30,8 @@ on low-level `paykit-lib` protocol bindings.
 - `PubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
   session state.
-- `defaultConfig()` — return default `PaykitSdkConfig`.
+- `defaultConfig(receiverId)` — return the default `PaykitSdkConfig` policy
+  for an explicit Paykit receiver id.
 - `defaultPubkyClientConfig()` — return default `PubkyClientConfig`.
 - `requiredSessionCapabilities(config)` — return Pubky capabilities required by
   a config.

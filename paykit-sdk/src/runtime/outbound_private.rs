@@ -240,6 +240,8 @@ where
             session_access.session.clone(),
             secret_key,
             &remote_public_key,
+            &self.config.receiver_id,
+            &self.config.receiver_id,
             session_access.outbox_client.clone(),
             snapshot,
         )

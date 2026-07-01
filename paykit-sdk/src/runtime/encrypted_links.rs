@@ -450,6 +450,8 @@ where
             session_access.session,
             secret_key,
             &remote_public_key,
+            &self.config.receiver_id,
+            &self.config.receiver_id,
             session_access.outbox_client,
             snapshot,
         )
@@ -599,12 +601,16 @@ where
                 session_access.session,
                 secret_key,
                 &remote_public_key,
+                &self.config.receiver_id,
+                &self.config.receiver_id,
                 session_access.outbox_client,
             )?,
             EncryptedLinkHandshakeRole::Responder => paykit_lib::accept_encrypted_link(
                 session_access.session,
                 secret_key,
                 &remote_public_key,
+                &self.config.receiver_id,
+                &self.config.receiver_id,
                 session_access.outbox_client,
             )?,
         };

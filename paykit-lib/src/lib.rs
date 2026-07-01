@@ -12,6 +12,7 @@ mod payment_request;
 mod private_payment_list;
 mod pubky_routing;
 mod receipt;
+mod receiver;
 mod shared_wire;
 mod validation;
 
@@ -63,7 +64,9 @@ pub use pubky::PublicKey;
 pub use pubky_noise;
 #[doc(inline)]
 pub use pubky_routing::{
-    PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX, PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX,
+    encrypted_link_recovery_path_prefix, payment_endpoint_path, payment_endpoint_path_prefix,
+    private_message_path_prefix, receipt_path_prefix, PAYKIT_PRIVATE_PATH_PREFIX,
+    PAYKIT_RECEIVERS_PATH_PREFIX,
 };
 #[doc(inline)]
 pub use receipt::{
@@ -72,6 +75,8 @@ pub use receipt::{
     serialize_receipt_access_json, store_prepared_receipt, PreparedReceipt, Receipt, ReceiptAccess,
     ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptDraft, ReceiptId,
 };
+#[doc(inline)]
+pub use receiver::{PaykitReceiverId, PaykitReceiverLocator};
 
 /// Common result alias for Paykit operations.
 pub type Result<T> = std::result::Result<T, PaykitError>;

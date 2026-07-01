@@ -509,7 +509,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_error() {
     );
     let raw_json = raw_json.replace(
         &location,
-        "/pub/paykit/v0/private/receipts/not-the-receipt-id",
+        "/pub/paykit/v0/private/bitkit/receipts/not-the-receipt-id",
     );
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
@@ -1381,7 +1381,7 @@ async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
         payment_reference: "invoice-2026-0001".into(),
         payment_request_id: None,
         billing_period: None,
-        location: format!("/pub/paykit/v0/private/receipts/{receipt_id}"),
+        location: format!("/pub/paykit/v0/private/bitkit/receipts/{receipt_id}"),
         key: "receipt-secret".into(),
         retrieval_status: crate::ReceiptRetrievalStatus::Pending,
         retrieval_attempted_at: None,
@@ -1530,6 +1530,7 @@ async fn test_restore_backup_state_rejects_receipt_issuance_access_mismatch() {
     let counterparty = public_key();
     let prepared = paykit_lib::prepare_receipt_for_recipient(
         counterparty.to_public_key().unwrap(),
+        &receiver_id(),
         paykit_lib::ReceiptDraft {
             receipt_id: Some(
                 paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
@@ -1594,6 +1595,7 @@ async fn test_restore_backup_state_rejects_duplicate_receipt_issuance_ids() {
         first_counterparty.clone(),
         paykit_lib::prepare_receipt_for_recipient(
             first_counterparty.to_public_key().unwrap(),
+            &receiver_id(),
             draft(),
         )
         .unwrap(),
@@ -1604,6 +1606,7 @@ async fn test_restore_backup_state_rejects_duplicate_receipt_issuance_ids() {
         second_counterparty.clone(),
         paykit_lib::prepare_receipt_for_recipient(
             second_counterparty.to_public_key().unwrap(),
+            &receiver_id(),
             draft(),
         )
         .unwrap(),

@@ -159,7 +159,9 @@ async fn test_delete_paykit_blob_requires_initialized_session() {
         FixedClock,
     );
 
-    let result = sdk.delete_paykit_blob("/pub/paykit/blobs/avatar.jpg").await;
+    let result = sdk
+        .delete_paykit_blob("/pub/paykit/v0/receivers/paykit/blobs/avatar.jpg")
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
 }
@@ -175,7 +177,7 @@ async fn test_fetch_pubky_file_requires_public_storage() {
     );
 
     let result = sdk
-        .fetch_pubky_file("pubky://invalid/pub/paykit/blobs/avatar.jpg")
+        .fetch_pubky_file("pubky://invalid/pub/paykit/v0/receivers/paykit/blobs/avatar.jpg")
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));

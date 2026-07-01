@@ -31,6 +31,13 @@ or aggregated explicitly above the app-owned runtime model. That does not mean
 all apps silently share one private Paykit runtime, one Encrypted Link state
 machine, or one payment execution state.
 
+Each SDK runtime is configured with one Paykit receiver id. Counterparty APIs
+that take only a Pubky key route to the same receiver id under that
+counterparty. Cross-receiver flows, such as paying `pubkyabc/bitkit` from a
+runtime configured as another receiver, need explicit receiver-locator APIs so
+storage, private links, receipts, and recovery state are keyed by both Pubky key
+and receiver id.
+
 ## Design Principles
 
 - Keep `paykit-lib` stateless. It validates and sends protocol objects, but it
@@ -318,26 +325,27 @@ The SDK provides default Pubky-backed Paykit-facing profile metadata so
 different Paykit apps can interoperate. This belongs in the SDK, not in
 `paykit-lib` core protocol validation.
 
-The default public profile/contact namespace is unversioned:
+The default public profile/contact namespace is receiver-scoped:
 
-- profile record: `/pub/paykit/profile.json`
-- Paykit blobs: `/pub/paykit/blobs/...`
-- public contact markers: `/pub/paykit/contacts/...`
+- profile record: `/pub/paykit/v0/receivers/{receiver_id}/profile.json`
+- Paykit blobs: `/pub/paykit/v0/receivers/{receiver_id}/blobs/...`
+- public contact markers: `/pub/paykit/v0/receivers/{receiver_id}/contacts/...`
 
-Public Payment Endpoints remain under `/pub/paykit/v0/`, so SDK profile paths
-do not collide with Payment Endpoint Identifier files.
+Public Payment Endpoints for the same receiver are stored under
+`/pub/paykit/v0/receivers/{receiver_id}/endpoints/...`, so SDK profile paths do
+not collide with Payment Endpoint Identifier files.
 
 Apps that already have a public product namespace can configure the SDK
 profile/contact namespace segment. For example, `profile_namespace =
 "bitkit.to"` makes Paykit Profile and contact marker helpers use
 `/pub/bitkit.to/profile.json`, `/pub/bitkit.to/blobs/...`, and
 `/pub/bitkit.to/contacts/...`. This does not change core Paykit Protocol paths
-such as public Payment Endpoints, and it does not create app-specific private
-runtime isolation under one shared key. The app should request the capability
+or receiver-scoped private runtime paths. The app should request the capability
 scope returned by `PaykitSdkConfig::required_session_capabilities()` and
 validate imported/completed sessions against that same scope. The default
-namespace is covered by `/pub/paykit/:rw`; a custom profile/contact namespace
-adds the matching `/pub/<namespace>/:rw` capability.
+receiver namespace is covered by receiver-scoped public/private Paykit
+capabilities; a custom profile/contact namespace adds the matching
+`/pub/<namespace>/:rw` capability.
 
 `image_uri` may point at the configured blob prefix or another public image
 location. The SDK can publish/delete Paykit blobs under the configured blob

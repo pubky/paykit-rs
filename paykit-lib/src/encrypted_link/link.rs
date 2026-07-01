@@ -1,6 +1,6 @@
 use tracing::{debug, instrument};
 
-use crate::{PaykitError, PublicKey, Result};
+use crate::{PaykitError, PaykitReceiverId, PublicKey, Result};
 
 use super::{
     paths::compute_private_payment_paths,
@@ -267,12 +267,39 @@ pub async fn restore_encrypted_link(
     session: pubky::PubkySession,
     secret_key: [u8; 32],
     remote_pubkey: &PublicKey,
+    local_receiver_id: &PaykitReceiverId,
+    remote_receiver_id: &PaykitReceiverId,
     outbox_client: pubky::Pubky,
     snapshot: EncryptedLinkSnapshot,
 ) -> Result<EncryptedLink> {
+    let paths = compute_private_payment_paths(
+        &secret_key,
+        remote_pubkey,
+        local_receiver_id,
+        remote_receiver_id,
+    );
+    restore_encrypted_link_with_paths(
+        session,
+        secret_key,
+        remote_pubkey,
+        outbox_client,
+        snapshot,
+        paths,
+    )
+    .await
+}
+
+async fn restore_encrypted_link_with_paths(
+    session: pubky::PubkySession,
+    secret_key: [u8; 32],
+    remote_pubkey: &PublicKey,
+    outbox_client: pubky::Pubky,
+    snapshot: EncryptedLinkSnapshot,
+    paths: (String, String),
+) -> Result<EncryptedLink> {
     debug!("restoring Encrypted Link from snapshot (raw params)");
 
-    let (write_path, read_path) = compute_private_payment_paths(&secret_key, remote_pubkey);
+    let (write_path, read_path) = paths;
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         secret_key,

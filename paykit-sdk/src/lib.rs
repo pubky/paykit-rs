@@ -83,6 +83,8 @@ pub use identity::{
     PubkySessionAccess,
 };
 #[doc(inline)]
+pub use paykit_lib::{PaykitReceiverId, PaykitReceiverLocator};
+#[doc(inline)]
 pub use pubky_session::{
     parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthDetails,
     PubkyAuthRequest, PubkyAuthRequestKind, PubkyResourceRef, PubkySessionBootstrap,

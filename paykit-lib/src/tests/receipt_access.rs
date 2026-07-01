@@ -59,12 +59,12 @@ async fn prepared_receipt_can_be_stored_and_sent_in_retryable_steps() {
         .unwrap(),
     };
 
-    let prepared = prepare_receipt(&setup.sender_link, draft).unwrap();
+    let prepared = prepare_receipt(&setup.sender_link, &receiver_id(), draft).unwrap();
     assert_eq!(prepared.access.payment_reference, reference);
     assert_eq!(prepared.receipt.receipt_id, prepared.access.receipt_id);
     assert_eq!(
         prepared.access.location,
-        ReceiptAccess::location_for(&prepared.access.receipt_id)
+        ReceiptAccess::location(&receiver_id(), &prepared.access.receipt_id)
     );
 
     store_prepared_receipt(&setup.sender_session, &prepared)
@@ -106,7 +106,7 @@ async fn receipt_access_parser_returns_all_available_receipts_in_fifo_order() {
         receipt_id: first_receipt_id.clone(),
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location_for(&first_receipt_id),
+        location: ReceiptAccess::location(&receiver_id(), &first_receipt_id),
         key: ReceiptDecryptionKey::generate(),
         payment_reference: first_reference.clone(),
     };
@@ -117,7 +117,7 @@ async fn receipt_access_parser_returns_all_available_receipts_in_fifo_order() {
         receipt_id: second_receipt_id.clone(),
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location_for(&second_receipt_id),
+        location: ReceiptAccess::location(&receiver_id(), &second_receipt_id),
         key: ReceiptDecryptionKey::generate(),
         payment_reference: second_reference.clone(),
     };
@@ -155,7 +155,7 @@ async fn receipt_access_parser_preserves_valid_receipts_when_one_message_is_malf
         receipt_id: first_receipt_id.clone(),
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location_for(&first_receipt_id),
+        location: ReceiptAccess::location(&receiver_id(), &first_receipt_id),
         key: ReceiptDecryptionKey::generate(),
         payment_reference: first_reference.clone(),
     };
@@ -166,7 +166,7 @@ async fn receipt_access_parser_preserves_valid_receipts_when_one_message_is_malf
         receipt_id: malformed_receipt_id,
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location_for(&ReceiptId::new_v4()),
+        location: ReceiptAccess::location(&receiver_id(), &ReceiptId::new_v4()),
         key: ReceiptDecryptionKey::generate(),
         payment_reference: malformed_reference,
     };
@@ -177,7 +177,7 @@ async fn receipt_access_parser_preserves_valid_receipts_when_one_message_is_malf
         receipt_id: second_receipt_id.clone(),
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location_for(&second_receipt_id),
+        location: ReceiptAccess::location(&receiver_id(), &second_receipt_id),
         key: ReceiptDecryptionKey::generate(),
         payment_reference: second_reference.clone(),
     };

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::{identity::PubkyPublicKey, pubky_session::PAYKIT_SESSION_CAPABILITIES};
+use paykit_lib::{receipt_path_prefix, PaykitReceiverId};
+
+use crate::identity::PubkyPublicKey;
 
 /// Default namespace segment for SDK profile/contact public data.
 ///
@@ -41,6 +43,8 @@ pub enum PublicContactSharingPolicy {
 /// Runtime configuration for Paykit SDK.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaykitSdkConfig {
+    /// Receiver folder for this app/runtime under `/pub/paykit/v0/receivers`.
+    pub receiver_id: PaykitReceiverId,
     /// Namespace segment for SDK profile/contact public data under `/pub/`.
     ///
     /// This is a local SDK convention for Paykit-facing profile, blob, and
@@ -68,9 +72,11 @@ pub struct PaykitSdkConfig {
     pub outbound_private_retry_backoff: Duration,
 }
 
-impl Default for PaykitSdkConfig {
-    fn default() -> Self {
+impl PaykitSdkConfig {
+    /// Build the default SDK policy for an explicit Paykit receiver id.
+    pub fn new(receiver_id: PaykitReceiverId) -> Self {
         Self {
+            receiver_id,
             profile_namespace: DEFAULT_PROFILE_NAMESPACE.into(),
             endpoint_management_scope: EndpointManagementScope::ManagedOnly,
             encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy::Enabled,
@@ -80,11 +86,12 @@ impl Default for PaykitSdkConfig {
             outbound_private_retry_backoff: Duration::from_secs(30),
         }
     }
-}
 
-impl PaykitSdkConfig {
     /// Validate runtime configuration values.
     pub fn validate(&self) -> crate::Result<()> {
+        PaykitReceiverId::new(self.receiver_id.as_str()).map_err(|err| {
+            crate::PaykitSdkError::Policy(format!("invalid Paykit receiver id: {err}"))
+        })?;
         validate_profile_namespace(&self.profile_namespace)?;
         validate_runtime_duration(
             "peer link operation lease timeout",
@@ -103,16 +110,25 @@ impl PaykitSdkConfig {
 
     /// Return the configured Paykit Profile path.
     pub fn paykit_profile_path(&self) -> String {
+        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
+            return format!("/pub/paykit/v0/receivers/{}/profile.json", self.receiver_id);
+        }
         format!("/pub/{}/profile.json", self.profile_namespace)
     }
 
     /// Return the configured Paykit Profile blob path prefix.
     pub fn paykit_profile_blob_path_prefix(&self) -> String {
+        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
+            return format!("/pub/paykit/v0/receivers/{}/blobs/", self.receiver_id);
+        }
         format!("/pub/{}/blobs/", self.profile_namespace)
     }
 
     /// Return the configured public contact marker path prefix.
     pub fn public_contact_path_prefix(&self) -> String {
+        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
+            return format!("/pub/paykit/v0/receivers/{}/contacts/", self.receiver_id);
+        }
         format!("/pub/{}/contacts/", self.profile_namespace)
     }
 
@@ -127,14 +143,19 @@ impl PaykitSdkConfig {
 
     /// Return the Pubky session capabilities required by this SDK configuration.
     pub fn required_session_capabilities(&self) -> String {
-        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
-            return PAYKIT_SESSION_CAPABILITIES.to_string();
+        let mut capabilities = vec![
+            format!("/pub/paykit/v0/receivers/{}/:rw", self.receiver_id),
+            format!("/pub/paykit/v0/private/{}/:rw", self.receiver_id),
+        ];
+        if self.profile_namespace != DEFAULT_PROFILE_NAMESPACE {
+            capabilities.push(format!("/pub/{}:rw", self.profile_namespace));
         }
+        capabilities.join(",")
+    }
 
-        format!(
-            "{},/pub/{}:rw",
-            PAYKIT_SESSION_CAPABILITIES, self.profile_namespace
-        )
+    /// Return the receiver-scoped Receipt Location prefix.
+    pub fn receipt_path_prefix(&self) -> String {
+        receipt_path_prefix(&self.receiver_id)
     }
 }
 
@@ -196,6 +217,13 @@ fn default_profile_namespace() -> String {
 
 fn default_outbound_private_retry_backoff() -> Duration {
     Duration::from_secs(30)
+}
+
+#[cfg(test)]
+impl Default for PaykitSdkConfig {
+    fn default() -> Self {
+        Self::new(PaykitReceiverId::new("test").expect("valid test receiver id"))
+    }
 }
 
 #[cfg(test)]

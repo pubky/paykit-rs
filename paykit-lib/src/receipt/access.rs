@@ -1,8 +1,8 @@
 use tracing::{debug, instrument};
 
 use crate::{
-    error::map_error, EncryptedLink, PaykitError, PrivateMessageKind, PublicKey, Result,
-    PAYKIT_PRIVATE_PATH_PREFIX,
+    error::map_error, receipt_path_prefix, EncryptedLink, PaykitError, PaykitReceiverId,
+    PrivateMessageKind, PublicKey, Result,
 };
 
 use super::{
@@ -12,8 +12,8 @@ use super::{
 
 impl ReceiptAccess {
     /// Return the canonical Receipt Location path for a Receipt ID.
-    pub fn location_for(receipt_id: &ReceiptId) -> String {
-        format!("{PAYKIT_PRIVATE_PATH_PREFIX}/receipts/{receipt_id}")
+    pub fn location(receiver_id: &PaykitReceiverId, receipt_id: &ReceiptId) -> String {
+        format!("{}/{receipt_id}", receipt_path_prefix(receiver_id))
     }
 
     /// Validate that this access descriptor points at the canonical location for
@@ -59,9 +59,25 @@ impl ReceiptAccess {
     }
 
     fn has_canonical_location(&self) -> bool {
-        let expected_location = Self::location_for(&self.receipt_id);
-        self.location == expected_location
+        Self::location_matches_receipt_id(&self.location, &self.receipt_id)
     }
+
+    pub(crate) fn location_matches_receipt_id(location: &str, receipt_id: &ReceiptId) -> bool {
+        receiver_scoped_location_matches(location, receipt_id)
+    }
+}
+
+fn receiver_scoped_location_matches(location: &str, receipt_id: &ReceiptId) -> bool {
+    let Some(rest) = location.strip_prefix("/pub/paykit/v0/private/") else {
+        return false;
+    };
+    let Some((receiver_id, receipt_segment)) = rest.split_once("/receipts/") else {
+        return false;
+    };
+    if receipt_segment != receipt_id.as_str() {
+        return false;
+    }
+    PaykitReceiverId::new(receiver_id).is_ok()
 }
 
 /// Prepare a plaintext Receipt, Encrypted Receipt, and Receipt Access
@@ -70,8 +86,12 @@ impl ReceiptAccess {
 /// The returned [`PreparedReceipt`] contains the Receipt Decryption Key and
 /// must be handled as sensitive data.
 #[instrument(skip(link, draft))]
-pub fn prepare_receipt(link: &EncryptedLink, draft: ReceiptDraft) -> Result<PreparedReceipt> {
-    prepare_receipt_for_recipient(link.recipient().clone(), draft)
+pub fn prepare_receipt(
+    link: &EncryptedLink,
+    receiver_id: &PaykitReceiverId,
+    draft: ReceiptDraft,
+) -> Result<PreparedReceipt> {
+    prepare_receipt_for_recipient(link.recipient().clone(), receiver_id, draft)
 }
 
 /// Prepare a plaintext Receipt, Encrypted Receipt, and Receipt Access
@@ -82,7 +102,18 @@ pub fn prepare_receipt(link: &EncryptedLink, draft: ReceiptDraft) -> Result<Prep
 #[instrument(skip(recipient_public_key, draft))]
 pub fn prepare_receipt_for_recipient(
     recipient_public_key: PublicKey,
+    receiver_id: &PaykitReceiverId,
     draft: ReceiptDraft,
+) -> Result<PreparedReceipt> {
+    prepare_receipt_for_recipient_at_location(recipient_public_key, draft, |receipt_id| {
+        ReceiptAccess::location(receiver_id, receipt_id)
+    })
+}
+
+fn prepare_receipt_for_recipient_at_location(
+    recipient_public_key: PublicKey,
+    draft: ReceiptDraft,
+    location_for: impl FnOnce(&ReceiptId) -> String,
 ) -> Result<PreparedReceipt> {
     debug!("preparing encrypted receipt");
     draft.validate_request_context()?;
@@ -93,7 +124,7 @@ pub fn prepare_receipt_for_recipient(
     let payment_reference = draft.payment_reference;
     let payment_request_id = draft.payment_request_id;
     let billing_period = draft.billing_period;
-    let location = ReceiptAccess::location_for(&receipt_id);
+    let location = location_for(&receipt_id);
     let key = ReceiptDecryptionKey::generate();
     let receipt = Receipt {
         receipt_id: receipt_id.clone(),
@@ -106,7 +137,7 @@ pub fn prepare_receipt_for_recipient(
         metadata: draft.metadata,
     };
     let encrypted_receipt = receipt
-        .encrypt(&key)
+        .encrypt_for_location(&key, &location)
         .map_err(|err| map_error("prepare_receipt", err))?;
     let access = ReceiptAccess {
         version: 1,

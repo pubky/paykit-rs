@@ -1,5 +1,9 @@
 use super::*;
 
+fn receiver_config(receiver_id: &str) -> PaykitSdkConfig {
+    PaykitSdkConfig::new(PaykitReceiverId::new(receiver_id).unwrap())
+}
+
 #[test]
 fn test_config_validate_rejects_zero_timeouts() {
     let config = PaykitSdkConfig {
@@ -22,26 +26,39 @@ fn test_config_validate_rejects_oversized_timeouts() {
 
 #[test]
 fn test_config_builds_default_profile_namespace_paths() {
-    let config = PaykitSdkConfig::default();
+    let config = receiver_config("bitkit");
     let public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
 
-    assert_eq!(config.paykit_profile_path(), "/pub/paykit/profile.json");
+    assert_eq!(
+        config.paykit_profile_path(),
+        "/pub/paykit/v0/receivers/bitkit/profile.json"
+    );
     assert_eq!(
         config.paykit_profile_blob_path_prefix(),
-        "/pub/paykit/blobs/"
+        "/pub/paykit/v0/receivers/bitkit/blobs/"
     );
     assert_eq!(
         config.public_contact_path(&public_key),
-        format!("/pub/paykit/contacts/{}.json", public_key.as_str())
+        format!(
+            "/pub/paykit/v0/receivers/bitkit/contacts/{}.json",
+            public_key.as_str()
+        )
     );
-    assert_eq!(config.required_session_capabilities(), "/pub/paykit/:rw");
+    assert_eq!(
+        config.receipt_path_prefix(),
+        "/pub/paykit/v0/private/bitkit/receipts"
+    );
+    assert_eq!(
+        config.required_session_capabilities(),
+        "/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw"
+    );
 }
 
 #[test]
 fn test_config_allows_custom_profile_namespace_segment() {
     let config = PaykitSdkConfig {
         profile_namespace: "bitkit.to".into(),
-        ..PaykitSdkConfig::default()
+        ..receiver_config("bitkit")
     };
 
     config.validate().unwrap();
@@ -56,7 +73,7 @@ fn test_config_allows_custom_profile_namespace_segment() {
     );
     assert_eq!(
         config.required_session_capabilities(),
-        "/pub/paykit/:rw,/pub/bitkit.to:rw"
+        "/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw,/pub/bitkit.to:rw"
     );
 }
 
@@ -67,7 +84,10 @@ fn test_config_uses_namespace_capability_when_public_contact_sharing_enabled() {
         ..PaykitSdkConfig::default()
     };
 
-    assert_eq!(config.required_session_capabilities(), "/pub/paykit/:rw");
+    assert_eq!(
+        config.required_session_capabilities(),
+        "/pub/paykit/v0/receivers/test/:rw,/pub/paykit/v0/private/test/:rw"
+    );
 }
 
 #[test]

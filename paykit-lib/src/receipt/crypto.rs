@@ -4,7 +4,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305,
 };
 
-use crate::{PaykitError, Result};
+use crate::{PaykitError, PaykitReceiverId, Result};
 
 use super::{
     wire::{EncryptedReceiptWire, ReceiptWire},
@@ -22,12 +22,29 @@ impl Receipt {
     /// The location path is derived from the Receipt ID and authenticated as
     /// AEAD associated data; callers must use that same canonical path when
     /// decrypting.
-    pub fn encrypt(&self, key: &ReceiptDecryptionKey) -> Result<String> {
+    pub fn encrypt(
+        &self,
+        receiver_id: &PaykitReceiverId,
+        key: &ReceiptDecryptionKey,
+    ) -> Result<String> {
+        let location = ReceiptAccess::location(receiver_id, &self.receipt_id);
+        self.encrypt_for_location(key, &location)
+    }
+
+    pub(crate) fn encrypt_for_location(
+        &self,
+        key: &ReceiptDecryptionKey,
+        location: &str,
+    ) -> Result<String> {
         self.validate_request_context()?;
         if let Some(amount) = &self.amount {
             amount.validate_with_label("Receipt amount")?;
         }
-        let location = ReceiptAccess::location_for(&self.receipt_id);
+        if !ReceiptAccess::location_matches_receipt_id(location, &self.receipt_id) {
+            return Err(PaykitError::Validation(
+                "Receipt Location does not match Receipt ID".into(),
+            ));
+        }
         let key_bytes = key.bytes()?;
         let cipher = XChaCha20Poly1305::new((&key_bytes).into());
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
@@ -42,7 +59,7 @@ impl Receipt {
                 &nonce,
                 chacha20poly1305::aead::Payload {
                     msg: &plaintext,
-                    aad: Self::aad_for_location(&location).as_bytes(),
+                    aad: Self::aad_for_location(location).as_bytes(),
                 },
             )
             .map_err(|err| PaykitError::InvalidData {
@@ -131,7 +148,7 @@ impl Receipt {
                 source: Some(err.into()),
             })?;
         let receipt = Self::try_from(receipt_wire)?;
-        if ReceiptAccess::location_for(&receipt.receipt_id) != location {
+        if !ReceiptAccess::location_matches_receipt_id(location, &receipt.receipt_id) {
             return Err(PaykitError::InvalidData {
                 context: "Receipt ID does not match Receipt Location".into(),
                 source: None,

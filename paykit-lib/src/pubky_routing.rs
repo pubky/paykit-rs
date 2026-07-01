@@ -12,89 +12,135 @@ use pubky::{
 };
 use tracing::{debug, error, instrument, trace};
 
-use crate::{PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList, Result};
+use crate::{
+    PaykitError, PaykitReceiverId, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList,
+    Result,
+};
 
-/// Conventional prefix for public Paykit data hosted on Pubky storage.
-///
-/// `v0` stores public payment endpoints as:
-/// `/pub/paykit/v0/{payment_endpoint_identifier}` with the file contents being
-/// the Payment Endpoint Payload.
-pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
+/// Conventional prefix for receiver-scoped Paykit public data.
+pub const PAYKIT_RECEIVERS_PATH_PREFIX: &str = "/pub/paykit/v0/receivers";
 
-/// Conventional prefix for private (encrypted) Paykit data.
-///
-/// This prefix is used as the base path for pubky-noise's encrypted messaging.
-/// The actual write and read paths are derived per-counterparty pair using
-/// [`pubky_noise::path_derivation::derive_asymmetric_paths`]. Pubky-noise manages
-/// individual file slots within the derived folders using a counter-based scheme.
+/// Conventional prefix for receiver-scoped Paykit private data.
 pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit/v0/private";
-
-/// Conventional prefix for Encrypted Link recovery markers.
-///
-/// Marker paths are derived per-counterparty pair before being appended below
-/// this prefix, so the prefix itself does not identify the counterparty pair.
-pub const PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX: &str =
-    "/pub/paykit/v0/encrypted-link-recovery";
 
 const LIST_PAGE_LIMIT: u16 = 100;
 
-/// Writes or updates a payment endpoint document in the authenticated Pubky session.
-#[instrument(skip(session, payload), fields(identifier = %identifier))]
+/// Writes or updates a receiver-scoped Payment Endpoint document.
+#[instrument(skip(session, payload), fields(receiver = %receiver_id, identifier = %identifier))]
 pub async fn upsert_payment_endpoint(
     session: &PubkySession,
+    receiver_id: &PaykitReceiverId,
     identifier: &PaymentEndpointIdentifier,
     payload: &PaymentEndpointPayload,
 ) -> Result<()> {
-    let path = payment_endpoint_path(identifier);
-    debug!(path = %path, "writing payment endpoint to Pubky storage");
+    let path = payment_endpoint_path(receiver_id, identifier);
+    debug!(path = %path, "writing Payment Endpoint to Pubky storage");
     session
         .storage()
         .put(path, payload.as_str().to_string())
         .await
         .map_err(|err| {
-            error!(error = %err, "failed to put payment endpoint");
+            error!(error = %err, "failed to put Payment Endpoint");
             PaykitError::Transport {
-                context: "put endpoint".into(),
+                context: "put Payment Endpoint".into(),
                 source: err.into(),
             }
         })?;
-    debug!("payment endpoint stored successfully");
     Ok(())
 }
 
-/// Removes an existing payment endpoint from the authenticated Pubky session.
-#[instrument(skip(session), fields(identifier = %identifier))]
+/// Removes a receiver-scoped Payment Endpoint from the authenticated Pubky session.
+#[instrument(skip(session), fields(receiver = %receiver_id, identifier = %identifier))]
 pub async fn delete_payment_endpoint(
     session: &PubkySession,
+    receiver_id: &PaykitReceiverId,
     identifier: &PaymentEndpointIdentifier,
 ) -> Result<()> {
-    let path = payment_endpoint_path(identifier);
-    debug!(path = %path, "deleting payment endpoint from Pubky storage");
+    let path = payment_endpoint_path(receiver_id, identifier);
+    debug!(path = %path, "deleting Payment Endpoint from Pubky storage");
     match session.storage().delete(path).await {
         Ok(_) => {}
         Err(err) if is_not_found(&err) => {
-            debug!("payment endpoint already absent");
+            debug!("Payment Endpoint already absent");
         }
         Err(err) => {
-            error!(error = %err, "failed to delete payment endpoint");
+            error!(error = %err, "failed to delete Payment Endpoint");
             return Err(PaykitError::Transport {
-                context: "delete endpoint".into(),
+                context: "delete Payment Endpoint".into(),
                 source: err.into(),
             });
         }
     }
-    debug!("payment endpoint removed successfully");
     Ok(())
 }
 
-/// Fetches all public payment endpoints for the provided payee from Pubky storage.
+/// Fetches all public Payment Endpoints for one receiver from Pubky storage.
 ///
 /// Directory listing and per-resource fetches are not atomic; the returned list is a
 /// best-effort snapshot of the payee's homeserver state.
-#[instrument(skip(storage), fields(payee = %payee))]
-pub async fn fetch_payment_list(storage: &PublicStorage, payee: &PublicKey) -> Result<PaymentList> {
-    let addr = format!("{payee}{PAYKIT_PATH_PREFIX}");
-    debug!(addr = %addr, "listing payment endpoints");
+#[instrument(skip(storage), fields(payee = %payee, receiver = %receiver_id))]
+pub async fn fetch_payment_list(
+    storage: &PublicStorage,
+    payee: &PublicKey,
+    receiver_id: &PaykitReceiverId,
+) -> Result<PaymentList> {
+    let addr = format!("{payee}{}", payment_endpoint_path_prefix(receiver_id));
+    debug!(addr = %addr, "listing Payment Endpoints");
+    fetch_payment_list_from_directory(storage, addr).await
+}
+
+/// Fetches an individual receiver-scoped public Payment Endpoint.
+#[instrument(skip(storage), fields(payee = %payee, receiver = %receiver_id, identifier = %identifier))]
+pub async fn fetch_payment_endpoint(
+    storage: &PublicStorage,
+    payee: &PublicKey,
+    receiver_id: &PaykitReceiverId,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<Option<PaymentEndpointPayload>> {
+    let addr = format!("{payee}{}", payment_endpoint_path(receiver_id, identifier));
+    debug!(addr = %addr, "fetching Payment Endpoint");
+    match fetch_text(storage, addr, "fetch Payment Endpoint").await? {
+        Some(payload) => Ok(Some(PaymentEndpointPayload::new(payload))),
+        None => Ok(None),
+    }
+}
+
+/// Return the receiver-scoped public Payment Endpoint path prefix.
+pub fn payment_endpoint_path_prefix(receiver_id: &PaykitReceiverId) -> String {
+    format!("{PAYKIT_RECEIVERS_PATH_PREFIX}/{receiver_id}/endpoints/")
+}
+
+/// Return the receiver-scoped public Payment Endpoint path.
+pub fn payment_endpoint_path(
+    receiver_id: &PaykitReceiverId,
+    identifier: &PaymentEndpointIdentifier,
+) -> String {
+    format!(
+        "{}{}",
+        payment_endpoint_path_prefix(receiver_id),
+        identifier.as_str()
+    )
+}
+
+/// Return the receiver-scoped private message base path.
+pub fn private_message_path_prefix(receiver_id: &PaykitReceiverId) -> String {
+    format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{receiver_id}/messages")
+}
+
+/// Return the receiver-scoped Receipt Location prefix.
+pub fn receipt_path_prefix(receiver_id: &PaykitReceiverId) -> String {
+    format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{receiver_id}/receipts")
+}
+
+/// Return the receiver-scoped Encrypted Link recovery marker base path.
+pub fn encrypted_link_recovery_path_prefix(receiver_id: &PaykitReceiverId) -> String {
+    format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{receiver_id}/encrypted-link-recovery")
+}
+
+async fn fetch_payment_list_from_directory(
+    storage: &PublicStorage,
+    addr: String,
+) -> Result<PaymentList> {
     let resources = list_resources(storage, addr, "list payment endpoints").await?;
 
     let mut map = HashMap::new();
@@ -124,7 +170,6 @@ pub async fn fetch_payment_list(storage: &PublicStorage, payee: &PublicKey) -> R
 
         let label = format!("fetch payment endpoint {identifier_text}");
         if let Some(payload) = fetch_text(storage, resource.to_string(), &label).await? {
-            debug!(identifier = %identifier_text, "fetched Payment Endpoint Payload");
             let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&identifier_text)
                 .map_err(|err| PaykitError::InvalidData {
                     context: format!(
@@ -139,35 +184,9 @@ pub async fn fetch_payment_list(storage: &PublicStorage, payee: &PublicKey) -> R
         }
     }
 
-    debug!(count = map.len(), "Payment List collected");
     Ok(PaymentList {
         payment_endpoints: map,
     })
-}
-
-/// Fetches an individual public payment endpoint from Pubky storage.
-#[instrument(skip(storage), fields(payee = %payee, identifier = %identifier))]
-pub async fn fetch_payment_endpoint(
-    storage: &PublicStorage,
-    payee: &PublicKey,
-    identifier: &PaymentEndpointIdentifier,
-) -> Result<Option<PaymentEndpointPayload>> {
-    let addr = format!("{payee}{}", payment_endpoint_path(identifier));
-    debug!(addr = %addr, "fetching individual payment endpoint");
-    match fetch_text(storage, addr, "fetch endpoint").await? {
-        Some(payload) => {
-            debug!("payment endpoint found");
-            Ok(Some(PaymentEndpointPayload::new(payload)))
-        }
-        None => {
-            debug!("payment endpoint not found");
-            Ok(None)
-        }
-    }
-}
-
-fn payment_endpoint_path(identifier: &PaymentEndpointIdentifier) -> String {
-    format!("{PAYKIT_PATH_PREFIX}{}", identifier.as_str())
 }
 
 #[instrument(skip(storage), fields(addr = %addr, label = %label))]
@@ -285,4 +304,32 @@ fn is_not_found(err: &PubkyError) -> bool {
         PubkyError::Request(RequestError::Server { status, .. })
             if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_receiver_scoped_payment_endpoint_path() {
+        let receiver_id = PaykitReceiverId::new("bitkit-9f3a").unwrap();
+        let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+
+        assert_eq!(
+            payment_endpoint_path(&receiver_id, &identifier),
+            "/pub/paykit/v0/receivers/bitkit-9f3a/endpoints/btc-lightning-bolt11"
+        );
+        assert_eq!(
+            private_message_path_prefix(&receiver_id),
+            "/pub/paykit/v0/private/bitkit-9f3a/messages"
+        );
+        assert_eq!(
+            receipt_path_prefix(&receiver_id),
+            "/pub/paykit/v0/private/bitkit-9f3a/receipts"
+        );
+        assert_eq!(
+            encrypted_link_recovery_path_prefix(&receiver_id),
+            "/pub/paykit/v0/private/bitkit-9f3a/encrypted-link-recovery"
+        );
+    }
 }

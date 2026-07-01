@@ -1,5 +1,5 @@
 use super::*;
-use crate::PaykitSdkConfig;
+use crate::{PaykitReceiverId, PaykitSdkConfig};
 
 fn public_key() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
@@ -9,7 +9,7 @@ fn public_key() -> PubkyPublicKey {
 fn test_paykit_profile_json_round_trips() {
     let profile = PaykitProfile {
         display_name: Some("Alice".into()),
-        image_uri: Some("/pub/paykit/blobs/avatar.png".into()),
+        image_uri: Some("/pub/paykit/v0/receivers/paykit/blobs/avatar.png".into()),
         extra: Some(serde_json::Map::from_iter([(
             "bio".into(),
             serde_json::Value::String("Builder".into()),
@@ -144,7 +144,7 @@ fn test_contact_profile_resolution_from_paykit_profile() {
         public_key: public_key.clone(),
         profile: PaykitProfile {
             display_name: Some("Alice".into()),
-            image_uri: Some("/pub/paykit/blobs/avatar.png".into()),
+            image_uri: Some("/pub/paykit/v0/receivers/paykit/blobs/avatar.png".into()),
             extra: None,
         },
         path: DEFAULT_PAYKIT_PROFILE_PATH.into(),
@@ -290,10 +290,14 @@ fn test_pending_public_contact_marker_may_exist_remotely() {
 #[test]
 fn test_public_contact_path_uses_default_profile_namespace() {
     let public_key = public_key();
+    let config = PaykitSdkConfig::new(PaykitReceiverId::new("bitkit").unwrap());
 
     assert_eq!(
-        PaykitSdkConfig::default().public_contact_path(&public_key),
-        format!("/pub/paykit/contacts/{}.json", public_key.as_str())
+        config.public_contact_path(&public_key),
+        format!(
+            "/pub/paykit/v0/receivers/bitkit/contacts/{}.json",
+            public_key.as_str()
+        )
     );
 }
 
@@ -312,11 +316,14 @@ fn test_paykit_blob_path_and_uri_are_scoped_to_configured_prefix() {
 #[test]
 fn test_paykit_blob_name_rejects_path_segments() {
     assert!(matches!(
-        paykit_blob_path("/pub/paykit/blobs/", "../avatar.jpg"),
+        paykit_blob_path(DEFAULT_PAYKIT_PROFILE_BLOB_PATH_PREFIX, "../avatar.jpg"),
         Err(PaykitSdkError::Protocol(_))
     ));
     assert!(matches!(
-        paykit_blob_path("/pub/paykit/blobs/", "avatars/avatar.jpg"),
+        paykit_blob_path(
+            DEFAULT_PAYKIT_PROFILE_BLOB_PATH_PREFIX,
+            "avatars/avatar.jpg"
+        ),
         Err(PaykitSdkError::Protocol(_))
     ));
 }
@@ -325,36 +332,42 @@ fn test_paykit_blob_name_rejects_path_segments() {
 fn test_paykit_blob_path_from_uri_or_path_accepts_owned_blob_only() {
     let owner_public_key = public_key();
     let other_public_key = public_key();
-    let prefix = "/pub/paykit/blobs/";
+    let prefix = DEFAULT_PAYKIT_PROFILE_BLOB_PATH_PREFIX;
 
     assert_eq!(
         paykit_blob_path_from_uri_or_path(
             &owner_public_key,
             prefix,
-            "/pub/paykit/blobs/avatar.jpg"
+            "/pub/paykit/v0/receivers/paykit/blobs/avatar.jpg"
         )
         .unwrap(),
-        "/pub/paykit/blobs/avatar.jpg"
+        "/pub/paykit/v0/receivers/paykit/blobs/avatar.jpg"
     );
     assert_eq!(
         paykit_blob_path_from_uri_or_path(
             &owner_public_key,
             prefix,
-            &format!("pubky://{}/pub/paykit/blobs/avatar.jpg", owner_public_key)
+            &format!(
+                "pubky://{}/pub/paykit/v0/receivers/paykit/blobs/avatar.jpg",
+                owner_public_key
+            )
         )
         .unwrap(),
-        "/pub/paykit/blobs/avatar.jpg"
+        "/pub/paykit/v0/receivers/paykit/blobs/avatar.jpg"
     );
     assert!(matches!(
         paykit_blob_path_from_uri_or_path(
             &owner_public_key,
             prefix,
-            &format!("pubky://{}/pub/paykit/blobs/avatar.jpg", other_public_key)
+            &format!(
+                "pubky://{}/pub/paykit/v0/receivers/paykit/blobs/avatar.jpg",
+                other_public_key
+            )
         ),
         Err(PaykitSdkError::Protocol(_))
     ));
     assert!(matches!(
-        paykit_blob_path_from_uri_or_path(&owner_public_key, prefix, "/pub/paykit/profile.json"),
+        paykit_blob_path_from_uri_or_path(&owner_public_key, prefix, DEFAULT_PAYKIT_PROFILE_PATH),
         Err(PaykitSdkError::Protocol(_))
     ));
 }

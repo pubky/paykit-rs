@@ -1585,6 +1585,10 @@ public data class PaykitProfileRecord (
 @kotlinx.serialization.Serializable
 public data class PaykitSdkConfig (
     /**
+     * Receiver folder for this app/runtime under `/pub/paykit/v0/receivers`.
+     */
+    val `receiverId`: kotlin.String,
+    /**
      * Namespace segment for SDK profile/contact public data under `/pub/`.
      */
     val `profileNamespace`: kotlin.String,

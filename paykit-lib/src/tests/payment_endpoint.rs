@@ -7,16 +7,26 @@ async fn endpoint_round_trip_and_update() {
     let method = PaymentEndpointIdentifier::new("onchain").unwrap();
     let endpoint = PaymentEndpointPayload::new("{\"address\":\"bc1...\"}");
 
-    set_payment_endpoint(&setup.session, method.clone(), endpoint.clone())
-        .await
-        .unwrap();
+    set_payment_endpoint(
+        &setup.session,
+        &receiver_id(),
+        method.clone(),
+        endpoint.clone(),
+    )
+    .await
+    .unwrap();
 
-    let fetched = get_payment_endpoint(&setup.public_storage, &setup.public_key, &method)
-        .await
-        .unwrap();
+    let fetched = get_payment_endpoint(
+        &setup.public_storage,
+        &setup.public_key,
+        &receiver_id(),
+        &method,
+    )
+    .await
+    .unwrap();
     assert_eq!(fetched, Some(endpoint.clone()));
 
-    let list = get_payment_list(&setup.public_storage, &setup.public_key)
+    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_id())
         .await
         .unwrap();
     assert_eq!(
@@ -30,13 +40,23 @@ async fn endpoint_round_trip_and_update() {
 
     let new_endpoint = PaymentEndpointPayload::new("{\"address\":\"1c1...\"}");
 
-    set_payment_endpoint(&setup.session, method.clone(), new_endpoint.clone())
-        .await
-        .unwrap();
+    set_payment_endpoint(
+        &setup.session,
+        &receiver_id(),
+        method.clone(),
+        new_endpoint.clone(),
+    )
+    .await
+    .unwrap();
 
-    let updated = get_payment_endpoint(&setup.public_storage, &setup.public_key, &method)
-        .await
-        .unwrap();
+    let updated = get_payment_endpoint(
+        &setup.public_storage,
+        &setup.public_key,
+        &receiver_id(),
+        &method,
+    )
+    .await
+    .unwrap();
     assert_eq!(updated, Some(new_endpoint.clone()));
 
     setup.raw_session.signout().await.unwrap();
@@ -47,9 +67,14 @@ async fn missing_endpoint_returns_none() {
     let setup = TestSetup::new().await;
     let method = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
 
-    let missing = get_payment_endpoint(&setup.public_storage, &setup.public_key, &method)
-        .await
-        .unwrap();
+    let missing = get_payment_endpoint(
+        &setup.public_storage,
+        &setup.public_key,
+        &receiver_id(),
+        &method,
+    )
+    .await
+    .unwrap();
     assert!(missing.is_none());
 
     setup.raw_session.signout().await.unwrap();
@@ -64,14 +89,24 @@ async fn list_reflects_additions_and_removals() {
     let onchain_data = PaymentEndpointPayload::new("bc1p...");
     let lightning_data = PaymentEndpointPayload::new("ln...");
 
-    set_payment_endpoint(&setup.session, onchain.clone(), onchain_data.clone())
-        .await
-        .unwrap();
-    set_payment_endpoint(&setup.session, lightning.clone(), lightning_data.clone())
-        .await
-        .unwrap();
+    set_payment_endpoint(
+        &setup.session,
+        &receiver_id(),
+        onchain.clone(),
+        onchain_data.clone(),
+    )
+    .await
+    .unwrap();
+    set_payment_endpoint(
+        &setup.session,
+        &receiver_id(),
+        lightning.clone(),
+        lightning_data.clone(),
+    )
+    .await
+    .unwrap();
 
-    let list = get_payment_list(&setup.public_storage, &setup.public_key)
+    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_id())
         .await
         .unwrap();
     let mut expected = HashMap::new();
@@ -79,10 +114,10 @@ async fn list_reflects_additions_and_removals() {
     expected.insert(lightning.clone(), lightning_data.clone());
     assert_eq!(list.payment_endpoints, expected);
 
-    remove_payment_endpoint(&setup.session, onchain.clone())
+    remove_payment_endpoint(&setup.session, &receiver_id(), onchain.clone())
         .await
         .unwrap();
-    let list = get_payment_list(&setup.public_storage, &setup.public_key)
+    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_id())
         .await
         .unwrap();
     assert_eq!(
@@ -92,10 +127,10 @@ async fn list_reflects_additions_and_removals() {
             .collect()
     );
 
-    remove_payment_endpoint(&setup.session, lightning.clone())
+    remove_payment_endpoint(&setup.session, &receiver_id(), lightning.clone())
         .await
         .unwrap();
-    let empty = get_payment_list(&setup.public_storage, &setup.public_key)
+    let empty = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_id())
         .await
         .unwrap();
     assert!(empty.payment_endpoints.is_empty());
@@ -111,13 +146,18 @@ async fn list_fetches_multiple_pages() {
     for index in 0..105 {
         let identifier = PaymentEndpointIdentifier::new(format!("endpoint-{index:03}")).unwrap();
         let payload = PaymentEndpointPayload::new(format!("payload-{index:03}"));
-        set_payment_endpoint(&setup.session, identifier.clone(), payload.clone())
-            .await
-            .unwrap();
+        set_payment_endpoint(
+            &setup.session,
+            &receiver_id(),
+            identifier.clone(),
+            payload.clone(),
+        )
+        .await
+        .unwrap();
         expected.insert(identifier, payload);
     }
 
-    let list = get_payment_list(&setup.public_storage, &setup.public_key)
+    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_id())
         .await
         .unwrap();
     assert_eq!(list.payment_endpoints, expected);
@@ -130,7 +170,7 @@ async fn removing_missing_endpoint_is_idempotent() {
     let setup = TestSetup::new().await;
     let method = PaymentEndpointIdentifier::new("unused").unwrap();
 
-    remove_payment_endpoint(&setup.session, method)
+    remove_payment_endpoint(&setup.session, &receiver_id(), method)
         .await
         .expect("removing non-existent endpoint should be idempotent");
 

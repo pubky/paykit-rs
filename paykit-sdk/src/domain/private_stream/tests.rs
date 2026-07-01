@@ -15,6 +15,10 @@ fn timestamp() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
 }
 
+fn receiver_id() -> paykit_lib::PaykitReceiverId {
+    paykit_lib::PaykitReceiverId::new("bitkit").unwrap()
+}
+
 fn private_message(raw_json: &str) -> PrivateApplicationMessage {
     let value: serde_json::Value = serde_json::from_str(raw_json).unwrap();
     PrivateApplicationMessage {
@@ -42,7 +46,7 @@ fn receipt_access_raw(event_id: &str, receipt_id: &str, reference: &str) -> Stri
         event_id,
         receipt_id.as_str(),
         reference,
-        &paykit_lib::ReceiptAccess::location_for(&receipt_id),
+        &paykit_lib::ReceiptAccess::location(&receiver_id(), &receipt_id),
     )
 }
 
@@ -274,7 +278,7 @@ async fn test_persist_private_stream_batch_skips_malformed_receipt_access_index(
         "650e8400-e29b-41d4-a716-446655440000",
         "550e8400-e29b-41d4-a716-446655440000",
         "invoice-2026-0001",
-        "/pub/paykit/v0/private/receipts/not-the-receipt-id",
+        "/pub/paykit/v0/private/bitkit/receipts/not-the-receipt-id",
     );
 
     persist_private_stream_batch(
