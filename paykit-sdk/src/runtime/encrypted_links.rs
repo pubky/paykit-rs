@@ -263,19 +263,29 @@ where
         self.finish_peer_link_operation(lease, result).await
     }
 
-    async fn ensure_link_with_peer_with_claim(
+    pub(super) async fn ensure_link_with_peer_with_claim(
         &self,
         counterparty: PubkyPublicKey,
         role: EncryptedLinkHandshakeRole,
         max_advance_steps: u32,
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let mut report = match self
+        let (peer_state, link_state) = self
             .storage
-            .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
-            .await?
-        {
-            Some(state) if state.link_snapshot.is_some() => {
+            .transaction(|tx| {
+                Ok((
+                    tx.linked_peer(&counterparty).map(|peer| peer.state),
+                    tx.encrypted_link_state(&counterparty),
+                ))
+            })
+            .await?;
+
+        let mut report = match (peer_state, link_state) {
+            (Some(LinkedPeerState::RecoveryRequired), _) => {
+                self.start_link_handshake_with_claim(counterparty.clone(), role, lease.clone())
+                    .await?
+            }
+            (_, Some(state)) if state.link_snapshot.is_some() => {
                 save_linked_peer_state_with_lease(
                     &self.storage,
                     counterparty.clone(),
@@ -291,7 +301,7 @@ where
                     handshake_role: None,
                 }
             }
-            Some(state) if state.handshake_snapshot.is_some() => {
+            (_, Some(state)) if state.handshake_snapshot.is_some() => {
                 if state.handshake_role.is_none() {
                     let mark = mark_recovery_required_with_lease(
                         &self.storage,
