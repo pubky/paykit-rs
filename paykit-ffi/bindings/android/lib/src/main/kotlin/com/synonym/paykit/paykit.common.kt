@@ -146,6 +146,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `contactRecords`(): List<FfiContactRecord>
 
     /**
+     * Return the latest valid Private Payment List view for a counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `currentPrivatePaymentList`(`counterparty`: kotlin.String): FfiPrivatePaymentListView?
+
+    /**
      * Delete a blob by `pubky://` URI or configured Paykit profile path.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -156,6 +162,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `encryptedLinkRecoveryMarkerStatus`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport?
+
+    /**
+     * Queue the current complete Private Payment List for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `enqueuePrivatePaymentList`(`counterparty`: kotlin.String): FfiQueuedPrivateMessage
 
     /**
      * Export SDK-managed backup state as an opaque blob.
@@ -300,6 +312,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `removePublicContact`(`publicKey`: kotlin.String): FfiContactRecord?
+
+    /**
+     * Resolve payable endpoints for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolveContactPayment`(`request`: FfiContactPaymentResolutionRequest): FfiContactPaymentResolution
 
     /**
      * Resolve display metadata for a contact.
@@ -659,6 +677,59 @@ public interface FfiSdkStateBlobStore {
     public companion object
 }
 
+
+
+
+/**
+ * Result of resolving contact Payment Endpoints.
+ */
+
+public data class FfiContactPaymentResolution (
+    /**
+     * General payment resolution outcome.
+     */
+    val `status`: FfiContactPaymentResolutionStatus,
+    /**
+     * Private-payment-specific state for this resolution.
+     */
+    val `privateState`: FfiContactPaymentResolutionPrivateState,
+    /**
+     * Payable Payment Endpoints in adapter-preferred order.
+     */
+    val `payableEndpoints`: List<FfiResolvedPaymentEndpoint>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`status`,
+            this.`privateState`,
+            this.`payableEndpoints`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Request to resolve payable endpoints for one counterparty.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiContactPaymentResolutionRequest (
+    /**
+     * Counterparty to pay.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Optional amount context used by the payment adapter.
+     */
+    val `amount`: FfiPaymentAmountContext?,
+    /**
+     * Include public Payment Endpoints after private candidates.
+     */
+    val `includePublicEndpoints`: kotlin.Boolean
+) {
+    public companion object
+}
 
 
 
@@ -1433,6 +1504,61 @@ public data class FfiPaymentTarget (
 
 
 /**
+ * One endpoint in the latest Private Payment List view.
+ */
+
+public data class FfiPrivatePaymentListEndpoint (
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: FfiPaymentPayload
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`identifier`,
+            this.`payload`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Latest valid Private Payment List view for one counterparty.
+ */
+
+public data class FfiPrivatePaymentListView (
+    /**
+     * Stream item id of the latest valid list.
+     */
+    val `latestStreamItemId`: kotlin.ULong?,
+    /**
+     * Current endpoint payloads sorted by identifier.
+     */
+    val `paymentEndpoints`: List<FfiPrivatePaymentListEndpoint>,
+    /**
+     * Receive time of the latest valid list as RFC3339 text.
+     */
+    val `lastRefreshAt`: kotlin.String?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`latestStreamItemId`,
+            this.`paymentEndpoints`,
+            this.`lastRefreshAt`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
  * Summary for receiving private messages from one counterparty.
  */
 
@@ -1658,6 +1784,71 @@ public data class FfiPubkySessionBootstrapResult (
 
 
 /**
+ * Queued outbound private message summary.
+ */
+
+public data class FfiQueuedPrivateMessage (
+    /**
+     * Assigned outbound message id.
+     */
+    val `outboundMessageId`: kotlin.ULong,
+    /**
+     * Counterparty public key.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Private Message Kind string.
+     */
+    val `kind`: kotlin.String,
+    /**
+     * Delivery status.
+     */
+    val `status`: FfiOutboundPrivateMessageStatus,
+    /**
+     * Number of send attempts.
+     */
+    val `attemptCount`: kotlin.UInt,
+    /**
+     * Queue time as RFC3339 text.
+     */
+    val `createdAt`: kotlin.String,
+    /**
+     * Last status update time as RFC3339 text.
+     */
+    val `updatedAt`: kotlin.String,
+    /**
+     * Last send attempt time as RFC3339 text.
+     */
+    val `lastAttemptAt`: kotlin.String?,
+    /**
+     * Successful send time as RFC3339 text.
+     */
+    val `sentAt`: kotlin.String?,
+    /**
+     * Last send error, when available.
+     */
+    val `lastError`: FfiPrivateOperationError?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`outboundMessageId`,
+            this.`counterparty`,
+            this.`kind`,
+            this.`status`,
+            this.`attemptCount`,
+            this.`createdAt`,
+            this.`updatedAt`,
+            this.`lastAttemptAt`,
+            this.`sentAt`,
+            this.`lastError`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
  * Payment-method-specific receiving detail returned by the payment adapter.
  */
 
@@ -1744,6 +1935,46 @@ public data class FfiReservationCleanupFailure (
         Disposable.destroy(
             this.`reservationId`,
             this.`error`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Payment Endpoint paired with the target needed to pay through it.
+ */
+
+public data class FfiResolvedPaymentEndpoint (
+    /**
+     * Counterparty that published the endpoint.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Where the endpoint was discovered.
+     */
+    val `source`: FfiPaymentEndpointSource,
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: FfiPaymentPayload,
+    /**
+     * Adapter-built target for executing payment through this endpoint.
+     */
+    val `target`: FfiPaymentTarget
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`source`,
+            this.`identifier`,
+            this.`payload`,
+            this.`target`,
         )
     }
     public companion object
@@ -1840,6 +2071,72 @@ public data class FfiSdkStateBlobSnapshot (
     }
     public companion object
 }
+
+
+
+
+/**
+ * Private-payment state observed while resolving a contact payment.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiContactPaymentResolutionPrivateState {
+
+    /**
+     * Private Payment List candidates were available for resolution.
+     */
+    AVAILABLE,
+    /**
+     * No Private Payment List candidate was available.
+     */
+    NO_PRIVATE_ENDPOINT,
+    /**
+     * Private payment state is blocked by link recovery.
+     */
+    RECOVERY_PENDING,
+    /**
+     * The local identity cannot establish private links.
+     */
+    PUBLIC_ONLY_SESSION,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Result category for contact payment resolution.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiContactPaymentResolutionStatus {
+
+    /**
+     * A payable endpoint was found.
+     */
+    PAYABLE,
+    /**
+     * No endpoint was found.
+     */
+    NO_ENDPOINT,
+    /**
+     * Endpoints exist but are unsupported.
+     */
+    UNSUPPORTED_ENDPOINT,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
 
 
 
@@ -1979,6 +2276,53 @@ public enum class FfiLinkedPeerState {
      * Local policy blocks this peer.
      */
     BLOCKED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Delivery status for one queued outbound Private Application Message.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiOutboundPrivateMessageStatus {
+
+    /**
+     * Message is queued and has not been sent.
+     */
+    PENDING,
+    /**
+     * A worker is sending this message.
+     */
+    SENDING,
+    /**
+     * Message was sent successfully.
+     */
+    SENT,
+    /**
+     * Last send attempt failed.
+     */
+    FAILED,
+    /**
+     * The stored payload is invalid and must not be retried automatically.
+     */
+    INVALID,
+    /**
+     * Automatic retry is blocked until local Encrypted Link state is recovered.
+     */
+    RECOVERY_REQUIRED,
+    /**
+     * Newer latest-state data made this message unnecessary to send.
+     */
+    SUPERSEDED,
     /**
      * SDK returned a value this binding version does not understand.
      */

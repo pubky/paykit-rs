@@ -34,7 +34,7 @@ impl fmt::Debug for FfiPrivateOperationError {
 }
 
 impl FfiPrivateOperationError {
-    fn new(
+    pub(crate) fn new(
         category: &'static str,
         code: &'static str,
         context: &'static str,
