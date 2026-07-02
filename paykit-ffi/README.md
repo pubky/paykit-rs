@@ -44,6 +44,23 @@ The payment adapter returns receiving details and candidate ids. Apps execute
 payments outside Paykit; Paykit SDK only routes, records, and validates the
 Paykit-side workflow.
 
+### Private Links and Stream Processing
+
+- `FfiPaykitSdk.initiateLinkWithPeer`, `acceptLinkWithPeer`, and
+  `advanceLinkHandshake` — establish Encrypted Links with counterparties.
+- `FfiPaykitSdk.linkedPeers`, `blockPeer`, and `unblockPeer` — inspect and
+  manage local peer state.
+- `FfiPaykitSdk.receivePrivateMessages` and
+  `receivePrivateMessagesFromLinkedPeers` — receive and checkpoint private
+  stream data.
+- `FfiPaykitSdk.processOutboundPrivateMessages` and
+  `processPendingPrivateMessages` — send queued private messages.
+- `FfiPaykitSdk.*EncryptedLinkRecoveryMarker*` methods — inspect, publish,
+  observe, and remove recovery markers.
+
+Private operation errors expose stable category/code fields and redacted
+context. Raw diagnostic details require an explicit debug export method.
+
 ### Pubky Session Bootstrap
 
 - `FfiPubkySessionBootstrap` — create/import Pubky sessions and auth flows.

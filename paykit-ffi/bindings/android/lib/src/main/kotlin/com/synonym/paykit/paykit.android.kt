@@ -1301,6 +1301,46 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1367,6 +1407,15 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_resolve_pubky_url() != 12085.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 32868.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 20770.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 3462.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1377,6 +1426,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_blob() != 43993.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 21009.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_state() != 29122.toShort()) {
@@ -1403,6 +1455,27 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_initialize() != 60774.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_initiate_link_with_peer() != 54115.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 57246.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 51945.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 36875.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_process_outbound_private_messages() != 52525.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_process_pending_private_messages() != 56244.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 29039.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_blob() != 48358.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1412,10 +1485,19 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 49322.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages() != 45996.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers() != 15229.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 29974.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 19304.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 10086.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact() != 46208.toShort()) {
@@ -1439,7 +1521,22 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints() != 41929.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 22658.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaymentpayload_export_text() != 53824.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiprivateoperationerror_category() != 32940.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiprivateoperationerror_code() != 52491.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiprivateoperationerror_export_debug_details() != 57660.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiprivateoperationerror_redacted_context() != 46174.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url() != 7484.toShort()) {
@@ -1587,6 +1684,15 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_func_resolve_pubky_url(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_block_peer(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_config(
     ): Short
     @JvmStatic
@@ -1597,6 +1703,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_blob(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_state(
@@ -1623,6 +1732,27 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_initialize(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_initiate_link_with_peer(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_process_outbound_private_messages(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_process_pending_private_messages(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_blob(
     ): Short
     @JvmStatic
@@ -1632,10 +1762,19 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact(
@@ -1659,7 +1798,22 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaymentpayload_export_text(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiprivateoperationerror_category(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiprivateoperationerror_code(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiprivateoperationerror_export_debug_details(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiprivateoperationerror_redacted_context(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url(
@@ -1840,6 +1994,21 @@ internal object UniffiLib : Library {
         uniffiCallStatus: UniffiRustCallStatus,
     ): Pointer?
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_accept_link_with_peer(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_advance_link_handshake(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_block_peer(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_config(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
@@ -1857,6 +2026,11 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_delete_paykit_blob(
         `ptr`: Pointer?,
         `uriOrPath`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_encrypted_link_recovery_marker_status(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_export_backup_state(
@@ -1896,6 +2070,38 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_initiate_link_with_peer(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_linked_peers(
+        `ptr`: Pointer?,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_observe_encrypted_link_recovery_marker(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_pending_outbound_private_counterparties(
+        `ptr`: Pointer?,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_process_outbound_private_messages(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_process_pending_private_messages(
+        `ptr`: Pointer?,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_publish_encrypted_link_recovery_marker(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_publish_paykit_blob(
         `ptr`: Pointer?,
         `blobName`: RustBufferByValue,
@@ -1912,6 +2118,15 @@ internal object UniffiLib : Library {
         `publicKey`: RustBufferByValue,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_receive_private_messages(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_receive_private_messages_from_linked_peers(
+        `ptr`: Pointer?,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_refresh_contact_paykit_profile(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
@@ -1920,6 +2135,11 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_remove_contact(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_remove_encrypted_link_recovery_marker(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_remove_public_contact(
@@ -1955,6 +2175,11 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_unblock_peer(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_clone_ffipaymentpayload(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
@@ -1971,6 +2196,36 @@ internal object UniffiLib : Library {
     ): Pointer?
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaymentpayload_export_text(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_clone_ffiprivateoperationerror(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_free_ffiprivateoperationerror(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiprivateoperationerror_category(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiprivateoperationerror_code(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiprivateoperationerror_export_debug_details(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiprivateoperationerror_redacted_context(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
@@ -2919,6 +3174,75 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
 
 
     /**
+     * Start an Encrypted Link Handshake as the responder.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `acceptLinkWithPeer`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_accept_link_with_peer(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiLinkedPeerHandshakeReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Advance the stored Encrypted Link Handshake for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `advanceLinkHandshake`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_advance_link_handshake(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiLinkedPeerHandshakeReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Block a counterparty for local Paykit private workflows.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `blockPeer`(`counterparty`: kotlin.String): FfiLinkedPeerRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_block_peer(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiLinkedPeerRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Return this runtime's configuration.
      */
     public override fun `config`(): FfiPaykitSdkConfig {
@@ -2996,6 +3320,29 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             // lift function
             { Unit },
 
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Return tracked Encrypted Link recovery marker state for a counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `encryptedLinkRecoveryMarkerStatus`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport? {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_encrypted_link_recovery_marker_status(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterOptionalTypeFfiEncryptedLinkRecoveryMarkerReport.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -3183,6 +3530,164 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
     }
 
     /**
+     * Start an Encrypted Link Handshake as the initiator.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `initiateLinkWithPeer`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_initiate_link_with_peer(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiLinkedPeerHandshakeReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * List locally tracked Linked Peer records.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `linkedPeers`(): List<FfiLinkedPeerRecord> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_linked_peers(
+                    thisPtr,
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceTypeFfiLinkedPeerRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Observe a counterparty's public recovery marker.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `observeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_observe_encrypted_link_recovery_marker(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * List counterparties with queued private messages ready for retry.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `pendingOutboundPrivateCounterparties`(): List<kotlin.String> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_pending_outbound_private_counterparties(
+                    thisPtr,
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceString.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Send queued outbound private messages for one counterparty in order.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `processOutboundPrivateMessages`(`counterparty`: kotlin.String): FfiOutboundPrivateSendReport {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_process_outbound_private_messages(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiOutboundPrivateSendReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Process queued outbound private messages for every pending counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `processPendingPrivateMessages`(): List<FfiOutboundPrivateCounterpartySendReport> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_process_pending_private_messages(
+                    thisPtr,
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceTypeFfiOutboundPrivateCounterpartySendReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Publish a minimal local recovery marker for a counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `publishEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_publish_encrypted_link_recovery_marker(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Publish a blob under this identity's Paykit profile namespace.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -3253,6 +3758,51 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
     }
 
     /**
+     * Receive and durably persist available private messages.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `receivePrivateMessages`(`counterparty`: kotlin.String): FfiPrivateStreamIntakeReport {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_receive_private_messages(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiPrivateStreamIntakeReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Receive private messages from every locally linked counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `receivePrivateMessagesFromLinkedPeers`(): List<FfiPrivateStreamCounterpartyIntakeReport> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_receive_private_messages_from_linked_peers(
+                    thisPtr,
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceTypeFfiPrivateStreamCounterpartyIntakeReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -3293,6 +3843,29 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterOptionalTypeFfiContactRecord.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Remove the local public recovery marker for a counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `removeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_remove_encrypted_link_recovery_marker(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -3452,6 +4025,29 @@ public open class FfiPaykitSdk: Disposable, FfiPaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterTypeFfiEndpointSyncReport.lift(it) },
+            // Error FFI converter
+            PaykitFfiExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Remove a local peer block and return the peer to NotLinked.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `unblockPeer`(`counterparty`: kotlin.String): FfiLinkedPeerRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_unblock_peer(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeFfiLinkedPeerRecord.lift(it) },
             // Error FFI converter
             PaykitFfiExceptionErrorHandler,
         )
@@ -3703,6 +4299,197 @@ public object FfiConverterTypeFfiPaymentPayload: FfiConverter<FfiPaymentPayload,
     override fun allocationSize(value: FfiPaymentPayload): ULong = 8UL
 
     override fun write(value: FfiPaymentPayload, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(lower(value).toLong())
+    }
+}
+
+
+
+/**
+ * Private workflow error with redacted default context.
+ */
+public open class FfiPrivateOperationError: Disposable, FfiPrivateOperationErrorInterface {
+
+    public constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    public constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(null))
+    }
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed: kotlinx.atomicfu.AtomicBoolean = kotlinx.atomicfu.atomic(false)
+    private val callCounter: kotlinx.atomicfu.AtomicLong = kotlinx.atomicfu.atomic(1L)
+
+    private val lock = kotlinx.atomicfu.locks.ReentrantLock()
+
+    private fun <T> synchronized(block: () -> T): T {
+        lock.lock()
+        try {
+            return block()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    override fun close() {
+        synchronized { this.destroy() }
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.value
+            if (c == 0L) {
+                throw IllegalStateException("${this::class::simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this::class::simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiPointerDestroyer(private val pointer: Pointer?) : Disposable {
+        override fun destroy() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.uniffi_paykit_fn_free_ffiprivateoperationerror(ptr, status)
+                }
+            }
+        }
+    }
+
+    public fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall { status ->
+            UniffiLib.uniffi_paykit_fn_clone_ffiprivateoperationerror(pointer!!, status)
+        }!!
+    }
+
+
+    /**
+     * Stable error category for app branching.
+     */
+    public override fun `category`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiprivateoperationerror_category(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Stable error code for app branching.
+     */
+    public override fun `code`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiprivateoperationerror_code(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Export raw debug details for explicit diagnostic handling.
+     */
+    public override fun `exportDebugDetails`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiprivateoperationerror_export_debug_details(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Redacted error context safe for normal UI/log surfaces.
+     */
+    public override fun `redactedContext`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiprivateoperationerror_redacted_context(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+
+
+
+
+
+
+    public companion object
+
+}
+
+
+
+
+
+public object FfiConverterTypeFfiPrivateOperationError: FfiConverter<FfiPrivateOperationError, Pointer> {
+
+    override fun lower(value: FfiPrivateOperationError): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): FfiPrivateOperationError {
+        return FfiPrivateOperationError(value)
+    }
+
+    override fun read(buf: ByteBuffer): FfiPrivateOperationError {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(buf.getLong().toPointer())
+    }
+
+    override fun allocationSize(value: FfiPrivateOperationError): ULong = 8UL
+
+    override fun write(value: FfiPrivateOperationError, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(lower(value).toLong())
@@ -6026,6 +6813,46 @@ public object FfiConverterTypeFfiContactUpdate: FfiConverterRustBuffer<FfiContac
 
 
 
+public object FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport: FfiConverterRustBuffer<FfiEncryptedLinkRecoveryMarkerReport> {
+    override fun read(buf: ByteBuffer): FfiEncryptedLinkRecoveryMarkerReport {
+        return FfiEncryptedLinkRecoveryMarkerReport(
+            FfiConverterString.read(buf),
+            FfiConverterTypeFfiLinkedPeerState.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiPrivateOperationError.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiEncryptedLinkRecoveryMarkerReport): ULong = (
+            FfiConverterString.allocationSize(value.`counterparty`) +
+            FfiConverterTypeFfiLinkedPeerState.allocationSize(value.`state`) +
+            FfiConverterOptionalString.allocationSize(value.`localAttemptId`) +
+            FfiConverterOptionalString.allocationSize(value.`localMarkerCreatedAt`) +
+            FfiConverterOptionalTypeFfiPrivateOperationError.allocationSize(value.`localMarkerLastError`) +
+            FfiConverterOptionalString.allocationSize(value.`remoteAttemptId`) +
+            FfiConverterOptionalString.allocationSize(value.`remoteMarkerObservedAt`) +
+            FfiConverterBoolean.allocationSize(value.`remoteMarkerChanged`)
+    )
+
+    override fun write(value: FfiEncryptedLinkRecoveryMarkerReport, buf: ByteBuffer) {
+        FfiConverterString.write(value.`counterparty`, buf)
+        FfiConverterTypeFfiLinkedPeerState.write(value.`state`, buf)
+        FfiConverterOptionalString.write(value.`localAttemptId`, buf)
+        FfiConverterOptionalString.write(value.`localMarkerCreatedAt`, buf)
+        FfiConverterOptionalTypeFfiPrivateOperationError.write(value.`localMarkerLastError`, buf)
+        FfiConverterOptionalString.write(value.`remoteAttemptId`, buf)
+        FfiConverterOptionalString.write(value.`remoteMarkerObservedAt`, buf)
+        FfiConverterBoolean.write(value.`remoteMarkerChanged`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiEndpointSyncChange: FfiConverterRustBuffer<FfiEndpointSyncChange> {
     override fun read(buf: ByteBuffer): FfiEndpointSyncChange {
         return FfiEndpointSyncChange(
@@ -6076,6 +6903,31 @@ public object FfiConverterTypeFfiEndpointSyncReport: FfiConverterRustBuffer<FfiE
 
 
 
+public object FfiConverterTypeFfiEventIdConflict: FfiConverterRustBuffer<FfiEventIdConflict> {
+    override fun read(buf: ByteBuffer): FfiEventIdConflict {
+        return FfiEventIdConflict(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiEventIdConflict): ULong = (
+            FfiConverterString.allocationSize(value.`eventId`) +
+            FfiConverterULong.allocationSize(value.`firstStreamItemId`) +
+            FfiConverterULong.allocationSize(value.`conflictingStreamItemId`)
+    )
+
+    override fun write(value: FfiEventIdConflict, buf: ByteBuffer) {
+        FfiConverterString.write(value.`eventId`, buf)
+        FfiConverterULong.write(value.`firstStreamItemId`, buf)
+        FfiConverterULong.write(value.`conflictingStreamItemId`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiIdentityStatus: FfiConverterRustBuffer<FfiIdentityStatus> {
     override fun read(buf: ByteBuffer): FfiIdentityStatus {
         return FfiIdentityStatus(
@@ -6120,6 +6972,158 @@ public object FfiConverterTypeFfiInitializationReport: FfiConverterRustBuffer<Ff
     override fun write(value: FfiInitializationReport, buf: ByteBuffer) {
         FfiConverterTypeFfiIdentityStatus.write(value.`identity`, buf)
         FfiConverterBoolean.write(value.`liveSessionAvailable`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiLinkedPeerHandshakeReport: FfiConverterRustBuffer<FfiLinkedPeerHandshakeReport> {
+    override fun read(buf: ByteBuffer): FfiLinkedPeerHandshakeReport {
+        return FfiLinkedPeerHandshakeReport(
+            FfiConverterString.read(buf),
+            FfiConverterTypeFfiLinkedPeerState.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalTypeFfiEncryptedLinkHandshakeRole.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiLinkedPeerHandshakeReport): ULong = (
+            FfiConverterString.allocationSize(value.`counterparty`) +
+            FfiConverterTypeFfiLinkedPeerState.allocationSize(value.`state`) +
+            FfiConverterULong.allocationSize(value.`generation`) +
+            FfiConverterOptionalTypeFfiEncryptedLinkHandshakeRole.allocationSize(value.`handshakeRole`)
+    )
+
+    override fun write(value: FfiLinkedPeerHandshakeReport, buf: ByteBuffer) {
+        FfiConverterString.write(value.`counterparty`, buf)
+        FfiConverterTypeFfiLinkedPeerState.write(value.`state`, buf)
+        FfiConverterULong.write(value.`generation`, buf)
+        FfiConverterOptionalTypeFfiEncryptedLinkHandshakeRole.write(value.`handshakeRole`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiLinkedPeerRecord: FfiConverterRustBuffer<FfiLinkedPeerRecord> {
+    override fun read(buf: ByteBuffer): FfiLinkedPeerRecord {
+        return FfiLinkedPeerRecord(
+            FfiConverterString.read(buf),
+            FfiConverterTypeFfiLinkedPeerState.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiPrivateOperationError.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiLinkedPeerRecord): ULong = (
+            FfiConverterString.allocationSize(value.`counterparty`) +
+            FfiConverterTypeFfiLinkedPeerState.allocationSize(value.`state`) +
+            FfiConverterOptionalString.allocationSize(value.`lastSyncAt`) +
+            FfiConverterOptionalString.allocationSize(value.`lastPrivateReceiveAt`) +
+            FfiConverterUInt.allocationSize(value.`failureCount`) +
+            FfiConverterOptionalString.allocationSize(value.`localRecoveryAttemptId`) +
+            FfiConverterOptionalString.allocationSize(value.`localRecoveryMarkerCreatedAt`) +
+            FfiConverterOptionalTypeFfiPrivateOperationError.allocationSize(value.`localRecoveryMarkerLastError`) +
+            FfiConverterOptionalString.allocationSize(value.`remoteRecoveryAttemptId`) +
+            FfiConverterOptionalString.allocationSize(value.`remoteRecoveryMarkerObservedAt`)
+    )
+
+    override fun write(value: FfiLinkedPeerRecord, buf: ByteBuffer) {
+        FfiConverterString.write(value.`counterparty`, buf)
+        FfiConverterTypeFfiLinkedPeerState.write(value.`state`, buf)
+        FfiConverterOptionalString.write(value.`lastSyncAt`, buf)
+        FfiConverterOptionalString.write(value.`lastPrivateReceiveAt`, buf)
+        FfiConverterUInt.write(value.`failureCount`, buf)
+        FfiConverterOptionalString.write(value.`localRecoveryAttemptId`, buf)
+        FfiConverterOptionalString.write(value.`localRecoveryMarkerCreatedAt`, buf)
+        FfiConverterOptionalTypeFfiPrivateOperationError.write(value.`localRecoveryMarkerLastError`, buf)
+        FfiConverterOptionalString.write(value.`remoteRecoveryAttemptId`, buf)
+        FfiConverterOptionalString.write(value.`remoteRecoveryMarkerObservedAt`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiOutboundPrivateCounterpartySendReport: FfiConverterRustBuffer<FfiOutboundPrivateCounterpartySendReport> {
+    override fun read(buf: ByteBuffer): FfiOutboundPrivateCounterpartySendReport {
+        return FfiOutboundPrivateCounterpartySendReport(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateSendReport.read(buf),
+            FfiConverterOptionalTypeFfiPrivateOperationError.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiOutboundPrivateCounterpartySendReport): ULong = (
+            FfiConverterString.allocationSize(value.`counterparty`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateSendReport.allocationSize(value.`report`) +
+            FfiConverterOptionalTypeFfiPrivateOperationError.allocationSize(value.`error`)
+    )
+
+    override fun write(value: FfiOutboundPrivateCounterpartySendReport, buf: ByteBuffer) {
+        FfiConverterString.write(value.`counterparty`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateSendReport.write(value.`report`, buf)
+        FfiConverterOptionalTypeFfiPrivateOperationError.write(value.`error`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiOutboundPrivateSendFailure: FfiConverterRustBuffer<FfiOutboundPrivateSendFailure> {
+    override fun read(buf: ByteBuffer): FfiOutboundPrivateSendFailure {
+        return FfiOutboundPrivateSendFailure(
+            FfiConverterULong.read(buf),
+            FfiConverterTypeFfiPrivateOperationError.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiOutboundPrivateSendFailure): ULong = (
+            FfiConverterULong.allocationSize(value.`outboundMessageId`) +
+            FfiConverterTypeFfiPrivateOperationError.allocationSize(value.`error`)
+    )
+
+    override fun write(value: FfiOutboundPrivateSendFailure, buf: ByteBuffer) {
+        FfiConverterULong.write(value.`outboundMessageId`, buf)
+        FfiConverterTypeFfiPrivateOperationError.write(value.`error`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiOutboundPrivateSendReport: FfiConverterRustBuffer<FfiOutboundPrivateSendReport> {
+    override fun read(buf: ByteBuffer): FfiOutboundPrivateSendReport {
+        return FfiOutboundPrivateSendReport(
+            FfiConverterSequenceULong.read(buf),
+            FfiConverterSequenceULong.read(buf),
+            FfiConverterSequenceTypeFfiOutboundPrivateSendFailure.read(buf),
+            FfiConverterSequenceTypeFfiReservationCleanupFailure.read(buf),
+            FfiConverterSequenceTypeFfiRecoveryMarkerPublishFailure.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiOutboundPrivateSendReport): ULong = (
+            FfiConverterSequenceULong.allocationSize(value.`attempted`) +
+            FfiConverterSequenceULong.allocationSize(value.`sent`) +
+            FfiConverterSequenceTypeFfiOutboundPrivateSendFailure.allocationSize(value.`failed`) +
+            FfiConverterSequenceTypeFfiReservationCleanupFailure.allocationSize(value.`reservationCleanupFailures`) +
+            FfiConverterSequenceTypeFfiRecoveryMarkerPublishFailure.allocationSize(value.`recoveryMarkerFailures`)
+    )
+
+    override fun write(value: FfiOutboundPrivateSendReport, buf: ByteBuffer) {
+        FfiConverterSequenceULong.write(value.`attempted`, buf)
+        FfiConverterSequenceULong.write(value.`sent`, buf)
+        FfiConverterSequenceTypeFfiOutboundPrivateSendFailure.write(value.`failed`, buf)
+        FfiConverterSequenceTypeFfiReservationCleanupFailure.write(value.`reservationCleanupFailures`, buf)
+        FfiConverterSequenceTypeFfiRecoveryMarkerPublishFailure.write(value.`recoveryMarkerFailures`, buf)
     }
 }
 
@@ -6403,6 +7407,56 @@ public object FfiConverterTypeFfiPaymentTarget: FfiConverterRustBuffer<FfiPaymen
 
 
 
+public object FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport: FfiConverterRustBuffer<FfiPrivateStreamCounterpartyIntakeReport> {
+    override fun read(buf: ByteBuffer): FfiPrivateStreamCounterpartyIntakeReport {
+        return FfiPrivateStreamCounterpartyIntakeReport(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeFfiPrivateStreamIntakeReport.read(buf),
+            FfiConverterOptionalTypeFfiPrivateOperationError.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPrivateStreamCounterpartyIntakeReport): ULong = (
+            FfiConverterString.allocationSize(value.`counterparty`) +
+            FfiConverterOptionalTypeFfiPrivateStreamIntakeReport.allocationSize(value.`report`) +
+            FfiConverterOptionalTypeFfiPrivateOperationError.allocationSize(value.`error`)
+    )
+
+    override fun write(value: FfiPrivateStreamCounterpartyIntakeReport, buf: ByteBuffer) {
+        FfiConverterString.write(value.`counterparty`, buf)
+        FfiConverterOptionalTypeFfiPrivateStreamIntakeReport.write(value.`report`, buf)
+        FfiConverterOptionalTypeFfiPrivateOperationError.write(value.`error`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiPrivateStreamIntakeReport: FfiConverterRustBuffer<FfiPrivateStreamIntakeReport> {
+    override fun read(buf: ByteBuffer): FfiPrivateStreamIntakeReport {
+        return FfiPrivateStreamIntakeReport(
+            FfiConverterULong.read(buf),
+            FfiConverterSequenceULong.read(buf),
+            FfiConverterSequenceTypeFfiEventIdConflict.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiPrivateStreamIntakeReport): ULong = (
+            FfiConverterULong.allocationSize(value.`receiveBatchId`) +
+            FfiConverterSequenceULong.allocationSize(value.`streamItemIds`) +
+            FfiConverterSequenceTypeFfiEventIdConflict.allocationSize(value.`eventConflicts`)
+    )
+
+    override fun write(value: FfiPrivateStreamIntakeReport, buf: ByteBuffer) {
+        FfiConverterULong.write(value.`receiveBatchId`, buf)
+        FfiConverterSequenceULong.write(value.`streamItemIds`, buf)
+        FfiConverterSequenceTypeFfiEventIdConflict.write(value.`eventConflicts`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiPubkyAuthDetails: FfiConverterRustBuffer<FfiPubkyAuthDetails> {
     override fun read(buf: ByteBuffer): FfiPubkyAuthDetails {
         return FfiPubkyAuthDetails(
@@ -6625,6 +7679,50 @@ public object FfiConverterTypeFfiReceivingDetailScope: FfiConverterRustBuffer<Ff
 
 
 
+public object FfiConverterTypeFfiRecoveryMarkerPublishFailure: FfiConverterRustBuffer<FfiRecoveryMarkerPublishFailure> {
+    override fun read(buf: ByteBuffer): FfiRecoveryMarkerPublishFailure {
+        return FfiRecoveryMarkerPublishFailure(
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterTypeFfiPrivateOperationError.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiRecoveryMarkerPublishFailure): ULong = (
+            FfiConverterOptionalULong.allocationSize(value.`outboundMessageId`) +
+            FfiConverterTypeFfiPrivateOperationError.allocationSize(value.`error`)
+    )
+
+    override fun write(value: FfiRecoveryMarkerPublishFailure, buf: ByteBuffer) {
+        FfiConverterOptionalULong.write(value.`outboundMessageId`, buf)
+        FfiConverterTypeFfiPrivateOperationError.write(value.`error`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeFfiReservationCleanupFailure: FfiConverterRustBuffer<FfiReservationCleanupFailure> {
+    override fun read(buf: ByteBuffer): FfiReservationCleanupFailure {
+        return FfiReservationCleanupFailure(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeFfiPrivateOperationError.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiReservationCleanupFailure): ULong = (
+            FfiConverterOptionalString.allocationSize(value.`reservationId`) +
+            FfiConverterTypeFfiPrivateOperationError.allocationSize(value.`error`)
+    )
+
+    override fun write(value: FfiReservationCleanupFailure, buf: ByteBuffer) {
+        FfiConverterOptionalString.write(value.`reservationId`, buf)
+        FfiConverterTypeFfiPrivateOperationError.write(value.`error`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeFfiRestoreReport: FfiConverterRustBuffer<FfiRestoreReport> {
     override fun read(buf: ByteBuffer): FfiRestoreReport {
         return FfiRestoreReport(
@@ -6724,6 +7822,24 @@ public object FfiConverterTypeFfiContactProfileSource: FfiConverterRustBuffer<Ff
 
 
 
+public object FfiConverterTypeFfiEncryptedLinkHandshakeRole: FfiConverterRustBuffer<FfiEncryptedLinkHandshakeRole> {
+    override fun read(buf: ByteBuffer): FfiEncryptedLinkHandshakeRole = try {
+        FfiEncryptedLinkHandshakeRole.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FfiEncryptedLinkHandshakeRole): ULong = 4UL
+
+    override fun write(value: FfiEncryptedLinkHandshakeRole, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 public object FfiConverterTypeFfiEncryptedLinkRecoveryMarkerPolicy: FfiConverterRustBuffer<FfiEncryptedLinkRecoveryMarkerPolicy> {
     override fun read(buf: ByteBuffer): FfiEncryptedLinkRecoveryMarkerPolicy = try {
         FfiEncryptedLinkRecoveryMarkerPolicy.entries[buf.getInt() - 1]
@@ -6752,6 +7868,24 @@ public object FfiConverterTypeFfiEndpointManagementScope: FfiConverterRustBuffer
     override fun allocationSize(value: FfiEndpointManagementScope): ULong = 4UL
 
     override fun write(value: FfiEndpointManagementScope, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+public object FfiConverterTypeFfiLinkedPeerState: FfiConverterRustBuffer<FfiLinkedPeerState> {
+    override fun read(buf: ByteBuffer): FfiLinkedPeerState = try {
+        FfiLinkedPeerState.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FfiLinkedPeerState): ULong = 4UL
+
+    override fun write(value: FfiLinkedPeerState, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -7020,6 +8154,35 @@ public object FfiConverterTypePaykitFfiError : FfiConverterRustBuffer<PaykitFfiE
 
 
 
+public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
+    override fun read(buf: ByteBuffer): kotlin.ULong? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterULong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ULong?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterULong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
@@ -7071,6 +8234,35 @@ public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteA
         } else {
             buf.put(1)
             FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiPrivateOperationError: FfiConverterRustBuffer<FfiPrivateOperationError?> {
+    override fun read(buf: ByteBuffer): FfiPrivateOperationError? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiPrivateOperationError.read(buf)
+    }
+
+    override fun allocationSize(value: FfiPrivateOperationError?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiPrivateOperationError.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiPrivateOperationError?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiPrivateOperationError.write(value, buf)
         }
     }
 }
@@ -7194,6 +8386,35 @@ public object FfiConverterOptionalTypeFfiContactRecord: FfiConverterRustBuffer<F
 
 
 
+public object FfiConverterOptionalTypeFfiEncryptedLinkRecoveryMarkerReport: FfiConverterRustBuffer<FfiEncryptedLinkRecoveryMarkerReport?> {
+    override fun read(buf: ByteBuffer): FfiEncryptedLinkRecoveryMarkerReport? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.read(buf)
+    }
+
+    override fun allocationSize(value: FfiEncryptedLinkRecoveryMarkerReport?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiEncryptedLinkRecoveryMarkerReport?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport.write(value, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterOptionalTypeFfiIdentityStatus: FfiConverterRustBuffer<FfiIdentityStatus?> {
     override fun read(buf: ByteBuffer): FfiIdentityStatus? {
         if (buf.get().toInt() == 0) {
@@ -7216,6 +8437,35 @@ public object FfiConverterOptionalTypeFfiIdentityStatus: FfiConverterRustBuffer<
         } else {
             buf.put(1)
             FfiConverterTypeFfiIdentityStatus.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiOutboundPrivateSendReport: FfiConverterRustBuffer<FfiOutboundPrivateSendReport?> {
+    override fun read(buf: ByteBuffer): FfiOutboundPrivateSendReport? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiOutboundPrivateSendReport.read(buf)
+    }
+
+    override fun allocationSize(value: FfiOutboundPrivateSendReport?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiOutboundPrivateSendReport.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiOutboundPrivateSendReport?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiOutboundPrivateSendReport.write(value, buf)
         }
     }
 }
@@ -7310,6 +8560,35 @@ public object FfiConverterOptionalTypeFfiPaymentAmountContext: FfiConverterRustB
 
 
 
+public object FfiConverterOptionalTypeFfiPrivateStreamIntakeReport: FfiConverterRustBuffer<FfiPrivateStreamIntakeReport?> {
+    override fun read(buf: ByteBuffer): FfiPrivateStreamIntakeReport? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiPrivateStreamIntakeReport.read(buf)
+    }
+
+    override fun allocationSize(value: FfiPrivateStreamIntakeReport?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiPrivateStreamIntakeReport.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiPrivateStreamIntakeReport?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiPrivateStreamIntakeReport.write(value, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterOptionalTypeFfiPubkyProfile: FfiConverterRustBuffer<FfiPubkyProfile?> {
     override fun read(buf: ByteBuffer): FfiPubkyProfile? {
         if (buf.get().toInt() == 0) {
@@ -7397,6 +8676,35 @@ public object FfiConverterOptionalTypeFfiSdkStateBlobSnapshot: FfiConverterRustB
 
 
 
+public object FfiConverterOptionalTypeFfiEncryptedLinkHandshakeRole: FfiConverterRustBuffer<FfiEncryptedLinkHandshakeRole?> {
+    override fun read(buf: ByteBuffer): FfiEncryptedLinkHandshakeRole? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiEncryptedLinkHandshakeRole.read(buf)
+    }
+
+    override fun allocationSize(value: FfiEncryptedLinkHandshakeRole?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiEncryptedLinkHandshakeRole.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiEncryptedLinkHandshakeRole?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiEncryptedLinkHandshakeRole.write(value, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterOptionalSequenceTypeFfiPaymentEndpointReservation: FfiConverterRustBuffer<List<FfiPaymentEndpointReservation>?> {
     override fun read(buf: ByteBuffer): List<FfiPaymentEndpointReservation>? {
         if (buf.get().toInt() == 0) {
@@ -7419,6 +8727,31 @@ public object FfiConverterOptionalSequenceTypeFfiPaymentEndpointReservation: Ffi
         } else {
             buf.put(1)
             FfiConverterSequenceTypeFfiPaymentEndpointReservation.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceULong: FfiConverterRustBuffer<List<kotlin.ULong>> {
+    override fun read(buf: ByteBuffer): List<kotlin.ULong> {
+        val len = buf.getInt()
+        return List<kotlin.ULong>(len) {
+            FfiConverterULong.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.ULong>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterULong.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.ULong>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterULong.write(it, buf)
         }
     }
 }
@@ -7501,6 +8834,106 @@ public object FfiConverterSequenceTypeFfiEndpointSyncChange: FfiConverterRustBuf
 
 
 
+public object FfiConverterSequenceTypeFfiEventIdConflict: FfiConverterRustBuffer<List<FfiEventIdConflict>> {
+    override fun read(buf: ByteBuffer): List<FfiEventIdConflict> {
+        val len = buf.getInt()
+        return List<FfiEventIdConflict>(len) {
+            FfiConverterTypeFfiEventIdConflict.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiEventIdConflict>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiEventIdConflict.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiEventIdConflict>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiEventIdConflict.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeFfiLinkedPeerRecord: FfiConverterRustBuffer<List<FfiLinkedPeerRecord>> {
+    override fun read(buf: ByteBuffer): List<FfiLinkedPeerRecord> {
+        val len = buf.getInt()
+        return List<FfiLinkedPeerRecord>(len) {
+            FfiConverterTypeFfiLinkedPeerRecord.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiLinkedPeerRecord>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiLinkedPeerRecord.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiLinkedPeerRecord>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiLinkedPeerRecord.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeFfiOutboundPrivateCounterpartySendReport: FfiConverterRustBuffer<List<FfiOutboundPrivateCounterpartySendReport>> {
+    override fun read(buf: ByteBuffer): List<FfiOutboundPrivateCounterpartySendReport> {
+        val len = buf.getInt()
+        return List<FfiOutboundPrivateCounterpartySendReport>(len) {
+            FfiConverterTypeFfiOutboundPrivateCounterpartySendReport.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiOutboundPrivateCounterpartySendReport>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiOutboundPrivateCounterpartySendReport.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiOutboundPrivateCounterpartySendReport>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiOutboundPrivateCounterpartySendReport.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeFfiOutboundPrivateSendFailure: FfiConverterRustBuffer<List<FfiOutboundPrivateSendFailure>> {
+    override fun read(buf: ByteBuffer): List<FfiOutboundPrivateSendFailure> {
+        val len = buf.getInt()
+        return List<FfiOutboundPrivateSendFailure>(len) {
+            FfiConverterTypeFfiOutboundPrivateSendFailure.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiOutboundPrivateSendFailure>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiOutboundPrivateSendFailure.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiOutboundPrivateSendFailure>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiOutboundPrivateSendFailure.write(it, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterSequenceTypeFfiPaymentEndpointCandidate: FfiConverterRustBuffer<List<FfiPaymentEndpointCandidate>> {
     override fun read(buf: ByteBuffer): List<FfiPaymentEndpointCandidate> {
         val len = buf.getInt()
@@ -7551,6 +8984,31 @@ public object FfiConverterSequenceTypeFfiPaymentEndpointReservation: FfiConverte
 
 
 
+public object FfiConverterSequenceTypeFfiPrivateStreamCounterpartyIntakeReport: FfiConverterRustBuffer<List<FfiPrivateStreamCounterpartyIntakeReport>> {
+    override fun read(buf: ByteBuffer): List<FfiPrivateStreamCounterpartyIntakeReport> {
+        val len = buf.getInt()
+        return List<FfiPrivateStreamCounterpartyIntakeReport>(len) {
+            FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiPrivateStreamCounterpartyIntakeReport>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiPrivateStreamCounterpartyIntakeReport>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiPrivateStreamCounterpartyIntakeReport.write(it, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterSequenceTypeFfiPubkyProfileLink: FfiConverterRustBuffer<List<FfiPubkyProfileLink>> {
     override fun read(buf: ByteBuffer): List<FfiPubkyProfileLink> {
         val len = buf.getInt()
@@ -7594,6 +9052,56 @@ public object FfiConverterSequenceTypeFfiReceivingDetail: FfiConverterRustBuffer
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFfiReceivingDetail.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeFfiRecoveryMarkerPublishFailure: FfiConverterRustBuffer<List<FfiRecoveryMarkerPublishFailure>> {
+    override fun read(buf: ByteBuffer): List<FfiRecoveryMarkerPublishFailure> {
+        val len = buf.getInt()
+        return List<FfiRecoveryMarkerPublishFailure>(len) {
+            FfiConverterTypeFfiRecoveryMarkerPublishFailure.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiRecoveryMarkerPublishFailure>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiRecoveryMarkerPublishFailure.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiRecoveryMarkerPublishFailure>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiRecoveryMarkerPublishFailure.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeFfiReservationCleanupFailure: FfiConverterRustBuffer<List<FfiReservationCleanupFailure>> {
+    override fun read(buf: ByteBuffer): List<FfiReservationCleanupFailure> {
+        val len = buf.getInt()
+        return List<FfiReservationCleanupFailure>(len) {
+            FfiConverterTypeFfiReservationCleanupFailure.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiReservationCleanupFailure>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeFfiReservationCleanupFailure.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiReservationCleanupFailure>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiReservationCleanupFailure.write(it, buf)
         }
     }
 }
