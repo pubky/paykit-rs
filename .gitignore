@@ -1,4 +1,5 @@
 /target
+paykit-ffi/bindings/android/native-debug-symbols.zip
 .idea/
 .DS_Store
 *.swp
