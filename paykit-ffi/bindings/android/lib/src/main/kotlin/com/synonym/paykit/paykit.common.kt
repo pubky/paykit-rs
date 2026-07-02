@@ -790,13 +790,13 @@ public interface PubkySessionBootstrapInterface {
      * Sign in with a local Pubky secret key and return session access material.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey): PubkySessionBootstrapResult
+    public suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
      * Sign up on a homeserver and return session access material.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?): PubkySessionBootstrapResult
+    public suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
      * Start a sign-in auth flow for an external signer.

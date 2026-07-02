@@ -218,7 +218,7 @@ async fn demo(session: &pubky::PubkySession) -> paykit_lib::Result<()> {
 
 #### `get_payment_list`
 
-Fetch the public Payment List for a public key. The result is empty when no Payment Endpoints are published.
+Fetch the public Payment List for a public key and receiver id. The result is empty when no Payment Endpoints are published for that receiver.
 
 ```rust,ignore
 use paykit_lib::{get_payment_list, PaykitReceiverId, PublicKey};
@@ -296,7 +296,7 @@ Storage paths for private Paykit data are derived per-counterparty pair using `p
 - `EncryptedLinkHandshake::config() -> &Arc<PubkyNoiseConfig>`
   Access the shared Noise configuration for in-process handshake restore.
 - `EncryptedLinkHandshakeSnapshot::serialize() -> Vec<u8>` / `EncryptedLinkHandshakeSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkHandshakeSnapshot>` / `EncryptedLinkHandshakeSnapshot::recipient() -> &PublicKey`
-  Snapshot wire format helpers (same compact 197-byte `PubkyNoiseSessionState` format used by link snapshots).
+  Snapshot wire format helpers. Snapshot bytes include receiver scope plus the underlying Noise state.
 - `restore_encrypted_link_handshake(session, secret_key, remote_pubkey, local_receiver_id, remote_receiver_id, outbox_client, snapshot) -> Result<EncryptedLinkHandshake>`
   Cross-restart restore for an in-progress handshake.
 - `restore_encrypted_link_handshake_from_config(config, remote_pubkey, snapshot) -> Result<EncryptedLinkHandshake>`
@@ -449,13 +449,13 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
 **Snapshot type:**
 
 - `EncryptedLinkSnapshot::serialize() -> Vec<u8>`
-  Serializes to a compact 197-byte binary format (the `pubky-noise` 0.1.0-rc5 `PubkyNoiseSessionState` wire format). The counterparty public key is embedded in the Noise state.
+  Serializes to Paykit's receiver-scoped snapshot wire format. The wire payload includes the local receiver id, remote receiver id, and underlying Noise state; the counterparty public key is embedded in the Noise state.
 - `EncryptedLinkSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkSnapshot>`
   Reconstructs a snapshot from bytes, including the embedded recipient public key.
 - `EncryptedLinkSnapshot::recipient() -> &PublicKey`
   Access the counterparty's public key embedded in the snapshot.
 
-Snapshots produced by `pubky-noise` `0.1.0-rc3` used the older 189-byte format and are not accepted by the current 197-byte deserializer. Re-establish the Encrypted Link before restoring if an app has persisted an older snapshot.
+Snapshots must be restored with the same local/remote receiver scope they were created with. Receiver mismatches are rejected so a saved link cannot be resumed against different Paykit folders.
 
 **Restore:**
 

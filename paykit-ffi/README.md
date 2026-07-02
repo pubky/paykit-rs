@@ -35,7 +35,6 @@ on low-level `paykit-lib` protocol bindings.
 - `defaultPubkyClientConfig()` — return default `PubkyClientConfig`.
 - `requiredSessionCapabilities(config)` — return Pubky capabilities required by
   a config.
-- `coreSessionCapabilities()` — return the core Paykit Pubky capability scope.
 
 FFI methods accept raw z32 Pubky public keys and `pubky...` app-key strings.
 App-facing records return `pubky...` strings. Use

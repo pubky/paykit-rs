@@ -3898,12 +3898,12 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     /**
      * Sign in with a local Pubky secret key and return session access material.
      */
-    func signIn(localSecretKey: PubkyLocalSecretKey) async throws  -> PubkySessionBootstrapResult
+    func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
      * Sign up on a homeserver and return session access material.
      */
-    func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?) async throws  -> PubkySessionBootstrapResult
+    func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
      * Start a sign-in auth flow for an external signer.
@@ -4055,13 +4055,13 @@ open func resumeAuth(authorizationUrl: String, expectedCapabilities: String)asyn
     /**
      * Sign in with a local Pubky secret key and return session access material.
      */
-open func signIn(localSecretKey: PubkyLocalSecretKey)async throws  -> PubkySessionBootstrapResult  {
+open func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_in(
                     self.uniffiClonePointer(),
-                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey)
+                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterString.lower(requiredCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -4075,13 +4075,13 @@ open func signIn(localSecretKey: PubkyLocalSecretKey)async throws  -> PubkySessi
     /**
      * Sign up on a homeserver and return session access material.
      */
-open func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?)async throws  -> PubkySessionBootstrapResult  {
+open func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_up(
                     self.uniffiClonePointer(),
-                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterString.lower(homeserverPublicKey),FfiConverterOptionString.lower(signupCode)
+                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterString.lower(homeserverPublicKey),FfiConverterOptionString.lower(signupCode),FfiConverterString.lower(requiredCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -16182,15 +16182,6 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
- * Return the core Paykit session capabilities.
- */
-public func coreSessionCapabilities() -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_paykit_fn_func_core_session_capabilities($0
-    )
-})
-}
-/**
  * Decode an SDK state blob snapshot previously encoded by Paykit FFI.
  */
 public func decodeSdkStateBlobSnapshot(bytes: Data)throws  -> SdkStateBlobSnapshot  {
@@ -16352,9 +16343,6 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_paykit_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
-    }
-    if (uniffi_paykit_checksum_func_core_session_capabilities() != 53661) {
-        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_decode_sdk_state_blob_snapshot() != 4823) {
         return InitializationResult.apiChecksumMismatch
@@ -16698,10 +16686,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 45596) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 58947) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 15662) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 31163) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 31538) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 47023) {

@@ -1,5 +1,10 @@
 use super::*;
 
+fn scoped_capabilities() -> String {
+    crate::PaykitSdkConfig::new(crate::PaykitReceiverId::new("bitkit").unwrap())
+        .required_session_capabilities()
+}
+
 #[test]
 fn test_parse_pubky_auth_url_sign_in() {
     let details = parse_pubky_auth_url(
@@ -85,13 +90,15 @@ fn test_parse_pubky_resource_rejects_missing_path() {
 
 #[test]
 fn test_parse_capabilities_rejects_invalid_entries() {
+    let capabilities = scoped_capabilities();
     assert_eq!(
-        parse_capabilities(PAYKIT_SESSION_CAPABILITIES)
-            .unwrap()
-            .to_string(),
-        PAYKIT_SESSION_CAPABILITIES
+        parse_capabilities(&capabilities).unwrap().to_string(),
+        capabilities
     );
-    assert_eq!(PAYKIT_SESSION_CAPABILITIES, "/pub/paykit/:rw");
+    assert_eq!(
+        capabilities,
+        "/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw"
+    );
     assert!(parse_capabilities("/:rw,not-a-capability").is_err());
     assert!(parse_capabilities("/:rw,").is_err());
     assert!(parse_capabilities(",/:rw").is_err());
@@ -100,19 +107,21 @@ fn test_parse_capabilities_rejects_invalid_entries() {
 
 #[test]
 fn test_validate_auth_url_capabilities_requires_exact_match() {
+    let capabilities = scoped_capabilities();
     let auth_url =
-        "pubkyauth://signin?caps=/pub/paykit/:rw&relay=https://httprelay.pubky.app/inbox/&secret=e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3s";
+        "pubkyauth://signin?caps=/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw&relay=https://httprelay.pubky.app/inbox/&secret=e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3s";
 
-    assert!(validate_auth_url_capabilities(auth_url, PAYKIT_SESSION_CAPABILITIES).is_ok());
+    assert!(validate_auth_url_capabilities(auth_url, &capabilities).is_ok());
     assert!(validate_auth_url_capabilities(auth_url, "/:rw").is_err());
 }
 
 #[test]
 fn test_validate_auth_url_capabilities_rejects_broad_capabilities() {
+    let capabilities = scoped_capabilities();
     let auth_url =
         "pubkyauth://signin?caps=/:rw&relay=https://httprelay.pubky.app/inbox/&secret=e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3s";
 
-    assert!(validate_auth_url_capabilities(auth_url, PAYKIT_SESSION_CAPABILITIES).is_err());
+    assert!(validate_auth_url_capabilities(auth_url, &capabilities).is_err());
 }
 
 #[test]

@@ -73,7 +73,7 @@ fn test_config_allows_custom_profile_namespace_segment() {
     );
     assert_eq!(
         config.required_session_capabilities(),
-        "/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw,/pub/bitkit.to:rw"
+        "/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw,/pub/bitkit.to/:rw"
     );
 }
 

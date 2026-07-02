@@ -148,7 +148,7 @@ impl PaykitSdkConfig {
             format!("/pub/paykit/v0/private/{}/:rw", self.receiver_id),
         ];
         if self.profile_namespace != DEFAULT_PROFILE_NAMESPACE {
-            capabilities.push(format!("/pub/{}:rw", self.profile_namespace));
+            capabilities.push(format!("/pub/{}/:rw", self.profile_namespace));
         }
         capabilities.join(",")
     }

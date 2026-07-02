@@ -85,18 +85,18 @@ enforces structural path-safety validation.
 ### Public Payment Lists
 
 Public Payment Lists are discoverable by anyone who knows the payee's Pubky
-public key.
+public key and Paykit receiver id.
 
 1. The payee creates one or more Payment Endpoints.
 2. The payee writes each Payment Endpoint Payload under its Payment Endpoint
    Identifier.
-3. The payee shares their Pubky public key.
+3. The payee shares their Pubky public key and receiver id.
 4. A payer calls `get_payment_list` or `get_payment_endpoint` through the
    Paykit Library or a Language Binding.
 
-Public Payment Lists are observable by anyone with the payee public key. Apps
-should avoid publishing reusable or correlation-sensitive Payment Endpoint
-Payloads unless that matches the payee's privacy model.
+Public Payment Lists are observable by anyone with the payee public key and
+receiver id. Apps should avoid publishing reusable or correlation-sensitive
+Payment Endpoint Payloads unless that matches the payee's privacy model.
 
 ### Private Payment Lists
 

@@ -3,7 +3,8 @@ use tracing::{debug, instrument, warn};
 use crate::{PaykitError, PaykitReceiverId, PublicKey, Result};
 
 use super::{
-    link::EncryptedLink, paths::compute_private_payment_paths,
+    link::EncryptedLink,
+    paths::{compute_private_payment_paths, validate_private_payment_paths},
     snapshot::EncryptedLinkHandshakeSnapshot,
 };
 
@@ -30,6 +31,10 @@ pub struct EncryptedLinkHandshake {
     remote_pubkey: PublicKey,
     /// Shared Noise configuration needed for snapshot-based recovery.
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    /// Local receiver folder used by this handshake.
+    local_receiver_id: PaykitReceiverId,
+    /// Counterparty receiver folder used by this handshake.
+    remote_receiver_id: PaykitReceiverId,
     /// Number of consecutive recovery attempts so far.
     recovery_attempts: u32,
     /// Maximum consecutive recovery attempts before giving up.
@@ -55,6 +60,8 @@ impl EncryptedLinkHandshake {
         EncryptedLinkHandshakeSnapshot::from_state(
             self.encryptor.snapshot(),
             self.remote_pubkey.clone(),
+            self.local_receiver_id.clone(),
+            self.remote_receiver_id.clone(),
         )
     }
 
@@ -119,6 +126,8 @@ pub fn initiate_encrypted_link(
         session,
         sender_secret_key,
         receiver_pubkey,
+        local_receiver_id,
+        remote_receiver_id,
         outbox_client,
         paths,
     )
@@ -128,6 +137,8 @@ fn initiate_encrypted_link_with_paths(
     session: pubky::PubkySession,
     sender_secret_key: [u8; 32],
     receiver_pubkey: &PublicKey,
+    local_receiver_id: &PaykitReceiverId,
+    remote_receiver_id: &PaykitReceiverId,
     outbox_client: pubky::Pubky,
     paths: (String, String),
 ) -> Result<EncryptedLinkHandshake> {
@@ -165,6 +176,8 @@ fn initiate_encrypted_link_with_paths(
         encryptor,
         remote_pubkey: receiver_pubkey.clone(),
         config,
+        local_receiver_id: local_receiver_id.clone(),
+        remote_receiver_id: remote_receiver_id.clone(),
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })
@@ -193,6 +206,8 @@ pub fn accept_encrypted_link(
         session,
         receiver_secret_key,
         sender_pubkey,
+        local_receiver_id,
+        remote_receiver_id,
         outbox_client,
         paths,
     )
@@ -202,6 +217,8 @@ fn accept_encrypted_link_with_paths(
     session: pubky::PubkySession,
     receiver_secret_key: [u8; 32],
     sender_pubkey: &PublicKey,
+    local_receiver_id: &PaykitReceiverId,
+    remote_receiver_id: &PaykitReceiverId,
     outbox_client: pubky::Pubky,
     paths: (String, String),
 ) -> Result<EncryptedLinkHandshake> {
@@ -239,6 +256,8 @@ fn accept_encrypted_link_with_paths(
         encryptor,
         remote_pubkey: sender_pubkey.clone(),
         config,
+        local_receiver_id: local_receiver_id.clone(),
+        remote_receiver_id: remote_receiver_id.clone(),
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })
@@ -317,6 +336,8 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
                 encryptor: restored,
                 config: handshake.config,
                 remote_pubkey: handshake.remote_pubkey,
+                local_receiver_id: handshake.local_receiver_id,
+                remote_receiver_id: handshake.remote_receiver_id,
                 recovery_attempts: handshake.recovery_attempts,
                 max_recovery_attempts: handshake.max_recovery_attempts,
             }))
@@ -344,6 +365,8 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
         handshake.encryptor,
         handshake.remote_pubkey,
         handshake.config,
+        handshake.local_receiver_id,
+        handshake.remote_receiver_id,
     )))
 }
 
@@ -361,6 +384,7 @@ pub async fn restore_encrypted_link_handshake(
     outbox_client: pubky::Pubky,
     snapshot: EncryptedLinkHandshakeSnapshot,
 ) -> Result<EncryptedLinkHandshake> {
+    snapshot.validate_receiver_scope(local_receiver_id, remote_receiver_id)?;
     let paths = compute_private_payment_paths(
         &secret_key,
         remote_pubkey,
@@ -444,6 +468,14 @@ async fn restore_encrypted_link_handshake_inner(
         )));
     }
 
+    let local_receiver_id = snapshot.local_receiver_id().clone();
+    let remote_receiver_id = snapshot.remote_receiver_id().clone();
+    validate_private_payment_paths(
+        &config,
+        remote_pubkey,
+        &local_receiver_id,
+        &remote_receiver_id,
+    )?;
     let state = snapshot.into_state();
     let encryptor =
         pubky_noise::PubkyNoiseEncryptor::restore(config.clone(), state, remote_pubkey.clone())
@@ -459,6 +491,8 @@ async fn restore_encrypted_link_handshake_inner(
         encryptor,
         remote_pubkey: remote_pubkey.clone(),
         config,
+        local_receiver_id,
+        remote_receiver_id,
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })
