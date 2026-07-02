@@ -11,13 +11,17 @@ TARGET_DIR="../target"
 ANDROID_LIB_DIR="./bindings/android"
 BASE_DIR="$ANDROID_LIB_DIR/lib/src/main/kotlin/com/synonym/paykit"
 JNILIBS_DIR="$ANDROID_LIB_DIR/lib/src/main/jniLibs"
+NATIVE_DEBUG_SYMBOLS_ZIP="$ANDROID_LIB_DIR/native-debug-symbols.zip"
 
 echo "Installing gobley-uniffi-bindgen fork..."
-cargo install --git https://github.com/ovitrif/gobley.git gobley-uniffi-bindgen --force
+GOBLEY_REV="82a0f93ad552d0c45e185f728f14c3c60b1ed707"
+cargo install --git https://github.com/ovitrif/gobley.git --rev "$GOBLEY_REV" gobley-uniffi-bindgen --force
 
-if ! command -v cargo-ndk &> /dev/null; then
-    echo "Installing cargo-ndk..."
-    cargo install cargo-ndk
+# Install the cargo-ndk version used by the mobile release scripts.
+CARGO_NDK_VERSION="3.5.4"
+if ! command -v cargo-ndk &> /dev/null || ! cargo ndk --version | grep -q "cargo-ndk $CARGO_NDK_VERSION"; then
+    echo "Installing cargo-ndk $CARGO_NDK_VERSION..."
+    cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked --force
 fi
 
 mkdir -p "$BASE_DIR"
@@ -33,14 +37,209 @@ cargo build --release
 echo "Adding Rust Android targets..."
 rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 
+find_readelf() {
+    if command -v llvm-readelf >/dev/null 2>&1; then
+        command -v llvm-readelf
+        return
+    fi
+
+    if command -v readelf >/dev/null 2>&1; then
+        command -v readelf
+        return
+    fi
+
+    for ndk_dir in "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK_HOME:-}" "${NDK_HOME:-}"; do
+        if [ -z "$ndk_dir" ] || [ ! -d "$ndk_dir/toolchains/llvm/prebuilt" ]; then
+            continue
+        fi
+
+        ndk_readelf=$(find "$ndk_dir/toolchains/llvm/prebuilt" -path '*/bin/llvm-readelf' | head -n 1)
+        if [ -n "$ndk_readelf" ]; then
+            echo "$ndk_readelf"
+            return
+        fi
+    done
+
+    echo "Error: llvm-readelf or readelf is required to validate Android native debug symbols"
+    exit 1
+}
+
+find_strip() {
+    if command -v llvm-strip >/dev/null 2>&1; then
+        command -v llvm-strip
+        return
+    fi
+
+    for ndk_dir in "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK_HOME:-}" "${NDK_HOME:-}"; do
+        if [ -z "$ndk_dir" ] || [ ! -d "$ndk_dir/toolchains/llvm/prebuilt" ]; then
+            continue
+        fi
+
+        ndk_strip=$(find "$ndk_dir/toolchains/llvm/prebuilt" -path '*/bin/llvm-strip' | head -n 1)
+        if [ -n "$ndk_strip" ]; then
+            echo "$ndk_strip"
+            return
+        fi
+    done
+
+    echo "Error: llvm-strip is required to strip Android native release libraries"
+    exit 1
+}
+
+has_dwarf_debug_metadata() {
+    "$READELF_BIN" -S "$1" | grep -Eq '\.debug_'
+}
+
+has_dwarf_sections() {
+    "$READELF_BIN" -S "$1" | grep -Eq '\.debug_'
+}
+
+readelf_program_headers() {
+    if "$READELF_BIN" -W -l "$1" >/dev/null 2>&1; then
+        "$READELF_BIN" -W -l "$1"
+        return
+    fi
+
+    "$READELF_BIN" -l "$1"
+}
+
+has_16kb_load_alignment() {
+    alignments=$(readelf_program_headers "$1" | awk '$1 == "LOAD" { print $NF }')
+    if [ -z "$alignments" ]; then
+        return 1
+    fi
+
+    while read -r alignment; do
+        if [ -z "$alignment" ]; then
+            continue
+        fi
+
+        if [ "$((alignment))" -lt 16384 ]; then
+            return 1
+        fi
+    done <<EOF
+$alignments
+EOF
+}
+
+validate_android_library() {
+    lib="$1"
+    if ! has_dwarf_debug_metadata "$lib"; then
+        echo "Error: Android native library has no full DWARF debug metadata: $lib"
+        exit 1
+    fi
+
+    if ! has_16kb_load_alignment "$lib"; then
+        echo "Error: Android native library is not 16 KB page-size aligned: $lib"
+        readelf_program_headers "$lib" | grep LOAD || true
+        exit 1
+    fi
+}
+
+validate_stripped_android_library() {
+    lib="$1"
+    if has_dwarf_sections "$lib"; then
+        echo "Error: Android release native library still contains .debug_* sections: $lib"
+        exit 1
+    fi
+
+    if ! has_16kb_load_alignment "$lib"; then
+        echo "Error: Android native library is not 16 KB page-size aligned: $lib"
+        readelf_program_headers "$lib" | grep LOAD || true
+        exit 1
+    fi
+}
+
+validate_android_symbols() {
+    READELF_BIN=$(find_readelf)
+
+    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+        lib="$JNILIBS_DIR/$abi/libpaykit.so"
+        if [ ! -f "$lib" ]; then
+            echo "Error: Android native library missing at $lib"
+            exit 1
+        fi
+
+        validate_android_library "$lib"
+    done
+}
+
+create_native_debug_symbols_archive() {
+    tmp_dir=$(mktemp -d)
+
+    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+        mkdir -p "$tmp_dir/$abi"
+        cp "$JNILIBS_DIR/$abi/libpaykit.so" "$tmp_dir/$abi/"
+    done
+
+    rm -f "$NATIVE_DEBUG_SYMBOLS_ZIP"
+    archive_path="$PWD/$NATIVE_DEBUG_SYMBOLS_ZIP"
+    (
+        cd "$tmp_dir"
+        zip -qr "$archive_path" armeabi-v7a arm64-v8a x86 x86_64
+    )
+    zip -T "$NATIVE_DEBUG_SYMBOLS_ZIP" >/dev/null
+    rm -rf "$tmp_dir"
+}
+
+strip_android_libraries() {
+    STRIP_BIN=$(find_strip)
+
+    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+        "$STRIP_BIN" --strip-unneeded "$JNILIBS_DIR/$abi/libpaykit.so"
+    done
+}
+
+validate_stripped_android_symbols() {
+    READELF_BIN=$(find_readelf)
+
+    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+        validate_stripped_android_library "$JNILIBS_DIR/$abi/libpaykit.so"
+    done
+}
+
+validate_android_aar_symbols() {
+    READELF_BIN=$(find_readelf)
+    aar=$(find "$ANDROID_LIB_DIR" -path '*/build/outputs/aar/*release.aar' -print | head -n 1)
+    if [ -z "$aar" ]; then
+        echo "Error: Android release AAR missing under $ANDROID_LIB_DIR"
+        exit 1
+    fi
+
+    tmp_dir=$(mktemp -d)
+    unzip -q "$aar" -d "$tmp_dir"
+
+    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+        lib="$tmp_dir/jni/$abi/libpaykit.so"
+        if [ ! -f "$lib" ]; then
+            echo "Error: Android release AAR native library missing at $lib"
+            rm -rf "$tmp_dir"
+            exit 1
+        fi
+
+        validate_stripped_android_library "$lib"
+    done
+
+    rm -rf "$tmp_dir"
+}
+
 echo "Building for Android architectures..."
+export CARGO_PROFILE_RELEASE_DEBUG=2
+export CARGO_PROFILE_RELEASE_STRIP=false
 cargo ndk \
     -o "$JNILIBS_DIR" \
+    --no-strip \
     -t armeabi-v7a \
     -t arm64-v8a \
     -t x86 \
     -t x86_64 \
     build --release
+validate_android_symbols
+create_native_debug_symbols_archive
+strip_android_libraries
+validate_stripped_android_symbols
+unset CARGO_PROFILE_RELEASE_DEBUG
+unset CARGO_PROFILE_RELEASE_STRIP
 
 echo "Removing spurious intermediate .so files from jniLibs..."
 find "$JNILIBS_DIR" -name "*.so" ! -name "libpaykit.so" -delete
@@ -96,6 +295,7 @@ fi
 
 echo "Testing android library publish to Maven Local..."
 "$ANDROID_LIB_DIR"/gradlew --project-dir "$ANDROID_LIB_DIR" clean publishToMavenLocal
+validate_android_aar_symbols
 
 echo "Android build process completed successfully!"
 echo ""

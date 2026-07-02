@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake
+      - run: cargo test --workspace --all-features
+
+  doc:
+    name: Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake
+      - run: cargo doc --workspace --no-deps --all-features
+
+  msrv:
+    name: MSRV (1.91.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.1"
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake
+      - run: cargo check --workspace --all-features
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Only publish the badge from master; PRs (incl. forks) don't have write token.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake
+      - name: Compute coverage
+        run: |
+          cargo llvm-cov --workspace --all-features --json --output-path cov.json
+          PCT=$(jq '.data[0].totals.lines.percent' cov.json)
+          printf 'COVERAGE=%.1f\n' "$PCT" >> "$GITHUB_ENV"
+      - name: Generate badge SVG
+        run: |
+          P="${COVERAGE}"
+          COLOR=$(awk -v p="$P" 'BEGIN{
+            if (p>=90) print "#4c1";
+            else if (p>=80) print "#97ca00";
+            else if (p>=70) print "#a4a61d";
+            else if (p>=60) print "#dfb317";
+            else if (p>=50) print "#fe7d37";
+            else print "#e05d44"}')
+          MSG="${P}%"
+          cat > coverage.svg <<EOF
+          <svg xmlns="http://www.w3.org/2000/svg" width="112" height="20" role="img" aria-label="coverage: ${MSG}">
+            <title>coverage: ${MSG}</title>
+            <linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient>
+            <clipPath id="r"><rect width="112" height="20" rx="3" fill="#fff"/></clipPath>
+            <g clip-path="url(#r)">
+              <rect width="65" height="20" fill="#555"/>
+              <rect x="65" width="47" height="20" fill="${COLOR}"/>
+              <rect width="112" height="20" fill="url(#s)"/>
+            </g>
+            <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="110">
+              <text x="335" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="550">coverage</text>
+              <text x="335" y="140" transform="scale(.1)" textLength="550">coverage</text>
+              <text x="875" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="370">${MSG}</text>
+              <text x="875" y="140" transform="scale(.1)" textLength="370">${MSG}</text>
+            </g>
+          </svg>
+          EOF
+      - name: Publish badge to orphan 'badges' branch
+        run: |
+          mkdir -p /tmp/badge && mv coverage.svg /tmp/badge/
+          cd /tmp/badge
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -q -b badges
+          git add coverage.svg
+          git commit -q -m "Update coverage badge"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges

@@ -2,6 +2,9 @@
 
 > WIP - not for production.
 
+[![CI](https://github.com/pubky/paykit-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/pubky/paykit-rs/actions/workflows/ci.yml)
+[![Coverage](https://raw.githubusercontent.com/pubky/paykit-rs/badges/coverage.svg)](https://github.com/pubky/paykit-rs/actions/workflows/ci.yml)
+
 ## Description
 
 Paykit helps apps discover where someone can receive a payment through their
