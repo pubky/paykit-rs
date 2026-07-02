@@ -52,6 +52,32 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     );
     assert_eq!(observed.state, LinkedPeerState::RecoveryRequired);
 
+    // Direct fetch through unauthenticated storage proves the marker file is
+    // on the homeserver before removal. This also validates the fetch
+    // arguments themselves, so the post-removal `None` below is meaningful.
+    let storage = pair.bob.access.outbox_client.public_storage();
+    let bob_secret_key = pair
+        .bob
+        .access
+        .local_secret_key
+        .as_ref()
+        .expect("bob's session should retain a local secret key")
+        .as_bytes();
+    let alice_public_key = pair
+        .alice
+        .public_key
+        .to_public_key()
+        .expect("public key conversion should succeed");
+    let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
+        &storage,
+        bob_secret_key,
+        &alice_public_key,
+    )
+    .await
+    .expect("direct marker fetch should succeed")
+    .expect("the published marker should be present on the homeserver");
+    assert_eq!(marker.attempt_id(), attempt_id.as_str());
+
     // Removal clears the local marker; a later observe sees no new marker.
     let removed = pair
         .alice
@@ -60,6 +86,21 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         .await
         .expect("removing the recovery marker should succeed");
     assert!(removed.local_attempt_id.is_none());
+
+    // `remote_marker_changed` stays false both when the marker is gone and
+    // when the already-observed marker is still present, so assert remote
+    // deletion directly.
+    let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
+        &storage,
+        bob_secret_key,
+        &alice_public_key,
+    )
+    .await
+    .expect("direct marker fetch after removal should succeed");
+    assert!(
+        marker.is_none(),
+        "the recovery marker must be deleted from the homeserver"
+    );
 
     let observed_again = pair
         .bob
