@@ -3115,13 +3115,18 @@ name = "paykit-ffi"
 version = "0.1.0-rc20"
 dependencies = [
  "android_logger",
+ "anyhow",
+ "async-trait",
  "hex",
  "jni",
  "log",
  "once_cell",
  "paykit-lib",
+ "paykit-sdk",
+ "postcard",
  "pubky",
  "rustls-platform-verifier",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

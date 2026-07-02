@@ -7,7 +7,7 @@ mod in_memory;
 mod queue;
 mod records;
 
-pub use in_memory::InMemoryStorage;
+pub use in_memory::{run_storage_state_transaction, InMemoryStorage};
 pub use records::{
     EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, NewOutboundPrivateMessage,
     NewPrivateStreamItem, OutboundPrivateMessageRecord, PaymentEndpointReservationRecord,
