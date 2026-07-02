@@ -37,7 +37,20 @@ fn test_required_capabilities_include_custom_namespace_scope() {
 
     assert!(capabilities.contains("/pub/paykit/v0/receivers/bitkit/:rw"));
     assert!(capabilities.contains("/pub/paykit/v0/private/bitkit/:rw"));
-    assert!(capabilities.contains("/pub/bitkit.to:rw"));
+    assert!(capabilities.contains("/pub/bitkit.to/:rw"));
+}
+
+#[test]
+fn test_required_capabilities_validate_config() {
+    let mut config = default_config("bitkit".into()).unwrap();
+    config.profile_namespace = "pubky.app".into();
+
+    let err = required_session_capabilities(config).unwrap_err();
+
+    assert!(
+        err.to_string().contains("profile namespace"),
+        "expected profile namespace validation error, got: {err}"
+    );
 }
 
 #[test]
@@ -440,7 +453,12 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
 
     let secret = FfiPubkyLocalSecretKey::new(vec![8; 32]);
     let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
-    let result = bootstrap.sign_in(Arc::new(secret)).await.unwrap();
+    let config = default_config("bitkit".into()).unwrap();
+    let capabilities = required_session_capabilities(config.clone()).unwrap();
+    let result = bootstrap
+        .sign_in(Arc::new(secret), capabilities)
+        .await
+        .unwrap();
     let store = Arc::new(MemoryStore::default());
     let provider = Arc::new(MemorySessionProvider {
         access: result.session_access.clone(),
@@ -449,7 +467,7 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
         store,
         provider,
         Arc::new(FfiNoopSdkPaymentAdapter),
-        default_config("bitkit".into()).unwrap(),
+        config,
     )
     .unwrap();
 

@@ -1,9 +1,9 @@
-use crate::{private_message_path_prefix, PaykitReceiverId, PublicKey};
+use crate::{private_message_path_prefix, PaykitError, PaykitReceiverId, PublicKey, Result};
 
 /// Domain separation string for Paykit private payment path derivation.
 ///
-/// Ensures that different applications using the same key pairs derive
-/// different storage paths, preventing cross-protocol path collisions.
+/// Keeps Paykit private paths separate from other pubky-noise users that share
+/// the same key material.
 pub(super) const PAYKIT_PATH_DOMAIN: &[u8] = b"paykit-path-v0";
 
 /// Computes the write and read path components for private payment storage.
@@ -49,6 +49,29 @@ pub(super) fn compute_private_payment_paths(
         &remote_base,
     );
     (write_path, read_path)
+}
+
+pub(super) fn validate_private_payment_paths(
+    config: &pubky_noise::PubkyNoiseConfig,
+    remote_pubkey: &PublicKey,
+    local_receiver_id: &PaykitReceiverId,
+    remote_receiver_id: &PaykitReceiverId,
+) -> Result<()> {
+    let local_secret_key = config.pubky_root_keypair.secret_key();
+    let (expected_write_path, expected_read_path) = compute_private_payment_paths(
+        &local_secret_key,
+        remote_pubkey,
+        local_receiver_id,
+        remote_receiver_id,
+    );
+
+    if config.write_path != expected_write_path || config.read_path != expected_read_path {
+        return Err(PaykitError::Validation(format!(
+            "Noise config paths do not match receiver scope (local={local_receiver_id}, remote={remote_receiver_id})"
+        )));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

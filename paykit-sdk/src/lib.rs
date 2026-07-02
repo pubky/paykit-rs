@@ -30,9 +30,7 @@ pub use domain::contacts::{
     ContactPaymentResolutionRequest, ContactPaymentResolutionStatus, ContactProfileResolution,
     ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile,
     PaykitProfileRecord, PreparedContactPayment, PubkyProfile, PubkyProfileLink,
-    PubkyProfileRecord, ResolvedPaymentEndpoint, DEFAULT_PAYKIT_PROFILE_BLOB_PATH_PREFIX,
-    DEFAULT_PAYKIT_PROFILE_PATH, DEFAULT_PAYKIT_PUBLIC_CONTACT_PATH_PREFIX,
-    PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+    PubkyProfileRecord, ResolvedPaymentEndpoint, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
 };
 #[doc(inline)]
 pub use domain::endpoints::{load_public_endpoint_records, EndpointSyncChange, EndpointSyncReport};
@@ -88,7 +86,7 @@ pub use paykit_lib::{PaykitReceiverId, PaykitReceiverLocator};
 pub use pubky_session::{
     parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthDetails,
     PubkyAuthRequest, PubkyAuthRequestKind, PubkyResourceRef, PubkySessionBootstrap,
-    PubkySessionBootstrapResult, PubkySessionSecret, PAYKIT_SESSION_CAPABILITIES,
+    PubkySessionBootstrapResult, PubkySessionSecret,
 };
 #[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};

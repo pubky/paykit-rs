@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use paykit_sdk::{
     EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitReceiverId, PaykitSdkConfig,
-    PublicContactSharingPolicy, PAYKIT_SESSION_CAPABILITIES,
+    PublicContactSharingPolicy,
 };
 
 use crate::errors::{validation_error, PaykitFfiError};
@@ -89,13 +89,11 @@ pub fn default_pubky_client_config() -> FfiPubkyClientConfig {
 /// Return Pubky capabilities required by this SDK configuration.
 #[uniffi::export]
 pub fn required_session_capabilities(config: FfiPaykitSdkConfig) -> Result<String, PaykitFfiError> {
-    Ok(PaykitSdkConfig::try_from(config)?.required_session_capabilities())
-}
-
-/// Return the core Paykit session capabilities.
-#[uniffi::export]
-pub fn core_session_capabilities() -> String {
-    PAYKIT_SESSION_CAPABILITIES.to_string()
+    let config = PaykitSdkConfig::try_from(config)?;
+    config
+        .validate()
+        .map_err(|err| validation_error(err.to_string()))?;
+    Ok(config.required_session_capabilities())
 }
 
 impl TryFrom<FfiPaykitSdkConfig> for PaykitSdkConfig {

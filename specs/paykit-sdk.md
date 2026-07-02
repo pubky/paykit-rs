@@ -308,8 +308,9 @@ workflows: signup, signin, session-secret import, auth handoff
 start/resume/approve helpers, and `pubky://` resource normalization. Full SDK
 runtime auth should use `config.required_session_capabilities()` as the expected
 scope for auth start/resume/approve, completion, and session import. The
-default Paykit capability covers the public Paykit namespace used by protocol
-paths and SDK-managed Paykit public data.
+required scope covers this runtime's receiver-scoped public and private Paykit
+paths; it adds the configured profile/contact namespace only when that namespace
+is outside the receiver-scoped Paykit default.
 `PubkyLocalSecretKey` also provides Pubky Core-compatible BIP39 seed and
 mnemonic helpers plus public-key-from-secret helpers. Apps that intentionally
 share the same Pubky identity material should derive the same Pubky key; app
@@ -510,7 +511,7 @@ Tracks local Pubky identity state:
 
 ### LinkedPeerRecord
 
-One record per counterparty:
+One record per counterparty in the current Rust SDK:
 
 - counterparty public key
 - relationship state: not linked, linking, linked, recovery required, blocked
@@ -521,19 +522,24 @@ One record per counterparty:
 - failure counters
 - policy overrides
 
+SDK APIs that accept only a counterparty Pubky key are same-receiver APIs: they
+use the local runtime receiver id for the counterparty side. Cross-receiver
+flows need an explicit receiver locator so private state can be keyed by Pubky
+key plus receiver id instead of Pubky key alone.
+
 ### EncryptedLinkState
 
-One record per linked peer:
+One record per linked peer in the current Rust SDK:
 
 - active link snapshot
 - handshake snapshot
-- snapshot recipient public key
+- snapshot recipient public key and receiver scope
 - read/write progress metadata
 - last persisted checkpoint time
 - snapshot generation
 
 Snapshots are opaque `paykit-lib` snapshots. The SDK validates the expected
-counterparty before restoring them.
+counterparty and receiver scope before restoring them.
 
 ### PrivateStreamItem
 
@@ -1007,10 +1013,11 @@ settlement confirmation.
 5. Treat outbound status as local delivery checkpoint state, not counterparty
    acknowledgement.
 
-Receipt IDs are unique per issuer because Receipt Location is derived from only
-the Receipt ID. `prepare_receipt_issuance` may generate a Receipt ID and return
-it to the caller; retries should then call `process_receipt_issuance` with that
-ID. The one-call `issue_receipt` helper requires the draft to already contain a
+Receipt IDs are unique per issuer receiver because Receipt Location is derived
+from the issuer's receiver id and Receipt ID. `prepare_receipt_issuance` may
+generate a Receipt ID and return it to the caller; retries should then call
+`process_receipt_issuance` with that ID from the same SDK receiver runtime. The
+one-call `issue_receipt` helper requires the draft to already contain a
 caller-provided Receipt ID so repeating the same call cannot create a second
 receipt after a partial failure.
 

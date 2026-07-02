@@ -240,12 +240,18 @@ impl FfiPubkySessionBootstrap {
         local_secret_key: Arc<FfiPubkyLocalSecretKey>,
         homeserver_public_key: String,
         signup_code: Option<String>,
+        required_capabilities: String,
     ) -> Result<FfiPubkySessionBootstrapResult, PaykitFfiError> {
         let secret = local_secret_from_bytes(local_secret_key.export_bytes())?;
         let homeserver = parse_public_key(homeserver_public_key)?;
         let result = self
             .inner
-            .sign_up(&secret, &homeserver, signup_code.as_deref())
+            .sign_up(
+                &secret,
+                &homeserver,
+                signup_code.as_deref(),
+                &required_capabilities,
+            )
             .await?;
         Ok(bootstrap_result_to_ffi(result, Some(secret)))
     }
@@ -254,9 +260,10 @@ impl FfiPubkySessionBootstrap {
     pub async fn sign_in(
         &self,
         local_secret_key: Arc<FfiPubkyLocalSecretKey>,
+        required_capabilities: String,
     ) -> Result<FfiPubkySessionBootstrapResult, PaykitFfiError> {
         let secret = local_secret_from_bytes(local_secret_key.export_bytes())?;
-        let result = self.inner.sign_in(&secret).await?;
+        let result = self.inner.sign_in(&secret, &required_capabilities).await?;
         Ok(bootstrap_result_to_ffi(result, Some(secret)))
     }
 

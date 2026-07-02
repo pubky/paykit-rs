@@ -30,6 +30,18 @@
 - **Synonyms to AVOID**: Paykit core, Paykit runtime core, Pubky SDK
 - **Related terms**: Paykit, Paykit Library, Language Bindings
 
+### Paykit Receiver ID
+- **Definition**: The folder-safe identifier for one app/payment-processor runtime under a Pubky identity, used to scope public Payment Endpoints, private Paykit paths, receipts, profiles, and SDK state.
+- **NOT**: A payment-role receiver, payee, wallet address, or Pubky public key.
+- **Synonyms to AVOID**: receiver when it could mean the party receiving value
+- **Related terms**: Paykit Receiver Locator, Payee, Pubky Routing, Payment Endpoint
+
+### Paykit Receiver Locator
+- **Definition**: The combination of a Pubky public key and Paykit Receiver ID that identifies one concrete Paykit app/runtime folder.
+- **NOT**: Only the Pubky public key, a human contact, or a Payment Endpoint.
+- **Synonyms to AVOID**: receiver when the identity plus folder distinction matters
+- **Related terms**: Paykit Receiver ID, Pubky Routing, Payment Endpoint
+
 ### Language Bindings
 - **Definition**: Distribution/integration surfaces for Paykit Library or Paykit SDK in languages or platforms such as Swift, Kotlin, and React Native.
 - **NOT**: First-class Paykit architecture components.

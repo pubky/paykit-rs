@@ -15,9 +15,6 @@ use crate::{
     PaykitSdkError, Result,
 };
 
-/// Default Pubky capabilities needed for Paykit public storage writes.
-pub const PAYKIT_SESSION_CAPABILITIES: &str = "/pub/paykit/:rw";
-
 /// Parsed Pubky resource with a normalized owner and path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PubkyResourceRef {
@@ -189,6 +186,7 @@ impl PubkySessionBootstrap {
         secret_key: &PubkyLocalSecretKey,
         homeserver_public_key: &PubkyPublicKey,
         signup_code: Option<&str>,
+        required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         let homeserver = homeserver_public_key.to_public_key()?;
         let session = self
@@ -201,7 +199,7 @@ impl PubkySessionBootstrap {
             session,
             self.pubky.clone(),
             Some(secret_key.clone()),
-            PAYKIT_SESSION_CAPABILITIES,
+            required_capabilities,
         )
     }
 
@@ -209,6 +207,7 @@ impl PubkySessionBootstrap {
     pub async fn sign_in(
         &self,
         secret_key: &PubkyLocalSecretKey,
+        required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         let session = self
             .pubky
@@ -220,7 +219,7 @@ impl PubkySessionBootstrap {
             session,
             self.pubky.clone(),
             Some(secret_key.clone()),
-            PAYKIT_SESSION_CAPABILITIES,
+            required_capabilities,
         )
     }
 
