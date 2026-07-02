@@ -4,12 +4,12 @@ UniFFI bindings for [paykit-sdk](../paykit-sdk/), targeting iOS (Swift) and
 Android (Kotlin).
 
 The generated bindings expose the SDK runtime foundation: configuration, Pubky
-session bootstrap helpers, opaque SDK state storage callbacks, identity
-initialization/sign-out, SDK backup/restore, Paykit Profile and Contact Record
-workflows, and public Pubky read helpers. Product workflows such as endpoint
-sync, private links, payment requests, receipts, and contact payment resolution
-belong on the SDK surface rather than on low-level `paykit-lib` protocol
-bindings.
+session bootstrap helpers, opaque SDK state storage callbacks, payment adapter
+callbacks, identity initialization/sign-out, SDK backup/restore, public Payment
+Endpoint sync, Paykit Profile and Contact Record workflows, and public Pubky
+read helpers. Product workflows such as private links, payment requests,
+receipts, and contact payment resolution belong on the SDK surface rather than
+on low-level `paykit-lib` protocol bindings.
 
 ## Exported Surface
 
@@ -20,6 +20,9 @@ bindings.
   blob load/save/clear.
 - `FfiSdkPubkySessionProvider` — platform callback interface for live Pubky
   session access and public storage availability.
+- `FfiSdkPaymentAdapter` — platform callback interface for receiving details,
+  endpoint reservation cleanup, payable endpoint ordering, and payment target
+  construction.
 - `FfiPubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
   session state.
@@ -28,6 +31,18 @@ bindings.
 - `requiredSessionCapabilities(config)` — return Pubky capabilities required by
   a config.
 - `coreSessionCapabilities()` — return the core Paykit Pubky capability scope.
+
+### Public Payment Endpoints
+
+- `FfiPaykitSdk.withPaymentAdapter` — create a runtime with payment adapter
+  callbacks.
+- `FfiPaykitSdk.syncPublicEndpoints` — publish current public receiving details
+  and remove stale SDK-managed public Payment Endpoints.
+- `FfiEndpointSyncReport` — published, removed, and failed endpoint changes.
+
+The payment adapter returns receiving details and candidate ids. Apps execute
+payments outside Paykit; Paykit SDK only routes, records, and validates the
+Paykit-side workflow.
 
 ### Pubky Session Bootstrap
 

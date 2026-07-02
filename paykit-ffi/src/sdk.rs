@@ -1,15 +1,12 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use paykit_sdk::{
-    IdentityStatus, InitializationReport, PaykitSdk, PaykitSdkError, PaymentAdapter,
-    PaymentEndpointCandidate, PaymentEndpointReservation, PaymentEndpointReservationCancellation,
-    PaymentEndpointSelectionRequest, PaymentTarget, PubkyPublicKey, ReceivingDetail,
-    ReceivingDetailScope, RestoreReport,
-};
+use paykit_sdk::{IdentityStatus, InitializationReport, PaykitSdk, RestoreReport};
 
 use crate::config::{default_pubky_client_config, FfiPaykitSdkConfig, FfiPubkyClientConfig};
 use crate::errors::PaykitFfiError;
+use crate::payment_adapter::{
+    FfiNoopSdkPaymentAdapter, FfiSdkPaymentAdapter, FfiSdkPaymentAdapterAdapter,
+};
 use crate::secrets::FfiSdkBackupBlob;
 use crate::session::{
     pubky_from_config, FfiPubkyIdentityCapability, FfiSdkPubkySessionProvider,
@@ -74,56 +71,8 @@ pub struct FfiRestoreReport {
     pub recovery_required_peers: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct FfiNoopPaymentAdapter;
-
-#[async_trait]
-impl PaymentAdapter for FfiNoopPaymentAdapter {
-    async fn current_receiving_details(
-        &self,
-        _scope: ReceivingDetailScope,
-    ) -> paykit_sdk::Result<Vec<ReceivingDetail>> {
-        Ok(Vec::new())
-    }
-
-    async fn reserve_receiving_details(
-        &self,
-        _counterparty: &PubkyPublicKey,
-    ) -> paykit_sdk::Result<Option<Vec<PaymentEndpointReservation>>> {
-        Ok(None)
-    }
-
-    async fn cancel_receiving_detail_reservation(
-        &self,
-        _cancellation: &PaymentEndpointReservationCancellation,
-    ) -> paykit_sdk::Result<()> {
-        Err(payment_adapter_unavailable())
-    }
-
-    async fn select_payment_endpoints(
-        &self,
-        _request: &PaymentEndpointSelectionRequest,
-    ) -> paykit_sdk::Result<Vec<PaymentEndpointCandidate>> {
-        Ok(Vec::new())
-    }
-
-    async fn build_payment_target(
-        &self,
-        _endpoint: &PaymentEndpointCandidate,
-    ) -> paykit_sdk::Result<PaymentTarget> {
-        Err(payment_adapter_unavailable())
-    }
-}
-
-fn payment_adapter_unavailable() -> PaykitSdkError {
-    PaykitSdkError::PaymentAdapter {
-        context: "payment adapter callbacks are not available on this SDK handle".into(),
-        source: None,
-    }
-}
-
 pub(crate) type FfiSdkRuntime =
-    PaykitSdk<FfiSdkStorage, FfiSdkPubkySessionProviderAdapter, FfiNoopPaymentAdapter>;
+    PaykitSdk<FfiSdkStorage, FfiSdkPubkySessionProviderAdapter, FfiSdkPaymentAdapterAdapter>;
 
 /// Stateful Paykit SDK runtime handle.
 #[derive(uniffi::Object)]
@@ -156,16 +105,54 @@ impl FfiPaykitSdk {
         config: FfiPaykitSdkConfig,
         pubky_client: FfiPubkyClientConfig,
     ) -> Result<Self, PaykitFfiError> {
+        Self::with_payment_adapter_and_pubky_client_config(
+            state_store,
+            session_provider,
+            Arc::new(FfiNoopSdkPaymentAdapter),
+            config,
+            pubky_client,
+        )
+    }
+
+    /// Create an SDK runtime with payment adapter callbacks.
+    #[uniffi::constructor]
+    pub fn with_payment_adapter(
+        state_store: Arc<dyn FfiSdkStateBlobStore>,
+        session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        payment_adapter: Arc<dyn FfiSdkPaymentAdapter>,
+        config: FfiPaykitSdkConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        Self::with_payment_adapter_and_pubky_client_config(
+            state_store,
+            session_provider,
+            payment_adapter,
+            config,
+            default_pubky_client_config(),
+        )
+    }
+
+    /// Create an SDK runtime with payment adapter callbacks and Pubky client configuration.
+    #[uniffi::constructor]
+    pub fn with_payment_adapter_and_pubky_client_config(
+        state_store: Arc<dyn FfiSdkStateBlobStore>,
+        session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        payment_adapter: Arc<dyn FfiSdkPaymentAdapter>,
+        config: FfiPaykitSdkConfig,
+        pubky_client: FfiPubkyClientConfig,
+    ) -> Result<Self, PaykitFfiError> {
         let pubky = pubky_from_config(&pubky_client)?;
         let storage = FfiSdkStorage { store: state_store };
         let session_provider = FfiSdkPubkySessionProviderAdapter {
             provider: session_provider,
             pubky,
         };
+        let payment_adapter = FfiSdkPaymentAdapterAdapter {
+            adapter: payment_adapter,
+        };
         let runtime = PaykitSdk::new(
             storage,
             session_provider,
-            FfiNoopPaymentAdapter,
+            payment_adapter,
             config.try_into()?,
         )?;
         Ok(Self { runtime })
