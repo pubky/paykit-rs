@@ -2,6 +2,14 @@ use paykit_sdk::{load_public_endpoint_records, PaykitSdkError, PublicationStatus
 
 use crate::harness::{build_testnet, receiving_detail, TestUser};
 
+/// Payload published for `identifier`, or `None` when the endpoint is absent.
+fn payload_of<'a>(list: &'a paykit_lib::PaymentList, identifier: &str) -> Option<&'a str> {
+    list.payment_endpoints
+        .iter()
+        .find(|(id, _)| id.as_str() == identifier)
+        .map(|(_, payload)| payload.as_str())
+}
+
 #[tokio::test]
 async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
     let testnet = build_testnet().await;
@@ -33,14 +41,11 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
     let list = paykit_lib::get_payment_list(&storage, &payee)
         .await
         .expect("Payment List fetch should succeed");
-    assert!(list
-        .payment_endpoints
-        .keys()
-        .any(|id| id.as_str() == "btc-lightning-bolt11"));
-    assert!(list
-        .payment_endpoints
-        .keys()
-        .any(|id| id.as_str() == "btc-onchain"));
+    assert_eq!(
+        payload_of(&list, "btc-lightning-bolt11"),
+        Some("lnbc-test-invoice")
+    );
+    assert_eq!(payload_of(&list, "btc-onchain"), Some("bc1q-test-address"));
 
     // Local publication records mirror the remote state.
     let records = load_public_endpoint_records(&user.storage)
@@ -69,14 +74,11 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
     let list = paykit_lib::get_payment_list(&storage, &payee)
         .await
         .expect("Payment List fetch should succeed");
-    assert!(!list
-        .payment_endpoints
-        .keys()
-        .any(|id| id.as_str() == "btc-onchain"));
-    assert!(list
-        .payment_endpoints
-        .keys()
-        .any(|id| id.as_str() == "btc-lightning-bolt11"));
+    assert_eq!(payload_of(&list, "btc-onchain"), None);
+    assert_eq!(
+        payload_of(&list, "btc-lightning-bolt11"),
+        Some("lnbc-test-invoice")
+    );
 }
 
 #[tokio::test]
