@@ -281,16 +281,27 @@ class Paykit: RCTEventEmitter {
         resolve(resultArray(coreSessionCapabilities()))
     }
 
-    @objc(sdkPubkyPublicKeyFromSeed:runtimeLabel:withResolver:withRejecter:)
-    func sdkPubkyPublicKeyFromSeed(
+    @objc(sdkPubkyPublicKeyFromBip39Seed:withResolver:withRejecter:)
+    func sdkPubkyPublicKeyFromBip39Seed(
         seedBase64: String,
-        runtimeLabel: String,
         resolve: RCTPromiseResolveBlock,
         reject: RCTPromiseRejectBlock
     ) {
         resolveResult(resolve) {
             let seed = try dataFromBase64(seedBase64, label: "seed")
-            let secret = try derivePubkySecretKey(seed: seed, runtimeLabel: runtimeLabel)
+            let secret = try pubkySecretKeyFromBip39Seed(seed: seed)
+            return try pubkyPublicKeyFromSecret(localSecretKey: secret)
+        }
+    }
+
+    @objc(sdkPubkyPublicKeyFromBip39Mnemonic:withResolver:withRejecter:)
+    func sdkPubkyPublicKeyFromBip39Mnemonic(
+        mnemonicPhrase: String,
+        resolve: RCTPromiseResolveBlock,
+        reject: RCTPromiseRejectBlock
+    ) {
+        resolveResult(resolve) {
+            let secret = try pubkySecretKeyFromBip39Mnemonic(mnemonicPhrase: mnemonicPhrase)
             return try pubkyPublicKeyFromSecret(localSecretKey: secret)
         }
     }

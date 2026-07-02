@@ -7,6 +7,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc25] - 2026-07-02
+
+### Changed
+- Pubky secret key derivation now matches Pubky Core/Ring BIP39 behavior:
+  SDK and FFI helpers derive from a BIP39 seed or mnemonic by using the first
+  32 bytes of the BIP39 seed with an empty passphrase, instead of Paykit
+  runtime-label HMAC derivation.
+
 ## [0.1.0-rc23] - 2026-07-02
 
 ### Fixed
@@ -185,7 +193,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc23...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc25...HEAD
+[0.1.0-rc25]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc25
+[0.1.0-rc24]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc24
 [0.1.0-rc23]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc23
 [0.1.0-rc21]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc21
 [0.1.0-rc19]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc19

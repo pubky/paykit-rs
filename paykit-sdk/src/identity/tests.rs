@@ -17,26 +17,35 @@ fn test_pubky_local_secret_key_from_hex_validates_length() {
 }
 
 #[test]
-fn test_pubky_local_secret_key_derivation_is_deterministic() {
+fn test_pubky_local_secret_key_derivation_matches_pubky_core_seed() {
     let seed = [3; 64];
-    let first = PubkyLocalSecretKey::derive_from_seed(&seed, "bitkit.to").unwrap();
-    let second = PubkyLocalSecretKey::derive_from_seed(&seed, "bitkit.to").unwrap();
-    let other_app = PubkyLocalSecretKey::derive_from_seed(&seed, "paykit.example").unwrap();
+    let key = PubkyLocalSecretKey::from_bip39_seed(&seed).unwrap();
 
-    assert_eq!(first.as_bytes(), second.as_bytes());
+    assert_eq!(key.as_bytes(), &[3; 32]);
+    assert!(PubkyLocalSecretKey::from_bip39_seed(&seed[..32]).is_err());
+}
+
+#[test]
+fn test_pubky_local_secret_key_derivation_matches_pubky_core_mnemonic() {
+    let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let key = PubkyLocalSecretKey::from_bip39_mnemonic(mnemonic).unwrap();
+
     assert_eq!(
-        hex::encode(first.as_bytes()),
-        "7cd9a283688abc70e2cb0a13bb7aa4826ee4d7972f3070d4dade0706a83c5dee"
+        hex::encode(key.as_bytes()),
+        "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1"
     );
     assert_eq!(
-        first.public_key().as_str(),
-        "wifjcot1pyutzt4g5jbuz9mweuh53cxyngrj4dbom6684pppzhwy"
+        key,
+        PubkyLocalSecretKey::from_bip39_seed(
+            &hex::decode(
+                "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1\
+             9a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+            )
+            .unwrap()
+        )
+        .unwrap()
     );
-    assert_ne!(first.as_bytes(), other_app.as_bytes());
-    assert_ne!(first.as_bytes(), &[3; 32]);
-    assert!(PubkyLocalSecretKey::derive_from_seed(&seed[..32], "bitkit.to").is_err());
-    assert!(PubkyLocalSecretKey::derive_from_seed(&seed, "").is_err());
-    assert!(PubkyLocalSecretKey::derive_from_seed(&seed, "bad\nlabel").is_err());
+    assert!(PubkyLocalSecretKey::from_bip39_mnemonic("not a mnemonic").is_err());
 }
 
 #[test]

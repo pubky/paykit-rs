@@ -32,7 +32,7 @@ No additional steps. Gradle picks up the module automatically.
 import {
   defaultConfig,
   requiredSessionCapabilities,
-  pubkyPublicKeyFromSeed,
+  pubkyPublicKeyFromBip39Mnemonic,
 } from '@synonymdev/react-native-paykit';
 
 const config = await defaultConfig();
@@ -45,7 +45,7 @@ if (capabilities.isErr()) {
   throw new Error(capabilities.error);
 }
 
-const publicKey = await pubkyPublicKeyFromSeed(seedBase64, 'bitkit.to');
+const publicKey = await pubkyPublicKeyFromBip39Mnemonic(mnemonicPhrase);
 if (publicKey.isOk()) {
   console.log(publicKey.value);
 }
@@ -64,9 +64,12 @@ stable `category`, `code`, and redacted `context`.
 - `requiredSessionCapabilities(config)` — return Pubky capabilities required by
   the supplied config.
 - `coreSessionCapabilities()` — return the core Paykit Pubky capability scope.
-- `pubkyPublicKeyFromSeed(seedBase64, runtimeLabel)` — derive the corresponding
-  Pubky public key from a 64-byte seed and app/runtime label without returning
-  the local secret key to JavaScript.
+- `pubkyPublicKeyFromBip39Seed(seedBase64)` — derive the corresponding Pubky
+  public key from a 64-byte BIP39 seed without returning the local secret key
+  to JavaScript.
+- `pubkyPublicKeyFromBip39Mnemonic(mnemonicPhrase)` — derive the corresponding
+  Pubky public key from a BIP39 English mnemonic phrase without returning the
+  local secret key to JavaScript.
 - `parsePubkyAuthUrl(authUrl)` — parse public details from a Pubky auth URL.
 - `resolvePubkyUrl(uri)` — resolve a Pubky URI to its transport URL.
 - `parsePubkyResource(uri)` — parse a `pubky://<public-key>/<path>` resource
