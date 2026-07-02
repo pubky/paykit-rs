@@ -371,13 +371,21 @@ impl FfiPubkyAuthRequest {
     }
 }
 
-/// Derive a local Pubky secret key from a 64-byte wallet seed.
+/// Derive a local Pubky secret key from a 64-byte BIP39 seed.
 #[uniffi::export]
-pub fn derive_pubky_secret_key(
+pub fn pubky_secret_key_from_bip39_seed(
     seed: Vec<u8>,
-    runtime_label: String,
 ) -> Result<Arc<FfiPubkyLocalSecretKey>, PaykitFfiError> {
-    let key = PubkyLocalSecretKey::derive_from_seed(&seed, &runtime_label)?;
+    let key = PubkyLocalSecretKey::from_bip39_seed(&seed)?;
+    Ok(secret_to_ffi(&key))
+}
+
+/// Derive a local Pubky secret key from a BIP39 English mnemonic phrase.
+#[uniffi::export]
+pub fn pubky_secret_key_from_bip39_mnemonic(
+    mnemonic_phrase: String,
+) -> Result<Arc<FfiPubkyLocalSecretKey>, PaykitFfiError> {
+    let key = PubkyLocalSecretKey::from_bip39_mnemonic(&mnemonic_phrase)?;
     Ok(secret_to_ffi(&key))
 }
 

@@ -369,13 +369,21 @@ fn test_blob_debug_redacts_bytes() {
 }
 
 #[test]
-fn test_pubky_secret_key_derivation_uses_sdk_derivation() {
+fn test_pubky_secret_key_derivation_matches_pubky_core_seed() {
     let seed = vec![3; 64];
-    let secret = derive_pubky_secret_key(seed, "bitkit.to".into()).unwrap();
+    let secret = pubky_secret_key_from_bip39_seed(seed).unwrap();
+
+    assert_eq!(secret.export_bytes(), vec![3; 32]);
+}
+
+#[test]
+fn test_pubky_secret_key_derivation_matches_pubky_core_mnemonic() {
+    let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let secret = pubky_secret_key_from_bip39_mnemonic(mnemonic.into()).unwrap();
 
     assert_eq!(
         hex::encode(secret.export_bytes()),
-        "7cd9a283688abc70e2cb0a13bb7aa4826ee4d7972f3070d4dade0706a83c5dee"
+        "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1"
     );
 }
 

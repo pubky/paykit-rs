@@ -1444,6 +1444,8 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1495,9 +1497,6 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_default_pubky_client_config() != 12841.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_func_derive_pubky_secret_key() != 37697.toShort()) {
-            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-        }
         if (uniffi_paykit_checksum_func_encode_sdk_state_blob_snapshot() != 49508.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1514,6 +1513,12 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_pubky_public_key_from_secret() != 41462.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_pubky_secret_key_from_bip39_mnemonic() != 59779.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_pubky_secret_key_from_bip39_seed() != 48251.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_raw_pubky_public_key() != 57096.toShort()) {
@@ -1934,9 +1939,6 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_func_default_pubky_client_config(
     ): Short
     @JvmStatic
-    external fun uniffi_paykit_checksum_func_derive_pubky_secret_key(
-    ): Short
-    @JvmStatic
     external fun uniffi_paykit_checksum_func_encode_sdk_state_blob_snapshot(
     ): Short
     @JvmStatic
@@ -1953,6 +1955,12 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_pubky_public_key_from_secret(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_pubky_secret_key_from_bip39_mnemonic(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_pubky_secret_key_from_bip39_seed(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_raw_pubky_public_key(
@@ -3244,12 +3252,6 @@ internal object UniffiLib : Library {
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
     @JvmStatic
-    external fun uniffi_paykit_fn_func_derive_pubky_secret_key(
-        `seed`: RustBufferByValue,
-        `runtimeLabel`: RustBufferByValue,
-        uniffiCallStatus: UniffiRustCallStatus,
-    ): Pointer?
-    @JvmStatic
     external fun uniffi_paykit_fn_func_encode_sdk_state_blob_snapshot(
         `snapshot`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
@@ -3278,6 +3280,16 @@ internal object UniffiLib : Library {
         `localSecretKey`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_pubky_secret_key_from_bip39_mnemonic(
+        `mnemonicPhrase`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_pubky_secret_key_from_bip39_seed(
+        `seed`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
     @JvmStatic
     external fun uniffi_paykit_fn_func_raw_pubky_public_key(
         `value`: RustBufferByValue,
@@ -12798,20 +12810,6 @@ public fun `defaultPubkyClientConfig`(): PubkyClientConfig {
 }
 
 /**
- * Derive a local Pubky secret key from a 64-byte wallet seed.
- */
-@Throws(PaykitException::class)
-public fun `derivePubkySecretKey`(`seed`: kotlin.ByteArray, `runtimeLabel`: kotlin.String): PubkyLocalSecretKey {
-    return FfiConverterTypePubkyLocalSecretKey.lift(uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
-        UniffiLib.uniffi_paykit_fn_func_derive_pubky_secret_key(
-            FfiConverterByteArray.lower(`seed`),
-            FfiConverterString.lower(`runtimeLabel`),
-            uniffiRustCallStatus,
-        )
-    }!!)
-}
-
-/**
  * Encode an SDK state blob snapshot for apps that store blob and revision together.
  */
 @Throws(PaykitException::class)
@@ -12885,6 +12883,32 @@ public fun `pubkyPublicKeyFromSecret`(`localSecretKey`: PubkyLocalSecretKey): ko
             uniffiRustCallStatus,
         )
     })
+}
+
+/**
+ * Derive a local Pubky secret key from a BIP39 English mnemonic phrase.
+ */
+@Throws(PaykitException::class)
+public fun `pubkySecretKeyFromBip39Mnemonic`(`mnemonicPhrase`: kotlin.String): PubkyLocalSecretKey {
+    return FfiConverterTypePubkyLocalSecretKey.lift(uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+        UniffiLib.uniffi_paykit_fn_func_pubky_secret_key_from_bip39_mnemonic(
+            FfiConverterString.lower(`mnemonicPhrase`),
+            uniffiRustCallStatus,
+        )
+    }!!)
+}
+
+/**
+ * Derive a local Pubky secret key from a 64-byte BIP39 seed.
+ */
+@Throws(PaykitException::class)
+public fun `pubkySecretKeyFromBip39Seed`(`seed`: kotlin.ByteArray): PubkyLocalSecretKey {
+    return FfiConverterTypePubkyLocalSecretKey.lift(uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+        UniffiLib.uniffi_paykit_fn_func_pubky_secret_key_from_bip39_seed(
+            FfiConverterByteArray.lower(`seed`),
+            uniffiRustCallStatus,
+        )
+    }!!)
 }
 
 /**
