@@ -35,13 +35,6 @@ pub trait FfiSdkStateBlobStore: Send + Sync {
         blob: Arc<FfiSdkStateBlob>,
         expected_revision: Option<String>,
     ) -> Result<String, PaykitFfiError>;
-
-    /// Atomically clear the SDK state blob.
-    ///
-    /// The platform store should reject the clear if the stored revision does
-    /// not match `expected_revision`.
-    fn clear_state_blob(&self, expected_revision: Option<String>)
-        -> Result<String, PaykitFfiError>;
 }
 
 #[derive(Clone)]

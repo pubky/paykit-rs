@@ -33,7 +33,7 @@ fn test_payment_request_terms_parse_protocol_inputs() {
             ends_at: None,
         }),
         accepted_payment_endpoint_identifiers: vec!["btc-lightning-bolt11".into()],
-        metadata_json: r#"{"order":"123"}"#.into(),
+        metadata: Arc::new(FfiPrivateJsonObject::new(r#"{"order":"123"}"#.into()).unwrap()),
     };
 
     let parsed = PaymentRequestTerms::try_from(terms).unwrap();
@@ -140,8 +140,10 @@ fn test_payment_request_record_conversion_redacts_references() {
     );
     assert!(!format!("{:?}", ffi.terms.unwrap().payment_reference).contains("invoice secret"));
     assert!(ffi.payment_proofs[0]
-        .proof_json
+        .proof
+        .export_text()
         .contains("\"preimage\":\"secret\""));
+    assert!(!format!("{:?}", ffi.payment_proofs[0].proof).contains("secret"));
 }
 
 #[test]
@@ -149,7 +151,7 @@ fn test_payment_proof_submission_rejects_non_object_proof() {
     let submission = FfiPaymentProofSubmission {
         billing_period: None,
         payment_endpoint_identifier: "btc-lightning-bolt11".into(),
-        proof_json: "[]".into(),
+        proof: Arc::new(FfiPrivateJsonObject::from_unchecked_text("[]".into())),
     };
 
     assert!(matches!(

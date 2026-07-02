@@ -248,6 +248,24 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `initiateLinkWithPeer`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport
 
     /**
+     * Prepare, store, and queue Receipt Access for private delivery.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `issueReceipt`(`counterparty`: kotlin.String, `draft`: FfiReceiptDraft): FfiReceiptIssuanceView
+
+    /**
+     * List issued receipts across non-blocked counterparties, newest first.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `issuedReceipts`(): List<FfiReceiptIssuanceView>
+
+    /**
+     * List issued receipts for one counterparty, newest first.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `issuedReceiptsTo`(`counterparty`: kotlin.String): List<FfiReceiptIssuanceView>
+
+    /**
      * List locally tracked Linked Peer records.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -284,6 +302,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `pendingOutboundPrivateCounterparties`(): List<kotlin.String>
 
     /**
+     * Prepare a receipt issuance and persist it before network side effects.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `prepareReceiptIssuance`(`counterparty`: kotlin.String, `draft`: FfiReceiptDraft): FfiReceiptIssuanceView
+
+    /**
      * Send queued outbound private messages for one counterparty in order.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -294,6 +318,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `processPendingPrivateMessages`(): List<FfiOutboundPrivateCounterpartySendReport>
+
+    /**
+     * Continue storage and Receipt Access queueing for a prepared issuance.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `processReceiptIssuance`(`counterparty`: kotlin.String, `receiptId`: kotlin.String): FfiReceiptIssuanceView
 
     /**
      * Queue a new Payment Request proposal and return local derived state.
@@ -324,6 +354,48 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `publishPublicContact`(`publicKey`: kotlin.String): FfiContactRecord
+
+    /**
+     * List Receipt Access across non-blocked counterparties, newest first.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptAccess`(): List<FfiReceiptAccessView>
+
+    /**
+     * List Receipt Access received from one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptAccessFrom`(`counterparty`: kotlin.String): List<FfiReceiptAccessView>
+
+    /**
+     * List indexed Receipt Access records for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptAccessRecords`(`counterparty`: kotlin.String): List<FfiReceiptAccessView>
+
+    /**
+     * List local receipt issuance records for one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptIssuanceRecords`(`counterparty`: kotlin.String): List<FfiReceiptIssuanceView>
+
+    /**
+     * List decrypted Receipt records for one issuer, newest first.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptRecords`(`issuer`: kotlin.String): List<FfiReceiptRecord>
+
+    /**
+     * List decrypted receipts across non-blocked issuers, newest first.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receipts`(): List<FfiReceiptRecord>
+
+    /**
+     * List decrypted receipts from one issuer, newest first.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptsFrom`(`issuer`: kotlin.String): List<FfiReceiptRecord>
 
     /**
      * Receive and durably persist available private messages.
@@ -392,6 +464,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `restoreBackupState`(`backup`: FfiSdkBackupBlob): FfiRestoreReport
 
     /**
+     * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `retrieveReceipt`(`counterparty`: kotlin.String, `receiptId`: kotlin.String): FfiReceiptRecord
+
+    /**
      * Save or update a local Contact Record.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -456,6 +534,22 @@ public interface FfiPaymentReferenceInterface {
 
     /**
      * Export the reference text for explicit payment execution or display.
+     */
+    public fun `exportText`(): kotlin.String
+
+    public companion object
+}
+
+
+
+
+/**
+ * Private JSON object with redacted debug output.
+ */
+public interface FfiPrivateJsonObjectInterface {
+
+    /**
+     * Export the JSON text for explicit app display, storage, or payment execution.
      */
     public fun `exportText`(): kotlin.String
 
@@ -746,15 +840,6 @@ public interface FfiSdkStateBlobStore {
      */
     @Throws(PaykitFfiException::class)
     public fun `saveStateBlobAtomically`(`blob`: FfiSdkStateBlob, `expectedRevision`: kotlin.String?): kotlin.String
-
-    /**
-     * Atomically clear the SDK state blob.
-     *
-     * The platform store should reject the clear if the stored revision does
-     * not match `expected_revision`.
-     */
-    @Throws(PaykitFfiException::class)
-    public fun `clearStateBlob`(`expectedRevision`: kotlin.String?): kotlin.String
 
     public companion object
 }
@@ -1620,7 +1705,7 @@ public data class FfiPaymentProofRecord (
     /**
      * Method-specific proof object encoded as JSON.
      */
-    val `proofJson`: kotlin.String,
+    val `proof`: FfiPrivateJsonObject,
     /**
      * Local record time for this proof as RFC3339 text.
      */
@@ -1635,7 +1720,7 @@ public data class FfiPaymentProofRecord (
             this.`paymentReference`,
             this.`billingPeriod`,
             this.`paymentEndpointIdentifier`,
-            this.`proofJson`,
+            this.`proof`,
             this.`recordedAt`,
         )
     }
@@ -1647,7 +1732,7 @@ public data class FfiPaymentProofRecord (
 /**
  * Method-specific Payment Proof submission data.
  */
-@kotlinx.serialization.Serializable
+
 public data class FfiPaymentProofSubmission (
     /**
      * Billing Period for recurring Payment Requests.
@@ -1660,8 +1745,15 @@ public data class FfiPaymentProofSubmission (
     /**
      * Method-specific proof object encoded as JSON.
      */
-    val `proofJson`: kotlin.String
-) {
+    val `proof`: FfiPrivateJsonObject
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`billingPeriod`,
+            this.`paymentEndpointIdentifier`,
+            this.`proof`,
+        )
+    }
     public companion object
 }
 
@@ -1896,7 +1988,7 @@ public data class FfiPaymentRequestTerms (
     /**
      * Application-specific metadata encoded as a JSON object.
      */
-    val `metadataJson`: kotlin.String
+    val `metadata`: FfiPrivateJsonObject
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1905,7 +1997,7 @@ public data class FfiPaymentRequestTerms (
             this.`proposalExpiresAt`,
             this.`recurrence`,
             this.`acceptedPaymentEndpointIdentifiers`,
-            this.`metadataJson`,
+            this.`metadata`,
         )
     }
     public companion object
@@ -2271,6 +2363,295 @@ public data class FfiQueuedPrivateMessage (
             this.`lastAttemptAt`,
             this.`sentAt`,
             this.`lastError`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * App-facing view of an indexed Receipt Access event.
+ */
+
+public data class FfiReceiptAccessView (
+    /**
+     * Counterparty that sent the Receipt Access event.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Receipt Access Event ID.
+     */
+    val `eventId`: kotlin.String,
+    /**
+     * Receipt ID.
+     */
+    val `receiptId`: kotlin.String,
+    /**
+     * Payment Reference copied from Receipt Access.
+     */
+    val `paymentReference`: FfiPaymentReference,
+    /**
+     * Optional Payment Request ID copied from Receipt Access.
+     */
+    val `paymentRequestId`: kotlin.String?,
+    /**
+     * Optional Billing Period copied from Receipt Access.
+     */
+    val `billingPeriod`: FfiBillingPeriod?,
+    /**
+     * Current retrieval state for the referenced receipt.
+     */
+    val `retrievalStatus`: FfiReceiptRetrievalStatus,
+    /**
+     * Last retrieval attempt time as RFC3339 text.
+     */
+    val `retrievalAttemptedAt`: kotlin.String?,
+    /**
+     * Successful retrieval/decryption time as RFC3339 text.
+     */
+    val `retrievedAt`: kotlin.String?,
+    /**
+     * Receive time of the indexed stream item as RFC3339 text.
+     */
+    val `receivedAt`: kotlin.String
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`eventId`,
+            this.`receiptId`,
+            this.`paymentReference`,
+            this.`paymentRequestId`,
+            this.`billingPeriod`,
+            this.`retrievalStatus`,
+            this.`retrievalAttemptedAt`,
+            this.`retrievedAt`,
+            this.`receivedAt`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Payment Amount fields copied into receipts.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiReceiptAmount (
+    /**
+     * Decimal amount text.
+     */
+    val `value`: kotlin.String,
+    /**
+     * Asset code or unit.
+     */
+    val `asset`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Caller-provided receipt fields.
+ */
+
+public data class FfiReceiptDraft (
+    /**
+     * Optional caller-stable Receipt ID.
+     */
+    val `receiptId`: kotlin.String?,
+    /**
+     * Payment Reference being receipted.
+     */
+    val `paymentReference`: FfiPaymentReference,
+    /**
+     * Optional Payment Request ID this receipt corresponds to.
+     */
+    val `paymentRequestId`: kotlin.String?,
+    /**
+     * Optional Billing Period for recurring Payment Request receipts.
+     */
+    val `billingPeriod`: FfiBillingPeriod?,
+    /**
+     * Optional Payment Endpoint Identifier used for the payment.
+     */
+    val `paymentEndpointIdentifier`: kotlin.String?,
+    /**
+     * Optional Payment Amount being receipted.
+     */
+    val `amount`: FfiReceiptAmount?,
+    /**
+     * Caller-defined Receipt Metadata encoded as a JSON object.
+     */
+    val `metadata`: FfiPrivateJsonObject
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`receiptId`,
+            this.`paymentReference`,
+            this.`paymentRequestId`,
+            this.`billingPeriod`,
+            this.`paymentEndpointIdentifier`,
+            this.`amount`,
+            this.`metadata`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * App-facing view of local receipt issuance progress.
+ */
+
+public data class FfiReceiptIssuanceView (
+    /**
+     * Counterparty that should receive Receipt Access.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Receipt ID.
+     */
+    val `receiptId`: kotlin.String,
+    /**
+     * Receipt Access Event ID.
+     */
+    val `receiptAccessEventId`: kotlin.String,
+    /**
+     * Payment Reference copied from the Receipt.
+     */
+    val `paymentReference`: FfiPaymentReference,
+    /**
+     * Optional Payment Request ID copied from the Receipt.
+     */
+    val `paymentRequestId`: kotlin.String?,
+    /**
+     * Optional Billing Period copied from the Receipt.
+     */
+    val `billingPeriod`: FfiBillingPeriod?,
+    /**
+     * Optional Payment Endpoint Identifier copied from the Receipt.
+     */
+    val `paymentEndpointIdentifier`: kotlin.String?,
+    /**
+     * Optional Payment Amount copied from the Receipt.
+     */
+    val `amount`: FfiReceiptAmount?,
+    /**
+     * Current issuance status.
+     */
+    val `status`: FfiReceiptIssuanceStatus,
+    /**
+     * Outbound private message id that carries Receipt Access, once queued.
+     */
+    val `outboundMessageId`: kotlin.ULong?,
+    /**
+     * Creation time as RFC3339 text.
+     */
+    val `createdAt`: kotlin.String,
+    /**
+     * Last status update time as RFC3339 text.
+     */
+    val `updatedAt`: kotlin.String,
+    /**
+     * Time the Encrypted Receipt was stored as RFC3339 text.
+     */
+    val `storedAt`: kotlin.String?,
+    /**
+     * Time Receipt Access was queued for private delivery as RFC3339 text.
+     */
+    val `accessQueuedAt`: kotlin.String?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`receiptId`,
+            this.`receiptAccessEventId`,
+            this.`paymentReference`,
+            this.`paymentRequestId`,
+            this.`billingPeriod`,
+            this.`paymentEndpointIdentifier`,
+            this.`amount`,
+            this.`status`,
+            this.`outboundMessageId`,
+            this.`createdAt`,
+            this.`updatedAt`,
+            this.`storedAt`,
+            this.`accessQueuedAt`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Decrypted Receipt record stored by the SDK.
+ */
+
+public data class FfiReceiptRecord (
+    /**
+     * Counterparty that issued the Receipt Access event.
+     */
+    val `issuer`: kotlin.String,
+    /**
+     * Receipt Access Event ID used for retrieval.
+     */
+    val `receiptAccessEventId`: kotlin.String,
+    /**
+     * Receipt ID.
+     */
+    val `receiptId`: kotlin.String,
+    /**
+     * Payment Reference copied from the decrypted Receipt.
+     */
+    val `paymentReference`: FfiPaymentReference,
+    /**
+     * Optional Payment Request ID copied from the decrypted Receipt.
+     */
+    val `paymentRequestId`: kotlin.String?,
+    /**
+     * Optional Billing Period copied from the decrypted Receipt.
+     */
+    val `billingPeriod`: FfiBillingPeriod?,
+    /**
+     * Recipient public key from the decrypted Receipt.
+     */
+    val `recipientPublicKey`: kotlin.String,
+    /**
+     * Optional Payment Endpoint Identifier copied from the decrypted Receipt.
+     */
+    val `paymentEndpointIdentifier`: kotlin.String?,
+    /**
+     * Optional Payment Amount copied from the decrypted Receipt.
+     */
+    val `amount`: FfiReceiptAmount?,
+    /**
+     * Caller-defined Receipt Metadata encoded as a JSON object.
+     */
+    val `metadata`: FfiPrivateJsonObject,
+    /**
+     * Successful retrieval/decryption time as RFC3339 text.
+     */
+    val `retrievedAt`: kotlin.String
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`issuer`,
+            this.`receiptAccessEventId`,
+            this.`receiptId`,
+            this.`paymentReference`,
+            this.`paymentRequestId`,
+            this.`billingPeriod`,
+            this.`recipientPublicKey`,
+            this.`paymentEndpointIdentifier`,
+            this.`amount`,
+            this.`metadata`,
+            this.`retrievedAt`,
         )
     }
     public companion object
@@ -2992,6 +3373,76 @@ public enum class FfiPublicationStatus {
     REMOVED,
     /**
      * Last publication or removal attempt failed.
+     */
+    FAILED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Local receipt issuance state.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiReceiptIssuanceStatus {
+
+    /**
+     * Encrypted Receipt has not been stored yet.
+     */
+    PENDING_STORAGE,
+    /**
+     * Encrypted Receipt was stored, but Receipt Access has not been queued yet.
+     */
+    STORED,
+    /**
+     * Receipt Access was queued for private delivery.
+     */
+    ACCESS_QUEUED,
+    /**
+     * Last storage or queueing attempt failed.
+     */
+    FAILED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Receipt retrieval state for an indexed Receipt Access event.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiReceiptRetrievalStatus {
+
+    /**
+     * Receipt Access has been indexed, but retrieval has not succeeded yet.
+     */
+    PENDING,
+    /**
+     * Encrypted Receipt was fetched and decrypted.
+     */
+    RETRIEVED,
+    /**
+     * Receipt Location was missing on the issuer homeserver.
+     */
+    NOT_FOUND,
+    /**
+     * Retrieval or decryption failed.
      */
     FAILED,
     /**
