@@ -3112,7 +3112,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "paykit-ffi"
-version = "0.1.0-rc20"
+version = "0.1.0-rc23"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -3129,6 +3129,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3137,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-lib"
-version = "0.1.0-rc20"
+version = "0.1.0-rc23"
 dependencies = [
  "anyhow",
  "base64",
@@ -3156,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-sdk"
-version = "0.1.0-rc12"
+version = "0.1.0-rc23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5752,6 +5753,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f38a9a27529ccff732f8efddb831b65b1e07f7dea3fd4cacd4a35a8c4b253b98"
 dependencies = [
  "anyhow",
+ "async-compat",
  "bytes",
  "once_cell",
  "static_assertions",

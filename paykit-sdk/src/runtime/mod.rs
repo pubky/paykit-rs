@@ -33,8 +33,8 @@ use crate::{
         pubky_follow_keys_from_follow_entries, public_contact_json, ContactPaymentResolution,
         ContactPaymentResolutionPrivateState, ContactPaymentResolutionRequest,
         ContactPaymentResolutionStatus, ContactProfileResolution, ContactRecord, ContactUpdate,
-        PaykitBlobRecord, PaykitProfile, PaykitProfileRecord, PubkyProfileRecord,
-        ResolvedPaymentEndpoint, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+        PaykitBlobRecord, PaykitProfile, PaykitProfileRecord, PreparedContactPayment,
+        PubkyProfileRecord, ResolvedPaymentEndpoint, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
     },
     domain::endpoint_reservations::{
         expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
@@ -76,6 +76,9 @@ use crate::{
     domain::private_lists::{
         current_private_payment_list as load_current_private_payment_list,
         enqueue_private_payment_list_with_link_lease as enqueue_private_payment_list_message_with_link_lease,
+        PrivatePaymentListDeliveryFailure, PrivatePaymentListDeliveryReport,
+        PrivatePaymentListReservationUpdate, PrivatePaymentListSyncChange,
+        PrivatePaymentListSyncReport,
     },
     domain::private_stream::{
         persist_private_stream_batch_with_link_lease, PrivateStreamCounterpartyIntakeReport,
@@ -150,6 +153,12 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     config: PaykitSdkConfig,
     clock: C,
     identity_operation_in_progress: Arc<Mutex<bool>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivateQueueReadiness {
+    Ready,
+    PendingHandshake,
 }
 
 struct RuntimeOperationGuard {
@@ -473,7 +482,7 @@ async fn fetch_public_text(
     path: &str,
     context: &'static str,
 ) -> Result<Option<String>> {
-    let addr = format!("{public_key}{path}");
+    let addr = public_resource_uri(public_key, path);
     match storage.get(addr).await {
         Ok(resp) => {
             let bytes = resp
@@ -522,7 +531,7 @@ async fn list_public_resources(
 ) -> Result<Vec<pubky::PubkyResource>> {
     const LIST_PAGE_LIMIT: u16 = 100;
 
-    let addr = format!("{public_key}{path}");
+    let addr = public_resource_uri(public_key, path);
     let mut entries = Vec::new();
     let mut cursor = None::<String>;
     loop {
@@ -567,6 +576,10 @@ fn is_pubky_not_found(err: &PubkyError) -> bool {
         PubkyError::Request(RequestError::Server { status, .. })
             if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
     )
+}
+
+fn public_resource_uri(public_key: &PubkyPublicKey, path: &str) -> String {
+    format!("pubky://{public_key}{path}")
 }
 
 #[cfg(test)]

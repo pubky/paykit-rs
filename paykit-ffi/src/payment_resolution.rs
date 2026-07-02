@@ -1,86 +1,23 @@
 use std::sync::Arc;
 
 use paykit_sdk::{
-    storage::OutboundPrivateMessageRecord, ContactPaymentResolution,
-    ContactPaymentResolutionPrivateState, ContactPaymentResolutionRequest,
-    ContactPaymentResolutionStatus, OutboundPrivateMessageStatus, PaymentTarget,
-    PrivatePaymentListView, ResolvedPaymentEndpoint,
+    ContactPaymentResolution, ContactPaymentResolutionPrivateState,
+    ContactPaymentResolutionRequest, ContactPaymentResolutionStatus, PaymentTarget,
+    PreparedContactPayment, ResolvedPaymentEndpoint,
 };
 
 use crate::{
     payment_adapter::{
         FfiPaymentAmountContext, FfiPaymentEndpointSource, FfiPaymentPayload, FfiPaymentTarget,
     },
-    private_links::FfiPrivateOperationError,
+    private_links::{
+        FfiLinkedPeerHandshakeReport, FfiOutboundPrivateSendReport, FfiPrivateOperationError,
+        FfiPrivateStreamIntakeReport,
+    },
     sdk::FfiPaykitSdk,
+    session::{app_public_key, parse_public_key},
     PaykitFfiError,
 };
-
-/// Delivery status for one queued outbound Private Application Message.
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FfiOutboundPrivateMessageStatus {
-    /// Message is queued and has not been sent.
-    Pending,
-    /// A worker is sending this message.
-    Sending,
-    /// Message was sent successfully.
-    Sent,
-    /// Last send attempt failed.
-    Failed,
-    /// The stored payload is invalid and must not be retried automatically.
-    Invalid,
-    /// Automatic retry is blocked until local Encrypted Link state is recovered.
-    RecoveryRequired,
-    /// Newer latest-state data made this message unnecessary to send.
-    Superseded,
-    /// SDK returned a value this binding version does not understand.
-    Unknown,
-}
-
-/// Queued outbound private message summary.
-#[derive(uniffi::Record, Clone, Debug)]
-pub struct FfiQueuedPrivateMessage {
-    /// Assigned outbound message id.
-    pub outbound_message_id: u64,
-    /// Counterparty public key.
-    pub counterparty: String,
-    /// Private Message Kind string.
-    pub kind: String,
-    /// Delivery status.
-    pub status: FfiOutboundPrivateMessageStatus,
-    /// Number of send attempts.
-    pub attempt_count: u32,
-    /// Queue time as RFC3339 text.
-    pub created_at: String,
-    /// Last status update time as RFC3339 text.
-    pub updated_at: String,
-    /// Last send attempt time as RFC3339 text.
-    pub last_attempt_at: Option<String>,
-    /// Successful send time as RFC3339 text.
-    pub sent_at: Option<String>,
-    /// Last send error, when available.
-    pub last_error: Option<Arc<FfiPrivateOperationError>>,
-}
-
-/// One endpoint in the latest Private Payment List view.
-#[derive(uniffi::Record, Clone, Debug)]
-pub struct FfiPrivatePaymentListEndpoint {
-    /// Payment Endpoint Identifier string.
-    pub identifier: String,
-    /// Serialized endpoint payload.
-    pub payload: Arc<FfiPaymentPayload>,
-}
-
-/// Latest valid Private Payment List view for one counterparty.
-#[derive(uniffi::Record, Clone, Debug)]
-pub struct FfiPrivatePaymentListView {
-    /// Stream item id of the latest valid list.
-    pub latest_stream_item_id: Option<u64>,
-    /// Current endpoint payloads sorted by identifier.
-    pub payment_endpoints: Vec<FfiPrivatePaymentListEndpoint>,
-    /// Receive time of the latest valid list as RFC3339 text.
-    pub last_refresh_at: Option<String>,
-}
 
 /// Result category for contact payment resolution.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,32 +84,23 @@ pub struct FfiContactPaymentResolution {
     pub payable_endpoints: Vec<FfiResolvedPaymentEndpoint>,
 }
 
-#[uniffi::export]
+/// Result of preparing a contact payment and resolving payable endpoints.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPreparedContactPayment {
+    /// Endpoint resolution after preparation.
+    pub resolution: FfiContactPaymentResolution,
+    /// Link handshake/advance report when the SDK attempted private setup.
+    pub link_report: Option<FfiLinkedPeerHandshakeReport>,
+    /// Private receive report when the SDK refreshed the private stream.
+    pub receive_report: Option<FfiPrivateStreamIntakeReport>,
+    /// Outbound send report when the SDK processed pending private messages.
+    pub outbound_report: Option<FfiOutboundPrivateSendReport>,
+    /// Private preparation error when public fallback was allowed.
+    pub private_error: Option<Arc<FfiPrivateOperationError>>,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
-    /// Return the latest valid Private Payment List view for a counterparty.
-    pub async fn current_private_payment_list(
-        &self,
-        counterparty: String,
-    ) -> Result<Option<FfiPrivatePaymentListView>, PaykitFfiError> {
-        self.runtime
-            .current_private_payment_list(&parse_public_key(counterparty)?)
-            .await
-            .map(|view| view.map(Into::into))
-            .map_err(Into::into)
-    }
-
-    /// Queue the current complete Private Payment List for one counterparty.
-    pub async fn enqueue_private_payment_list(
-        &self,
-        counterparty: String,
-    ) -> Result<FfiQueuedPrivateMessage, PaykitFfiError> {
-        self.runtime
-            .enqueue_private_payment_list(parse_public_key(counterparty)?)
-            .await
-            .map(Into::into)
-            .map_err(Into::into)
-    }
-
     /// Resolve payable endpoints for one counterparty.
     pub async fn resolve_contact_payment(
         &self,
@@ -184,63 +112,59 @@ impl FfiPaykitSdk {
             .map(Into::into)
             .map_err(Into::into)
     }
-}
 
-impl From<OutboundPrivateMessageStatus> for FfiOutboundPrivateMessageStatus {
-    fn from(value: OutboundPrivateMessageStatus) -> Self {
-        match value {
-            OutboundPrivateMessageStatus::Pending => Self::Pending,
-            OutboundPrivateMessageStatus::Sending => Self::Sending,
-            OutboundPrivateMessageStatus::Sent => Self::Sent,
-            OutboundPrivateMessageStatus::Failed => Self::Failed,
-            OutboundPrivateMessageStatus::Invalid => Self::Invalid,
-            OutboundPrivateMessageStatus::RecoveryRequired => Self::RecoveryRequired,
-            OutboundPrivateMessageStatus::Superseded => Self::Superseded,
-            _ => Self::Unknown,
-        }
+    /// Resolve payable private endpoints for one counterparty.
+    pub async fn resolve_private_contact_payment(
+        &self,
+        counterparty: String,
+        amount: Option<FfiPaymentAmountContext>,
+    ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
+        self.runtime
+            .resolve_private_contact_payment(
+                parse_public_key(counterparty)?,
+                amount.map(Into::into),
+            )
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
     }
-}
 
-impl From<OutboundPrivateMessageRecord> for FfiQueuedPrivateMessage {
-    fn from(value: OutboundPrivateMessageRecord) -> Self {
-        Self {
-            outbound_message_id: value.outbound_message_id,
-            counterparty: value.counterparty.to_string(),
-            kind: value.kind,
-            status: value.status.into(),
-            attempt_count: value.attempt_count,
-            created_at: value.created_at.to_rfc3339(),
-            updated_at: value.updated_at.to_rfc3339(),
-            last_attempt_at: value.last_attempt_at.map(|time| time.to_rfc3339()),
-            sent_at: value.sent_at.map(|time| time.to_rfc3339()),
-            last_error: value.last_error.map(|error| {
-                private_error(
-                    "outbound_private_queue",
-                    "last_send_error",
-                    "last outbound private send error",
-                    error,
-                )
-            }),
-        }
+    /// Resolve payable public endpoints for one counterparty.
+    pub async fn resolve_public_contact_payment(
+        &self,
+        counterparty: String,
+        amount: Option<FfiPaymentAmountContext>,
+    ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
+        self.runtime
+            .resolve_public_contact_payment(parse_public_key(counterparty)?, amount.map(Into::into))
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
     }
-}
 
-impl From<PrivatePaymentListView> for FfiPrivatePaymentListView {
-    fn from(value: PrivatePaymentListView) -> Self {
-        let mut payment_endpoints = value
-            .payment_endpoints
-            .into_iter()
-            .map(|(identifier, payload)| FfiPrivatePaymentListEndpoint {
-                identifier,
-                payload: Arc::new(FfiPaymentPayload::new(payload)),
-            })
-            .collect::<Vec<_>>();
-        payment_endpoints.sort_by(|left, right| left.identifier.cmp(&right.identifier));
-        Self {
-            latest_stream_item_id: value.latest_stream_item_id,
-            payment_endpoints,
-            last_refresh_at: value.last_refresh_at.map(|time| time.to_rfc3339()),
-        }
+    /// Prepare private contact state, then resolve payable endpoints.
+    ///
+    /// The SDK refreshes live session capability, ensures or advances the
+    /// private link when possible, drains currently available private
+    /// send/receive work for the peer, then resolves endpoints private-first.
+    /// Public endpoints are included only when requested.
+    pub async fn prepare_and_resolve_contact_payment(
+        &self,
+        counterparty: String,
+        amount: Option<FfiPaymentAmountContext>,
+        include_public_endpoints: bool,
+        max_advance_steps: u32,
+    ) -> Result<FfiPreparedContactPayment, PaykitFfiError> {
+        self.runtime
+            .prepare_and_resolve_contact_payment(
+                parse_public_key(counterparty)?,
+                amount.map(Into::into),
+                include_public_endpoints,
+                max_advance_steps,
+            )
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
     }
 }
 
@@ -263,6 +187,25 @@ impl From<ContactPaymentResolutionPrivateState> for FfiContactPaymentResolutionP
             ContactPaymentResolutionPrivateState::RecoveryPending => Self::RecoveryPending,
             ContactPaymentResolutionPrivateState::PublicOnlySession => Self::PublicOnlySession,
             _ => Self::Unknown,
+        }
+    }
+}
+
+impl From<PreparedContactPayment> for FfiPreparedContactPayment {
+    fn from(value: PreparedContactPayment) -> Self {
+        Self {
+            resolution: value.resolution.into(),
+            link_report: value.link_report.map(Into::into),
+            receive_report: value.receive_report.map(Into::into),
+            outbound_report: value.outbound_report.map(Into::into),
+            private_error: value.private_error.map(|error| {
+                private_error(
+                    "contact_payment_preparation",
+                    "private_preparation_error",
+                    "private contact payment preparation failed",
+                    error,
+                )
+            }),
         }
     }
 }
@@ -299,7 +242,7 @@ impl From<PaymentTarget> for FfiPaymentTarget {
 impl From<ResolvedPaymentEndpoint> for FfiResolvedPaymentEndpoint {
     fn from(value: ResolvedPaymentEndpoint) -> Self {
         Self {
-            counterparty: value.endpoint.counterparty.to_string(),
+            counterparty: app_public_key(&value.endpoint.counterparty),
             source: value.endpoint.source.into(),
             identifier: value.endpoint.identifier,
             payload: Arc::new(FfiPaymentPayload::new(value.endpoint.payload)),
@@ -322,10 +265,6 @@ impl From<ContactPaymentResolution> for FfiContactPaymentResolution {
     }
 }
 
-fn parse_public_key(value: String) -> Result<paykit_sdk::PubkyPublicKey, PaykitFfiError> {
-    paykit_sdk::PubkyPublicKey::new(value).map_err(Into::into)
-}
-
 fn private_error(
     category: &'static str,
     code: &'static str,
@@ -340,33 +279,10 @@ fn private_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use paykit_sdk::PaymentEndpointCandidate;
-    use std::collections::HashMap;
 
     fn public_key() -> paykit_sdk::PubkyPublicKey {
         parse_public_key("8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io".into()).unwrap()
-    }
-
-    #[test]
-    fn test_private_payment_list_view_sorts_and_wraps_payloads() {
-        let mut payment_endpoints = HashMap::new();
-        payment_endpoints.insert("btc-z".into(), "payload-z".into());
-        payment_endpoints.insert("btc-a".into(), "payload-a".into());
-        let view = FfiPrivatePaymentListView::from(PrivatePaymentListView {
-            latest_stream_item_id: Some(9),
-            payment_endpoints,
-            last_refresh_at: Some("2026-06-18T11:00:00Z".parse().unwrap()),
-        });
-
-        assert_eq!(view.latest_stream_item_id, Some(9));
-        assert_eq!(view.payment_endpoints[0].identifier, "btc-a");
-        assert_eq!(view.payment_endpoints[1].identifier, "btc-z");
-        assert_eq!(view.payment_endpoints[0].payload.export_text(), "payload-a");
-        assert_eq!(
-            view.last_refresh_at.as_deref(),
-            Some("2026-06-18T11:00:00+00:00")
-        );
     }
 
     #[test]
@@ -403,31 +319,5 @@ mod tests {
             ffi.payable_endpoints[0].target.payload.export_text(),
             "wallet-target"
         );
-    }
-
-    #[test]
-    fn test_queued_private_message_redacts_last_error() {
-        let record = OutboundPrivateMessageRecord {
-            outbound_message_id: 4,
-            counterparty: public_key(),
-            kind: "paykit.private_payment_list".into(),
-            raw_json: "{\"secret\":true}".into(),
-            status: OutboundPrivateMessageStatus::Failed,
-            attempt_count: 1,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            last_attempt_at: None,
-            sent_at: None,
-            last_error: Some("private send secret".into()),
-        };
-
-        let ffi = FfiQueuedPrivateMessage::from(record);
-
-        assert_eq!(ffi.status, FfiOutboundPrivateMessageStatus::Failed);
-        let error = ffi.last_error.unwrap();
-        assert_eq!(error.category(), "outbound_private_queue");
-        assert_eq!(error.code(), "last_send_error");
-        assert_eq!(error.export_debug_details(), "private send secret");
-        assert!(!format!("{error:?}").contains("private send secret"));
     }
 }

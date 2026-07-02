@@ -10,7 +10,12 @@ use paykit_sdk::{
     PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord, PubkyPublicKey,
 };
 
-use crate::{errors::validation_error, json::FfiPrivateJsonObject, PaykitFfiError};
+use crate::{
+    errors::validation_error,
+    json::FfiPrivateJsonObject,
+    session::{app_public_key, parse_public_key as parse_pubky_public_key},
+    PaykitFfiError,
+};
 
 use super::{
     FfiBillingPeriod, FfiPaymentProofRecord, FfiPaymentProofSubmission, FfiPaymentReference,
@@ -220,7 +225,7 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
 
     fn try_from(value: PaymentRequestRecord) -> Result<Self, Self::Error> {
         Ok(Self {
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             payment_request_id: value.payment_request_id,
             local_role: value.local_role.map(Into::into),
             state: value.state.into(),
@@ -276,7 +281,7 @@ pub(super) fn payment_request_records_to_ffi(
 }
 
 pub(super) fn parse_public_key(value: String) -> Result<PubkyPublicKey, PaykitFfiError> {
-    PubkyPublicKey::new(value).map_err(Into::into)
+    parse_pubky_public_key(value)
 }
 
 pub(super) fn parse_payment_request_id(value: String) -> Result<PaymentRequestId, PaykitFfiError> {

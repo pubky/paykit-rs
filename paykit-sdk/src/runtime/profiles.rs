@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -63,6 +64,27 @@ where
         }))
     }
 
+    /// Delete the local public Paykit profile.
+    pub async fn delete_paykit_profile(&self) -> Result<()> {
+        let session_access = self
+            .load_session_access_for_initialized_identity("delete Paykit profile")
+            .await?;
+        let path = self.config.paykit_profile_path();
+        session_access
+            .session
+            .storage()
+            .delete(path.as_str())
+            .await
+            .map(|_| ())
+            .or_else(|err| {
+                if is_pubky_not_found(&err) {
+                    Ok(())
+                } else {
+                    Err(map_pubky_transport_error("delete Paykit profile", err))
+                }
+            })
+    }
+
     /// Publish a public blob under the configured Paykit blob prefix.
     pub async fn publish_paykit_blob(
         &self,
@@ -91,6 +113,25 @@ where
             size_bytes,
             updated_at: self.clock.now(),
         })
+    }
+
+    /// Upload profile avatar bytes under the configured Paykit blob prefix.
+    ///
+    /// The blob name is derived from the content hash and image content type.
+    pub async fn upload_profile_avatar(
+        &self,
+        bytes: Vec<u8>,
+        content_type: &str,
+    ) -> Result<PaykitBlobRecord> {
+        if bytes.is_empty() {
+            return Err(PaykitSdkError::Protocol(
+                "profile avatar bytes must not be empty".into(),
+            ));
+        }
+        let extension = avatar_extension(content_type)?;
+        let digest = Sha256::digest(&bytes);
+        let blob_name = format!("avatar-{}.{extension}", hex::encode(&digest[..8]));
+        self.publish_paykit_blob(blob_name, bytes).await
     }
 
     /// Delete a public blob from the configured Paykit blob prefix.
@@ -212,5 +253,39 @@ where
                 .map(|record| record.map(ContactProfileResolution::from_pubky));
         }
         Ok(None)
+    }
+
+    /// Resolve a public profile, preferring Paykit Profile.
+    pub async fn resolve_profile(
+        &self,
+        public_key: PubkyPublicKey,
+        allow_pubky_profile_fallback: bool,
+    ) -> Result<Option<ContactProfileResolution>> {
+        self.resolve_contact_profile(public_key, allow_pubky_profile_fallback)
+            .await
+    }
+
+    /// Resolve this identity's public profile.
+    pub async fn current_profile(
+        &self,
+        allow_pubky_profile_fallback: bool,
+    ) -> Result<Option<ContactProfileResolution>> {
+        let public_key = self
+            .require_initialized_identity("resolve current profile")
+            .await?;
+        self.resolve_profile(public_key, allow_pubky_profile_fallback)
+            .await
+    }
+}
+
+fn avatar_extension(content_type: &str) -> Result<&'static str> {
+    match content_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Ok("jpg"),
+        "image/png" => Ok("png"),
+        "image/webp" => Ok("webp"),
+        "image/gif" => Ok("gif"),
+        _ => Err(PaykitSdkError::Protocol(format!(
+            "unsupported profile avatar content type: {content_type}"
+        ))),
     }
 }

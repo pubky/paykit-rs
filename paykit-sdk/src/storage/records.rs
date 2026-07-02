@@ -90,7 +90,7 @@ pub struct PaymentEndpointReservationRecord {
     /// Optional reservation expiry.
     pub expires_at: Option<DateTime<Utc>>,
     /// Time at which adapter cancellation was claimed for this reservation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cancellation_started_at: Option<DateTime<Utc>>,
     /// Creation time.
     pub created_at: DateTime<Utc>,

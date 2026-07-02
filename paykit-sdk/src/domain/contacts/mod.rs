@@ -4,16 +4,19 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::{
-    domain::publication::PublicationStatus, PaykitSdkError, PaymentAmountContext,
-    PaymentEndpointCandidate, PaymentTarget, PubkyPublicKey, Result,
+    domain::linked_peers::LinkedPeerHandshakeReport,
+    domain::outbound_private::OutboundPrivateSendReport,
+    domain::private_stream::PrivateStreamIntakeReport, domain::publication::PublicationStatus,
+    PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate, PaymentTarget, PubkyPublicKey,
+    Result,
 };
 
 /// Default public Paykit profile path.
-pub const PAYKIT_PROFILE_PATH: &str = "/pub/paykit/profile.json";
+pub const DEFAULT_PAYKIT_PROFILE_PATH: &str = "/pub/paykit/profile.json";
 /// Default public Paykit blob prefix.
-pub const PAYKIT_PROFILE_BLOB_PATH_PREFIX: &str = "/pub/paykit/blobs/";
+pub const DEFAULT_PAYKIT_PROFILE_BLOB_PATH_PREFIX: &str = "/pub/paykit/blobs/";
 /// Default public Paykit contact marker prefix.
-pub const PAYKIT_PUBLIC_CONTACT_PATH_PREFIX: &str = "/pub/paykit/contacts/";
+pub const DEFAULT_PAYKIT_PUBLIC_CONTACT_PATH_PREFIX: &str = "/pub/paykit/contacts/";
 /// Pubky app profile path used by read-only fallback/helper APIs.
 pub const PUBKY_PROFILE_PATH: &str = "/pub/pubky.app/profile.json";
 /// Pubky app follows path used by read-only helper APIs.
@@ -40,13 +43,13 @@ const MAX_PUBKY_PROFILE_LINKS: usize = 32;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaykitProfile {
     /// Public display name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub display_name: Option<String>,
     /// Public image pointer such as a Pubky path or URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub image_uri: Option<String>,
     /// App-specific public profile fields.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub extra: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
@@ -56,16 +59,16 @@ pub struct PubkyProfile {
     /// Public display name.
     pub name: String,
     /// Optional profile bio.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub bio: Option<String>,
     /// Optional public image pointer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub image: Option<String>,
     /// Optional public profile links.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub links: Option<Vec<PubkyProfileLink>>,
     /// Optional public status text.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub status: Option<String>,
 }
 
@@ -107,6 +110,50 @@ impl PubkyProfile {
             }
         }
         Ok(())
+    }
+
+    fn drop_invalid_optional_fields(&mut self) {
+        if validate_optional_text(
+            self.bio.as_deref(),
+            "Pubky profile bio",
+            MAX_PUBKY_PROFILE_TEXT_CHARS,
+            true,
+        )
+        .is_err()
+        {
+            self.bio = None;
+        }
+
+        if validate_optional_text(
+            self.image.as_deref(),
+            "Pubky profile image",
+            MAX_PUBKY_PROFILE_URI_CHARS,
+            false,
+        )
+        .is_err()
+        {
+            self.image = None;
+        }
+
+        if validate_optional_text(
+            self.status.as_deref(),
+            "Pubky profile status",
+            MAX_PUBKY_PROFILE_TEXT_CHARS,
+            true,
+        )
+        .is_err()
+        {
+            self.status = None;
+        }
+
+        if let Some(links) = self.links.take() {
+            let valid_links = links
+                .into_iter()
+                .take(MAX_PUBKY_PROFILE_LINKS)
+                .filter(|link| link.validate().is_ok())
+                .collect::<Vec<_>>();
+            self.links = (!valid_links.is_empty()).then_some(valid_links);
+        }
     }
 }
 
@@ -593,8 +640,9 @@ fn validate_paykit_blob_path(blob_prefix: &str, path: &str) -> Result<String> {
 }
 
 pub(crate) fn parse_pubky_profile_json(raw_json: &str) -> Result<PubkyProfile> {
-    let profile = serde_json::from_str::<PubkyProfile>(raw_json)
+    let mut profile = serde_json::from_str::<PubkyProfile>(raw_json)
         .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky profile JSON: {err}")))?;
+    profile.drop_invalid_optional_fields();
     profile.validate()?;
     Ok(profile)
 }
@@ -668,6 +716,36 @@ pub struct ContactPaymentResolutionRequest {
     pub amount: Option<PaymentAmountContext>,
     /// Include public Payment Endpoints after private candidates.
     pub include_public_endpoints: bool,
+}
+
+/// Result of preparing a contact payment and resolving payable endpoints.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedContactPayment {
+    /// Endpoint resolution after preparation.
+    pub resolution: ContactPaymentResolution,
+    /// Link handshake/advance report when the SDK attempted private setup.
+    pub link_report: Option<LinkedPeerHandshakeReport>,
+    /// Private receive report when the SDK refreshed the private stream.
+    pub receive_report: Option<PrivateStreamIntakeReport>,
+    /// Outbound send report when the SDK processed pending private messages.
+    pub outbound_report: Option<OutboundPrivateSendReport>,
+    /// Private preparation error when public fallback was allowed.
+    pub private_error: Option<String>,
+}
+
+impl fmt::Debug for PreparedContactPayment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedContactPayment")
+            .field("resolution", &self.resolution)
+            .field("link_report", &self.link_report)
+            .field("receive_report", &self.receive_report)
+            .field("outbound_report", &self.outbound_report)
+            .field(
+                "private_error",
+                &self.private_error.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Payment Endpoint paired with the target needed to pay through it.

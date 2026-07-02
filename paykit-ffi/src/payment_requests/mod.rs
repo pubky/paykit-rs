@@ -4,7 +4,7 @@ use paykit_lib::PaymentReference;
 
 use crate::{
     errors::validation_error, json::FfiPrivateJsonObject,
-    payment_resolution::FfiOutboundPrivateMessageStatus, sdk::FfiPaykitSdk, PaykitFfiError,
+    private_lists::FfiOutboundPrivateMessageStatus, sdk::FfiPaykitSdk, PaykitFfiError,
 };
 
 mod conversions;
@@ -235,7 +235,7 @@ pub struct FfiPaymentProofSubmission {
     pub proof: Arc<FfiPrivateJsonObject>,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Return inbound Payment Requests received from one counterparty.
     pub async fn received_payment_requests_from(

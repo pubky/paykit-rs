@@ -8,7 +8,7 @@ use std::{
 
 use super::*;
 use super::{
-    payment_resolution::{payable_from_batch, PrivateRecoveryOutcome},
+    payment_resolution::{payable_from_batch, prefer_private_endpoints, PrivateRecoveryOutcome},
     recovery::{local_recovery_marker_belongs_to_current_episode, RecoveryRequiredUpdate},
 };
 use crate::{
@@ -23,7 +23,7 @@ use crate::{
         EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
         NewOutboundPrivateMessage, PublicEndpointRecord,
     },
-    OutboundPrivateMessageStatus, PubkySessionAccess,
+    EventIdConflict, OutboundPrivateMessageStatus, PubkySessionAccess,
 };
 use paykit_lib::PrivateApplicationMessage;
 
@@ -34,6 +34,16 @@ impl Clock for FixedClock {
     fn now(&self) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
     }
+}
+
+#[test]
+fn test_public_resource_uri_uses_pubky_scheme() {
+    let public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+
+    assert_eq!(
+        public_resource_uri(&public_key, "/pub/staging.bitkit.to/profile.json"),
+        format!("pubky://{public_key}/pub/staging.bitkit.to/profile.json")
+    );
 }
 
 struct TestPubkySessionProvider {
@@ -644,6 +654,50 @@ async fn seed_private_capable_identity_and_link(
                 link_snapshot: Some(vec![1, 2, 3]),
                 handshake_snapshot: None,
                 handshake_role: None,
+                generation: 0,
+                checkpointed_at: FixedClock.now(),
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn seed_private_capable_identity_and_handshake(
+    storage: &InMemoryStorage,
+    counterparty: PubkyPublicKey,
+) {
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(PubkyPublicKey::from_public_key(
+                &pubky::Keypair::random().public_key(),
+            )),
+            capability: PubkyIdentityCapability::PrivateLinkCapable,
+            local_secret_available: true,
+            initialized_at: FixedClock.now(),
+            sign_out_generation: 0,
+        })
+        .await
+        .unwrap();
+    storage
+        .transaction(move |tx| {
+            tx.save_linked_peer(LinkedPeerRecord {
+                counterparty: counterparty.clone(),
+                state: LinkedPeerState::Linking,
+                last_sync_at: Some(FixedClock.now()),
+                last_private_receive_at: None,
+                failure_count: 0,
+                local_recovery_attempt_id: None,
+                local_recovery_marker_created_at: None,
+                local_recovery_marker_last_error: None,
+                remote_recovery_attempt_id: None,
+                remote_recovery_marker_observed_at: None,
+            });
+            tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                counterparty,
+                link_snapshot: None,
+                handshake_snapshot: Some(vec![1, 2, 3]),
+                handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
                 generation: 0,
                 checkpointed_at: FixedClock.now(),
             });

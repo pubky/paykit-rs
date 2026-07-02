@@ -12,11 +12,13 @@ use paykit_sdk::{
     PaymentEndpointSelectionRequest, PaymentEndpointSource, PaymentTarget, PubkyPublicKey,
     ReceivingDetail, ReceivingDetailScope,
 };
+use sha2::{Digest, Sha256};
 
 use crate::{
     errors::{validation_error, PaykitFfiError},
     profiles::FfiPublicationStatus,
     sdk::FfiPaykitSdk,
+    session::app_public_key,
 };
 
 /// Payment adapter payload text with redacted debug output.
@@ -115,6 +117,26 @@ pub struct FfiPaymentEndpointReservation {
     pub expires_at: Option<String>,
     /// Adapter attribution metadata.
     pub attribution: Arc<FfiReservationAttribution>,
+}
+
+/// Reservation callback result kind.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiReceivingDetailReservationResponseKind {
+    /// Use `current_receiving_details` for this private list.
+    UseCurrentReceivingDetails,
+    /// Use the reservations carried by this response, including an empty list.
+    Reservations,
+    /// Reserved invalid response kind.
+    Unknown,
+}
+
+/// Explicit result for private receiving-detail reservation callbacks.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiReceivingDetailReservationResponse {
+    /// Response kind.
+    pub kind: FfiReceivingDetailReservationResponseKind,
+    /// Reserved details when `kind` is `Reservations`.
+    pub reservations: Vec<FfiPaymentEndpointReservation>,
 }
 
 /// Request passed to cancel a receiving-detail reservation.
@@ -220,7 +242,7 @@ pub trait FfiSdkPaymentAdapter: Send + Sync {
     fn reserve_receiving_details(
         &self,
         counterparty: String,
-    ) -> Result<Option<Vec<FfiPaymentEndpointReservation>>, PaykitFfiError>;
+    ) -> Result<FfiReceivingDetailReservationResponse, PaykitFfiError>;
 
     /// Cancel a previously reserved receiving detail.
     fn cancel_receiving_detail_reservation(
@@ -265,10 +287,9 @@ impl PaymentAdapter for FfiSdkPaymentAdapterAdapter {
         counterparty: &PubkyPublicKey,
     ) -> paykit_sdk::Result<Option<Vec<PaymentEndpointReservation>>> {
         self.adapter
-            .reserve_receiving_details(counterparty.to_string())
+            .reserve_receiving_details(app_public_key(counterparty))
             .map_err(|err| payment_adapter_error(err, "reserve receiving details"))?
-            .map(|reservations| reservations.into_iter().map(TryInto::try_into).collect())
-            .transpose()
+            .try_into()
     }
 
     async fn cancel_receiving_detail_reservation(
@@ -284,19 +305,23 @@ impl PaymentAdapter for FfiSdkPaymentAdapterAdapter {
         &self,
         request: &PaymentEndpointSelectionRequest,
     ) -> paykit_sdk::Result<Vec<PaymentEndpointCandidate>> {
-        let candidates_by_id = request
-            .candidates
-            .iter()
-            .enumerate()
-            .map(|(index, candidate)| {
-                (
-                    candidate_id(index),
-                    FfiPaymentEndpointCandidate::from_candidate(candidate, candidate_id(index)),
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut seen_candidate_ids = HashSet::new();
+        let mut candidates_by_id = Vec::with_capacity(request.candidates.len());
+        for candidate in &request.candidates {
+            let id = candidate_id(candidate);
+            if !seen_candidate_ids.insert(id.clone()) {
+                return Err(payment_adapter_error(
+                    validation_error("duplicate payment endpoint candidate"),
+                    "select payment endpoints",
+                ));
+            }
+            candidates_by_id.push((
+                id.clone(),
+                FfiPaymentEndpointCandidate::from_candidate(candidate, id),
+            ));
+        }
         let ffi_request = FfiPaymentEndpointSelectionRequest {
-            counterparty: request.counterparty.to_string(),
+            counterparty: app_public_key(&request.counterparty),
             amount: request.amount.clone().map(Into::into),
             candidates: candidates_by_id
                 .iter()
@@ -340,7 +365,7 @@ impl PaymentAdapter for FfiSdkPaymentAdapterAdapter {
         self.adapter
             .build_payment_target(FfiPaymentEndpointCandidate::from_candidate(
                 endpoint,
-                "candidate".into(),
+                candidate_id(endpoint),
             ))
             .map_err(|err| payment_adapter_error(err, "build payment target"))
             .map(Into::into)
@@ -361,8 +386,11 @@ impl FfiSdkPaymentAdapter for FfiNoopSdkPaymentAdapter {
     fn reserve_receiving_details(
         &self,
         _counterparty: String,
-    ) -> Result<Option<Vec<FfiPaymentEndpointReservation>>, PaykitFfiError> {
-        Ok(None)
+    ) -> Result<FfiReceivingDetailReservationResponse, PaykitFfiError> {
+        Ok(FfiReceivingDetailReservationResponse {
+            kind: FfiReceivingDetailReservationResponseKind::UseCurrentReceivingDetails,
+            reservations: Vec::new(),
+        })
     }
 
     fn cancel_receiving_detail_reservation(
@@ -387,12 +415,28 @@ impl FfiSdkPaymentAdapter for FfiNoopSdkPaymentAdapter {
     }
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     pub async fn sync_public_endpoints(&self) -> Result<FfiEndpointSyncReport, PaykitFfiError> {
         self.runtime
             .sync_public_endpoints()
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Publish explicit public receiving details and remove stale SDK-managed endpoints.
+    pub async fn sync_public_endpoints_with_receiving_details(
+        &self,
+        receiving_details: Vec<FfiReceivingDetail>,
+    ) -> Result<FfiEndpointSyncReport, PaykitFfiError> {
+        let receiving_details = receiving_details
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<paykit_sdk::Result<Vec<_>>>()?;
+        self.runtime
+            .sync_public_endpoints_with_receiving_details(receiving_details)
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -408,7 +452,7 @@ impl From<ReceivingDetailScope> for FfiReceivingDetailScope {
             },
             ReceivingDetailScope::Private { counterparty } => Self {
                 kind: FfiReceivingDetailScopeKind::Private,
-                counterparty: Some(counterparty.to_string()),
+                counterparty: Some(app_public_key(&counterparty)),
             },
             _ => Self {
                 kind: FfiReceivingDetailScopeKind::Unknown,
@@ -433,12 +477,64 @@ impl TryFrom<FfiPaymentEndpointReservation> for PaymentEndpointReservation {
     type Error = paykit_sdk::PaykitSdkError;
 
     fn try_from(value: FfiPaymentEndpointReservation) -> Result<Self, Self::Error> {
-        Ok(Self {
-            reservation_id: value.reservation_id,
-            receiving_detail: value.receiving_detail.try_into()?,
-            expires_at: value.expires_at.map(parse_rfc3339_utc).transpose()?,
-            attribution: value.attribution.export_fields(),
-        })
+        let receiving_detail: ReceivingDetail = value.receiving_detail.try_into()?;
+        payment_endpoint_reservation_from_parts(
+            value.reservation_id,
+            receiving_detail.identifier,
+            receiving_detail.payload,
+            value.expires_at,
+            value.attribution.export_fields(),
+        )
+    }
+}
+
+pub(crate) fn payment_endpoint_reservation_from_parts(
+    reservation_id: String,
+    identifier: String,
+    payload: String,
+    expires_at: Option<String>,
+    attribution: HashMap<String, String>,
+) -> paykit_sdk::Result<PaymentEndpointReservation> {
+    Ok(PaymentEndpointReservation {
+        reservation_id,
+        receiving_detail: ReceivingDetail {
+            identifier,
+            payload,
+        },
+        expires_at: expires_at.map(parse_rfc3339_utc).transpose()?,
+        attribution,
+    })
+}
+
+impl TryFrom<FfiReceivingDetailReservationResponse> for Option<Vec<PaymentEndpointReservation>> {
+    type Error = paykit_sdk::PaykitSdkError;
+
+    fn try_from(value: FfiReceivingDetailReservationResponse) -> Result<Self, Self::Error> {
+        match value.kind {
+            FfiReceivingDetailReservationResponseKind::UseCurrentReceivingDetails => {
+                if !value.reservations.is_empty() {
+                    return Err(paykit_sdk::PaykitSdkError::PaymentAdapter {
+                        context:
+                            "reservation response cannot include reservations when using current details"
+                                .into(),
+                        source: None,
+                    });
+                }
+                Ok(None)
+            }
+            FfiReceivingDetailReservationResponseKind::Reservations => value
+                .reservations
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<paykit_sdk::Result<Vec<_>>>()
+                .map(Some),
+            FfiReceivingDetailReservationResponseKind::Unknown => {
+                Err(paykit_sdk::PaykitSdkError::PaymentAdapter {
+                    context: "unknown receiving-detail reservation response kind".into(),
+                    source: None,
+                })
+            }
+        }
     }
 }
 
@@ -446,7 +542,7 @@ impl From<PaymentEndpointReservationCancellation> for FfiPaymentEndpointReservat
     fn from(value: PaymentEndpointReservationCancellation) -> Self {
         Self {
             reservation_id: value.reservation_id,
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             identifier: value.identifier,
             payload_hash: value.payload_hash,
             attribution: Arc::new(FfiReservationAttribution::new(value.attribution)),
@@ -477,7 +573,7 @@ impl FfiPaymentEndpointCandidate {
     fn from_candidate(value: &PaymentEndpointCandidate, candidate_id: String) -> Self {
         Self {
             candidate_id,
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             source: value.source.clone().into(),
             identifier: value.identifier.clone(),
             payload: Arc::new(FfiPaymentPayload::new(value.payload.clone())),
@@ -513,11 +609,28 @@ impl From<EndpointSyncReport> for FfiEndpointSyncReport {
     }
 }
 
-fn candidate_id(index: usize) -> String {
-    format!("candidate-{index}")
+fn candidate_id(candidate: &PaymentEndpointCandidate) -> String {
+    let mut digest = Sha256::new();
+    digest.update(candidate.counterparty.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(payment_endpoint_source_tag(&candidate.source).as_bytes());
+    digest.update([0]);
+    digest.update(candidate.identifier.as_bytes());
+    digest.update([0]);
+    digest.update(candidate.payload.as_bytes());
+    let digest = digest.finalize();
+    format!("candidate-{}", hex::encode(&digest[..16]))
 }
 
-fn parse_rfc3339_utc(value: String) -> paykit_sdk::Result<DateTime<Utc>> {
+fn payment_endpoint_source_tag(source: &PaymentEndpointSource) -> &'static str {
+    match source {
+        PaymentEndpointSource::PrivatePaymentList => "private",
+        PaymentEndpointSource::PublicPaymentEndpoint => "public",
+        _ => "unknown",
+    }
+}
+
+pub(crate) fn parse_rfc3339_utc(value: String) -> paykit_sdk::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&value)
         .map(|time| time.with_timezone(&Utc))
         .map_err(|err| paykit_sdk::PaykitSdkError::Protocol(format!("invalid RFC3339 time: {err}")))
@@ -540,10 +653,12 @@ fn payment_adapter_unavailable() -> PaykitFfiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[derive(Default)]
     struct TestPaymentAdapter {
         selected_ids: Vec<String>,
+        built_candidate_ids: Arc<Mutex<Vec<String>>>,
     }
 
     impl FfiSdkPaymentAdapter for TestPaymentAdapter {
@@ -560,8 +675,11 @@ mod tests {
         fn reserve_receiving_details(
             &self,
             _counterparty: String,
-        ) -> Result<Option<Vec<FfiPaymentEndpointReservation>>, PaykitFfiError> {
-            Ok(None)
+        ) -> Result<FfiReceivingDetailReservationResponse, PaykitFfiError> {
+            Ok(FfiReceivingDetailReservationResponse {
+                kind: FfiReceivingDetailReservationResponseKind::UseCurrentReceivingDetails,
+                reservations: Vec::new(),
+            })
         }
 
         fn cancel_receiving_detail_reservation(
@@ -575,7 +693,7 @@ mod tests {
             &self,
             request: FfiPaymentEndpointSelectionRequest,
         ) -> Result<Vec<String>, PaykitFfiError> {
-            assert_eq!(request.candidates[0].candidate_id, "candidate-0");
+            assert!(request.candidates[0].candidate_id.starts_with("candidate-"));
             Ok(self.selected_ids.clone())
         }
 
@@ -583,6 +701,10 @@ mod tests {
             &self,
             endpoint: FfiPaymentEndpointCandidate,
         ) -> Result<FfiPaymentTarget, PaykitFfiError> {
+            self.built_candidate_ids
+                .lock()
+                .unwrap()
+                .push(endpoint.candidate_id.clone());
             Ok(FfiPaymentTarget {
                 payload: Arc::new(FfiPaymentPayload::new(format!(
                     "target:{}",
@@ -606,15 +728,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_select_payment_endpoint_ids_maps_back_to_candidates() {
-        let adapter = FfiSdkPaymentAdapterAdapter {
-            adapter: Arc::new(TestPaymentAdapter {
-                selected_ids: vec!["candidate-1".into()],
-            }),
-        };
         let candidates = vec![
             candidate("btc-mainnet-address"),
             candidate("btc-mainnet-lnurl"),
         ];
+        let adapter = FfiSdkPaymentAdapterAdapter {
+            adapter: Arc::new(TestPaymentAdapter {
+                selected_ids: vec![candidate_id(&candidates[1])],
+                built_candidate_ids: Arc::default(),
+            }),
+        };
         let selected = adapter
             .select_payment_endpoints(&PaymentEndpointSelectionRequest {
                 counterparty: candidates[0].counterparty.clone(),
@@ -635,6 +758,7 @@ mod tests {
         let adapter = FfiSdkPaymentAdapterAdapter {
             adapter: Arc::new(TestPaymentAdapter {
                 selected_ids: vec!["missing".into()],
+                built_candidate_ids: Arc::default(),
             }),
         };
         let candidates = vec![candidate("btc-mainnet-address")];
@@ -655,15 +779,43 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_payment_target_maps_payload() {
+        let built_candidate_ids = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = candidate("btc-mainnet-address");
+        let expected_id = candidate_id(&endpoint);
         let adapter = FfiSdkPaymentAdapterAdapter {
-            adapter: Arc::new(TestPaymentAdapter::default()),
+            adapter: Arc::new(TestPaymentAdapter {
+                selected_ids: Vec::new(),
+                built_candidate_ids: built_candidate_ids.clone(),
+            }),
         };
-        let target = adapter
-            .build_payment_target(&candidate("btc-mainnet-address"))
-            .await
-            .unwrap();
+        let target = adapter.build_payment_target(&endpoint).await.unwrap();
 
         assert_eq!(target.payload, "target:btc-mainnet-address");
+        assert_eq!(*built_candidate_ids.lock().unwrap(), vec![expected_id]);
+    }
+
+    #[test]
+    fn test_reservation_response_rejects_mixed_meaning() {
+        let response = FfiReceivingDetailReservationResponse {
+            kind: FfiReceivingDetailReservationResponseKind::UseCurrentReceivingDetails,
+            reservations: vec![FfiPaymentEndpointReservation {
+                reservation_id: "reservation-1".into(),
+                receiving_detail: FfiReceivingDetail {
+                    identifier: "btc-mainnet-address".into(),
+                    payload: Arc::new(FfiPaymentPayload::new("bc1qexample".into())),
+                },
+                expires_at: None,
+                attribution: Arc::new(FfiReservationAttribution::new(HashMap::new())),
+            }],
+        };
+
+        let result: paykit_sdk::Result<Option<Vec<PaymentEndpointReservation>>> =
+            response.try_into();
+
+        assert!(matches!(
+            result,
+            Err(paykit_sdk::PaykitSdkError::PaymentAdapter { .. })
+        ));
     }
 
     #[test]

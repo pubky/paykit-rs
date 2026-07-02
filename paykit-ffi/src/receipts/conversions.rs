@@ -9,7 +9,10 @@ use paykit_sdk::{
 };
 
 use crate::{
-    errors::validation_error, json::FfiPrivateJsonObject, payment_requests::FfiPaymentReference,
+    errors::validation_error,
+    json::FfiPrivateJsonObject,
+    payment_requests::FfiPaymentReference,
+    session::{app_public_key, parse_public_key as parse_pubky_public_key},
     PaykitFfiError,
 };
 
@@ -90,7 +93,7 @@ impl TryFrom<FfiReceiptDraft> for ReceiptDraft {
 impl From<ReceiptIssuanceView> for FfiReceiptIssuanceView {
     fn from(value: ReceiptIssuanceView) -> Self {
         Self {
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             receipt_id: value.receipt_id,
             receipt_access_event_id: value.receipt_access_event_id,
             payment_reference: Arc::new(FfiPaymentReference::from_validated_text(
@@ -113,7 +116,7 @@ impl From<ReceiptIssuanceView> for FfiReceiptIssuanceView {
 impl From<ReceiptAccessView> for FfiReceiptAccessView {
     fn from(value: ReceiptAccessView) -> Self {
         Self {
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             event_id: value.event_id,
             receipt_id: value.receipt_id,
             payment_reference: Arc::new(FfiPaymentReference::from_validated_text(
@@ -134,7 +137,7 @@ impl TryFrom<ReceiptRecord> for FfiReceiptRecord {
 
     fn try_from(value: ReceiptRecord) -> Result<Self, Self::Error> {
         Ok(Self {
-            issuer: value.issuer.to_string(),
+            issuer: app_public_key(&value.issuer),
             receipt_access_event_id: value.receipt_access_event_id,
             receipt_id: value.receipt_id,
             payment_reference: Arc::new(FfiPaymentReference::from_validated_text(
@@ -142,7 +145,7 @@ impl TryFrom<ReceiptRecord> for FfiReceiptRecord {
             )),
             payment_request_id: value.payment_request_id,
             billing_period: value.billing_period.map(Into::into),
-            recipient_public_key: value.recipient_public_key.to_string(),
+            recipient_public_key: app_public_key(&value.recipient_public_key),
             payment_endpoint_identifier: value.payment_endpoint_identifier,
             amount: value.amount.map(Into::into),
             metadata: FfiPrivateJsonObject::from_json_map("Receipt metadata", &value.metadata)?,
@@ -172,7 +175,7 @@ pub(super) fn receipt_records_to_ffi(
 pub(super) fn parse_public_key(
     value: String,
 ) -> Result<paykit_sdk::PubkyPublicKey, PaykitFfiError> {
-    paykit_sdk::PubkyPublicKey::new(value).map_err(Into::into)
+    parse_pubky_public_key(value)
 }
 
 fn parse_receipt_id(value: String) -> Result<ReceiptId, PaykitFfiError> {

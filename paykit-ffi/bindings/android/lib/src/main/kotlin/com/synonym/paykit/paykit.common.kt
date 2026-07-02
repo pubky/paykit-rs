@@ -108,402 +108,515 @@ public object NoPointer
 /**
  * Stateful Paykit SDK runtime handle.
  */
-public interface FfiPaykitSdkInterface {
+public interface PaykitSdkInterface {
 
     /**
      * Start an Encrypted Link Handshake as the responder.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `acceptLinkWithPeer`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `acceptLinkWithPeer`(`counterparty`: kotlin.String): LinkedPeerHandshakeReport
 
     /**
      * Queue acceptance for a received Payment Request and return local derived state.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `acceptPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String): FfiPaymentRequestRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `acceptPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String): PaymentRequestRecord
 
     /**
      * Return received Payment Requests that need a local payer response.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `actionableReceivedPaymentRequests`(): List<FfiPaymentRequestRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `actionableReceivedPaymentRequests`(): List<PaymentRequestRecord>
 
     /**
      * Return accepted recurring Payment Requests across non-blocked counterparties.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `activeRecurringPaymentRequests`(): List<FfiPaymentRequestRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `activeRecurringPaymentRequests`(): List<PaymentRequestRecord>
 
     /**
      * Advance the stored Encrypted Link Handshake for one counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `advanceLinkHandshake`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `advanceLinkHandshake`(`counterparty`: kotlin.String): LinkedPeerHandshakeReport
 
     /**
      * Block a counterparty for local Paykit private workflows.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `blockPeer`(`counterparty`: kotlin.String): FfiLinkedPeerRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `blockPeer`(`counterparty`: kotlin.String): LinkedPeerRecord
 
     /**
      * Queue cancellation for a known non-terminal Payment Request.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `cancelPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): FfiPaymentRequestRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `cancelPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): PaymentRequestRecord
+
+    /**
+     * Queue an empty Private Payment List for one counterparty.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `clearPrivatePaymentList`(`counterparty`: kotlin.String): QueuedPrivateMessage
+
+    /**
+     * Queue an empty Private Payment List and process that counterparty's queue.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `clearPrivatePaymentListAndProcessOutbound`(`counterparty`: kotlin.String): PrivatePaymentListDeliveryReport
 
     /**
      * Return this runtime's configuration.
      */
-    public fun `config`(): FfiPaykitSdkConfig
+    public fun `config`(): PaykitSdkConfig
 
     /**
      * Return one local Contact Record.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `contactRecord`(`publicKey`: kotlin.String): FfiContactRecord?
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `contactRecord`(`publicKey`: kotlin.String): ContactRecord?
 
     /**
      * Return all local Contact Records.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `contactRecords`(): List<FfiContactRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `contactRecords`(): List<ContactRecord>
 
     /**
      * Return the latest valid Private Payment List view for a counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `currentPrivatePaymentList`(`counterparty`: kotlin.String): FfiPrivatePaymentListView?
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `currentPrivatePaymentList`(`counterparty`: kotlin.String): PrivatePaymentListView?
+
+    /**
+     * Resolve this identity's public profile.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `currentProfile`(`allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
 
     /**
      * Delete a blob by `pubky://` URI or configured Paykit profile path.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `deletePaykitBlob`(`uriOrPath`: kotlin.String)
+
+    /**
+     * Delete this identity's Paykit Profile.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `deletePaykitProfile`()
 
     /**
      * Return tracked Encrypted Link recovery marker state for a counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `encryptedLinkRecoveryMarkerStatus`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport?
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `encryptedLinkRecoveryMarkerStatus`(`counterparty`: kotlin.String): EncryptedLinkRecoveryMarkerReport?
 
     /**
      * Queue the current complete Private Payment List for one counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `enqueuePrivatePaymentList`(`counterparty`: kotlin.String): FfiQueuedPrivateMessage
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `enqueuePrivatePaymentList`(`counterparty`: kotlin.String): QueuedPrivateMessage
+
+    /**
+     * Queue an explicit complete Private Payment List for one counterparty.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `enqueuePrivatePaymentListWithReceivingDetails`(`counterparty`: kotlin.String, `receivingDetails`: List<ReceivingDetail>): QueuedPrivateMessage
+
+    /**
+     * Start or advance an Encrypted Link Handshake for one counterparty.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `ensureLinkWithPeer`(`counterparty`: kotlin.String, `maxAdvanceSteps`: kotlin.UInt): LinkedPeerHandshakeReport
 
     /**
      * Export SDK-managed backup state as an opaque blob.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `exportBackupState`(): FfiSdkBackupBlob
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `exportBackupState`(): SdkBackupBlob
+
+    /**
+     * Export SDK-managed backup state as a hex string.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `exportBackupString`(): kotlin.String
 
     /**
      * Fetch a public Paykit Profile.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `fetchPaykitProfile`(`publicKey`: kotlin.String): FfiPaykitProfileRecord?
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `fetchPaykitProfile`(`publicKey`: kotlin.String): PaykitProfileRecord?
 
     /**
      * Fetch public Pubky file bytes.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `fetchPubkyFile`(`uri`: kotlin.String): kotlin.ByteArray?
 
     /**
      * Fetch public Pubky app follows.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `fetchPubkyFollows`(`publicKey`: kotlin.String): List<kotlin.String>
 
     /**
      * Fetch a public Pubky app profile.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `fetchPubkyProfile`(`publicKey`: kotlin.String): FfiPubkyProfileRecord?
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `fetchPubkyProfile`(`publicKey`: kotlin.String): PubkyProfileRecord?
 
     /**
      * Fetch a public Pubky UTF-8 text file.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `fetchPubkyText`(`uri`: kotlin.String): kotlin.String?
 
     /**
      * Return current identity status, when initialized.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `identityStatus`(): FfiIdentityStatus?
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `identityStatus`(): IdentityStatus?
 
     /**
      * Initialize durable SDK identity state.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `initialize`(): FfiInitializationReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `initialize`(): InitializationReport
 
     /**
      * Start an Encrypted Link Handshake as the initiator.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `initiateLinkWithPeer`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `initiateLinkWithPeer`(`counterparty`: kotlin.String): LinkedPeerHandshakeReport
 
     /**
      * Prepare, store, and queue Receipt Access for private delivery.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `issueReceipt`(`counterparty`: kotlin.String, `draft`: FfiReceiptDraft): FfiReceiptIssuanceView
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `issueReceipt`(`counterparty`: kotlin.String, `draft`: ReceiptDraft): ReceiptIssuanceView
 
     /**
      * List issued receipts across non-blocked counterparties, newest first.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `issuedReceipts`(): List<FfiReceiptIssuanceView>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `issuedReceipts`(): List<ReceiptIssuanceView>
 
     /**
      * List issued receipts for one counterparty, newest first.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `issuedReceiptsTo`(`counterparty`: kotlin.String): List<FfiReceiptIssuanceView>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `issuedReceiptsTo`(`counterparty`: kotlin.String): List<ReceiptIssuanceView>
 
     /**
      * List locally tracked Linked Peer records.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `linkedPeers`(): List<FfiLinkedPeerRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `linkedPeers`(): List<LinkedPeerRecord>
 
     /**
      * Return Payment Requests matching a local SDK filter.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `listPaymentRequests`(`filter`: FfiPaymentRequestFilter): List<FfiPaymentRequestRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `listPaymentRequests`(`filter`: PaymentRequestFilter): List<PaymentRequestRecord>
 
     /**
      * Observe a counterparty's public recovery marker.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `observeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `observeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): EncryptedLinkRecoveryMarkerReport
 
     /**
      * Return all Payment Requests across non-blocked counterparties.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `paymentRequests`(): List<FfiPaymentRequestRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `paymentRequests`(): List<PaymentRequestRecord>
 
     /**
      * Return Payment Requests involving one counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `paymentRequestsWith`(`counterparty`: kotlin.String): List<FfiPaymentRequestRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `paymentRequestsWith`(`counterparty`: kotlin.String): List<PaymentRequestRecord>
 
     /**
      * List counterparties with queued private messages ready for retry.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `pendingOutboundPrivateCounterparties`(): List<kotlin.String>
+
+    /**
+     * Prepare private contact state, then resolve payable endpoints.
+     *
+     * The SDK refreshes live session capability, ensures or advances the
+     * private link when possible, drains currently available private
+     * send/receive work for the peer, then resolves endpoints private-first.
+     * Public endpoints are included only when requested.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `prepareAndResolveContactPayment`(`counterparty`: kotlin.String, `amount`: PaymentAmountContext?, `includePublicEndpoints`: kotlin.Boolean, `maxAdvanceSteps`: kotlin.UInt): PreparedContactPayment
 
     /**
      * Prepare a receipt issuance and persist it before network side effects.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `prepareReceiptIssuance`(`counterparty`: kotlin.String, `draft`: FfiReceiptDraft): FfiReceiptIssuanceView
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `prepareReceiptIssuance`(`counterparty`: kotlin.String, `draft`: ReceiptDraft): ReceiptIssuanceView
 
     /**
      * Send queued outbound private messages for one counterparty in order.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `processOutboundPrivateMessages`(`counterparty`: kotlin.String): FfiOutboundPrivateSendReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `processOutboundPrivateMessages`(`counterparty`: kotlin.String): OutboundPrivateSendReport
 
     /**
      * Process queued outbound private messages for every pending counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `processPendingPrivateMessages`(): List<FfiOutboundPrivateCounterpartySendReport>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `processPendingPrivateMessages`(): List<OutboundPrivateCounterpartySendReport>
 
     /**
      * Continue storage and Receipt Access queueing for a prepared issuance.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `processReceiptIssuance`(`counterparty`: kotlin.String, `receiptId`: kotlin.String): FfiReceiptIssuanceView
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `processReceiptIssuance`(`counterparty`: kotlin.String, `receiptId`: kotlin.String): ReceiptIssuanceView
 
     /**
      * Queue a new Payment Request proposal and return local derived state.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `proposePaymentRequest`(`counterparty`: kotlin.String, `terms`: FfiPaymentRequestTerms): FfiPaymentRequestRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `proposePaymentRequest`(`counterparty`: kotlin.String, `terms`: PaymentRequestTerms): PaymentRequestRecord
 
     /**
      * Publish a minimal local recovery marker for a counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `publishEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `publishEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): EncryptedLinkRecoveryMarkerReport
 
     /**
      * Publish a blob under this identity's Paykit profile namespace.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `publishPaykitBlob`(`blobName`: kotlin.String, `bytes`: kotlin.ByteArray): FfiPaykitBlobRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `publishPaykitBlob`(`blobName`: kotlin.String, `bytes`: kotlin.ByteArray): PaykitBlobRecord
 
     /**
      * Publish this identity's Paykit Profile.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `publishPaykitProfile`(`profile`: FfiPaykitProfile): FfiPaykitProfileRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `publishPaykitProfile`(`profile`: PaykitProfile): PaykitProfileRecord
 
     /**
      * Publish a public Contact Marker for a local Contact Record.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `publishPublicContact`(`publicKey`: kotlin.String): FfiContactRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `publishPublicContact`(`publicKey`: kotlin.String): ContactRecord
 
     /**
      * List Receipt Access across non-blocked counterparties, newest first.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptAccess`(): List<FfiReceiptAccessView>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptAccess`(): List<ReceiptAccessView>
 
     /**
      * List Receipt Access received from one counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptAccessFrom`(`counterparty`: kotlin.String): List<FfiReceiptAccessView>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptAccessFrom`(`counterparty`: kotlin.String): List<ReceiptAccessView>
 
     /**
      * List indexed Receipt Access records for one counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptAccessRecords`(`counterparty`: kotlin.String): List<FfiReceiptAccessView>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptAccessRecords`(`counterparty`: kotlin.String): List<ReceiptAccessView>
 
     /**
      * List local receipt issuance records for one counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptIssuanceRecords`(`counterparty`: kotlin.String): List<FfiReceiptIssuanceView>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptIssuanceRecords`(`counterparty`: kotlin.String): List<ReceiptIssuanceView>
 
     /**
      * List decrypted Receipt records for one issuer, newest first.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptRecords`(`issuer`: kotlin.String): List<FfiReceiptRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptRecords`(`issuer`: kotlin.String): List<ReceiptRecord>
 
     /**
      * List decrypted receipts across non-blocked issuers, newest first.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receipts`(): List<FfiReceiptRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receipts`(): List<ReceiptRecord>
 
     /**
      * List decrypted receipts from one issuer, newest first.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptsFrom`(`issuer`: kotlin.String): List<FfiReceiptRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receiptsFrom`(`issuer`: kotlin.String): List<ReceiptRecord>
 
     /**
      * Receive and durably persist available private messages.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receivePrivateMessages`(`counterparty`: kotlin.String): FfiPrivateStreamIntakeReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receivePrivateMessages`(`counterparty`: kotlin.String): PrivateStreamIntakeReport
 
     /**
      * Receive private messages from every locally linked counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receivePrivateMessagesFromLinkedPeers`(): List<FfiPrivateStreamCounterpartyIntakeReport>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receivePrivateMessagesFromLinkedPeers`(): List<PrivateStreamCounterpartyIntakeReport>
 
     /**
      * Return inbound Payment Requests received from one counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receivedPaymentRequestsFrom`(`counterparty`: kotlin.String): List<FfiPaymentRequestRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receivedPaymentRequestsFrom`(`counterparty`: kotlin.String): List<PaymentRequestRecord>
 
     /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `refreshContactPaykitProfile`(`publicKey`: kotlin.String): FfiContactRecord?
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `refreshContactPaykitProfile`(`publicKey`: kotlin.String): ContactRecord?
 
     /**
      * Queue rejection for a received Payment Request and return local derived state.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `rejectPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): FfiPaymentRequestRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `rejectPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): PaymentRequestRecord
 
     /**
      * Remove a local Contact Record when it has no public marker to clean up.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `removeContact`(`publicKey`: kotlin.String): FfiContactRecord?
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `removeContact`(`publicKey`: kotlin.String): ContactRecord?
 
     /**
      * Remove the local public recovery marker for a counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `removeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `removeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): EncryptedLinkRecoveryMarkerReport
 
     /**
      * Remove a public Contact Marker.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `removePublicContact`(`publicKey`: kotlin.String): FfiContactRecord?
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `removePublicContact`(`publicKey`: kotlin.String): ContactRecord?
 
     /**
      * Resolve payable endpoints for one counterparty.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolveContactPayment`(`request`: FfiContactPaymentResolutionRequest): FfiContactPaymentResolution
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolveContactPayment`(`request`: ContactPaymentResolutionRequest): ContactPaymentResolution
 
     /**
      * Resolve display metadata for a contact.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolveContactProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): FfiContactProfileResolution?
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolveContactProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
+
+    /**
+     * Resolve payable private endpoints for one counterparty.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `amount`: PaymentAmountContext?): ContactPaymentResolution
+
+    /**
+     * Resolve public profile metadata, preferring Paykit Profile.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolveProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
+
+    /**
+     * Resolve payable public endpoints for one counterparty.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolvePublicContactPayment`(`counterparty`: kotlin.String, `amount`: PaymentAmountContext?): ContactPaymentResolution
 
     /**
      * Restore SDK-managed backup state from an opaque blob.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `restoreBackupState`(`backup`: FfiSdkBackupBlob): FfiRestoreReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `restoreBackupState`(`backup`: SdkBackupBlob): RestoreReport
+
+    /**
+     * Restore SDK-managed backup state from a hex string.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `restoreBackupString`(`backup`: kotlin.String): RestoreReport
 
     /**
      * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `retrieveReceipt`(`counterparty`: kotlin.String, `receiptId`: kotlin.String): FfiReceiptRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `retrieveReceipt`(`counterparty`: kotlin.String, `receiptId`: kotlin.String): ReceiptRecord
 
     /**
      * Save or update a local Contact Record.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `saveContact`(`update`: FfiContactUpdate): FfiContactRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `saveContact`(`update`: ContactUpdate): ContactRecord
 
     /**
      * Clear live Pubky session access and SDK-managed identity-scoped state.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signOut`(): FfiIdentityStatus
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `signOut`(): IdentityStatus
+
+    /**
+     * Return the current platform SDK state revision, when a state blob exists.
+     */
+    @Throws(PaykitException::class)
+    public fun `stateRevision`(): kotlin.String?
 
     /**
      * Queue a Payment Proof for an accepted Payment Request.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `submitPaymentProof`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `proof`: FfiPaymentProofSubmission): FfiPaymentRequestRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `submitPaymentProof`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `proof`: PaymentProofSubmission): PaymentRequestRecord
+
+    /**
+     * Queue Private Payment List updates for saved local contacts.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncContactPrivatePaymentLists`(`clearUnlistedLinkedPeers`: kotlin.Boolean): PrivatePaymentListSyncReport
+
+    /**
+     * Queue contact Private Payment Lists and process pending private messages.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncContactPrivatePaymentListsAndProcessOutbound`(`clearUnlistedLinkedPeers`: kotlin.Boolean): PrivatePaymentListDeliveryReport
+
+    /**
+     * Queue reservation-backed Private Payment Lists and process their queues.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncPrivatePaymentListsWithReservationsAndProcessOutbound`(`updates`: List<PrivatePaymentListReservationUpdateInput>, `clearUnlistedLinkedPeers`: kotlin.Boolean): PrivatePaymentListDeliveryReport
 
     /**
      * Retry pending public Contact Marker publication/removal work.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `syncPublicContactMarkers`(): List<FfiContactRecord>
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncPublicContactMarkers`(): List<ContactRecord>
 
     /**
      * Publish current public receiving details and remove stale SDK-managed endpoints.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `syncPublicEndpoints`(): FfiEndpointSyncReport
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncPublicEndpoints`(): EndpointSyncReport
+
+    /**
+     * Publish explicit public receiving details and remove stale SDK-managed endpoints.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `syncPublicEndpointsWithReceivingDetails`(`receivingDetails`: List<ReceivingDetail>): EndpointSyncReport
 
     /**
      * Remove a local peer block and return the peer to NotLinked.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `unblockPeer`(`counterparty`: kotlin.String): FfiLinkedPeerRecord
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `unblockPeer`(`counterparty`: kotlin.String): LinkedPeerRecord
+
+    /**
+     * Upload profile avatar bytes and return the published blob record.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `uploadProfileAvatar`(`bytes`: kotlin.ByteArray, `contentType`: kotlin.String): PaykitBlobRecord
 
     public companion object
 }
@@ -514,7 +627,7 @@ public interface FfiPaykitSdkInterface {
 /**
  * Payment adapter payload text with redacted debug output.
  */
-public interface FfiPaymentPayloadInterface {
+public interface PaymentPayloadInterface {
 
     /**
      * Export the payload text for payment adapter execution.
@@ -530,7 +643,7 @@ public interface FfiPaymentPayloadInterface {
 /**
  * Payment Reference text with redacted debug output.
  */
-public interface FfiPaymentReferenceInterface {
+public interface PaymentReferenceInterface {
 
     /**
      * Export the reference text for explicit payment execution or display.
@@ -546,7 +659,7 @@ public interface FfiPaymentReferenceInterface {
 /**
  * Private JSON object with redacted debug output.
  */
-public interface FfiPrivateJsonObjectInterface {
+public interface PrivateJsonObjectInterface {
 
     /**
      * Export the JSON text for explicit app display, storage, or payment execution.
@@ -562,7 +675,7 @@ public interface FfiPrivateJsonObjectInterface {
 /**
  * Private workflow error with redacted default context.
  */
-public interface FfiPrivateOperationErrorInterface {
+public interface PrivateOperationErrorInterface {
 
     /**
      * Stable error category for app branching.
@@ -593,19 +706,19 @@ public interface FfiPrivateOperationErrorInterface {
 /**
  * Pending Pubky auth request.
  */
-public interface FfiPubkyAuthRequestInterface {
+public interface PubkyAuthRequestInterface {
 
     /**
      * Return the auth URL to show as a deeplink or QR code.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `authorizationUrl`(): kotlin.String
 
     /**
      * Wait for auth approval and validate the resulting session capabilities.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `complete`(`localSecretKey`: FfiPubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): FfiPubkySessionBootstrapResult
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     public companion object
 }
@@ -616,7 +729,7 @@ public interface FfiPubkyAuthRequestInterface {
 /**
  * Local Pubky secret key bytes supplied by platform secure storage.
  */
-public interface FfiPubkyLocalSecretKeyInterface {
+public interface PubkyLocalSecretKeyInterface {
 
     /**
      * Export the raw bytes for platform secure storage.
@@ -632,12 +745,12 @@ public interface FfiPubkyLocalSecretKeyInterface {
 /**
  * Live Pubky access material supplied by platform session storage.
  */
-public interface FfiPubkySessionAccessInterface {
+public interface PubkySessionAccessInterface {
 
     /**
      * Export the local Pubky secret key, when available.
      */
-    public fun `exportLocalSecretKey`(): FfiPubkyLocalSecretKey?
+    public fun `exportLocalSecretKey`(): PubkyLocalSecretKey?
 
     /**
      * Export the Pubky session bearer secret for platform secure storage.
@@ -653,49 +766,49 @@ public interface FfiPubkySessionAccessInterface {
 /**
  * Pubky session bootstrap helper.
  */
-public interface FfiPubkySessionBootstrapInterface {
+public interface PubkySessionBootstrapInterface {
 
     /**
      * Approve a Pubky auth URL with this local secret key.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `approveAuth`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: FfiPubkyLocalSecretKey)
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `approveAuth`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey)
 
     /**
      * Import an exported Pubky session secret.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: FfiPubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): FfiPubkySessionBootstrapResult
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
      * Resume a short-lived auth flow from its authorization URL.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): FfiPubkyAuthRequest
+    @Throws(PaykitException::class)
+    public fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): PubkyAuthRequest
 
     /**
      * Sign in with a local Pubky secret key and return session access material.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signIn`(`localSecretKey`: FfiPubkyLocalSecretKey): FfiPubkySessionBootstrapResult
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey): PubkySessionBootstrapResult
 
     /**
      * Sign up on a homeserver and return session access material.
      */
-    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signUp`(`localSecretKey`: FfiPubkyLocalSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?): FfiPubkySessionBootstrapResult
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?): PubkySessionBootstrapResult
 
     /**
      * Start a sign-in auth flow for an external signer.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `startSignInAuth`(`capabilities`: kotlin.String): FfiPubkyAuthRequest
+    @Throws(PaykitException::class)
+    public fun `startSignInAuth`(`capabilities`: kotlin.String): PubkyAuthRequest
 
     /**
      * Start a signup auth flow for an external signer.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `startSignUpAuth`(`capabilities`: kotlin.String, `homeserverPublicKey`: kotlin.String, `signupToken`: kotlin.String?): FfiPubkyAuthRequest
+    @Throws(PaykitException::class)
+    public fun `startSignUpAuth`(`capabilities`: kotlin.String, `homeserverPublicKey`: kotlin.String, `signupToken`: kotlin.String?): PubkyAuthRequest
 
     public companion object
 }
@@ -706,7 +819,7 @@ public interface FfiPubkySessionBootstrapInterface {
 /**
  * Reservation attribution metadata with redacted debug output.
  */
-public interface FfiReservationAttributionInterface {
+public interface ReservationAttributionInterface {
 
     /**
      * Export attribution fields for payment adapter cleanup.
@@ -722,7 +835,7 @@ public interface FfiReservationAttributionInterface {
 /**
  * SDK backup blob owned by the app.
  */
-public interface FfiSdkBackupBlobInterface {
+public interface SdkBackupBlobInterface {
 
     /**
      * Export the raw bytes for app-controlled backup storage.
@@ -738,37 +851,37 @@ public interface FfiSdkBackupBlobInterface {
 /**
  * Platform-owned payment adapter callbacks.
  */
-public interface FfiSdkPaymentAdapter {
+public interface SdkPaymentAdapter {
 
     /**
      * Return current receiving details for a scope.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `currentReceivingDetails`(`scope`: FfiReceivingDetailScope): List<FfiReceivingDetail>
+    @Throws(PaykitException::class)
+    public fun `currentReceivingDetails`(`scope`: ReceivingDetailScope): List<ReceivingDetail>
 
     /**
      * Reserve receiving details for a counterparty's Private Payment List.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `reserveReceivingDetails`(`counterparty`: kotlin.String): List<FfiPaymentEndpointReservation>?
+    @Throws(PaykitException::class)
+    public fun `reserveReceivingDetails`(`counterparty`: kotlin.String): ReceivingDetailReservationResponse
 
     /**
      * Cancel a previously reserved receiving detail.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `cancelReceivingDetailReservation`(`cancellation`: FfiPaymentEndpointReservationCancellation)
+    @Throws(PaykitException::class)
+    public fun `cancelReceivingDetailReservation`(`cancellation`: PaymentEndpointReservationCancellation)
 
     /**
      * Return payable candidate ids in adapter-preferred order.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `selectPaymentEndpointIds`(`request`: FfiPaymentEndpointSelectionRequest): List<kotlin.String>
+    @Throws(PaykitException::class)
+    public fun `selectPaymentEndpointIds`(`request`: PaymentEndpointSelectionRequest): List<kotlin.String>
 
     /**
      * Build a payment target from a payable endpoint.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `buildPaymentTarget`(`endpoint`: FfiPaymentEndpointCandidate): FfiPaymentTarget
+    @Throws(PaykitException::class)
+    public fun `buildPaymentTarget`(`endpoint`: PaymentEndpointCandidate): PaymentTarget
 
     public companion object
 }
@@ -779,24 +892,24 @@ public interface FfiSdkPaymentAdapter {
 /**
  * Platform-owned Pubky session provider.
  */
-public interface FfiSdkPubkySessionProvider {
+public interface SdkPubkySessionProvider {
 
     /**
      * Load current live Pubky session access, when available.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `loadSessionAccess`(): FfiPubkySessionAccess?
+    @Throws(PaykitException::class)
+    public fun `loadSessionAccess`(): PubkySessionAccess?
 
     /**
      * Report whether unauthenticated public Pubky storage can be used.
      */
-    @Throws(PaykitFfiException::class)
+    @Throws(PaykitException::class)
     public fun `publicStorageAvailable`(): kotlin.Boolean
 
     /**
      * Clear platform session access during explicit SDK sign-out.
      */
-    @Throws(PaykitFfiException::class)
+    @Throws(PaykitException::class)
     public fun `clearSessionAccess`()
 
     public companion object
@@ -808,7 +921,7 @@ public interface FfiSdkPubkySessionProvider {
 /**
  * SDK state blob owned by platform storage.
  */
-public interface FfiSdkStateBlobInterface {
+public interface SdkStateBlobInterface {
 
     /**
      * Export the raw bytes for platform storage.
@@ -824,13 +937,13 @@ public interface FfiSdkStateBlobInterface {
 /**
  * Platform-owned durable blob store for SDK state.
  */
-public interface FfiSdkStateBlobStore {
+public interface SdkStateBlobStore {
 
     /**
      * Load the current SDK state blob, when one exists.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `loadStateBlob`(): FfiSdkStateBlobSnapshot?
+    @Throws(PaykitException::class)
+    public fun `loadStateBlob`(): SdkStateBlobSnapshot?
 
     /**
      * Atomically save a new SDK state blob.
@@ -838,8 +951,8 @@ public interface FfiSdkStateBlobStore {
      * `expected_revision` is `None` when no previous blob was loaded. The
      * platform store should reject the write if the stored revision changed.
      */
-    @Throws(PaykitFfiException::class)
-    public fun `saveStateBlobAtomically`(`blob`: FfiSdkStateBlob, `expectedRevision`: kotlin.String?): kotlin.String
+    @Throws(PaykitException::class)
+    public fun `saveStateBlobAtomically`(`blob`: SdkStateBlob, `expectedRevision`: kotlin.String?): kotlin.String
 
     public companion object
 }
@@ -851,7 +964,7 @@ public interface FfiSdkStateBlobStore {
  * Time interval a recurring Payment Proof applies to.
  */
 @kotlinx.serialization.Serializable
-public data class FfiBillingPeriod (
+public data class BillingPeriod (
     /**
      * RFC3339 UTC start timestamp.
      */
@@ -870,19 +983,19 @@ public data class FfiBillingPeriod (
  * Result of resolving contact Payment Endpoints.
  */
 
-public data class FfiContactPaymentResolution (
+public data class ContactPaymentResolution (
     /**
      * General payment resolution outcome.
      */
-    val `status`: FfiContactPaymentResolutionStatus,
+    val `status`: ContactPaymentResolutionStatus,
     /**
      * Private-payment-specific state for this resolution.
      */
-    val `privateState`: FfiContactPaymentResolutionPrivateState,
+    val `privateState`: ContactPaymentResolutionPrivateState,
     /**
      * Payable Payment Endpoints in adapter-preferred order.
      */
-    val `payableEndpoints`: List<FfiResolvedPaymentEndpoint>
+    val `payableEndpoints`: List<ResolvedPaymentEndpoint>
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -900,7 +1013,7 @@ public data class FfiContactPaymentResolution (
  * Request to resolve payable endpoints for one counterparty.
  */
 @kotlinx.serialization.Serializable
-public data class FfiContactPaymentResolutionRequest (
+public data class ContactPaymentResolutionRequest (
     /**
      * Counterparty to pay.
      */
@@ -908,7 +1021,7 @@ public data class FfiContactPaymentResolutionRequest (
     /**
      * Optional amount context used by the payment adapter.
      */
-    val `amount`: FfiPaymentAmountContext?,
+    val `amount`: PaymentAmountContext?,
     /**
      * Include public Payment Endpoints after private candidates.
      */
@@ -923,7 +1036,7 @@ public data class FfiContactPaymentResolutionRequest (
  * Contact display profile resolved by trying Paykit Profile first.
  */
 @kotlinx.serialization.Serializable
-public data class FfiContactProfileResolution (
+public data class ContactProfileResolution (
     /**
      * Profile owner.
      */
@@ -931,7 +1044,7 @@ public data class FfiContactProfileResolution (
     /**
      * Source that produced this profile.
      */
-    val `source`: FfiContactProfileSource,
+    val `source`: ContactProfileSource,
     /**
      * Normalized display name for app contact lists.
      */
@@ -943,11 +1056,11 @@ public data class FfiContactProfileResolution (
     /**
      * Paykit Profile payload when the source is Paykit Profile.
      */
-    val `paykitProfile`: FfiPaykitProfile?,
+    val `paykitProfile`: PaykitProfile?,
     /**
      * Pubky Profile payload when the source is Pubky Profile.
      */
-    val `pubkyProfile`: FfiPubkyProfile?,
+    val `pubkyProfile`: PubkyProfile?,
     /**
      * Local observation time as RFC3339 text.
      */
@@ -962,7 +1075,7 @@ public data class FfiContactProfileResolution (
  * Local SDK contact record.
  */
 @kotlinx.serialization.Serializable
-public data class FfiContactRecord (
+public data class ContactRecord (
     /**
      * Contact public key.
      */
@@ -974,7 +1087,7 @@ public data class FfiContactRecord (
     /**
      * Cached public profile, when fetched.
      */
-    val `profile`: FfiPaykitProfile?,
+    val `profile`: PaykitProfile?,
     /**
      * Time the cached public profile was fetched as RFC3339 text.
      */
@@ -990,7 +1103,7 @@ public data class FfiContactRecord (
     /**
      * Public Contact Marker publication state.
      */
-    val `publicContactMarkerStatus`: FfiPublicationStatus,
+    val `publicContactMarkerStatus`: PublicationStatus,
     /**
      * Time the contact was last published publicly as RFC3339 text.
      */
@@ -1013,7 +1126,7 @@ public data class FfiContactRecord (
  * Local SDK contact update.
  */
 @kotlinx.serialization.Serializable
-public data class FfiContactUpdate (
+public data class ContactUpdate (
     /**
      * Contact public key.
      */
@@ -1032,7 +1145,7 @@ public data class FfiContactUpdate (
  * Public recovery marker state tracked for one Linked Peer.
  */
 
-public data class FfiEncryptedLinkRecoveryMarkerReport (
+public data class EncryptedLinkRecoveryMarkerReport (
     /**
      * Counterparty public key.
      */
@@ -1040,7 +1153,7 @@ public data class FfiEncryptedLinkRecoveryMarkerReport (
     /**
      * Current Linked Peer state.
      */
-    val `state`: FfiLinkedPeerState,
+    val `state`: LinkedPeerState,
     /**
      * Locally published recovery attempt id.
      */
@@ -1052,7 +1165,7 @@ public data class FfiEncryptedLinkRecoveryMarkerReport (
     /**
      * Last local marker publish/remove error, when available.
      */
-    val `localMarkerLastError`: FfiPrivateOperationError?,
+    val `localMarkerLastError`: PrivateOperationError?,
     /**
      * Latest observed counterparty recovery attempt id.
      */
@@ -1087,7 +1200,7 @@ public data class FfiEncryptedLinkRecoveryMarkerReport (
  * One public endpoint changed during sync.
  */
 @kotlinx.serialization.Serializable
-public data class FfiEndpointSyncChange (
+public data class EndpointSyncChange (
     /**
      * Payment Endpoint Identifier.
      */
@@ -1095,7 +1208,7 @@ public data class FfiEndpointSyncChange (
     /**
      * Resulting local publication status.
      */
-    val `status`: FfiPublicationStatus,
+    val `status`: PublicationStatus,
     /**
      * Error text for failed changes.
      */
@@ -1110,19 +1223,19 @@ public data class FfiEndpointSyncChange (
  * Summary returned after public Payment Endpoint sync.
  */
 @kotlinx.serialization.Serializable
-public data class FfiEndpointSyncReport (
+public data class EndpointSyncReport (
     /**
      * Endpoints successfully published or updated.
      */
-    val `published`: List<FfiEndpointSyncChange>,
+    val `published`: List<EndpointSyncChange>,
     /**
      * Endpoints successfully removed.
      */
-    val `removed`: List<FfiEndpointSyncChange>,
+    val `removed`: List<EndpointSyncChange>,
     /**
      * Endpoints that failed to publish or remove.
      */
-    val `failed`: List<FfiEndpointSyncChange>
+    val `failed`: List<EndpointSyncChange>
 ) {
     public companion object
 }
@@ -1133,7 +1246,7 @@ public data class FfiEndpointSyncReport (
  * Reused Event ID with a different payload.
  */
 @kotlinx.serialization.Serializable
-public data class FfiEventIdConflict (
+public data class EventIdConflict (
     /**
      * Conflicting Event ID.
      */
@@ -1156,7 +1269,7 @@ public data class FfiEventIdConflict (
  * Current identity status returned to apps.
  */
 @kotlinx.serialization.Serializable
-public data class FfiIdentityStatus (
+public data class IdentityStatus (
     /**
      * Current local public key, when signed in.
      */
@@ -1164,7 +1277,7 @@ public data class FfiIdentityStatus (
     /**
      * Current Pubky capability.
      */
-    val `capability`: FfiPubkyIdentityCapability,
+    val `capability`: PubkyIdentityCapability,
     /**
      * Whether live Pubky session access is available for this identity.
      */
@@ -1183,11 +1296,11 @@ public data class FfiIdentityStatus (
  * Initialization report returned after SDK startup.
  */
 @kotlinx.serialization.Serializable
-public data class FfiInitializationReport (
+public data class InitializationReport (
     /**
      * Last persisted identity status.
      */
-    val `identity`: FfiIdentityStatus,
+    val `identity`: IdentityStatus,
     /**
      * Whether live Pubky session access was available during startup.
      */
@@ -1202,7 +1315,7 @@ public data class FfiInitializationReport (
  * Result of starting or advancing an Encrypted Link Handshake.
  */
 @kotlinx.serialization.Serializable
-public data class FfiLinkedPeerHandshakeReport (
+public data class LinkedPeerHandshakeReport (
     /**
      * Counterparty public key.
      */
@@ -1210,7 +1323,7 @@ public data class FfiLinkedPeerHandshakeReport (
     /**
      * Current Linked Peer state after the operation.
      */
-    val `state`: FfiLinkedPeerState,
+    val `state`: LinkedPeerState,
     /**
      * Current Encrypted Link state generation.
      */
@@ -1218,7 +1331,7 @@ public data class FfiLinkedPeerHandshakeReport (
     /**
      * In-progress handshake role, when a handshake remains pending.
      */
-    val `handshakeRole`: FfiEncryptedLinkHandshakeRole?
+    val `handshakeRole`: EncryptedLinkHandshakeRole?
 ) {
     public companion object
 }
@@ -1229,7 +1342,7 @@ public data class FfiLinkedPeerHandshakeReport (
  * Locally tracked Linked Peer record.
  */
 
-public data class FfiLinkedPeerRecord (
+public data class LinkedPeerRecord (
     /**
      * Counterparty public key.
      */
@@ -1237,7 +1350,7 @@ public data class FfiLinkedPeerRecord (
     /**
      * Current local relationship/link state.
      */
-    val `state`: FfiLinkedPeerState,
+    val `state`: LinkedPeerState,
     /**
      * Last successful sync time as RFC3339 text.
      */
@@ -1261,7 +1374,7 @@ public data class FfiLinkedPeerRecord (
     /**
      * Last local marker publish/remove error, when available.
      */
-    val `localRecoveryMarkerLastError`: FfiPrivateOperationError?,
+    val `localRecoveryMarkerLastError`: PrivateOperationError?,
     /**
      * Latest counterparty recovery attempt id already observed.
      */
@@ -1294,7 +1407,7 @@ public data class FfiLinkedPeerRecord (
  * Summary for processing outbound private messages for one counterparty.
  */
 
-public data class FfiOutboundPrivateCounterpartySendReport (
+public data class OutboundPrivateCounterpartySendReport (
     /**
      * Counterparty whose queue was processed.
      */
@@ -1302,11 +1415,11 @@ public data class FfiOutboundPrivateCounterpartySendReport (
     /**
      * Successful send report, when processing completed.
      */
-    val `report`: FfiOutboundPrivateSendReport?,
+    val `report`: OutboundPrivateSendReport?,
     /**
      * Error text, when processing failed for this counterparty.
      */
-    val `error`: FfiPrivateOperationError?
+    val `error`: PrivateOperationError?
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1324,7 +1437,7 @@ public data class FfiOutboundPrivateCounterpartySendReport (
  * Failed outbound private send attempt.
  */
 
-public data class FfiOutboundPrivateSendFailure (
+public data class OutboundPrivateSendFailure (
     /**
      * Outbound message id.
      */
@@ -1332,7 +1445,7 @@ public data class FfiOutboundPrivateSendFailure (
     /**
      * Error from the send attempt.
      */
-    val `error`: FfiPrivateOperationError
+    val `error`: PrivateOperationError
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1349,7 +1462,7 @@ public data class FfiOutboundPrivateSendFailure (
  * Summary returned after processing outbound private messages.
  */
 
-public data class FfiOutboundPrivateSendReport (
+public data class OutboundPrivateSendReport (
     /**
      * Messages attempted in this run.
      */
@@ -1361,15 +1474,15 @@ public data class FfiOutboundPrivateSendReport (
     /**
      * Messages that failed in this run.
      */
-    val `failed`: List<FfiOutboundPrivateSendFailure>,
+    val `failed`: List<OutboundPrivateSendFailure>,
     /**
      * Superseded reservation cleanup failures observed in this run.
      */
-    val `reservationCleanupFailures`: List<FfiReservationCleanupFailure>,
+    val `reservationCleanupFailures`: List<ReservationCleanupFailure>,
     /**
      * Recovery marker publication failures observed after fail-closed recovery.
      */
-    val `recoveryMarkerFailures`: List<FfiRecoveryMarkerPublishFailure>
+    val `recoveryMarkerFailures`: List<RecoveryMarkerPublishFailure>
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1389,7 +1502,7 @@ public data class FfiOutboundPrivateSendReport (
  * Public blob published under the configured Paykit namespace.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPaykitBlobRecord (
+public data class PaykitBlobRecord (
     /**
      * Blob owner.
      */
@@ -1420,7 +1533,7 @@ public data class FfiPaykitBlobRecord (
  * Public Paykit-facing profile metadata.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPaykitProfile (
+public data class PaykitProfile (
     /**
      * Public display name.
      */
@@ -1443,7 +1556,7 @@ public data class FfiPaykitProfile (
  * Profile record fetched or published through the SDK.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPaykitProfileRecord (
+public data class PaykitProfileRecord (
     /**
      * Profile owner.
      */
@@ -1451,7 +1564,7 @@ public data class FfiPaykitProfileRecord (
     /**
      * Public profile metadata.
      */
-    val `profile`: FfiPaykitProfile,
+    val `profile`: PaykitProfile,
     /**
      * Pubky path used for the profile.
      */
@@ -1470,7 +1583,7 @@ public data class FfiPaykitProfileRecord (
  * Runtime configuration for Paykit SDK bindings.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPaykitSdkConfig (
+public data class PaykitSdkConfig (
     /**
      * Namespace segment for SDK profile/contact public data under `/pub/`.
      */
@@ -1478,15 +1591,15 @@ public data class FfiPaykitSdkConfig (
     /**
      * Public endpoint management scope.
      */
-    val `endpointManagementScope`: FfiEndpointManagementScope,
+    val `endpointManagementScope`: EndpointManagementScope,
     /**
      * Public recovery marker behavior.
      */
-    val `encryptedLinkRecoveryMarkers`: FfiEncryptedLinkRecoveryMarkerPolicy,
+    val `encryptedLinkRecoveryMarkers`: EncryptedLinkRecoveryMarkerPolicy,
     /**
      * Public contact marker behavior.
      */
-    val `publicContactSharing`: FfiPublicContactSharingPolicy,
+    val `publicContactSharing`: PublicContactSharingPolicy,
     /**
      * Peer link operation lease timeout in seconds.
      */
@@ -1509,7 +1622,7 @@ public data class FfiPaykitSdkConfig (
  * Optional amount context for endpoint selection.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPaymentAmountContext (
+public data class PaymentAmountContext (
     /**
      * Decimal amount text.
      */
@@ -1528,7 +1641,7 @@ public data class FfiPaymentAmountContext (
  * Candidate endpoint passed to the payment adapter.
  */
 
-public data class FfiPaymentEndpointCandidate (
+public data class PaymentEndpointCandidate (
     /**
      * Opaque candidate id for this callback request.
      */
@@ -1540,7 +1653,7 @@ public data class FfiPaymentEndpointCandidate (
     /**
      * Where the endpoint was discovered.
      */
-    val `source`: FfiPaymentEndpointSource,
+    val `source`: PaymentEndpointSource,
     /**
      * Payment Endpoint Identifier string.
      */
@@ -1548,7 +1661,7 @@ public data class FfiPaymentEndpointCandidate (
     /**
      * Serialized endpoint payload.
      */
-    val `payload`: FfiPaymentPayload
+    val `payload`: PaymentPayload
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1568,7 +1681,7 @@ public data class FfiPaymentEndpointCandidate (
  * Receiving detail reserved by the payment adapter.
  */
 
-public data class FfiPaymentEndpointReservation (
+public data class PaymentEndpointReservation (
     /**
      * Adapter-stable reservation id.
      */
@@ -1576,7 +1689,7 @@ public data class FfiPaymentEndpointReservation (
     /**
      * Reserved receiving detail.
      */
-    val `receivingDetail`: FfiReceivingDetail,
+    val `receivingDetail`: ReceivingDetail,
     /**
      * Optional reservation expiry as RFC3339 text.
      */
@@ -1584,7 +1697,7 @@ public data class FfiPaymentEndpointReservation (
     /**
      * Adapter attribution metadata.
      */
-    val `attribution`: FfiReservationAttribution
+    val `attribution`: ReservationAttribution
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1603,7 +1716,7 @@ public data class FfiPaymentEndpointReservation (
  * Request passed to cancel a receiving-detail reservation.
  */
 
-public data class FfiPaymentEndpointReservationCancellation (
+public data class PaymentEndpointReservationCancellation (
     /**
      * Adapter-stable reservation id.
      */
@@ -1623,7 +1736,7 @@ public data class FfiPaymentEndpointReservationCancellation (
     /**
      * Adapter attribution metadata from the reservation.
      */
-    val `attribution`: FfiReservationAttribution
+    val `attribution`: ReservationAttribution
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1640,10 +1753,41 @@ public data class FfiPaymentEndpointReservationCancellation (
 
 
 /**
+ * Plain reservation input for one Payment Endpoint.
+ */
+@kotlinx.serialization.Serializable
+public data class PaymentEndpointReservationInput (
+    /**
+     * Adapter-stable reservation id.
+     */
+    val `reservationId`: kotlin.String,
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: kotlin.String,
+    /**
+     * Optional reservation expiry as RFC3339 text.
+     */
+    val `expiresAt`: kotlin.String?,
+    /**
+     * Adapter attribution metadata.
+     */
+    val `attribution`: Map<kotlin.String, kotlin.String>
+) {
+    public companion object
+}
+
+
+
+/**
  * Request passed to the payment adapter for payable endpoint ordering.
  */
 
-public data class FfiPaymentEndpointSelectionRequest (
+public data class PaymentEndpointSelectionRequest (
     /**
      * Counterparty being paid.
      */
@@ -1651,11 +1795,11 @@ public data class FfiPaymentEndpointSelectionRequest (
     /**
      * Optional amount context.
      */
-    val `amount`: FfiPaymentAmountContext?,
+    val `amount`: PaymentAmountContext?,
     /**
      * Candidate endpoints in SDK preference order.
      */
-    val `candidates`: List<FfiPaymentEndpointCandidate>
+    val `candidates`: List<PaymentEndpointCandidate>
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1673,7 +1817,7 @@ public data class FfiPaymentEndpointSelectionRequest (
  * Payment Proof captured in a derived Payment Request record.
  */
 
-public data class FfiPaymentProofRecord (
+public data class PaymentProofRecord (
     /**
      * Event ID.
      */
@@ -1685,7 +1829,7 @@ public data class FfiPaymentProofRecord (
     /**
      * Local outbound delivery status, when proof was queued locally.
      */
-    val `outboundStatus`: FfiOutboundPrivateMessageStatus?,
+    val `outboundStatus`: OutboundPrivateMessageStatus?,
     /**
      * Stream item id, when proof was received from the counterparty.
      */
@@ -1693,11 +1837,11 @@ public data class FfiPaymentProofRecord (
     /**
      * Payment Reference copied from the proof.
      */
-    val `paymentReference`: FfiPaymentReference,
+    val `paymentReference`: PaymentReference,
     /**
      * Optional Billing Period copied from the proof.
      */
-    val `billingPeriod`: FfiBillingPeriod?,
+    val `billingPeriod`: BillingPeriod?,
     /**
      * Payment Endpoint Identifier used for payment.
      */
@@ -1705,7 +1849,7 @@ public data class FfiPaymentProofRecord (
     /**
      * Method-specific proof object encoded as JSON.
      */
-    val `proof`: FfiPrivateJsonObject,
+    val `proof`: PrivateJsonObject,
     /**
      * Local record time for this proof as RFC3339 text.
      */
@@ -1733,11 +1877,11 @@ public data class FfiPaymentProofRecord (
  * Method-specific Payment Proof submission data.
  */
 
-public data class FfiPaymentProofSubmission (
+public data class PaymentProofSubmission (
     /**
      * Billing Period for recurring Payment Requests.
      */
-    val `billingPeriod`: FfiBillingPeriod?,
+    val `billingPeriod`: BillingPeriod?,
     /**
      * Payment Endpoint Identifier used for payment.
      */
@@ -1745,7 +1889,7 @@ public data class FfiPaymentProofSubmission (
     /**
      * Method-specific proof object encoded as JSON.
      */
-    val `proof`: FfiPrivateJsonObject
+    val `proof`: PrivateJsonObject
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1763,7 +1907,7 @@ public data class FfiPaymentProofSubmission (
  * Payment Amount fields used by Payment Requests.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPaymentRequestAmount (
+public data class PaymentRequestAmount (
     /**
      * Decimal amount text.
      */
@@ -1782,7 +1926,7 @@ public data class FfiPaymentRequestAmount (
  * Filter for listing Payment Requests.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPaymentRequestFilter (
+public data class PaymentRequestFilter (
     /**
      * Restrict results to one counterparty.
      */
@@ -1790,11 +1934,11 @@ public data class FfiPaymentRequestFilter (
     /**
      * Restrict results to one local role.
      */
-    val `localRole`: FfiPaymentRequestLocalRole?,
+    val `localRole`: PaymentRequestLocalRole?,
     /**
      * Restrict results to lifecycle states. Empty means all states.
      */
-    val `states`: List<FfiPaymentRequestLifecycleState>,
+    val `states`: List<PaymentRequestLifecycleState>,
     /**
      * Restrict results by whether the request has recurrence terms.
      */
@@ -1813,7 +1957,7 @@ public data class FfiPaymentRequestFilter (
  * SDK-derived Payment Request lifecycle record.
  */
 
-public data class FfiPaymentRequestRecord (
+public data class PaymentRequestRecord (
     /**
      * Counterparty associated with the private stream.
      */
@@ -1825,11 +1969,11 @@ public data class FfiPaymentRequestRecord (
     /**
      * Local role, when known.
      */
-    val `localRole`: FfiPaymentRequestLocalRole?,
+    val `localRole`: PaymentRequestLocalRole?,
     /**
      * Derived local lifecycle state.
      */
-    val `state`: FfiPaymentRequestLifecycleState,
+    val `state`: PaymentRequestLifecycleState,
     /**
      * Stream item id of the proposal event.
      */
@@ -1841,7 +1985,7 @@ public data class FfiPaymentRequestRecord (
     /**
      * Local outbound delivery status for the proposal event.
      */
-    val `proposalOutboundStatus`: FfiOutboundPrivateMessageStatus?,
+    val `proposalOutboundStatus`: OutboundPrivateMessageStatus?,
     /**
      * Proposal Event ID.
      */
@@ -1849,7 +1993,7 @@ public data class FfiPaymentRequestRecord (
     /**
      * Immutable terms from the proposal.
      */
-    val `terms`: FfiPaymentRequestTerms?,
+    val `terms`: PaymentRequestTerms?,
     /**
      * Acceptance Event ID.
      */
@@ -1857,7 +2001,7 @@ public data class FfiPaymentRequestRecord (
     /**
      * Local outbound delivery status for an acceptance event.
      */
-    val `acceptedOutboundStatus`: FfiOutboundPrivateMessageStatus?,
+    val `acceptedOutboundStatus`: OutboundPrivateMessageStatus?,
     /**
      * Rejection Event ID.
      */
@@ -1865,7 +2009,7 @@ public data class FfiPaymentRequestRecord (
     /**
      * Local outbound delivery status for a rejection event.
      */
-    val `rejectedOutboundStatus`: FfiOutboundPrivateMessageStatus?,
+    val `rejectedOutboundStatus`: OutboundPrivateMessageStatus?,
     /**
      * Cancellation Event ID.
      */
@@ -1873,11 +2017,11 @@ public data class FfiPaymentRequestRecord (
     /**
      * Local outbound delivery status for a cancellation event.
      */
-    val `canceledOutboundStatus`: FfiOutboundPrivateMessageStatus?,
+    val `canceledOutboundStatus`: OutboundPrivateMessageStatus?,
     /**
      * Payment Proof records in local record order.
      */
-    val `paymentProofs`: List<FfiPaymentProofRecord>,
+    val `paymentProofs`: List<PaymentProofRecord>,
     /**
      * Last inbound stream item applied to this record.
      */
@@ -1889,7 +2033,7 @@ public data class FfiPaymentRequestRecord (
     /**
      * Local delivery status of the last outbound message applied to this record.
      */
-    val `lastOutboundStatus`: FfiOutboundPrivateMessageStatus?,
+    val `lastOutboundStatus`: OutboundPrivateMessageStatus?,
     /**
      * Last event local record time as RFC3339 text.
      */
@@ -1933,7 +2077,7 @@ public data class FfiPaymentRequestRecord (
  * Recurrence fields for a recurring Payment Request.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPaymentRequestRecurrence (
+public data class PaymentRequestRecurrence (
     /**
      * Positive interval count.
      */
@@ -1964,15 +2108,15 @@ public data class FfiPaymentRequestRecurrence (
  * Immutable terms for a Payment Request proposal.
  */
 
-public data class FfiPaymentRequestTerms (
+public data class PaymentRequestTerms (
     /**
      * Requested amount.
      */
-    val `amount`: FfiPaymentRequestAmount,
+    val `amount`: PaymentRequestAmount,
     /**
      * Payee-provided payment correlation value.
      */
-    val `paymentReference`: FfiPaymentReference,
+    val `paymentReference`: PaymentReference,
     /**
      * Proposal expiry before acceptance.
      */
@@ -1980,7 +2124,7 @@ public data class FfiPaymentRequestTerms (
     /**
      * Optional recurrence.
      */
-    val `recurrence`: FfiPaymentRequestRecurrence?,
+    val `recurrence`: PaymentRequestRecurrence?,
     /**
      * Accepted Payment Endpoint Identifier strings.
      */
@@ -1988,7 +2132,7 @@ public data class FfiPaymentRequestTerms (
     /**
      * Application-specific metadata encoded as a JSON object.
      */
-    val `metadata`: FfiPrivateJsonObject
+    val `metadata`: PrivateJsonObject
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2009,11 +2153,11 @@ public data class FfiPaymentRequestTerms (
  * Payment-method-specific execution payload produced by the adapter.
  */
 
-public data class FfiPaymentTarget (
+public data class PaymentTarget (
     /**
      * Method-specific target payload.
      */
-    val `payload`: FfiPaymentPayload
+    val `payload`: PaymentPayload
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2026,10 +2170,120 @@ public data class FfiPaymentTarget (
 
 
 /**
+ * Result of preparing a contact payment and resolving payable endpoints.
+ */
+
+public data class PreparedContactPayment (
+    /**
+     * Endpoint resolution after preparation.
+     */
+    val `resolution`: ContactPaymentResolution,
+    /**
+     * Link handshake/advance report when the SDK attempted private setup.
+     */
+    val `linkReport`: LinkedPeerHandshakeReport?,
+    /**
+     * Private receive report when the SDK refreshed the private stream.
+     */
+    val `receiveReport`: PrivateStreamIntakeReport?,
+    /**
+     * Outbound send report when the SDK processed pending private messages.
+     */
+    val `outboundReport`: OutboundPrivateSendReport?,
+    /**
+     * Private preparation error when public fallback was allowed.
+     */
+    val `privateError`: PrivateOperationError?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`resolution`,
+            this.`linkReport`,
+            this.`receiveReport`,
+            this.`outboundReport`,
+            this.`privateError`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Failed delivery after a Private Payment List was queued.
+ */
+
+public data class PrivatePaymentListDeliveryFailure (
+    /**
+     * Counterparty whose outbound delivery failed.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Outbound message id, when the failure is tied to one message.
+     */
+    val `outboundMessageId`: kotlin.ULong?,
+    /**
+     * Reservation id, when the failure is tied to reservation cleanup.
+     */
+    val `reservationId`: kotlin.String?,
+    /**
+     * Delivery or cleanup error.
+     */
+    val `error`: PrivateOperationError
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`outboundMessageId`,
+            this.`reservationId`,
+            this.`error`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Report from queueing and delivering Private Payment Lists.
+ */
+
+public data class PrivatePaymentListDeliveryReport (
+    /**
+     * Counterparties that had a non-empty Private Payment List queued.
+     */
+    val `queued`: List<PrivatePaymentListSyncChange>,
+    /**
+     * Counterparties that had an empty Private Payment List queued.
+     */
+    val `cleared`: List<PrivatePaymentListSyncChange>,
+    /**
+     * Counterparties that could not be queued or cleared.
+     */
+    val `failedToQueue`: List<PrivatePaymentListSyncChange>,
+    /**
+     * Counterparties queued successfully but failed during outbound delivery.
+     */
+    val `failedToDeliver`: List<PrivatePaymentListDeliveryFailure>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`queued`,
+            this.`cleared`,
+            this.`failedToQueue`,
+            this.`failedToDeliver`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
  * One endpoint in the latest Private Payment List view.
  */
 
-public data class FfiPrivatePaymentListEndpoint (
+public data class PrivatePaymentListEndpoint (
     /**
      * Payment Endpoint Identifier string.
      */
@@ -2037,7 +2291,7 @@ public data class FfiPrivatePaymentListEndpoint (
     /**
      * Serialized endpoint payload.
      */
-    val `payload`: FfiPaymentPayload
+    val `payload`: PaymentPayload
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2051,10 +2305,77 @@ public data class FfiPrivatePaymentListEndpoint (
 
 
 /**
+ * Reservation-backed Private Payment List input for one counterparty.
+ */
+@kotlinx.serialization.Serializable
+public data class PrivatePaymentListReservationUpdateInput (
+    /**
+     * Counterparty that should receive the Private Payment List.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Complete reserved receiving details to share with this counterparty.
+     *
+     * An empty list queues an empty Private Payment List for this counterparty.
+     */
+    val `reservations`: List<PaymentEndpointReservationInput>
+) {
+    public companion object
+}
+
+
+
+/**
+ * One counterparty result from a Private Payment List sync.
+ */
+@kotlinx.serialization.Serializable
+public data class PrivatePaymentListSyncChange (
+    /**
+     * Counterparty affected by the sync.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Queued outbound message id, when queueing succeeded.
+     */
+    val `outboundMessageId`: kotlin.ULong?,
+    /**
+     * Error text, when queueing failed.
+     */
+    val `error`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Report from syncing Private Payment Lists for local contacts.
+ */
+@kotlinx.serialization.Serializable
+public data class PrivatePaymentListSyncReport (
+    /**
+     * Counterparties that had a current Private Payment List queued.
+     */
+    val `queued`: List<PrivatePaymentListSyncChange>,
+    /**
+     * Counterparties that had an empty Private Payment List queued.
+     */
+    val `cleared`: List<PrivatePaymentListSyncChange>,
+    /**
+     * Counterparties that could not be queued or cleared.
+     */
+    val `failed`: List<PrivatePaymentListSyncChange>
+) {
+    public companion object
+}
+
+
+
+/**
  * Latest valid Private Payment List view for one counterparty.
  */
 
-public data class FfiPrivatePaymentListView (
+public data class PrivatePaymentListView (
     /**
      * Stream item id of the latest valid list.
      */
@@ -2062,7 +2383,7 @@ public data class FfiPrivatePaymentListView (
     /**
      * Current endpoint payloads sorted by identifier.
      */
-    val `paymentEndpoints`: List<FfiPrivatePaymentListEndpoint>,
+    val `paymentEndpoints`: List<PrivatePaymentListEndpoint>,
     /**
      * Receive time of the latest valid list as RFC3339 text.
      */
@@ -2084,7 +2405,7 @@ public data class FfiPrivatePaymentListView (
  * Summary for receiving private messages from one counterparty.
  */
 
-public data class FfiPrivateStreamCounterpartyIntakeReport (
+public data class PrivateStreamCounterpartyIntakeReport (
     /**
      * Counterparty whose private stream was received.
      */
@@ -2092,11 +2413,11 @@ public data class FfiPrivateStreamCounterpartyIntakeReport (
     /**
      * Successful intake report, when receive completed.
      */
-    val `report`: FfiPrivateStreamIntakeReport?,
+    val `report`: PrivateStreamIntakeReport?,
     /**
      * Error text, when receive failed for this counterparty.
      */
-    val `error`: FfiPrivateOperationError?
+    val `error`: PrivateOperationError?
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2114,7 +2435,7 @@ public data class FfiPrivateStreamCounterpartyIntakeReport (
  * Summary of a persisted private stream batch.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPrivateStreamIntakeReport (
+public data class PrivateStreamIntakeReport (
     /**
      * Receive batch id assigned by storage.
      */
@@ -2126,7 +2447,7 @@ public data class FfiPrivateStreamIntakeReport (
     /**
      * Event ID conflicts found while updating dedupe records.
      */
-    val `eventConflicts`: List<FfiEventIdConflict>
+    val `eventConflicts`: List<EventIdConflict>
 ) {
     public companion object
 }
@@ -2137,11 +2458,11 @@ public data class FfiPrivateStreamIntakeReport (
  * Public details parsed from a Pubky auth deep link.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPubkyAuthDetails (
+public data class PubkyAuthDetails (
     /**
      * Auth request kind.
      */
-    val `kind`: FfiPubkyAuthRequestKind,
+    val `kind`: PubkyAuthRequestKind,
     /**
      * Requested capabilities as canonical Pubky capability text.
      */
@@ -2164,7 +2485,7 @@ public data class FfiPubkyAuthDetails (
  * Pubky client configuration owned by the binding layer.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPubkyClientConfig (
+public data class PubkyClientConfig (
     /**
      * Request timeout for Pubky HTTP operations in seconds.
      */
@@ -2179,7 +2500,7 @@ public data class FfiPubkyClientConfig (
  * Public profile metadata from the Pubky app namespace.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPubkyProfile (
+public data class PubkyProfile (
     /**
      * Public display name.
      */
@@ -2195,7 +2516,7 @@ public data class FfiPubkyProfile (
     /**
      * Public profile links.
      */
-    val `links`: List<FfiPubkyProfileLink>,
+    val `links`: List<PubkyProfileLink>,
     /**
      * Optional public status text.
      */
@@ -2210,7 +2531,7 @@ public data class FfiPubkyProfile (
  * Public profile link from the Pubky app namespace.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPubkyProfileLink (
+public data class PubkyProfileLink (
     /**
      * Link title.
      */
@@ -2229,7 +2550,7 @@ public data class FfiPubkyProfileLink (
  * Public profile record fetched from the Pubky app namespace.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPubkyProfileRecord (
+public data class PubkyProfileRecord (
     /**
      * Profile owner.
      */
@@ -2237,7 +2558,7 @@ public data class FfiPubkyProfileRecord (
     /**
      * Public profile metadata.
      */
-    val `profile`: FfiPubkyProfile,
+    val `profile`: PubkyProfile,
     /**
      * Pubky path used for the profile.
      */
@@ -2256,7 +2577,7 @@ public data class FfiPubkyProfileRecord (
  * Parsed Pubky resource with a normalized owner and path.
  */
 @kotlinx.serialization.Serializable
-public data class FfiPubkyResourceRef (
+public data class PubkyResourceRef (
     /**
      * Resource owner public key.
      */
@@ -2279,11 +2600,11 @@ public data class FfiPubkyResourceRef (
  * Result of creating or importing a Pubky session.
  */
 
-public data class FfiPubkySessionBootstrapResult (
+public data class PubkySessionBootstrapResult (
     /**
      * Session access material to persist in platform session storage.
      */
-    val `sessionAccess`: FfiPubkySessionAccess,
+    val `sessionAccess`: PubkySessionAccess,
     /**
      * Local Pubky public key.
      */
@@ -2291,7 +2612,7 @@ public data class FfiPubkySessionBootstrapResult (
     /**
      * Capability implied by the session and optional local secret key.
      */
-    val `capability`: FfiPubkyIdentityCapability
+    val `capability`: PubkyIdentityCapability
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2309,7 +2630,7 @@ public data class FfiPubkySessionBootstrapResult (
  * Queued outbound private message summary.
  */
 
-public data class FfiQueuedPrivateMessage (
+public data class QueuedPrivateMessage (
     /**
      * Assigned outbound message id.
      */
@@ -2325,7 +2646,7 @@ public data class FfiQueuedPrivateMessage (
     /**
      * Delivery status.
      */
-    val `status`: FfiOutboundPrivateMessageStatus,
+    val `status`: OutboundPrivateMessageStatus,
     /**
      * Number of send attempts.
      */
@@ -2349,7 +2670,7 @@ public data class FfiQueuedPrivateMessage (
     /**
      * Last send error, when available.
      */
-    val `lastError`: FfiPrivateOperationError?
+    val `lastError`: PrivateOperationError?
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2374,7 +2695,7 @@ public data class FfiQueuedPrivateMessage (
  * App-facing view of an indexed Receipt Access event.
  */
 
-public data class FfiReceiptAccessView (
+public data class ReceiptAccessView (
     /**
      * Counterparty that sent the Receipt Access event.
      */
@@ -2390,7 +2711,7 @@ public data class FfiReceiptAccessView (
     /**
      * Payment Reference copied from Receipt Access.
      */
-    val `paymentReference`: FfiPaymentReference,
+    val `paymentReference`: PaymentReference,
     /**
      * Optional Payment Request ID copied from Receipt Access.
      */
@@ -2398,11 +2719,11 @@ public data class FfiReceiptAccessView (
     /**
      * Optional Billing Period copied from Receipt Access.
      */
-    val `billingPeriod`: FfiBillingPeriod?,
+    val `billingPeriod`: BillingPeriod?,
     /**
      * Current retrieval state for the referenced receipt.
      */
-    val `retrievalStatus`: FfiReceiptRetrievalStatus,
+    val `retrievalStatus`: ReceiptRetrievalStatus,
     /**
      * Last retrieval attempt time as RFC3339 text.
      */
@@ -2439,7 +2760,7 @@ public data class FfiReceiptAccessView (
  * Payment Amount fields copied into receipts.
  */
 @kotlinx.serialization.Serializable
-public data class FfiReceiptAmount (
+public data class ReceiptAmount (
     /**
      * Decimal amount text.
      */
@@ -2458,7 +2779,7 @@ public data class FfiReceiptAmount (
  * Caller-provided receipt fields.
  */
 
-public data class FfiReceiptDraft (
+public data class ReceiptDraft (
     /**
      * Optional caller-stable Receipt ID.
      */
@@ -2466,7 +2787,7 @@ public data class FfiReceiptDraft (
     /**
      * Payment Reference being receipted.
      */
-    val `paymentReference`: FfiPaymentReference,
+    val `paymentReference`: PaymentReference,
     /**
      * Optional Payment Request ID this receipt corresponds to.
      */
@@ -2474,7 +2795,7 @@ public data class FfiReceiptDraft (
     /**
      * Optional Billing Period for recurring Payment Request receipts.
      */
-    val `billingPeriod`: FfiBillingPeriod?,
+    val `billingPeriod`: BillingPeriod?,
     /**
      * Optional Payment Endpoint Identifier used for the payment.
      */
@@ -2482,11 +2803,11 @@ public data class FfiReceiptDraft (
     /**
      * Optional Payment Amount being receipted.
      */
-    val `amount`: FfiReceiptAmount?,
+    val `amount`: ReceiptAmount?,
     /**
      * Caller-defined Receipt Metadata encoded as a JSON object.
      */
-    val `metadata`: FfiPrivateJsonObject
+    val `metadata`: PrivateJsonObject
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2508,7 +2829,7 @@ public data class FfiReceiptDraft (
  * App-facing view of local receipt issuance progress.
  */
 
-public data class FfiReceiptIssuanceView (
+public data class ReceiptIssuanceView (
     /**
      * Counterparty that should receive Receipt Access.
      */
@@ -2524,7 +2845,7 @@ public data class FfiReceiptIssuanceView (
     /**
      * Payment Reference copied from the Receipt.
      */
-    val `paymentReference`: FfiPaymentReference,
+    val `paymentReference`: PaymentReference,
     /**
      * Optional Payment Request ID copied from the Receipt.
      */
@@ -2532,7 +2853,7 @@ public data class FfiReceiptIssuanceView (
     /**
      * Optional Billing Period copied from the Receipt.
      */
-    val `billingPeriod`: FfiBillingPeriod?,
+    val `billingPeriod`: BillingPeriod?,
     /**
      * Optional Payment Endpoint Identifier copied from the Receipt.
      */
@@ -2540,11 +2861,11 @@ public data class FfiReceiptIssuanceView (
     /**
      * Optional Payment Amount copied from the Receipt.
      */
-    val `amount`: FfiReceiptAmount?,
+    val `amount`: ReceiptAmount?,
     /**
      * Current issuance status.
      */
-    val `status`: FfiReceiptIssuanceStatus,
+    val `status`: ReceiptIssuanceStatus,
     /**
      * Outbound private message id that carries Receipt Access, once queued.
      */
@@ -2593,7 +2914,7 @@ public data class FfiReceiptIssuanceView (
  * Decrypted Receipt record stored by the SDK.
  */
 
-public data class FfiReceiptRecord (
+public data class ReceiptRecord (
     /**
      * Counterparty that issued the Receipt Access event.
      */
@@ -2609,7 +2930,7 @@ public data class FfiReceiptRecord (
     /**
      * Payment Reference copied from the decrypted Receipt.
      */
-    val `paymentReference`: FfiPaymentReference,
+    val `paymentReference`: PaymentReference,
     /**
      * Optional Payment Request ID copied from the decrypted Receipt.
      */
@@ -2617,7 +2938,7 @@ public data class FfiReceiptRecord (
     /**
      * Optional Billing Period copied from the decrypted Receipt.
      */
-    val `billingPeriod`: FfiBillingPeriod?,
+    val `billingPeriod`: BillingPeriod?,
     /**
      * Recipient public key from the decrypted Receipt.
      */
@@ -2629,11 +2950,11 @@ public data class FfiReceiptRecord (
     /**
      * Optional Payment Amount copied from the decrypted Receipt.
      */
-    val `amount`: FfiReceiptAmount?,
+    val `amount`: ReceiptAmount?,
     /**
      * Caller-defined Receipt Metadata encoded as a JSON object.
      */
-    val `metadata`: FfiPrivateJsonObject,
+    val `metadata`: PrivateJsonObject,
     /**
      * Successful retrieval/decryption time as RFC3339 text.
      */
@@ -2663,7 +2984,7 @@ public data class FfiReceiptRecord (
  * Payment-method-specific receiving detail returned by the payment adapter.
  */
 
-public data class FfiReceivingDetail (
+public data class ReceivingDetail (
     /**
      * Payment Endpoint Identifier string.
      */
@@ -2671,7 +2992,7 @@ public data class FfiReceivingDetail (
     /**
      * Serialized endpoint payload.
      */
-    val `payload`: FfiPaymentPayload
+    val `payload`: PaymentPayload
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2685,14 +3006,39 @@ public data class FfiReceivingDetail (
 
 
 /**
+ * Explicit result for private receiving-detail reservation callbacks.
+ */
+
+public data class ReceivingDetailReservationResponse (
+    /**
+     * Response kind.
+     */
+    val `kind`: ReceivingDetailReservationResponseKind,
+    /**
+     * Reserved details when `kind` is `Reservations`.
+     */
+    val `reservations`: List<PaymentEndpointReservation>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`kind`,
+            this.`reservations`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
  * Receiving-detail request scope passed to the payment adapter.
  */
 @kotlinx.serialization.Serializable
-public data class FfiReceivingDetailScope (
+public data class ReceivingDetailScope (
     /**
      * Scope kind.
      */
-    val `kind`: FfiReceivingDetailScopeKind,
+    val `kind`: ReceivingDetailScopeKind,
     /**
      * Counterparty public key for private scopes.
      */
@@ -2707,7 +3053,7 @@ public data class FfiReceivingDetailScope (
  * Failed recovery marker publication during outbound private send recovery.
  */
 
-public data class FfiRecoveryMarkerPublishFailure (
+public data class RecoveryMarkerPublishFailure (
     /**
      * Outbound message id that triggered recovery, when available.
      */
@@ -2715,7 +3061,7 @@ public data class FfiRecoveryMarkerPublishFailure (
     /**
      * Recovery marker publication error.
      */
-    val `error`: FfiPrivateOperationError
+    val `error`: PrivateOperationError
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2732,7 +3078,7 @@ public data class FfiRecoveryMarkerPublishFailure (
  * Failed cleanup of a superseded Payment Endpoint Reservation.
  */
 
-public data class FfiReservationCleanupFailure (
+public data class ReservationCleanupFailure (
     /**
      * Reservation id, when the failure is tied to a specific reservation.
      */
@@ -2740,7 +3086,7 @@ public data class FfiReservationCleanupFailure (
     /**
      * Cleanup error.
      */
-    val `error`: FfiPrivateOperationError
+    val `error`: PrivateOperationError
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2757,7 +3103,7 @@ public data class FfiReservationCleanupFailure (
  * Payment Endpoint paired with the target needed to pay through it.
  */
 
-public data class FfiResolvedPaymentEndpoint (
+public data class ResolvedPaymentEndpoint (
     /**
      * Counterparty that published the endpoint.
      */
@@ -2765,7 +3111,7 @@ public data class FfiResolvedPaymentEndpoint (
     /**
      * Where the endpoint was discovered.
      */
-    val `source`: FfiPaymentEndpointSource,
+    val `source`: PaymentEndpointSource,
     /**
      * Payment Endpoint Identifier string.
      */
@@ -2773,11 +3119,11 @@ public data class FfiResolvedPaymentEndpoint (
     /**
      * Serialized endpoint payload.
      */
-    val `payload`: FfiPaymentPayload,
+    val `payload`: PaymentPayload,
     /**
      * Adapter-built target for executing payment through this endpoint.
      */
-    val `target`: FfiPaymentTarget
+    val `target`: PaymentTarget
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2797,7 +3143,7 @@ public data class FfiResolvedPaymentEndpoint (
  * Report returned after restoring SDK-managed backup state.
  */
 @kotlinx.serialization.Serializable
-public data class FfiRestoreReport (
+public data class RestoreReport (
     /**
      * Restored backup schema version.
      */
@@ -2864,11 +3210,11 @@ public data class FfiRestoreReport (
  * Current SDK state blob with its platform storage revision.
  */
 
-public data class FfiSdkStateBlobSnapshot (
+public data class SdkStateBlobSnapshot (
     /**
      * Encoded SDK state.
      */
-    val `blob`: FfiSdkStateBlob,
+    val `blob`: SdkStateBlob,
     /**
      * Opaque platform storage revision for optimistic writes.
      */
@@ -2891,7 +3237,7 @@ public data class FfiSdkStateBlobSnapshot (
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiContactPaymentResolutionPrivateState {
+public enum class ContactPaymentResolutionPrivateState {
 
     /**
      * Private Payment List candidates were available for resolution.
@@ -2926,7 +3272,7 @@ public enum class FfiContactPaymentResolutionPrivateState {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiContactPaymentResolutionStatus {
+public enum class ContactPaymentResolutionStatus {
 
     /**
      * A payable endpoint was found.
@@ -2957,7 +3303,7 @@ public enum class FfiContactPaymentResolutionStatus {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiContactProfileSource {
+public enum class ContactProfileSource {
 
     /**
      * Resolved from the configured Paykit Profile path.
@@ -2984,7 +3330,7 @@ public enum class FfiContactProfileSource {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiEncryptedLinkHandshakeRole {
+public enum class EncryptedLinkHandshakeRole {
 
     /**
      * Local peer initiated the handshake.
@@ -3011,7 +3357,7 @@ public enum class FfiEncryptedLinkHandshakeRole {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiEncryptedLinkRecoveryMarkerPolicy {
+public enum class EncryptedLinkRecoveryMarkerPolicy {
 
     /**
      * Publish and observe recovery markers.
@@ -3038,7 +3384,7 @@ public enum class FfiEncryptedLinkRecoveryMarkerPolicy {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiEndpointManagementScope {
+public enum class EndpointManagementScope {
 
     /**
      * Manage only endpoints previously published by the SDK.
@@ -3065,7 +3411,7 @@ public enum class FfiEndpointManagementScope {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiLinkedPeerState {
+public enum class LinkedPeerState {
 
     /**
      * The SDK tracks this counterparty, but no active Encrypted Link exists.
@@ -3104,7 +3450,7 @@ public enum class FfiLinkedPeerState {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiOutboundPrivateMessageStatus {
+public enum class OutboundPrivateMessageStatus {
 
     /**
      * Message is queued and has not been sent.
@@ -3151,7 +3497,7 @@ public enum class FfiOutboundPrivateMessageStatus {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiPaymentEndpointSource {
+public enum class PaymentEndpointSource {
 
     /**
      * Endpoint came from a counterparty-specific Private Payment List.
@@ -3178,7 +3524,7 @@ public enum class FfiPaymentEndpointSource {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiPaymentRequestLifecycleState {
+public enum class PaymentRequestLifecycleState {
 
     /**
      * Proposal is known locally and remains actionable.
@@ -3233,7 +3579,7 @@ public enum class FfiPaymentRequestLifecycleState {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiPaymentRequestLocalRole {
+public enum class PaymentRequestLocalRole {
 
     /**
      * Local identity is expected to pay.
@@ -3260,7 +3606,7 @@ public enum class FfiPaymentRequestLocalRole {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiPubkyAuthRequestKind {
+public enum class PubkyAuthRequestKind {
 
     /**
      * Sign in to an existing Pubky account.
@@ -3291,7 +3637,7 @@ public enum class FfiPubkyAuthRequestKind {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiPubkyIdentityCapability {
+public enum class PubkyIdentityCapability {
 
     /**
      * No Pubky identity is initialized, or explicit sign-out completed.
@@ -3322,7 +3668,7 @@ public enum class FfiPubkyIdentityCapability {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiPublicContactSharingPolicy {
+public enum class PublicContactSharingPolicy {
 
     /**
      * Keep saved contacts only in local SDK storage.
@@ -3349,7 +3695,7 @@ public enum class FfiPublicContactSharingPolicy {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiPublicationStatus {
+public enum class PublicationStatus {
 
     /**
      * No publication is known to exist.
@@ -3392,7 +3738,7 @@ public enum class FfiPublicationStatus {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiReceiptIssuanceStatus {
+public enum class ReceiptIssuanceStatus {
 
     /**
      * Encrypted Receipt has not been stored yet.
@@ -3427,7 +3773,7 @@ public enum class FfiReceiptIssuanceStatus {
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiReceiptRetrievalStatus {
+public enum class ReceiptRetrievalStatus {
 
     /**
      * Receipt Access has been indexed, but retrieval has not succeeded yet.
@@ -3458,11 +3804,38 @@ public enum class FfiReceiptRetrievalStatus {
 
 
 /**
+ * Reservation callback result kind.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class ReceivingDetailReservationResponseKind {
+
+    /**
+     * Use `current_receiving_details` for this private list.
+     */
+    USE_CURRENT_RECEIVING_DETAILS,
+    /**
+     * Use the reservations carried by this response, including an empty list.
+     */
+    RESERVATIONS,
+    /**
+     * Reserved invalid response kind.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
  * Scope used when asking a payment adapter for receiving details.
  */
 
 @kotlinx.serialization.Serializable
-public enum class FfiReceivingDetailScopeKind {
+public enum class ReceivingDetailScopeKind {
 
     /**
      * Details intended for public Payment Endpoints.
@@ -3488,7 +3861,7 @@ public enum class FfiReceivingDetailScopeKind {
 /**
  * Error type exposed through generated bindings.
  */
-public sealed class PaykitFfiException: kotlin.Exception() {
+public sealed class PaykitException: kotlin.Exception() {
 
     /**
      * Durable storage failed.
@@ -3496,7 +3869,7 @@ public sealed class PaykitFfiException: kotlin.Exception() {
     public class Storage(
         public val `code`: kotlin.String,
         public val `context`: kotlin.String,
-    ) : PaykitFfiException() {
+    ) : PaykitException() {
         override val message: String
             get() = "code=${ `code` }, context=${ `context` }"
     }
@@ -3507,7 +3880,7 @@ public sealed class PaykitFfiException: kotlin.Exception() {
     public class Identity(
         public val `code`: kotlin.String,
         public val `context`: kotlin.String,
-    ) : PaykitFfiException() {
+    ) : PaykitException() {
         override val message: String
             get() = "code=${ `code` }, context=${ `context` }"
     }
@@ -3518,7 +3891,7 @@ public sealed class PaykitFfiException: kotlin.Exception() {
     public class Transport(
         public val `code`: kotlin.String,
         public val `context`: kotlin.String,
-    ) : PaykitFfiException() {
+    ) : PaykitException() {
         override val message: String
             get() = "code=${ `code` }, context=${ `context` }"
     }
@@ -3529,7 +3902,7 @@ public sealed class PaykitFfiException: kotlin.Exception() {
     public class NotFound(
         public val `code`: kotlin.String,
         public val `context`: kotlin.String,
-    ) : PaykitFfiException() {
+    ) : PaykitException() {
         override val message: String
             get() = "code=${ `code` }, context=${ `context` }"
     }
@@ -3540,7 +3913,7 @@ public sealed class PaykitFfiException: kotlin.Exception() {
     public class Protocol(
         public val `code`: kotlin.String,
         public val `context`: kotlin.String,
-    ) : PaykitFfiException() {
+    ) : PaykitException() {
         override val message: String
             get() = "code=${ `code` }, context=${ `context` }"
     }
@@ -3551,7 +3924,7 @@ public sealed class PaykitFfiException: kotlin.Exception() {
     public class Policy(
         public val `code`: kotlin.String,
         public val `context`: kotlin.String,
-    ) : PaykitFfiException() {
+    ) : PaykitException() {
         override val message: String
             get() = "code=${ `code` }, context=${ `context` }"
     }
@@ -3562,7 +3935,7 @@ public sealed class PaykitFfiException: kotlin.Exception() {
     public class PaymentAdapter(
         public val `code`: kotlin.String,
         public val `context`: kotlin.String,
-    ) : PaykitFfiException() {
+    ) : PaykitException() {
         override val message: String
             get() = "code=${ `code` }, context=${ `context` }"
     }
@@ -3573,7 +3946,7 @@ public sealed class PaykitFfiException: kotlin.Exception() {
     public class RecoveryRequired(
         public val `code`: kotlin.String,
         public val `context`: kotlin.String,
-    ) : PaykitFfiException() {
+    ) : PaykitException() {
         override val message: String
             get() = "code=${ `code` }, context=${ `context` }"
     }

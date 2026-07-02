@@ -8,7 +8,11 @@ use paykit_sdk::{
     PrivateStreamIntakeReport, RecoveryMarkerPublishFailure, ReservationCleanupFailure,
 };
 
-use crate::{sdk::FfiPaykitSdk, PaykitFfiError};
+use crate::{
+    sdk::FfiPaykitSdk,
+    session::{app_public_key, parse_public_key},
+    PaykitFfiError,
+};
 
 /// Private workflow error with redacted default context.
 #[derive(uniffi::Object)]
@@ -245,7 +249,7 @@ pub struct FfiEncryptedLinkRecoveryMarkerReport {
     pub remote_marker_changed: bool,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// List locally tracked Linked Peer records.
     pub async fn linked_peers(&self) -> Result<Vec<FfiLinkedPeerRecord>, PaykitFfiError> {
@@ -316,6 +320,19 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Start or advance an Encrypted Link Handshake for one counterparty.
+    pub async fn ensure_link_with_peer(
+        &self,
+        counterparty: String,
+        max_advance_steps: u32,
+    ) -> Result<FfiLinkedPeerHandshakeReport, PaykitFfiError> {
+        self.runtime
+            .ensure_link_with_peer(parse_public_key(counterparty)?, max_advance_steps)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
     /// Receive and durably persist available private messages.
     pub async fn receive_private_messages(
         &self,
@@ -358,7 +375,7 @@ impl FfiPaykitSdk {
         self.runtime
             .pending_outbound_private_counterparties()
             .await
-            .map(|keys| keys.into_iter().map(|key| key.to_string()).collect())
+            .map(|keys| keys.into_iter().map(|key| app_public_key(&key)).collect())
             .map_err(Into::into)
     }
 
@@ -448,7 +465,7 @@ impl From<EncryptedLinkHandshakeRole> for FfiEncryptedLinkHandshakeRole {
 impl From<LinkedPeerRecord> for FfiLinkedPeerRecord {
     fn from(value: LinkedPeerRecord) -> Self {
         Self {
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             state: value.state.into(),
             last_sync_at: value.last_sync_at.map(|time| time.to_rfc3339()),
             last_private_receive_at: value.last_private_receive_at.map(|time| time.to_rfc3339()),
@@ -471,7 +488,7 @@ impl From<LinkedPeerRecord> for FfiLinkedPeerRecord {
 impl From<LinkedPeerHandshakeReport> for FfiLinkedPeerHandshakeReport {
     fn from(value: LinkedPeerHandshakeReport) -> Self {
         Self {
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             state: value.state.into(),
             generation: value.generation,
             handshake_role: value.handshake_role.map(Into::into),
@@ -502,7 +519,7 @@ impl From<PrivateStreamIntakeReport> for FfiPrivateStreamIntakeReport {
 impl From<PrivateStreamCounterpartyIntakeReport> for FfiPrivateStreamCounterpartyIntakeReport {
     fn from(value: PrivateStreamCounterpartyIntakeReport) -> Self {
         Self {
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             report: value.report.map(Into::into),
             error: private_receive_error_opt(value.error),
         }
@@ -574,7 +591,7 @@ impl From<OutboundPrivateSendReport> for FfiOutboundPrivateSendReport {
 impl From<OutboundPrivateCounterpartySendReport> for FfiOutboundPrivateCounterpartySendReport {
     fn from(value: OutboundPrivateCounterpartySendReport) -> Self {
         Self {
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             report: value.report.map(Into::into),
             error: outbound_queue_error_opt(value.error),
         }
@@ -584,7 +601,7 @@ impl From<OutboundPrivateCounterpartySendReport> for FfiOutboundPrivateCounterpa
 impl From<EncryptedLinkRecoveryMarkerReport> for FfiEncryptedLinkRecoveryMarkerReport {
     fn from(value: EncryptedLinkRecoveryMarkerReport) -> Self {
         Self {
-            counterparty: value.counterparty.to_string(),
+            counterparty: app_public_key(&value.counterparty),
             state: value.state.into(),
             local_attempt_id: value.local_attempt_id,
             local_marker_created_at: value.local_marker_created_at.map(|time| time.to_rfc3339()),
@@ -596,10 +613,6 @@ impl From<EncryptedLinkRecoveryMarkerReport> for FfiEncryptedLinkRecoveryMarkerR
             remote_marker_changed: value.remote_marker_changed,
         }
     }
-}
-
-fn parse_public_key(value: String) -> Result<paykit_sdk::PubkyPublicKey, PaykitFfiError> {
-    paykit_sdk::PubkyPublicKey::new(value).map_err(Into::into)
 }
 
 fn private_error(

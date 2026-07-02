@@ -43,20 +43,7 @@ where
     /// List counterparties with queued private messages ready for retry.
     pub async fn pending_outbound_private_counterparties(&self) -> Result<Vec<PubkyPublicKey>> {
         let now = self.clock.now();
-        let lease_timeout = ChronoDuration::from_std(
-            self.config.outbound_private_send_lease_timeout,
-        )
-        .map_err(|err| {
-            PaykitSdkError::Policy(format!(
-                "invalid outbound private send lease timeout: {err}"
-            ))
-        })?;
-        let retry_backoff = ChronoDuration::from_std(self.config.outbound_private_retry_backoff)
-            .map_err(|err| {
-                PaykitSdkError::Policy(format!("invalid outbound private retry backoff: {err}"))
-            })?;
-        let stale_before = now - lease_timeout;
-        let failed_retry_after = now - retry_backoff;
+        let (stale_before, failed_retry_after) = self.outbound_retry_thresholds(now)?;
         self.storage
             .transaction(move |tx| {
                 let snapshot = tx.export_storage_state();

@@ -70,7 +70,7 @@ pub trait PaymentAdapter: Send + Sync {
         _cancellation: &PaymentEndpointReservationCancellation,
     ) -> Result<()> {
         Err(PaykitSdkError::PaymentAdapter {
-            context: "receiving-detail reservation cancellation is not implemented".into(),
+            context: "adapter does not support receiving-detail reservation cancellation".into(),
             source: None,
         })
     }

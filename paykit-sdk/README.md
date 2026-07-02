@@ -11,8 +11,9 @@ tracks local receipt issuance, tracks optional Payment Endpoint Reservations,
 manages Paykit-facing profile and local contact records, and exports/restores
 SDK-managed backup state.
 
-The SDK currently exposes a Rust API. Platform SDK bindings are the next layer
-and should wrap this SDK surface as the primary mobile/app integration API.
+This crate exposes the Rust SDK API. The workspace also ships Swift and Kotlin
+SDK bindings through `paykit-ffi`, which should be the primary mobile/app
+integration surface.
 
 Payment execution, settlement detection, balances, route policy, product UI,
 and app backup transport stay outside the SDK and are provided by application
@@ -43,7 +44,7 @@ Implemented in this Rust SDK crate:
 
 Not implemented in this crate yet:
 
-- platform SDK bindings and first-party durable mobile storage helpers
+- first-party durable mobile storage helpers
 - payment execution, settlement confirmation, balances, fees, or route policy
 - product UI/profile screens, localization, and app backup transport
 - multi-device checkpoint synchronization and recurring payment scheduling
@@ -168,6 +169,10 @@ link. Outbound status is local checkpoint state, not counterparty
 acknowledgement. Non-retryable link-state failures still pause the peer for
 recovery. Superseded reservation cleanup failures are reported separately and do
 not block delivery of current outbound messages.
+
+Private Payment List helpers support adapter-reserved receiving details. Apps
+can queue reservation-backed lists directly when they already hold reservation
+metadata, including an empty list to clear a counterparty's private list.
 
 Storage implementations must commit raw private stream items, derived indexes,
 and the advanced Encrypted Link snapshot atomically. If storage cannot provide

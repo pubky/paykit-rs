@@ -29,9 +29,10 @@ pub use domain::contacts::{
     ContactPaymentResolution, ContactPaymentResolutionPrivateState,
     ContactPaymentResolutionRequest, ContactPaymentResolutionStatus, ContactProfileResolution,
     ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile,
-    PaykitProfileRecord, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
-    ResolvedPaymentEndpoint, PAYKIT_PROFILE_BLOB_PATH_PREFIX, PAYKIT_PROFILE_PATH,
-    PAYKIT_PUBLIC_CONTACT_PATH_PREFIX, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+    PaykitProfileRecord, PreparedContactPayment, PubkyProfile, PubkyProfileLink,
+    PubkyProfileRecord, ResolvedPaymentEndpoint, DEFAULT_PAYKIT_PROFILE_BLOB_PATH_PREFIX,
+    DEFAULT_PAYKIT_PROFILE_PATH, DEFAULT_PAYKIT_PUBLIC_CONTACT_PATH_PREFIX,
+    PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
 };
 #[doc(inline)]
 pub use domain::endpoints::{load_public_endpoint_records, EndpointSyncChange, EndpointSyncReport};
@@ -53,7 +54,11 @@ pub use domain::payment_requests::{
     PaymentRequestTermsRecord,
 };
 #[doc(inline)]
-pub use domain::private_lists::PrivatePaymentListView;
+pub use domain::private_lists::{
+    PrivatePaymentListDeliveryFailure, PrivatePaymentListDeliveryReport,
+    PrivatePaymentListReservationUpdate, PrivatePaymentListSyncChange,
+    PrivatePaymentListSyncReport, PrivatePaymentListView,
+};
 #[doc(inline)]
 pub use domain::private_stream::{
     EventIdConflict, PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,
