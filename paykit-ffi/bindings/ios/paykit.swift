@@ -532,6 +532,21 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func acceptLinkWithPeer(counterparty: String) async throws  -> FfiLinkedPeerHandshakeReport
 
     /**
+     * Queue acceptance for a received Payment Request and return local derived state.
+     */
+    func acceptPaymentRequest(counterparty: String, paymentRequestId: String) async throws  -> FfiPaymentRequestRecord
+
+    /**
+     * Return received Payment Requests that need a local payer response.
+     */
+    func actionableReceivedPaymentRequests() async throws  -> [FfiPaymentRequestRecord]
+
+    /**
+     * Return accepted recurring Payment Requests across non-blocked counterparties.
+     */
+    func activeRecurringPaymentRequests() async throws  -> [FfiPaymentRequestRecord]
+
+    /**
      * Advance the stored Encrypted Link Handshake for one counterparty.
      */
     func advanceLinkHandshake(counterparty: String) async throws  -> FfiLinkedPeerHandshakeReport
@@ -540,6 +555,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Block a counterparty for local Paykit private workflows.
      */
     func blockPeer(counterparty: String) async throws  -> FfiLinkedPeerRecord
+
+    /**
+     * Queue cancellation for a known non-terminal Payment Request.
+     */
+    func cancelPaymentRequest(counterparty: String, paymentRequestId: String, reason: String?) async throws  -> FfiPaymentRequestRecord
 
     /**
      * Return this runtime's configuration.
@@ -627,9 +647,24 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func linkedPeers() async throws  -> [FfiLinkedPeerRecord]
 
     /**
+     * Return Payment Requests matching a local SDK filter.
+     */
+    func listPaymentRequests(filter: FfiPaymentRequestFilter) async throws  -> [FfiPaymentRequestRecord]
+
+    /**
      * Observe a counterparty's public recovery marker.
      */
     func observeEncryptedLinkRecoveryMarker(counterparty: String) async throws  -> FfiEncryptedLinkRecoveryMarkerReport
+
+    /**
+     * Return all Payment Requests across non-blocked counterparties.
+     */
+    func paymentRequests() async throws  -> [FfiPaymentRequestRecord]
+
+    /**
+     * Return Payment Requests involving one counterparty.
+     */
+    func paymentRequestsWith(counterparty: String) async throws  -> [FfiPaymentRequestRecord]
 
     /**
      * List counterparties with queued private messages ready for retry.
@@ -645,6 +680,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Process queued outbound private messages for every pending counterparty.
      */
     func processPendingPrivateMessages() async throws  -> [FfiOutboundPrivateCounterpartySendReport]
+
+    /**
+     * Queue a new Payment Request proposal and return local derived state.
+     */
+    func proposePaymentRequest(counterparty: String, terms: FfiPaymentRequestTerms) async throws  -> FfiPaymentRequestRecord
 
     /**
      * Publish a minimal local recovery marker for a counterparty.
@@ -677,9 +717,19 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
     func receivePrivateMessagesFromLinkedPeers() async throws  -> [FfiPrivateStreamCounterpartyIntakeReport]
 
     /**
+     * Return inbound Payment Requests received from one counterparty.
+     */
+    func receivedPaymentRequestsFrom(counterparty: String) async throws  -> [FfiPaymentRequestRecord]
+
+    /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
     func refreshContactPaykitProfile(publicKey: String) async throws  -> FfiContactRecord?
+
+    /**
+     * Queue rejection for a received Payment Request and return local derived state.
+     */
+    func rejectPaymentRequest(counterparty: String, paymentRequestId: String, reason: String?) async throws  -> FfiPaymentRequestRecord
 
     /**
      * Remove a local Contact Record when it has no public marker to clean up.
@@ -720,6 +770,11 @@ public protocol FfiPaykitSdkProtocol: AnyObject, Sendable {
      * Clear live Pubky session access and SDK-managed identity-scoped state.
      */
     func signOut() async throws  -> FfiIdentityStatus
+
+    /**
+     * Queue a Payment Proof for an accepted Payment Request.
+     */
+    func submitPaymentProof(counterparty: String, paymentRequestId: String, proof: FfiPaymentProofSubmission) async throws  -> FfiPaymentRequestRecord
 
     /**
      * Retry pending public Contact Marker publication/removal work.
@@ -869,6 +924,66 @@ open func acceptLinkWithPeer(counterparty: String)async throws  -> FfiLinkedPeer
 }
 
     /**
+     * Queue acceptance for a received Payment Request and return local derived state.
+     */
+open func acceptPaymentRequest(counterparty: String, paymentRequestId: String)async throws  -> FfiPaymentRequestRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_accept_payment_request(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiPaymentRequestRecord_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Return received Payment Requests that need a local payer response.
+     */
+open func actionableReceivedPaymentRequests()async throws  -> [FfiPaymentRequestRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_actionable_received_payment_requests(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiPaymentRequestRecord.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Return accepted recurring Payment Requests across non-blocked counterparties.
+     */
+open func activeRecurringPaymentRequests()async throws  -> [FfiPaymentRequestRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_active_recurring_payment_requests(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiPaymentRequestRecord.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Advance the stored Encrypted Link Handshake for one counterparty.
      */
 open func advanceLinkHandshake(counterparty: String)async throws  -> FfiLinkedPeerHandshakeReport  {
@@ -904,6 +1019,26 @@ open func blockPeer(counterparty: String)async throws  -> FfiLinkedPeerRecord  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeFfiLinkedPeerRecord_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Queue cancellation for a known non-terminal Payment Request.
+     */
+open func cancelPaymentRequest(counterparty: String, paymentRequestId: String, reason: String?)async throws  -> FfiPaymentRequestRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_cancel_payment_request(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiPaymentRequestRecord_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1239,6 +1374,26 @@ open func linkedPeers()async throws  -> [FfiLinkedPeerRecord]  {
 }
 
     /**
+     * Return Payment Requests matching a local SDK filter.
+     */
+open func listPaymentRequests(filter: FfiPaymentRequestFilter)async throws  -> [FfiPaymentRequestRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_list_payment_requests(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypeFfiPaymentRequestFilter_lower(filter)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiPaymentRequestRecord.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Observe a counterparty's public recovery marker.
      */
 open func observeEncryptedLinkRecoveryMarker(counterparty: String)async throws  -> FfiEncryptedLinkRecoveryMarkerReport  {
@@ -1254,6 +1409,46 @@ open func observeEncryptedLinkRecoveryMarker(counterparty: String)async throws  
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeFfiEncryptedLinkRecoveryMarkerReport_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Return all Payment Requests across non-blocked counterparties.
+     */
+open func paymentRequests()async throws  -> [FfiPaymentRequestRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_payment_requests(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiPaymentRequestRecord.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Return Payment Requests involving one counterparty.
+     */
+open func paymentRequestsWith(counterparty: String)async throws  -> [FfiPaymentRequestRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_payment_requests_with(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiPaymentRequestRecord.lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1314,6 +1509,26 @@ open func processPendingPrivateMessages()async throws  -> [FfiOutboundPrivateCou
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeFfiOutboundPrivateCounterpartySendReport.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Queue a new Payment Request proposal and return local derived state.
+     */
+open func proposePaymentRequest(counterparty: String, terms: FfiPaymentRequestTerms)async throws  -> FfiPaymentRequestRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_propose_payment_request(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterTypeFfiPaymentRequestTerms_lower(terms)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiPaymentRequestRecord_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1439,6 +1654,26 @@ open func receivePrivateMessagesFromLinkedPeers()async throws  -> [FfiPrivateStr
 }
 
     /**
+     * Return inbound Payment Requests received from one counterparty.
+     */
+open func receivedPaymentRequestsFrom(counterparty: String)async throws  -> [FfiPaymentRequestRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_received_payment_requests_from(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiPaymentRequestRecord.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
 open func refreshContactPaykitProfile(publicKey: String)async throws  -> FfiContactRecord?  {
@@ -1454,6 +1689,26 @@ open func refreshContactPaykitProfile(publicKey: String)async throws  -> FfiCont
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeFfiContactRecord.lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Queue rejection for a received Payment Request and return local derived state.
+     */
+open func rejectPaymentRequest(counterparty: String, paymentRequestId: String, reason: String?)async throws  -> FfiPaymentRequestRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_reject_payment_request(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiPaymentRequestRecord_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1614,6 +1869,26 @@ open func signOut()async throws  -> FfiIdentityStatus  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeFfiIdentityStatus_lift,
+            errorHandler: FfiConverterTypePaykitFfiError_lift
+        )
+}
+
+    /**
+     * Queue a Payment Proof for an accepted Payment Request.
+     */
+open func submitPaymentProof(counterparty: String, paymentRequestId: String, proof: FfiPaymentProofSubmission)async throws  -> FfiPaymentRequestRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_submit_payment_proof(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId),FfiConverterTypeFfiPaymentProofSubmission_lower(proof)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiPaymentRequestRecord_lift,
             errorHandler: FfiConverterTypePaykitFfiError_lift
         )
 }
@@ -1874,6 +2149,151 @@ public func FfiConverterTypeFfiPaymentPayload_lift(_ pointer: UnsafeMutableRawPo
 #endif
 public func FfiConverterTypeFfiPaymentPayload_lower(_ value: FfiPaymentPayload) -> UnsafeMutableRawPointer {
     return FfiConverterTypeFfiPaymentPayload.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Payment Reference text with redacted debug output.
+ */
+public protocol FfiPaymentReferenceProtocol: AnyObject, Sendable {
+
+    /**
+     * Export the reference text for explicit payment execution or display.
+     */
+    func exportText()  -> String
+
+}
+/**
+ * Payment Reference text with redacted debug output.
+ */
+open class FfiPaymentReference: FfiPaymentReferenceProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffipaymentreference(self.pointer, $0) }
+    }
+    /**
+     * Create a Payment Reference after validating it.
+     */
+public convenience init(text: String)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitFfiError_lift) {
+    uniffi_paykit_fn_constructor_ffipaymentreference_new(
+        FfiConverterString.lower(text),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffipaymentreference(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Export the reference text for explicit payment execution or display.
+     */
+open func exportText() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipaymentreference_export_text(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPaymentReference: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = FfiPaymentReference
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> FfiPaymentReference {
+        return FfiPaymentReference(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: FfiPaymentReference) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentReference {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: FfiPaymentReference, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentReference_lift(_ pointer: UnsafeMutableRawPointer) throws -> FfiPaymentReference {
+    return try FfiConverterTypeFfiPaymentReference.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentReference_lower(_ value: FfiPaymentReference) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeFfiPaymentReference.lower(value)
 }
 
 
@@ -4147,6 +4567,93 @@ public func FfiConverterTypeFfiSdkStateBlobStore_lower(_ value: FfiSdkStateBlobS
 }
 
 
+
+
+/**
+ * Time interval a recurring Payment Proof applies to.
+ */
+public struct FfiBillingPeriod {
+    /**
+     * RFC3339 UTC start timestamp.
+     */
+    public var startsAt: String
+    /**
+     * RFC3339 UTC end timestamp.
+     */
+    public var endsAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * RFC3339 UTC start timestamp.
+         */startsAt: String,
+        /**
+         * RFC3339 UTC end timestamp.
+         */endsAt: String) {
+        self.startsAt = startsAt
+        self.endsAt = endsAt
+    }
+}
+
+#if compiler(>=6)
+extension FfiBillingPeriod: Sendable {}
+#endif
+
+
+extension FfiBillingPeriod: Equatable, Hashable {
+    public static func ==(lhs: FfiBillingPeriod, rhs: FfiBillingPeriod) -> Bool {
+        if lhs.startsAt != rhs.startsAt {
+            return false
+        }
+        if lhs.endsAt != rhs.endsAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(startsAt)
+        hasher.combine(endsAt)
+    }
+}
+
+extension FfiBillingPeriod: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiBillingPeriod: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiBillingPeriod {
+        return
+            try FfiBillingPeriod(
+                startsAt: FfiConverterString.read(from: &buf),
+                endsAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiBillingPeriod, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.startsAt, into: &buf)
+        FfiConverterString.write(value.endsAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiBillingPeriod_lift(_ buf: RustBuffer) throws -> FfiBillingPeriod {
+    return try FfiConverterTypeFfiBillingPeriod.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiBillingPeriod_lower(_ value: FfiBillingPeriod) -> RustBuffer {
+    return FfiConverterTypeFfiBillingPeriod.lower(value)
+}
 
 
 /**
@@ -6849,6 +7356,953 @@ public func FfiConverterTypeFfiPaymentEndpointSelectionRequest_lift(_ buf: RustB
 #endif
 public func FfiConverterTypeFfiPaymentEndpointSelectionRequest_lower(_ value: FfiPaymentEndpointSelectionRequest) -> RustBuffer {
     return FfiConverterTypeFfiPaymentEndpointSelectionRequest.lower(value)
+}
+
+
+/**
+ * Payment Proof captured in a derived Payment Request record.
+ */
+public struct FfiPaymentProofRecord {
+    /**
+     * Event ID.
+     */
+    public var eventId: String
+    /**
+     * Outbound message id, when proof was sent locally.
+     */
+    public var outboundMessageId: UInt64?
+    /**
+     * Local outbound delivery status, when proof was queued locally.
+     */
+    public var outboundStatus: FfiOutboundPrivateMessageStatus?
+    /**
+     * Stream item id, when proof was received from the counterparty.
+     */
+    public var streamItemId: UInt64?
+    /**
+     * Payment Reference copied from the proof.
+     */
+    public var paymentReference: FfiPaymentReference
+    /**
+     * Optional Billing Period copied from the proof.
+     */
+    public var billingPeriod: FfiBillingPeriod?
+    /**
+     * Payment Endpoint Identifier used for payment.
+     */
+    public var paymentEndpointIdentifier: String
+    /**
+     * Method-specific proof object encoded as JSON.
+     */
+    public var proofJson: String
+    /**
+     * Local record time for this proof as RFC3339 text.
+     */
+    public var recordedAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Event ID.
+         */eventId: String,
+        /**
+         * Outbound message id, when proof was sent locally.
+         */outboundMessageId: UInt64?,
+        /**
+         * Local outbound delivery status, when proof was queued locally.
+         */outboundStatus: FfiOutboundPrivateMessageStatus?,
+        /**
+         * Stream item id, when proof was received from the counterparty.
+         */streamItemId: UInt64?,
+        /**
+         * Payment Reference copied from the proof.
+         */paymentReference: FfiPaymentReference,
+        /**
+         * Optional Billing Period copied from the proof.
+         */billingPeriod: FfiBillingPeriod?,
+        /**
+         * Payment Endpoint Identifier used for payment.
+         */paymentEndpointIdentifier: String,
+        /**
+         * Method-specific proof object encoded as JSON.
+         */proofJson: String,
+        /**
+         * Local record time for this proof as RFC3339 text.
+         */recordedAt: String) {
+        self.eventId = eventId
+        self.outboundMessageId = outboundMessageId
+        self.outboundStatus = outboundStatus
+        self.streamItemId = streamItemId
+        self.paymentReference = paymentReference
+        self.billingPeriod = billingPeriod
+        self.paymentEndpointIdentifier = paymentEndpointIdentifier
+        self.proofJson = proofJson
+        self.recordedAt = recordedAt
+    }
+}
+
+#if compiler(>=6)
+extension FfiPaymentProofRecord: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPaymentProofRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentProofRecord {
+        return
+            try FfiPaymentProofRecord(
+                eventId: FfiConverterString.read(from: &buf),
+                outboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
+                outboundStatus: FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.read(from: &buf),
+                streamItemId: FfiConverterOptionUInt64.read(from: &buf),
+                paymentReference: FfiConverterTypeFfiPaymentReference.read(from: &buf),
+                billingPeriod: FfiConverterOptionTypeFfiBillingPeriod.read(from: &buf),
+                paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
+                proofJson: FfiConverterString.read(from: &buf),
+                recordedAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPaymentProofRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.eventId, into: &buf)
+        FfiConverterOptionUInt64.write(value.outboundMessageId, into: &buf)
+        FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.write(value.outboundStatus, into: &buf)
+        FfiConverterOptionUInt64.write(value.streamItemId, into: &buf)
+        FfiConverterTypeFfiPaymentReference.write(value.paymentReference, into: &buf)
+        FfiConverterOptionTypeFfiBillingPeriod.write(value.billingPeriod, into: &buf)
+        FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
+        FfiConverterString.write(value.proofJson, into: &buf)
+        FfiConverterString.write(value.recordedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentProofRecord_lift(_ buf: RustBuffer) throws -> FfiPaymentProofRecord {
+    return try FfiConverterTypeFfiPaymentProofRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentProofRecord_lower(_ value: FfiPaymentProofRecord) -> RustBuffer {
+    return FfiConverterTypeFfiPaymentProofRecord.lower(value)
+}
+
+
+/**
+ * Method-specific Payment Proof submission data.
+ */
+public struct FfiPaymentProofSubmission {
+    /**
+     * Billing Period for recurring Payment Requests.
+     */
+    public var billingPeriod: FfiBillingPeriod?
+    /**
+     * Payment Endpoint Identifier used for payment.
+     */
+    public var paymentEndpointIdentifier: String
+    /**
+     * Method-specific proof object encoded as JSON.
+     */
+    public var proofJson: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Billing Period for recurring Payment Requests.
+         */billingPeriod: FfiBillingPeriod?,
+        /**
+         * Payment Endpoint Identifier used for payment.
+         */paymentEndpointIdentifier: String,
+        /**
+         * Method-specific proof object encoded as JSON.
+         */proofJson: String) {
+        self.billingPeriod = billingPeriod
+        self.paymentEndpointIdentifier = paymentEndpointIdentifier
+        self.proofJson = proofJson
+    }
+}
+
+#if compiler(>=6)
+extension FfiPaymentProofSubmission: Sendable {}
+#endif
+
+
+extension FfiPaymentProofSubmission: Equatable, Hashable {
+    public static func ==(lhs: FfiPaymentProofSubmission, rhs: FfiPaymentProofSubmission) -> Bool {
+        if lhs.billingPeriod != rhs.billingPeriod {
+            return false
+        }
+        if lhs.paymentEndpointIdentifier != rhs.paymentEndpointIdentifier {
+            return false
+        }
+        if lhs.proofJson != rhs.proofJson {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(billingPeriod)
+        hasher.combine(paymentEndpointIdentifier)
+        hasher.combine(proofJson)
+    }
+}
+
+extension FfiPaymentProofSubmission: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPaymentProofSubmission: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentProofSubmission {
+        return
+            try FfiPaymentProofSubmission(
+                billingPeriod: FfiConverterOptionTypeFfiBillingPeriod.read(from: &buf),
+                paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
+                proofJson: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPaymentProofSubmission, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeFfiBillingPeriod.write(value.billingPeriod, into: &buf)
+        FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
+        FfiConverterString.write(value.proofJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentProofSubmission_lift(_ buf: RustBuffer) throws -> FfiPaymentProofSubmission {
+    return try FfiConverterTypeFfiPaymentProofSubmission.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentProofSubmission_lower(_ value: FfiPaymentProofSubmission) -> RustBuffer {
+    return FfiConverterTypeFfiPaymentProofSubmission.lower(value)
+}
+
+
+/**
+ * Payment Amount fields used by Payment Requests.
+ */
+public struct FfiPaymentRequestAmount {
+    /**
+     * Decimal amount text.
+     */
+    public var value: String
+    /**
+     * Asset code or unit.
+     */
+    public var asset: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Decimal amount text.
+         */value: String,
+        /**
+         * Asset code or unit.
+         */asset: String) {
+        self.value = value
+        self.asset = asset
+    }
+}
+
+#if compiler(>=6)
+extension FfiPaymentRequestAmount: Sendable {}
+#endif
+
+
+extension FfiPaymentRequestAmount: Equatable, Hashable {
+    public static func ==(lhs: FfiPaymentRequestAmount, rhs: FfiPaymentRequestAmount) -> Bool {
+        if lhs.value != rhs.value {
+            return false
+        }
+        if lhs.asset != rhs.asset {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(value)
+        hasher.combine(asset)
+    }
+}
+
+extension FfiPaymentRequestAmount: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPaymentRequestAmount: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentRequestAmount {
+        return
+            try FfiPaymentRequestAmount(
+                value: FfiConverterString.read(from: &buf),
+                asset: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPaymentRequestAmount, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.value, into: &buf)
+        FfiConverterString.write(value.asset, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestAmount_lift(_ buf: RustBuffer) throws -> FfiPaymentRequestAmount {
+    return try FfiConverterTypeFfiPaymentRequestAmount.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestAmount_lower(_ value: FfiPaymentRequestAmount) -> RustBuffer {
+    return FfiConverterTypeFfiPaymentRequestAmount.lower(value)
+}
+
+
+/**
+ * Filter for listing Payment Requests.
+ */
+public struct FfiPaymentRequestFilter {
+    /**
+     * Restrict results to one counterparty.
+     */
+    public var counterparty: String?
+    /**
+     * Restrict results to one local role.
+     */
+    public var localRole: FfiPaymentRequestLocalRole?
+    /**
+     * Restrict results to lifecycle states. Empty means all states.
+     */
+    public var states: [FfiPaymentRequestLifecycleState]
+    /**
+     * Restrict results by whether the request has recurrence terms.
+     */
+    public var recurring: Bool?
+    /**
+     * Include only inbound Payment Requests received from counterparties.
+     */
+    public var receivedOnly: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Restrict results to one counterparty.
+         */counterparty: String?,
+        /**
+         * Restrict results to one local role.
+         */localRole: FfiPaymentRequestLocalRole?,
+        /**
+         * Restrict results to lifecycle states. Empty means all states.
+         */states: [FfiPaymentRequestLifecycleState],
+        /**
+         * Restrict results by whether the request has recurrence terms.
+         */recurring: Bool?,
+        /**
+         * Include only inbound Payment Requests received from counterparties.
+         */receivedOnly: Bool) {
+        self.counterparty = counterparty
+        self.localRole = localRole
+        self.states = states
+        self.recurring = recurring
+        self.receivedOnly = receivedOnly
+    }
+}
+
+#if compiler(>=6)
+extension FfiPaymentRequestFilter: Sendable {}
+#endif
+
+
+extension FfiPaymentRequestFilter: Equatable, Hashable {
+    public static func ==(lhs: FfiPaymentRequestFilter, rhs: FfiPaymentRequestFilter) -> Bool {
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.localRole != rhs.localRole {
+            return false
+        }
+        if lhs.states != rhs.states {
+            return false
+        }
+        if lhs.recurring != rhs.recurring {
+            return false
+        }
+        if lhs.receivedOnly != rhs.receivedOnly {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(counterparty)
+        hasher.combine(localRole)
+        hasher.combine(states)
+        hasher.combine(recurring)
+        hasher.combine(receivedOnly)
+    }
+}
+
+extension FfiPaymentRequestFilter: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPaymentRequestFilter: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentRequestFilter {
+        return
+            try FfiPaymentRequestFilter(
+                counterparty: FfiConverterOptionString.read(from: &buf),
+                localRole: FfiConverterOptionTypeFfiPaymentRequestLocalRole.read(from: &buf),
+                states: FfiConverterSequenceTypeFfiPaymentRequestLifecycleState.read(from: &buf),
+                recurring: FfiConverterOptionBool.read(from: &buf),
+                receivedOnly: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPaymentRequestFilter, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.counterparty, into: &buf)
+        FfiConverterOptionTypeFfiPaymentRequestLocalRole.write(value.localRole, into: &buf)
+        FfiConverterSequenceTypeFfiPaymentRequestLifecycleState.write(value.states, into: &buf)
+        FfiConverterOptionBool.write(value.recurring, into: &buf)
+        FfiConverterBool.write(value.receivedOnly, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestFilter_lift(_ buf: RustBuffer) throws -> FfiPaymentRequestFilter {
+    return try FfiConverterTypeFfiPaymentRequestFilter.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestFilter_lower(_ value: FfiPaymentRequestFilter) -> RustBuffer {
+    return FfiConverterTypeFfiPaymentRequestFilter.lower(value)
+}
+
+
+/**
+ * SDK-derived Payment Request lifecycle record.
+ */
+public struct FfiPaymentRequestRecord {
+    /**
+     * Counterparty associated with the private stream.
+     */
+    public var counterparty: String
+    /**
+     * Stable Payment Request ID.
+     */
+    public var paymentRequestId: String
+    /**
+     * Local role, when known.
+     */
+    public var localRole: FfiPaymentRequestLocalRole?
+    /**
+     * Derived local lifecycle state.
+     */
+    public var state: FfiPaymentRequestLifecycleState
+    /**
+     * Stream item id of the proposal event.
+     */
+    public var proposalStreamItemId: UInt64?
+    /**
+     * Outbound message id of the proposal event.
+     */
+    public var proposalOutboundMessageId: UInt64?
+    /**
+     * Local outbound delivery status for the proposal event.
+     */
+    public var proposalOutboundStatus: FfiOutboundPrivateMessageStatus?
+    /**
+     * Proposal Event ID.
+     */
+    public var proposalEventId: String?
+    /**
+     * Immutable terms from the proposal.
+     */
+    public var terms: FfiPaymentRequestTerms?
+    /**
+     * Acceptance Event ID.
+     */
+    public var acceptedEventId: String?
+    /**
+     * Local outbound delivery status for an acceptance event.
+     */
+    public var acceptedOutboundStatus: FfiOutboundPrivateMessageStatus?
+    /**
+     * Rejection Event ID.
+     */
+    public var rejectedEventId: String?
+    /**
+     * Local outbound delivery status for a rejection event.
+     */
+    public var rejectedOutboundStatus: FfiOutboundPrivateMessageStatus?
+    /**
+     * Cancellation Event ID.
+     */
+    public var canceledEventId: String?
+    /**
+     * Local outbound delivery status for a cancellation event.
+     */
+    public var canceledOutboundStatus: FfiOutboundPrivateMessageStatus?
+    /**
+     * Payment Proof records in local record order.
+     */
+    public var paymentProofs: [FfiPaymentProofRecord]
+    /**
+     * Last inbound stream item applied to this record.
+     */
+    public var lastStreamItemId: UInt64?
+    /**
+     * Last outbound message applied to this record.
+     */
+    public var lastOutboundMessageId: UInt64?
+    /**
+     * Local delivery status of the last outbound message applied to this record.
+     */
+    public var lastOutboundStatus: FfiOutboundPrivateMessageStatus?
+    /**
+     * Last event local record time as RFC3339 text.
+     */
+    public var lastEventAt: String?
+    /**
+     * Invalid state reason, when available.
+     */
+    public var invalidReason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty associated with the private stream.
+         */counterparty: String,
+        /**
+         * Stable Payment Request ID.
+         */paymentRequestId: String,
+        /**
+         * Local role, when known.
+         */localRole: FfiPaymentRequestLocalRole?,
+        /**
+         * Derived local lifecycle state.
+         */state: FfiPaymentRequestLifecycleState,
+        /**
+         * Stream item id of the proposal event.
+         */proposalStreamItemId: UInt64?,
+        /**
+         * Outbound message id of the proposal event.
+         */proposalOutboundMessageId: UInt64?,
+        /**
+         * Local outbound delivery status for the proposal event.
+         */proposalOutboundStatus: FfiOutboundPrivateMessageStatus?,
+        /**
+         * Proposal Event ID.
+         */proposalEventId: String?,
+        /**
+         * Immutable terms from the proposal.
+         */terms: FfiPaymentRequestTerms?,
+        /**
+         * Acceptance Event ID.
+         */acceptedEventId: String?,
+        /**
+         * Local outbound delivery status for an acceptance event.
+         */acceptedOutboundStatus: FfiOutboundPrivateMessageStatus?,
+        /**
+         * Rejection Event ID.
+         */rejectedEventId: String?,
+        /**
+         * Local outbound delivery status for a rejection event.
+         */rejectedOutboundStatus: FfiOutboundPrivateMessageStatus?,
+        /**
+         * Cancellation Event ID.
+         */canceledEventId: String?,
+        /**
+         * Local outbound delivery status for a cancellation event.
+         */canceledOutboundStatus: FfiOutboundPrivateMessageStatus?,
+        /**
+         * Payment Proof records in local record order.
+         */paymentProofs: [FfiPaymentProofRecord],
+        /**
+         * Last inbound stream item applied to this record.
+         */lastStreamItemId: UInt64?,
+        /**
+         * Last outbound message applied to this record.
+         */lastOutboundMessageId: UInt64?,
+        /**
+         * Local delivery status of the last outbound message applied to this record.
+         */lastOutboundStatus: FfiOutboundPrivateMessageStatus?,
+        /**
+         * Last event local record time as RFC3339 text.
+         */lastEventAt: String?,
+        /**
+         * Invalid state reason, when available.
+         */invalidReason: String?) {
+        self.counterparty = counterparty
+        self.paymentRequestId = paymentRequestId
+        self.localRole = localRole
+        self.state = state
+        self.proposalStreamItemId = proposalStreamItemId
+        self.proposalOutboundMessageId = proposalOutboundMessageId
+        self.proposalOutboundStatus = proposalOutboundStatus
+        self.proposalEventId = proposalEventId
+        self.terms = terms
+        self.acceptedEventId = acceptedEventId
+        self.acceptedOutboundStatus = acceptedOutboundStatus
+        self.rejectedEventId = rejectedEventId
+        self.rejectedOutboundStatus = rejectedOutboundStatus
+        self.canceledEventId = canceledEventId
+        self.canceledOutboundStatus = canceledOutboundStatus
+        self.paymentProofs = paymentProofs
+        self.lastStreamItemId = lastStreamItemId
+        self.lastOutboundMessageId = lastOutboundMessageId
+        self.lastOutboundStatus = lastOutboundStatus
+        self.lastEventAt = lastEventAt
+        self.invalidReason = invalidReason
+    }
+}
+
+#if compiler(>=6)
+extension FfiPaymentRequestRecord: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPaymentRequestRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentRequestRecord {
+        return
+            try FfiPaymentRequestRecord(
+                counterparty: FfiConverterString.read(from: &buf),
+                paymentRequestId: FfiConverterString.read(from: &buf),
+                localRole: FfiConverterOptionTypeFfiPaymentRequestLocalRole.read(from: &buf),
+                state: FfiConverterTypeFfiPaymentRequestLifecycleState.read(from: &buf),
+                proposalStreamItemId: FfiConverterOptionUInt64.read(from: &buf),
+                proposalOutboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
+                proposalOutboundStatus: FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.read(from: &buf),
+                proposalEventId: FfiConverterOptionString.read(from: &buf),
+                terms: FfiConverterOptionTypeFfiPaymentRequestTerms.read(from: &buf),
+                acceptedEventId: FfiConverterOptionString.read(from: &buf),
+                acceptedOutboundStatus: FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.read(from: &buf),
+                rejectedEventId: FfiConverterOptionString.read(from: &buf),
+                rejectedOutboundStatus: FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.read(from: &buf),
+                canceledEventId: FfiConverterOptionString.read(from: &buf),
+                canceledOutboundStatus: FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.read(from: &buf),
+                paymentProofs: FfiConverterSequenceTypeFfiPaymentProofRecord.read(from: &buf),
+                lastStreamItemId: FfiConverterOptionUInt64.read(from: &buf),
+                lastOutboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
+                lastOutboundStatus: FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.read(from: &buf),
+                lastEventAt: FfiConverterOptionString.read(from: &buf),
+                invalidReason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPaymentRequestRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterString.write(value.paymentRequestId, into: &buf)
+        FfiConverterOptionTypeFfiPaymentRequestLocalRole.write(value.localRole, into: &buf)
+        FfiConverterTypeFfiPaymentRequestLifecycleState.write(value.state, into: &buf)
+        FfiConverterOptionUInt64.write(value.proposalStreamItemId, into: &buf)
+        FfiConverterOptionUInt64.write(value.proposalOutboundMessageId, into: &buf)
+        FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.write(value.proposalOutboundStatus, into: &buf)
+        FfiConverterOptionString.write(value.proposalEventId, into: &buf)
+        FfiConverterOptionTypeFfiPaymentRequestTerms.write(value.terms, into: &buf)
+        FfiConverterOptionString.write(value.acceptedEventId, into: &buf)
+        FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.write(value.acceptedOutboundStatus, into: &buf)
+        FfiConverterOptionString.write(value.rejectedEventId, into: &buf)
+        FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.write(value.rejectedOutboundStatus, into: &buf)
+        FfiConverterOptionString.write(value.canceledEventId, into: &buf)
+        FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.write(value.canceledOutboundStatus, into: &buf)
+        FfiConverterSequenceTypeFfiPaymentProofRecord.write(value.paymentProofs, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastStreamItemId, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastOutboundMessageId, into: &buf)
+        FfiConverterOptionTypeFfiOutboundPrivateMessageStatus.write(value.lastOutboundStatus, into: &buf)
+        FfiConverterOptionString.write(value.lastEventAt, into: &buf)
+        FfiConverterOptionString.write(value.invalidReason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestRecord_lift(_ buf: RustBuffer) throws -> FfiPaymentRequestRecord {
+    return try FfiConverterTypeFfiPaymentRequestRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestRecord_lower(_ value: FfiPaymentRequestRecord) -> RustBuffer {
+    return FfiConverterTypeFfiPaymentRequestRecord.lower(value)
+}
+
+
+/**
+ * Recurrence fields for a recurring Payment Request.
+ */
+public struct FfiPaymentRequestRecurrence {
+    /**
+     * Positive interval count.
+     */
+    public var every: UInt32
+    /**
+     * Unit string: minute, hour, day, week, month, or year.
+     */
+    public var unit: String
+    /**
+     * RFC3339 UTC timestamp using `Z`.
+     */
+    public var startsAt: String
+    /**
+     * RFC3339 UTC timestamp using `Z`.
+     */
+    public var anchor: String
+    /**
+     * Optional RFC3339 UTC timestamp using `Z`.
+     */
+    public var endsAt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Positive interval count.
+         */every: UInt32,
+        /**
+         * Unit string: minute, hour, day, week, month, or year.
+         */unit: String,
+        /**
+         * RFC3339 UTC timestamp using `Z`.
+         */startsAt: String,
+        /**
+         * RFC3339 UTC timestamp using `Z`.
+         */anchor: String,
+        /**
+         * Optional RFC3339 UTC timestamp using `Z`.
+         */endsAt: String?) {
+        self.every = every
+        self.unit = unit
+        self.startsAt = startsAt
+        self.anchor = anchor
+        self.endsAt = endsAt
+    }
+}
+
+#if compiler(>=6)
+extension FfiPaymentRequestRecurrence: Sendable {}
+#endif
+
+
+extension FfiPaymentRequestRecurrence: Equatable, Hashable {
+    public static func ==(lhs: FfiPaymentRequestRecurrence, rhs: FfiPaymentRequestRecurrence) -> Bool {
+        if lhs.every != rhs.every {
+            return false
+        }
+        if lhs.unit != rhs.unit {
+            return false
+        }
+        if lhs.startsAt != rhs.startsAt {
+            return false
+        }
+        if lhs.anchor != rhs.anchor {
+            return false
+        }
+        if lhs.endsAt != rhs.endsAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(every)
+        hasher.combine(unit)
+        hasher.combine(startsAt)
+        hasher.combine(anchor)
+        hasher.combine(endsAt)
+    }
+}
+
+extension FfiPaymentRequestRecurrence: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPaymentRequestRecurrence: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentRequestRecurrence {
+        return
+            try FfiPaymentRequestRecurrence(
+                every: FfiConverterUInt32.read(from: &buf),
+                unit: FfiConverterString.read(from: &buf),
+                startsAt: FfiConverterString.read(from: &buf),
+                anchor: FfiConverterString.read(from: &buf),
+                endsAt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPaymentRequestRecurrence, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.every, into: &buf)
+        FfiConverterString.write(value.unit, into: &buf)
+        FfiConverterString.write(value.startsAt, into: &buf)
+        FfiConverterString.write(value.anchor, into: &buf)
+        FfiConverterOptionString.write(value.endsAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestRecurrence_lift(_ buf: RustBuffer) throws -> FfiPaymentRequestRecurrence {
+    return try FfiConverterTypeFfiPaymentRequestRecurrence.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestRecurrence_lower(_ value: FfiPaymentRequestRecurrence) -> RustBuffer {
+    return FfiConverterTypeFfiPaymentRequestRecurrence.lower(value)
+}
+
+
+/**
+ * Immutable terms for a Payment Request proposal.
+ */
+public struct FfiPaymentRequestTerms {
+    /**
+     * Requested amount.
+     */
+    public var amount: FfiPaymentRequestAmount
+    /**
+     * Payee-provided payment correlation value.
+     */
+    public var paymentReference: FfiPaymentReference
+    /**
+     * Proposal expiry before acceptance.
+     */
+    public var proposalExpiresAt: String?
+    /**
+     * Optional recurrence.
+     */
+    public var recurrence: FfiPaymentRequestRecurrence?
+    /**
+     * Accepted Payment Endpoint Identifier strings.
+     */
+    public var acceptedPaymentEndpointIdentifiers: [String]
+    /**
+     * Application-specific metadata encoded as a JSON object.
+     */
+    public var metadataJson: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Requested amount.
+         */amount: FfiPaymentRequestAmount,
+        /**
+         * Payee-provided payment correlation value.
+         */paymentReference: FfiPaymentReference,
+        /**
+         * Proposal expiry before acceptance.
+         */proposalExpiresAt: String?,
+        /**
+         * Optional recurrence.
+         */recurrence: FfiPaymentRequestRecurrence?,
+        /**
+         * Accepted Payment Endpoint Identifier strings.
+         */acceptedPaymentEndpointIdentifiers: [String],
+        /**
+         * Application-specific metadata encoded as a JSON object.
+         */metadataJson: String) {
+        self.amount = amount
+        self.paymentReference = paymentReference
+        self.proposalExpiresAt = proposalExpiresAt
+        self.recurrence = recurrence
+        self.acceptedPaymentEndpointIdentifiers = acceptedPaymentEndpointIdentifiers
+        self.metadataJson = metadataJson
+    }
+}
+
+#if compiler(>=6)
+extension FfiPaymentRequestTerms: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPaymentRequestTerms: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentRequestTerms {
+        return
+            try FfiPaymentRequestTerms(
+                amount: FfiConverterTypeFfiPaymentRequestAmount.read(from: &buf),
+                paymentReference: FfiConverterTypeFfiPaymentReference.read(from: &buf),
+                proposalExpiresAt: FfiConverterOptionString.read(from: &buf),
+                recurrence: FfiConverterOptionTypeFfiPaymentRequestRecurrence.read(from: &buf),
+                acceptedPaymentEndpointIdentifiers: FfiConverterSequenceString.read(from: &buf),
+                metadataJson: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPaymentRequestTerms, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiPaymentRequestAmount.write(value.amount, into: &buf)
+        FfiConverterTypeFfiPaymentReference.write(value.paymentReference, into: &buf)
+        FfiConverterOptionString.write(value.proposalExpiresAt, into: &buf)
+        FfiConverterOptionTypeFfiPaymentRequestRecurrence.write(value.recurrence, into: &buf)
+        FfiConverterSequenceString.write(value.acceptedPaymentEndpointIdentifiers, into: &buf)
+        FfiConverterString.write(value.metadataJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestTerms_lift(_ buf: RustBuffer) throws -> FfiPaymentRequestTerms {
+    return try FfiConverterTypeFfiPaymentRequestTerms.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestTerms_lower(_ value: FfiPaymentRequestTerms) -> RustBuffer {
+    return FfiConverterTypeFfiPaymentRequestTerms.lower(value)
 }
 
 
@@ -9713,6 +11167,258 @@ extension FfiPaymentEndpointSource: Codable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * SDK-derived Payment Request lifecycle state.
+ */
+
+public enum FfiPaymentRequestLifecycleState {
+
+    /**
+     * Proposal is known locally and remains actionable.
+     */
+    case proposed
+    /**
+     * Proposal is past its expiry.
+     */
+    case proposalExpired
+    /**
+     * Acceptance is present locally.
+     */
+    case accepted
+    /**
+     * Rejection is present locally.
+     */
+    case rejected
+    /**
+     * Cancellation is present locally.
+     */
+    case canceled
+    /**
+     * A one-time Payment Proof is present locally.
+     */
+    case proofSubmitted
+    /**
+     * Recurring request acceptance is present locally.
+     */
+    case activeRecurring
+    /**
+     * A local outbound event may require private-link recovery.
+     */
+    case recoveryRequired
+    /**
+     * Event ordering, dedupe, or lifecycle validation found an invalid state.
+     */
+    case invalidConflict
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension FfiPaymentRequestLifecycleState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPaymentRequestLifecycleState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPaymentRequestLifecycleState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentRequestLifecycleState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .proposed
+
+        case 2: return .proposalExpired
+
+        case 3: return .accepted
+
+        case 4: return .rejected
+
+        case 5: return .canceled
+
+        case 6: return .proofSubmitted
+
+        case 7: return .activeRecurring
+
+        case 8: return .recoveryRequired
+
+        case 9: return .invalidConflict
+
+        case 10: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiPaymentRequestLifecycleState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .proposed:
+            writeInt(&buf, Int32(1))
+
+
+        case .proposalExpired:
+            writeInt(&buf, Int32(2))
+
+
+        case .accepted:
+            writeInt(&buf, Int32(3))
+
+
+        case .rejected:
+            writeInt(&buf, Int32(4))
+
+
+        case .canceled:
+            writeInt(&buf, Int32(5))
+
+
+        case .proofSubmitted:
+            writeInt(&buf, Int32(6))
+
+
+        case .activeRecurring:
+            writeInt(&buf, Int32(7))
+
+
+        case .recoveryRequired:
+            writeInt(&buf, Int32(8))
+
+
+        case .invalidConflict:
+            writeInt(&buf, Int32(9))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(10))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestLifecycleState_lift(_ buf: RustBuffer) throws -> FfiPaymentRequestLifecycleState {
+    return try FfiConverterTypeFfiPaymentRequestLifecycleState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestLifecycleState_lower(_ value: FfiPaymentRequestLifecycleState) -> RustBuffer {
+    return FfiConverterTypeFfiPaymentRequestLifecycleState.lower(value)
+}
+
+
+extension FfiPaymentRequestLifecycleState: Equatable, Hashable {}
+
+extension FfiPaymentRequestLifecycleState: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Local role for one Payment Request.
+ */
+
+public enum FfiPaymentRequestLocalRole {
+
+    /**
+     * Local identity is expected to pay.
+     */
+    case payer
+    /**
+     * Local identity expects to receive payment.
+     */
+    case payee
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension FfiPaymentRequestLocalRole: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPaymentRequestLocalRole: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPaymentRequestLocalRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPaymentRequestLocalRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .payer
+
+        case 2: return .payee
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiPaymentRequestLocalRole, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .payer:
+            writeInt(&buf, Int32(1))
+
+
+        case .payee:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestLocalRole_lift(_ buf: RustBuffer) throws -> FfiPaymentRequestLocalRole {
+    return try FfiConverterTypeFfiPaymentRequestLocalRole.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPaymentRequestLocalRole_lower(_ value: FfiPaymentRequestLocalRole) -> RustBuffer {
+    return FfiConverterTypeFfiPaymentRequestLocalRole.lower(value)
+}
+
+
+extension FfiPaymentRequestLocalRole: Equatable, Hashable {}
+
+extension FfiPaymentRequestLocalRole: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Kind of Pubky auth request represented by a deep link.
  */
 
@@ -10443,6 +12149,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -10555,6 +12285,30 @@ fileprivate struct FfiConverterOptionTypeFfiPubkySessionAccess: FfiConverterRust
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFfiPubkySessionAccess.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiBillingPeriod: FfiConverterRustBuffer {
+    typealias SwiftType = FfiBillingPeriod?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiBillingPeriod.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiBillingPeriod.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -10755,6 +12509,54 @@ fileprivate struct FfiConverterOptionTypeFfiPaymentAmountContext: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiPaymentRequestRecurrence: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPaymentRequestRecurrence?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiPaymentRequestRecurrence.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiPaymentRequestRecurrence.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiPaymentRequestTerms: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPaymentRequestTerms?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiPaymentRequestTerms.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiPaymentRequestTerms.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiPrivatePaymentListView: FfiConverterRustBuffer {
     typealias SwiftType = FfiPrivatePaymentListView?
 
@@ -10891,6 +12693,54 @@ fileprivate struct FfiConverterOptionTypeFfiEncryptedLinkHandshakeRole: FfiConve
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFfiEncryptedLinkHandshakeRole.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOutboundPrivateMessageStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOutboundPrivateMessageStatus?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOutboundPrivateMessageStatus.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOutboundPrivateMessageStatus.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiPaymentRequestLocalRole: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPaymentRequestLocalRole?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiPaymentRequestLocalRole.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiPaymentRequestLocalRole.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -11173,6 +13023,56 @@ fileprivate struct FfiConverterSequenceTypeFfiPaymentEndpointReservation: FfiCon
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiPaymentProofRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiPaymentProofRecord]
+
+    public static func write(_ value: [FfiPaymentProofRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiPaymentProofRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPaymentProofRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiPaymentProofRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiPaymentProofRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiPaymentRequestRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiPaymentRequestRecord]
+
+    public static func write(_ value: [FfiPaymentRequestRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiPaymentRequestRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPaymentRequestRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiPaymentRequestRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiPaymentRequestRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiPrivatePaymentListEndpoint: FfiConverterRustBuffer {
     typealias SwiftType = [FfiPrivatePaymentListEndpoint]
 
@@ -11340,6 +13240,31 @@ fileprivate struct FfiConverterSequenceTypeFfiResolvedPaymentEndpoint: FfiConver
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiResolvedPaymentEndpoint.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiPaymentRequestLifecycleState: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiPaymentRequestLifecycleState]
+
+    public static func write(_ value: [FfiPaymentRequestLifecycleState], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiPaymentRequestLifecycleState.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPaymentRequestLifecycleState] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiPaymentRequestLifecycleState]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiPaymentRequestLifecycleState.read(from: &buf))
         }
         return seq
     }
@@ -11550,10 +13475,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 32868) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 49281) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests() != 10342) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_active_recurring_payment_requests() != 2902) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 20770) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 3462) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410) {
@@ -11607,7 +13544,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 57246) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 51945) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests() != 9060) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests_with() != 33620) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 36875) {
@@ -11617,6 +13563,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_process_pending_private_messages() != 56244) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 14281) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 29039) {
@@ -11637,7 +13586,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers() != 15229) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 24822) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 29974) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request() != 8097) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 19304) {
@@ -11664,6 +13619,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sign_out() != 28715) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 59922) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers() != 39954) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11674,6 +13632,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaymentpayload_export_text() != 53824) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaymentreference_export_text() != 10144) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffiprivateoperationerror_category() != 32940) {
@@ -11779,6 +13740,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipaymentpayload_new() != 12481) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffipaymentreference_new() != 26530) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295) {

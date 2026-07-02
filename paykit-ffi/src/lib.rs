@@ -3,6 +3,7 @@
 mod config;
 mod errors;
 mod payment_adapter;
+mod payment_requests;
 mod payment_resolution;
 mod private_links;
 mod profiles;
@@ -17,6 +18,7 @@ mod tests;
 pub use config::*;
 pub use errors::PaykitFfiError;
 pub use payment_adapter::*;
+pub use payment_requests::*;
 pub use payment_resolution::*;
 pub use private_links::*;
 pub use profiles::*;

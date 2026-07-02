@@ -117,6 +117,24 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `acceptLinkWithPeer`(`counterparty`: kotlin.String): FfiLinkedPeerHandshakeReport
 
     /**
+     * Queue acceptance for a received Payment Request and return local derived state.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `acceptPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String): FfiPaymentRequestRecord
+
+    /**
+     * Return received Payment Requests that need a local payer response.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `actionableReceivedPaymentRequests`(): List<FfiPaymentRequestRecord>
+
+    /**
+     * Return accepted recurring Payment Requests across non-blocked counterparties.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `activeRecurringPaymentRequests`(): List<FfiPaymentRequestRecord>
+
+    /**
      * Advance the stored Encrypted Link Handshake for one counterparty.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -127,6 +145,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `blockPeer`(`counterparty`: kotlin.String): FfiLinkedPeerRecord
+
+    /**
+     * Queue cancellation for a known non-terminal Payment Request.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `cancelPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): FfiPaymentRequestRecord
 
     /**
      * Return this runtime's configuration.
@@ -230,10 +254,28 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `linkedPeers`(): List<FfiLinkedPeerRecord>
 
     /**
+     * Return Payment Requests matching a local SDK filter.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `listPaymentRequests`(`filter`: FfiPaymentRequestFilter): List<FfiPaymentRequestRecord>
+
+    /**
      * Observe a counterparty's public recovery marker.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `observeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): FfiEncryptedLinkRecoveryMarkerReport
+
+    /**
+     * Return all Payment Requests across non-blocked counterparties.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `paymentRequests`(): List<FfiPaymentRequestRecord>
+
+    /**
+     * Return Payment Requests involving one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `paymentRequestsWith`(`counterparty`: kotlin.String): List<FfiPaymentRequestRecord>
 
     /**
      * List counterparties with queued private messages ready for retry.
@@ -252,6 +294,12 @@ public interface FfiPaykitSdkInterface {
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `processPendingPrivateMessages`(): List<FfiOutboundPrivateCounterpartySendReport>
+
+    /**
+     * Queue a new Payment Request proposal and return local derived state.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `proposePaymentRequest`(`counterparty`: kotlin.String, `terms`: FfiPaymentRequestTerms): FfiPaymentRequestRecord
 
     /**
      * Publish a minimal local recovery marker for a counterparty.
@@ -290,10 +338,22 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `receivePrivateMessagesFromLinkedPeers`(): List<FfiPrivateStreamCounterpartyIntakeReport>
 
     /**
+     * Return inbound Payment Requests received from one counterparty.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `receivedPaymentRequestsFrom`(`counterparty`: kotlin.String): List<FfiPaymentRequestRecord>
+
+    /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `refreshContactPaykitProfile`(`publicKey`: kotlin.String): FfiContactRecord?
+
+    /**
+     * Queue rejection for a received Payment Request and return local derived state.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `rejectPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): FfiPaymentRequestRecord
 
     /**
      * Remove a local Contact Record when it has no public marker to clean up.
@@ -344,6 +404,12 @@ public interface FfiPaykitSdkInterface {
     public suspend fun `signOut`(): FfiIdentityStatus
 
     /**
+     * Queue a Payment Proof for an accepted Payment Request.
+     */
+    @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `submitPaymentProof`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `proof`: FfiPaymentProofSubmission): FfiPaymentRequestRecord
+
+    /**
      * Retry pending public Contact Marker publication/removal work.
      */
     @Throws(PaykitFfiException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -374,6 +440,22 @@ public interface FfiPaymentPayloadInterface {
 
     /**
      * Export the payload text for payment adapter execution.
+     */
+    public fun `exportText`(): kotlin.String
+
+    public companion object
+}
+
+
+
+
+/**
+ * Payment Reference text with redacted debug output.
+ */
+public interface FfiPaymentReferenceInterface {
+
+    /**
+     * Export the reference text for explicit payment execution or display.
      */
     public fun `exportText`(): kotlin.String
 
@@ -677,6 +759,25 @@ public interface FfiSdkStateBlobStore {
     public companion object
 }
 
+
+
+
+/**
+ * Time interval a recurring Payment Proof applies to.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiBillingPeriod (
+    /**
+     * RFC3339 UTC start timestamp.
+     */
+    val `startsAt`: kotlin.String,
+    /**
+     * RFC3339 UTC end timestamp.
+     */
+    val `endsAt`: kotlin.String
+) {
+    public companion object
+}
 
 
 
@@ -1476,6 +1577,335 @@ public data class FfiPaymentEndpointSelectionRequest (
             this.`counterparty`,
             this.`amount`,
             this.`candidates`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Payment Proof captured in a derived Payment Request record.
+ */
+
+public data class FfiPaymentProofRecord (
+    /**
+     * Event ID.
+     */
+    val `eventId`: kotlin.String,
+    /**
+     * Outbound message id, when proof was sent locally.
+     */
+    val `outboundMessageId`: kotlin.ULong?,
+    /**
+     * Local outbound delivery status, when proof was queued locally.
+     */
+    val `outboundStatus`: FfiOutboundPrivateMessageStatus?,
+    /**
+     * Stream item id, when proof was received from the counterparty.
+     */
+    val `streamItemId`: kotlin.ULong?,
+    /**
+     * Payment Reference copied from the proof.
+     */
+    val `paymentReference`: FfiPaymentReference,
+    /**
+     * Optional Billing Period copied from the proof.
+     */
+    val `billingPeriod`: FfiBillingPeriod?,
+    /**
+     * Payment Endpoint Identifier used for payment.
+     */
+    val `paymentEndpointIdentifier`: kotlin.String,
+    /**
+     * Method-specific proof object encoded as JSON.
+     */
+    val `proofJson`: kotlin.String,
+    /**
+     * Local record time for this proof as RFC3339 text.
+     */
+    val `recordedAt`: kotlin.String
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`eventId`,
+            this.`outboundMessageId`,
+            this.`outboundStatus`,
+            this.`streamItemId`,
+            this.`paymentReference`,
+            this.`billingPeriod`,
+            this.`paymentEndpointIdentifier`,
+            this.`proofJson`,
+            this.`recordedAt`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Method-specific Payment Proof submission data.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPaymentProofSubmission (
+    /**
+     * Billing Period for recurring Payment Requests.
+     */
+    val `billingPeriod`: FfiBillingPeriod?,
+    /**
+     * Payment Endpoint Identifier used for payment.
+     */
+    val `paymentEndpointIdentifier`: kotlin.String,
+    /**
+     * Method-specific proof object encoded as JSON.
+     */
+    val `proofJson`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Payment Amount fields used by Payment Requests.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPaymentRequestAmount (
+    /**
+     * Decimal amount text.
+     */
+    val `value`: kotlin.String,
+    /**
+     * Asset code or unit.
+     */
+    val `asset`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Filter for listing Payment Requests.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPaymentRequestFilter (
+    /**
+     * Restrict results to one counterparty.
+     */
+    val `counterparty`: kotlin.String?,
+    /**
+     * Restrict results to one local role.
+     */
+    val `localRole`: FfiPaymentRequestLocalRole?,
+    /**
+     * Restrict results to lifecycle states. Empty means all states.
+     */
+    val `states`: List<FfiPaymentRequestLifecycleState>,
+    /**
+     * Restrict results by whether the request has recurrence terms.
+     */
+    val `recurring`: kotlin.Boolean?,
+    /**
+     * Include only inbound Payment Requests received from counterparties.
+     */
+    val `receivedOnly`: kotlin.Boolean
+) {
+    public companion object
+}
+
+
+
+/**
+ * SDK-derived Payment Request lifecycle record.
+ */
+
+public data class FfiPaymentRequestRecord (
+    /**
+     * Counterparty associated with the private stream.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Stable Payment Request ID.
+     */
+    val `paymentRequestId`: kotlin.String,
+    /**
+     * Local role, when known.
+     */
+    val `localRole`: FfiPaymentRequestLocalRole?,
+    /**
+     * Derived local lifecycle state.
+     */
+    val `state`: FfiPaymentRequestLifecycleState,
+    /**
+     * Stream item id of the proposal event.
+     */
+    val `proposalStreamItemId`: kotlin.ULong?,
+    /**
+     * Outbound message id of the proposal event.
+     */
+    val `proposalOutboundMessageId`: kotlin.ULong?,
+    /**
+     * Local outbound delivery status for the proposal event.
+     */
+    val `proposalOutboundStatus`: FfiOutboundPrivateMessageStatus?,
+    /**
+     * Proposal Event ID.
+     */
+    val `proposalEventId`: kotlin.String?,
+    /**
+     * Immutable terms from the proposal.
+     */
+    val `terms`: FfiPaymentRequestTerms?,
+    /**
+     * Acceptance Event ID.
+     */
+    val `acceptedEventId`: kotlin.String?,
+    /**
+     * Local outbound delivery status for an acceptance event.
+     */
+    val `acceptedOutboundStatus`: FfiOutboundPrivateMessageStatus?,
+    /**
+     * Rejection Event ID.
+     */
+    val `rejectedEventId`: kotlin.String?,
+    /**
+     * Local outbound delivery status for a rejection event.
+     */
+    val `rejectedOutboundStatus`: FfiOutboundPrivateMessageStatus?,
+    /**
+     * Cancellation Event ID.
+     */
+    val `canceledEventId`: kotlin.String?,
+    /**
+     * Local outbound delivery status for a cancellation event.
+     */
+    val `canceledOutboundStatus`: FfiOutboundPrivateMessageStatus?,
+    /**
+     * Payment Proof records in local record order.
+     */
+    val `paymentProofs`: List<FfiPaymentProofRecord>,
+    /**
+     * Last inbound stream item applied to this record.
+     */
+    val `lastStreamItemId`: kotlin.ULong?,
+    /**
+     * Last outbound message applied to this record.
+     */
+    val `lastOutboundMessageId`: kotlin.ULong?,
+    /**
+     * Local delivery status of the last outbound message applied to this record.
+     */
+    val `lastOutboundStatus`: FfiOutboundPrivateMessageStatus?,
+    /**
+     * Last event local record time as RFC3339 text.
+     */
+    val `lastEventAt`: kotlin.String?,
+    /**
+     * Invalid state reason, when available.
+     */
+    val `invalidReason`: kotlin.String?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`paymentRequestId`,
+            this.`localRole`,
+            this.`state`,
+            this.`proposalStreamItemId`,
+            this.`proposalOutboundMessageId`,
+            this.`proposalOutboundStatus`,
+            this.`proposalEventId`,
+            this.`terms`,
+            this.`acceptedEventId`,
+            this.`acceptedOutboundStatus`,
+            this.`rejectedEventId`,
+            this.`rejectedOutboundStatus`,
+            this.`canceledEventId`,
+            this.`canceledOutboundStatus`,
+            this.`paymentProofs`,
+            this.`lastStreamItemId`,
+            this.`lastOutboundMessageId`,
+            this.`lastOutboundStatus`,
+            this.`lastEventAt`,
+            this.`invalidReason`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Recurrence fields for a recurring Payment Request.
+ */
+@kotlinx.serialization.Serializable
+public data class FfiPaymentRequestRecurrence (
+    /**
+     * Positive interval count.
+     */
+    val `every`: kotlin.UInt,
+    /**
+     * Unit string: minute, hour, day, week, month, or year.
+     */
+    val `unit`: kotlin.String,
+    /**
+     * RFC3339 UTC timestamp using `Z`.
+     */
+    val `startsAt`: kotlin.String,
+    /**
+     * RFC3339 UTC timestamp using `Z`.
+     */
+    val `anchor`: kotlin.String,
+    /**
+     * Optional RFC3339 UTC timestamp using `Z`.
+     */
+    val `endsAt`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Immutable terms for a Payment Request proposal.
+ */
+
+public data class FfiPaymentRequestTerms (
+    /**
+     * Requested amount.
+     */
+    val `amount`: FfiPaymentRequestAmount,
+    /**
+     * Payee-provided payment correlation value.
+     */
+    val `paymentReference`: FfiPaymentReference,
+    /**
+     * Proposal expiry before acceptance.
+     */
+    val `proposalExpiresAt`: kotlin.String?,
+    /**
+     * Optional recurrence.
+     */
+    val `recurrence`: FfiPaymentRequestRecurrence?,
+    /**
+     * Accepted Payment Endpoint Identifier strings.
+     */
+    val `acceptedPaymentEndpointIdentifiers`: List<kotlin.String>,
+    /**
+     * Application-specific metadata encoded as a JSON object.
+     */
+    val `metadataJson`: kotlin.String
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`amount`,
+            this.`paymentReference`,
+            this.`proposalExpiresAt`,
+            this.`recurrence`,
+            this.`acceptedPaymentEndpointIdentifiers`,
+            this.`metadataJson`,
         )
     }
     public companion object
@@ -2350,6 +2780,88 @@ public enum class FfiPaymentEndpointSource {
      * Endpoint came from a public Payment Endpoint.
      */
     PUBLIC_PAYMENT_ENDPOINT,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * SDK-derived Payment Request lifecycle state.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiPaymentRequestLifecycleState {
+
+    /**
+     * Proposal is known locally and remains actionable.
+     */
+    PROPOSED,
+    /**
+     * Proposal is past its expiry.
+     */
+    PROPOSAL_EXPIRED,
+    /**
+     * Acceptance is present locally.
+     */
+    ACCEPTED,
+    /**
+     * Rejection is present locally.
+     */
+    REJECTED,
+    /**
+     * Cancellation is present locally.
+     */
+    CANCELED,
+    /**
+     * A one-time Payment Proof is present locally.
+     */
+    PROOF_SUBMITTED,
+    /**
+     * Recurring request acceptance is present locally.
+     */
+    ACTIVE_RECURRING,
+    /**
+     * A local outbound event may require private-link recovery.
+     */
+    RECOVERY_REQUIRED,
+    /**
+     * Event ordering, dedupe, or lifecycle validation found an invalid state.
+     */
+    INVALID_CONFLICT,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Local role for one Payment Request.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class FfiPaymentRequestLocalRole {
+
+    /**
+     * Local identity is expected to pay.
+     */
+    PAYER,
+    /**
+     * Local identity expects to receive payment.
+     */
+    PAYEE,
     /**
      * SDK returned a value this binding version does not understand.
      */
