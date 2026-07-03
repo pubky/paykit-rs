@@ -1827,7 +1827,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 19676.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 48603.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 45596.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 58947.toShort()) {
@@ -1836,10 +1836,10 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 31163.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 7015.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 47023.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_up_auth() != 3775.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_up_auth() != 45811.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffireservationattribution_export_fields() != 11904.toShort()) {
@@ -3047,8 +3047,7 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
         `authorizationUrl`: RustBufferByValue,
         `expectedCapabilities`: RustBufferByValue,
-        uniffiCallStatus: UniffiRustCallStatus,
-    ): Pointer?
+    ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_in(
         `ptr`: Pointer?,
@@ -3065,16 +3064,14 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipubkysessionbootstrap_start_sign_in_auth(
         `ptr`: Pointer?,
         `capabilities`: RustBufferByValue,
-        uniffiCallStatus: UniffiRustCallStatus,
-    ): Pointer?
+    ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipubkysessionbootstrap_start_sign_up_auth(
         `ptr`: Pointer?,
         `capabilities`: RustBufferByValue,
         `homeserverPublicKey`: RustBufferByValue,
         `signupToken`: RustBufferByValue,
-        uniffiCallStatus: UniffiRustCallStatus,
-    ): Pointer?
+    ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_clone_ffireservationattribution(
         `ptr`: Pointer?,
@@ -7271,18 +7268,25 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     /**
      * Resume a short-lived auth flow from its authorization URL.
      */
-    @Throws(PaykitException::class)
-    public override fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): PubkyAuthRequest {
-        return FfiConverterTypePubkyAuthRequest.lift(callWithPointer {
-            uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): PubkyAuthRequest {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipubkysessionbootstrap_resume_auth(
-                    it,
+                    thisPtr,
                     FfiConverterString.lower(`authorizationUrl`),
                     FfiConverterString.lower(`expectedCapabilities`),
-                    uniffiRustCallStatus,
                 )
-            }!!
-        })
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_pointer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_pointer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_pointer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_pointer(future) },
+            // lift function
+            { FfiConverterTypePubkyAuthRequest.lift(it!!) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
     }
 
     /**
@@ -7336,35 +7340,49 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     /**
      * Start a sign-in auth flow for an external signer.
      */
-    @Throws(PaykitException::class)
-    public override fun `startSignInAuth`(`capabilities`: kotlin.String): PubkyAuthRequest {
-        return FfiConverterTypePubkyAuthRequest.lift(callWithPointer {
-            uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `startSignInAuth`(`capabilities`: kotlin.String): PubkyAuthRequest {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipubkysessionbootstrap_start_sign_in_auth(
-                    it,
+                    thisPtr,
                     FfiConverterString.lower(`capabilities`),
-                    uniffiRustCallStatus,
                 )
-            }!!
-        })
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_pointer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_pointer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_pointer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_pointer(future) },
+            // lift function
+            { FfiConverterTypePubkyAuthRequest.lift(it!!) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
     }
 
     /**
      * Start a signup auth flow for an external signer.
      */
-    @Throws(PaykitException::class)
-    public override fun `startSignUpAuth`(`capabilities`: kotlin.String, `homeserverPublicKey`: kotlin.String, `signupToken`: kotlin.String?): PubkyAuthRequest {
-        return FfiConverterTypePubkyAuthRequest.lift(callWithPointer {
-            uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `startSignUpAuth`(`capabilities`: kotlin.String, `homeserverPublicKey`: kotlin.String, `signupToken`: kotlin.String?): PubkyAuthRequest {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipubkysessionbootstrap_start_sign_up_auth(
-                    it,
+                    thisPtr,
                     FfiConverterString.lower(`capabilities`),
                     FfiConverterString.lower(`homeserverPublicKey`),
                     FfiConverterOptionalString.lower(`signupToken`),
-                    uniffiRustCallStatus,
                 )
-            }!!
-        })
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_pointer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_pointer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_pointer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_pointer(future) },
+            // lift function
+            { FfiConverterTypePubkyAuthRequest.lift(it!!) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
     }
 
 

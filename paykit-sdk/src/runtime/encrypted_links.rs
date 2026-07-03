@@ -341,9 +341,28 @@ where
             if report.state == LinkedPeerState::Linked {
                 return Ok(report);
             }
-            report = self
+            report = match self
                 .advance_link_handshake_with_claim(counterparty.clone(), lease.clone())
-                .await?;
+                .await
+            {
+                Ok(report) => report,
+                Err(err) if Self::handshake_restore_error_requires_recovery(&err) => {
+                    let recovery_required = self
+                        .storage
+                        .transaction(|tx| {
+                            Ok(tx.linked_peer(&counterparty).is_some_and(|peer| {
+                                peer.state == LinkedPeerState::RecoveryRequired
+                            }))
+                        })
+                        .await?;
+                    if !recovery_required {
+                        return Err(err);
+                    }
+                    self.start_link_handshake_with_claim(counterparty.clone(), role, lease.clone())
+                        .await?
+                }
+                Err(err) => return Err(err),
+            };
         }
 
         Ok(report)
