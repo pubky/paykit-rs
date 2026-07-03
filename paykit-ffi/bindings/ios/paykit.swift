@@ -16195,17 +16195,6 @@ public func defaultPubkyClientConfig() -> PubkyClientConfig  {
 })
 }
 /**
- * Derive a local Pubky secret key from a 64-byte wallet seed.
- */
-public func derivePubkySecretKey(seed: Data, runtimeLabel: String)throws  -> PubkyLocalSecretKey  {
-    return try  FfiConverterTypePubkyLocalSecretKey_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
-    uniffi_paykit_fn_func_derive_pubky_secret_key(
-        FfiConverterData.lower(seed),
-        FfiConverterString.lower(runtimeLabel),$0
-    )
-})
-}
-/**
  * Encode an SDK state blob snapshot for apps that store blob and revision together.
  */
 public func encodeSdkStateBlobSnapshot(snapshot: SdkStateBlobSnapshot)throws  -> Data  {
@@ -16261,6 +16250,26 @@ public func pubkyPublicKeyFromSecret(localSecretKey: PubkyLocalSecretKey)throws 
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
     uniffi_paykit_fn_func_pubky_public_key_from_secret(
         FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),$0
+    )
+})
+}
+/**
+ * Derive a local Pubky secret key from a BIP39 English mnemonic phrase.
+ */
+public func pubkySecretKeyFromBip39Mnemonic(mnemonicPhrase: String)throws  -> PubkyLocalSecretKey  {
+    return try  FfiConverterTypePubkyLocalSecretKey_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_func_pubky_secret_key_from_bip39_mnemonic(
+        FfiConverterString.lower(mnemonicPhrase),$0
+    )
+})
+}
+/**
+ * Derive a local Pubky secret key from a 64-byte BIP39 seed.
+ */
+public func pubkySecretKeyFromBip39Seed(seed: Data)throws  -> PubkyLocalSecretKey  {
+    return try  FfiConverterTypePubkyLocalSecretKey_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_func_pubky_secret_key_from_bip39_seed(
+        FfiConverterData.lower(seed),$0
     )
 })
 }
@@ -16332,9 +16341,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_default_pubky_client_config() != 12841) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_derive_pubky_secret_key() != 37697) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_paykit_checksum_func_encode_sdk_state_blob_snapshot() != 49508) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -16351,6 +16357,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_pubky_public_key_from_secret() != 41462) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_pubky_secret_key_from_bip39_mnemonic() != 59779) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_pubky_secret_key_from_bip39_seed() != 48251) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_raw_pubky_public_key() != 57096) {

@@ -1,18 +1,16 @@
 use std::fmt;
 
+use bip39::{Language, Mnemonic};
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
 use paykit_lib::PublicKey;
 use pubky::{Capabilities, Capability};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use zeroize::Zeroize;
 
-const PUBKY_DERIVATION_CONTEXT: &[u8] = b"paykit/pubky";
 const PUBKY_APP_KEY_PREFIX: &str = "pubky";
 const PUBKY_PUBLIC_KEY_Z32_LEN: usize = 52;
 const BIP39_SEED_BYTES: usize = 64;
-const MAX_DERIVATION_LABEL_BYTES: usize = 128;
+const PUBKY_SECRET_BYTES: usize = 32;
 
 /// Pubky public key string used by SDK records.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -145,34 +143,41 @@ impl PubkyLocalSecretKey {
         Ok(Self::new(bytes))
     }
 
-    /// Derive a local Pubky secret key from a 64-byte wallet seed.
+    /// Derive a local Pubky secret key from a 64-byte BIP39 seed.
     ///
-    /// `runtime_label` must be stable and app/runtime-specific, such as a
-    /// product namespace. Different labels derive different Pubky keys from the
-    /// same wallet seed.
-    pub fn derive_from_seed(seed: &[u8], runtime_label: &str) -> crate::Result<Self> {
+    /// This matches Pubky Core and Pubky Ring: the Pubky secret key is the
+    /// first 32 bytes of the BIP39 seed produced with an empty passphrase.
+    pub fn from_bip39_seed(seed: &[u8]) -> crate::Result<Self> {
         if seed.len() != BIP39_SEED_BYTES {
             return Err(crate::PaykitSdkError::Identity {
                 context: format!(
-                    "Pubky seed derivation requires {BIP39_SEED_BYTES} bytes, got {}",
+                    "Pubky BIP39 seed must be {BIP39_SEED_BYTES} bytes, got {}",
                     seed.len()
                 ),
                 source: None,
             });
         }
-        validate_derivation_label(runtime_label)?;
+        let bytes: [u8; PUBKY_SECRET_BYTES] = seed[..PUBKY_SECRET_BYTES]
+            .try_into()
+            .expect("BIP39 seed length checked above");
+        Ok(Self::new(bytes))
+    }
 
-        let mut mac = Hmac::<Sha256>::new_from_slice(seed).map_err(|err| {
+    /// Derive a local Pubky secret key from a BIP39 English mnemonic phrase.
+    ///
+    /// The mnemonic is converted to a BIP39 seed with an empty passphrase, then
+    /// handled the same way as [`Self::from_bip39_seed`].
+    pub fn from_bip39_mnemonic(mnemonic_phrase: &str) -> crate::Result<Self> {
+        let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_phrase).map_err(|err| {
             crate::PaykitSdkError::Identity {
-                context: format!("create Pubky key derivation MAC: {err}"),
+                context: format!("invalid BIP39 mnemonic phrase: {err}"),
                 source: None,
             }
         })?;
-        mac.update(PUBKY_DERIVATION_CONTEXT);
-        mac.update(&[0]);
-        mac.update(runtime_label.as_bytes());
-        let bytes: [u8; 32] = mac.finalize().into_bytes().into();
-        Ok(Self::new(bytes))
+        let mut seed = mnemonic.to_seed("");
+        let key = Self::from_bip39_seed(&seed);
+        seed.zeroize();
+        key
     }
 
     /// Return the Pubky public key for this secret key.
@@ -208,30 +213,6 @@ impl From<[u8; 32]> for PubkyLocalSecretKey {
     fn from(bytes: [u8; 32]) -> Self {
         Self::new(bytes)
     }
-}
-
-fn validate_derivation_label(value: &str) -> crate::Result<()> {
-    if value.is_empty() {
-        return Err(crate::PaykitSdkError::Identity {
-            context: "Pubky derivation label must not be empty".into(),
-            source: None,
-        });
-    }
-    if value.len() > MAX_DERIVATION_LABEL_BYTES {
-        return Err(crate::PaykitSdkError::Identity {
-            context: format!(
-                "Pubky derivation label must not exceed {MAX_DERIVATION_LABEL_BYTES} bytes"
-            ),
-            source: None,
-        });
-    }
-    if !value.is_ascii() || value.bytes().any(|byte| byte.is_ascii_control()) {
-        return Err(crate::PaykitSdkError::Identity {
-            context: "Pubky derivation label must be printable ASCII".into(),
-            source: None,
-        });
-    }
-    Ok(())
 }
 
 /// Live Pubky access used by one SDK runtime for Pubky storage or links.

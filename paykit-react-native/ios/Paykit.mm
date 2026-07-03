@@ -16,8 +16,11 @@ RCT_EXTERN_METHOD(sdkRequiredSessionCapabilities:(NSString *)configJson
 RCT_EXTERN_METHOD(sdkCoreSessionCapabilities:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(sdkPubkyPublicKeyFromSeed:(NSString *)seedBase64
-                  runtimeLabel:(NSString *)runtimeLabel
+RCT_EXTERN_METHOD(sdkPubkyPublicKeyFromBip39Seed:(NSString *)seedBase64
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(sdkPubkyPublicKeyFromBip39Mnemonic:(NSString *)mnemonicPhrase
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 

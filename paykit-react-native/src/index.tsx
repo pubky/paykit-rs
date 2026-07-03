@@ -95,9 +95,9 @@ interface NativePaykit {
   sdkDefaultPubkyClientConfig(): Promise<NativeResult>;
   sdkRequiredSessionCapabilities(configJson: string): Promise<NativeResult>;
   sdkCoreSessionCapabilities(): Promise<NativeResult>;
-  sdkPubkyPublicKeyFromSeed(
-    seedBase64: string,
-    runtimeLabel: string
+  sdkPubkyPublicKeyFromBip39Seed(seedBase64: string): Promise<NativeResult>;
+  sdkPubkyPublicKeyFromBip39Mnemonic(
+    mnemonicPhrase: string
   ): Promise<NativeResult>;
   sdkParsePubkyAuthUrl(authUrl: string): Promise<NativeResult>;
   sdkResolvePubkyUrl(uri: string): Promise<NativeResult>;
@@ -190,13 +190,24 @@ export async function coreSessionCapabilities(): Promise<Result<string>> {
   }
 }
 
-export async function pubkyPublicKeyFromSeed(
-  seedBase64: string,
-  runtimeLabel: string
+export async function pubkyPublicKeyFromBip39Seed(
+  seedBase64: string
 ): Promise<Result<string>> {
   try {
     return resultValue(
-      await Native.sdkPubkyPublicKeyFromSeed(seedBase64, runtimeLabel)
+      await Native.sdkPubkyPublicKeyFromBip39Seed(seedBase64)
+    );
+  } catch (e) {
+    return err(unknownErrorPayload(e));
+  }
+}
+
+export async function pubkyPublicKeyFromBip39Mnemonic(
+  mnemonicPhrase: string
+): Promise<Result<string>> {
+  try {
+    return resultValue(
+      await Native.sdkPubkyPublicKeyFromBip39Mnemonic(mnemonicPhrase)
     );
   } catch (e) {
     return err(unknownErrorPayload(e));

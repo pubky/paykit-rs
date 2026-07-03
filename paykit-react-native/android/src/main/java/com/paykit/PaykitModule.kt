@@ -17,10 +17,11 @@ import com.synonym.paykit.PaykitAndroid
 import com.synonym.paykit.coreSessionCapabilities
 import com.synonym.paykit.defaultConfig
 import com.synonym.paykit.defaultPubkyClientConfig
-import com.synonym.paykit.derivePubkySecretKey
 import com.synonym.paykit.parsePubkyAuthUrl
 import com.synonym.paykit.parsePubkyResource
 import com.synonym.paykit.pubkyPublicKeyFromSecret
+import com.synonym.paykit.pubkySecretKeyFromBip39Mnemonic
+import com.synonym.paykit.pubkySecretKeyFromBip39Seed
 import com.synonym.paykit.requiredSessionCapabilities
 import com.synonym.paykit.resolvePubkyUrl
 import org.json.JSONObject
@@ -264,10 +265,17 @@ class PaykitModule(private val reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun sdkPubkyPublicKeyFromSeed(seedBase64: String, runtimeLabel: String, promise: Promise) {
+    fun sdkPubkyPublicKeyFromBip39Seed(seedBase64: String, promise: Promise) {
         resolveResult(promise) {
             val seed = bytesFromBase64(seedBase64, "seed")
-            pubkyPublicKeyFromSecret(derivePubkySecretKey(seed, runtimeLabel))
+            pubkyPublicKeyFromSecret(pubkySecretKeyFromBip39Seed(seed))
+        }
+    }
+
+    @ReactMethod
+    fun sdkPubkyPublicKeyFromBip39Mnemonic(mnemonicPhrase: String, promise: Promise) {
+        resolveResult(promise) {
+            pubkyPublicKeyFromSecret(pubkySecretKeyFromBip39Mnemonic(mnemonicPhrase))
         }
     }
 

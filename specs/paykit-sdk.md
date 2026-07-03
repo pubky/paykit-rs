@@ -303,12 +303,12 @@ runtime auth should use `config.required_session_capabilities()` as the expected
 scope for auth start/resume/approve, completion, and session import. The
 default Paykit capability covers the public Paykit namespace used by protocol
 paths and SDK-managed Paykit public data.
-`PubkyLocalSecretKey` also provides app/runtime-domain-separated seed
-derivation and public-key-from-secret helpers for apps that choose that key
-convention. The `runtime_label` must be a stable app/runtime label such as
-`bitkit.to`; changing it derives a different Paykit runtime identity from the
-same wallet seed. Exported session secrets and auth URLs are secret-bearing
-values and must be stored or displayed only for their intended short-lived flow.
+`PubkyLocalSecretKey` also provides Pubky Core-compatible BIP39 seed and
+mnemonic helpers plus public-key-from-secret helpers. Apps that intentionally
+share the same Pubky identity material should derive the same Pubky key; app
+and runtime separation belongs in receiver folders, Noise keys, and SDK state.
+Exported session secrets and auth URLs are secret-bearing values and must be
+stored or displayed only for their intended short-lived flow.
 Bindings should wrap these helpers so mobile apps do not need a second Pubky
 SDK dependency for ordinary Paykit onboarding.
 
