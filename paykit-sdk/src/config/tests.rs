@@ -34,6 +34,10 @@ fn test_config_builds_default_profile_namespace_paths() {
         "/pub/paykit/v0/receivers/bitkit/profile.json"
     );
     assert_eq!(
+        config.paykit_profile_path_for_receiver(&PaykitReceiverId::new("tether").unwrap()),
+        "/pub/paykit/v0/receivers/tether/profile.json"
+    );
+    assert_eq!(
         config.paykit_profile_blob_path_prefix(),
         "/pub/paykit/v0/receivers/bitkit/blobs/"
     );
@@ -63,6 +67,10 @@ fn test_config_allows_custom_profile_namespace_segment() {
 
     config.validate().unwrap();
     assert_eq!(config.paykit_profile_path(), "/pub/bitkit.to/profile.json");
+    assert_eq!(
+        config.paykit_profile_path_for_receiver(&PaykitReceiverId::new("tether").unwrap()),
+        "/pub/bitkit.to/profile.json"
+    );
     assert_eq!(
         config.paykit_profile_blob_path_prefix(),
         "/pub/bitkit.to/blobs/"

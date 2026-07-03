@@ -77,7 +77,9 @@ where
     ) -> Result<Option<ContactRecord>> {
         self.require_initialized_identity("refresh contact Paykit profile")
             .await?;
-        let fetched = self.fetch_paykit_profile(public_key.clone()).await?;
+        let fetched = self
+            .fetch_paykit_profile(public_key.clone(), receiver_id.clone())
+            .await?;
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {

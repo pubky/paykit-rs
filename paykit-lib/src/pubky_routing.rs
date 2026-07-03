@@ -117,11 +117,18 @@ pub async fn fetch_paykit_receiver_ids(
                 context: format!("cannot extract Paykit receiver id from path '{path}'"),
                 source: None,
             })?;
-        let receiver_id =
-            PaykitReceiverId::new(segment).map_err(|err| PaykitError::InvalidData {
-                context: format!("storage returned invalid Paykit receiver id '{segment}'"),
-                source: Some(err.into()),
-            })?;
+        let receiver_id = match PaykitReceiverId::new(segment) {
+            Ok(receiver_id) => receiver_id,
+            Err(err) => {
+                debug!(
+                    path = %path,
+                    receiver_id = %segment,
+                    error = %err,
+                    "skipping invalid Paykit receiver id from directory listing"
+                );
+                continue;
+            }
+        };
         if !receiver_ids.contains(&receiver_id) {
             receiver_ids.push(receiver_id);
         }
@@ -181,6 +188,43 @@ pub(crate) fn receipt_path_prefix(receiver_id: &PaykitReceiverId) -> String {
 /// Return the receiver-scoped Encrypted Link recovery marker base path.
 pub(crate) fn encrypted_link_recovery_path_prefix(receiver_id: &PaykitReceiverId) -> String {
     format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{receiver_id}/encrypted-link-recovery")
+}
+
+pub(crate) fn receiver_pair_path_domain(
+    base_domain: &[u8],
+    local_public_key: &PublicKey,
+    local_receiver_id: &PaykitReceiverId,
+    remote_public_key: &PublicKey,
+    remote_receiver_id: &PaykitReceiverId,
+) -> Vec<u8> {
+    let mut endpoints = [
+        (
+            local_public_key.z32(),
+            local_receiver_id.as_str().to_owned(),
+        ),
+        (
+            remote_public_key.z32(),
+            remote_receiver_id.as_str().to_owned(),
+        ),
+    ];
+    endpoints.sort();
+
+    let mut domain = Vec::with_capacity(
+        base_domain.len()
+            + endpoints
+                .iter()
+                .map(|(public_key, receiver_id)| public_key.len() + receiver_id.len() + 2)
+                .sum::<usize>()
+            + 1,
+    );
+    domain.extend_from_slice(base_domain);
+    for (public_key, receiver_id) in endpoints {
+        domain.push(0);
+        domain.extend_from_slice(public_key.as_bytes());
+        domain.push(0);
+        domain.extend_from_slice(receiver_id.as_bytes());
+    }
+    domain
 }
 
 async fn fetch_payment_list_from_directory(

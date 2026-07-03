@@ -245,7 +245,7 @@ public interface PaykitSdkInterface {
      * Fetch a public Paykit Profile.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `fetchPaykitProfile`(`publicKey`: kotlin.String): PaykitProfileRecord?
+    public suspend fun `fetchPaykitProfile`(`publicKey`: kotlin.String, `receiverId`: kotlin.String): PaykitProfileRecord?
 
     /**
      * Fetch public Pubky file bytes.
@@ -514,7 +514,7 @@ public interface PaykitSdkInterface {
      * Resolve display metadata for a contact.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolveContactProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
+    public suspend fun `resolveContactProfile`(`publicKey`: kotlin.String, `receiverId`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
 
     /**
      * Resolve payable private endpoints for one counterparty.
@@ -526,7 +526,7 @@ public interface PaykitSdkInterface {
      * Resolve public profile metadata, preferring Paykit Profile.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolveProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
+    public suspend fun `resolveProfile`(`publicKey`: kotlin.String, `receiverId`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
 
     /**
      * Resolve payable public endpoints for one counterparty.

@@ -197,7 +197,7 @@ where
         .await
 }
 
-fn enforce_receipt_access_receiver_scope(
+pub(crate) fn enforce_receipt_access_receiver_scope(
     classification: &mut PrivateStreamMessageClassification,
     counterparty_receiver_id: &PaykitReceiverId,
 ) {
@@ -211,6 +211,7 @@ fn enforce_receipt_access_receiver_scope(
     classification.parse_error = Some(format!(
         "Receipt Access location does not match counterparty receiver {counterparty_receiver_id}"
     ));
+    classification.event = None;
     classification.receipt_access = None;
 }
 

@@ -167,6 +167,80 @@ async fn test_backup_state_round_trips_contact_records() {
 }
 
 #[tokio::test]
+async fn test_backup_round_trips_receiver_rejected_receipt_access() {
+    let storage = InMemoryStorage::new();
+    let restored_storage = InMemoryStorage::new();
+    let counterparty = public_key();
+    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
+    let billing_period = BillingPeriodRecord {
+        starts_at: "2026-06-01T00:00:00Z".into(),
+        ends_at: "2026-07-01T00:00:00Z".into(),
+    };
+    let (raw_json, location, _) = receipt_access_raw_with_context(
+        "650e8400-e29b-41d4-a716-446655440000",
+        receipt_id,
+        "invoice-2026-0001",
+        "750e8400-e29b-41d4-a716-446655440000",
+        &billing_period,
+    );
+    let wrong_location = paykit_lib::ReceiptAccess::location(
+        &other_receiver_id(),
+        &ReceiptId::new(receipt_id).unwrap(),
+    );
+    let raw_json = raw_json.replace(&location, &wrong_location);
+    let value: serde_json::Value = serde_json::from_str(&raw_json).unwrap();
+    let message = paykit_lib::PrivateApplicationMessage {
+        version: value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|version| u8::try_from(version).ok()),
+        kind: value
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        raw_json,
+    };
+
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_identity_state(identity(counterparty));
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    crate::domain::private_stream::persist_private_stream_batch(
+        &storage,
+        counterparty,
+        receiver_id(),
+        vec![message],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let backup = export_backup_state(&storage, receiver_id()).await.unwrap();
+    let report = restore_backup_state(&restored_storage, backup)
+        .await
+        .unwrap();
+
+    assert!(report.recovery_required_peers.is_empty());
+    let restored = restored_storage.snapshot().unwrap();
+    assert_eq!(
+        restored.private_stream_items[0].parse_status,
+        PrivateStreamParseStatus::MalformedRecognized
+    );
+    assert_eq!(
+        restored.private_stream_items[0].parse_error.as_deref(),
+        Some("Receipt Access location does not match counterparty receiver bitkit")
+    );
+    assert!(restored.receipt_access_records.is_empty());
+}
+
+#[tokio::test]
 async fn test_restore_backup_state_rejects_inconsistent_contact_marker_state() {
     let storage = InMemoryStorage::new();
     let local_public_key = public_key();

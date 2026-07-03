@@ -13,7 +13,8 @@ use crate::{
     domain::linked_peers::LinkedPeerState,
     domain::outbound_private::validate_queued_outbound_private_message,
     domain::private_stream::{
-        classify_private_application_message, payload_hash, PrivateStreamParseStatus,
+        classify_private_application_message, enforce_receipt_access_receiver_scope, payload_hash,
+        PrivateStreamParseStatus,
     },
     domain::publication::PublicationStatus,
     domain::receipts::{

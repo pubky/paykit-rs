@@ -639,7 +639,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Fetch a public Paykit Profile.
      */
-    func fetchPaykitProfile(publicKey: String) async throws  -> PaykitProfileRecord?
+    func fetchPaykitProfile(publicKey: String, receiverId: String) async throws  -> PaykitProfileRecord?
 
     /**
      * Fetch public Pubky file bytes.
@@ -864,7 +864,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Resolve display metadata for a contact.
      */
-    func resolveContactProfile(publicKey: String, allowPubkyProfileFallback: Bool) async throws  -> ContactProfileResolution?
+    func resolveContactProfile(publicKey: String, receiverId: String, allowPubkyProfileFallback: Bool) async throws  -> ContactProfileResolution?
 
     /**
      * Resolve payable private endpoints for one counterparty.
@@ -874,7 +874,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Resolve public profile metadata, preferring Paykit Profile.
      */
-    func resolveProfile(publicKey: String, allowPubkyProfileFallback: Bool) async throws  -> ContactProfileResolution?
+    func resolveProfile(publicKey: String, receiverId: String, allowPubkyProfileFallback: Bool) async throws  -> ContactProfileResolution?
 
     /**
      * Resolve payable public endpoints for one counterparty.
@@ -1501,13 +1501,13 @@ open func exportBackupString()async throws  -> String  {
     /**
      * Fetch a public Paykit Profile.
      */
-open func fetchPaykitProfile(publicKey: String)async throws  -> PaykitProfileRecord?  {
+open func fetchPaykitProfile(publicKey: String, receiverId: String)async throws  -> PaykitProfileRecord?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_fetch_paykit_profile(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2386,13 +2386,13 @@ open func resolveContactPayment(request: ContactPaymentResolutionRequest)async t
     /**
      * Resolve display metadata for a contact.
      */
-open func resolveContactProfile(publicKey: String, allowPubkyProfileFallback: Bool)async throws  -> ContactProfileResolution?  {
+open func resolveContactProfile(publicKey: String, receiverId: String, allowPubkyProfileFallback: Bool)async throws  -> ContactProfileResolution?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_resolve_contact_profile(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterBool.lower(allowPubkyProfileFallback)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId),FfiConverterBool.lower(allowPubkyProfileFallback)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2426,13 +2426,13 @@ open func resolvePrivateContactPayment(counterparty: String, counterpartyReceive
     /**
      * Resolve public profile metadata, preferring Paykit Profile.
      */
-open func resolveProfile(publicKey: String, allowPubkyProfileFallback: Bool)async throws  -> ContactProfileResolution?  {
+open func resolveProfile(publicKey: String, receiverId: String, allowPubkyProfileFallback: Bool)async throws  -> ContactProfileResolution?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_resolve_profile(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterBool.lower(allowPubkyProfileFallback)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId),FfiConverterBool.lower(allowPubkyProfileFallback)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -16959,7 +16959,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_string() != 15207) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_paykit_profile() != 57253) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_paykit_profile() != 23428) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file() != 313) {
@@ -17091,13 +17091,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_payment() != 23408) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 56264) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 34976) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 9742) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_profile() != 11432) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_profile() != 46041) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_contact_payment() != 3156) {
