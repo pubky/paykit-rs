@@ -10,7 +10,7 @@ use paykit_sdk::{
 
 use crate::{
     sdk::FfiPaykitSdk,
-    session::{app_public_key, parse_public_key},
+    session::{app_public_key, parse_public_key, parse_receiver_id},
     PaykitFfiError,
 };
 
@@ -109,6 +109,8 @@ pub enum FfiEncryptedLinkHandshakeRole {
 pub struct FfiLinkedPeerRecord {
     /// Counterparty public key.
     pub counterparty: String,
+    /// Counterparty Paykit receiver folder id.
+    pub counterparty_receiver_id: String,
     /// Current local relationship/link state.
     pub state: FfiLinkedPeerState,
     /// Last successful sync time as RFC3339 text.
@@ -134,6 +136,8 @@ pub struct FfiLinkedPeerRecord {
 pub struct FfiLinkedPeerHandshakeReport {
     /// Counterparty public key.
     pub counterparty: String,
+    /// Counterparty Paykit receiver folder id.
+    pub counterparty_receiver_id: String,
     /// Current Linked Peer state after the operation.
     pub state: FfiLinkedPeerState,
     /// Current Encrypted Link state generation.
@@ -169,6 +173,8 @@ pub struct FfiPrivateStreamIntakeReport {
 pub struct FfiPrivateStreamCounterpartyIntakeReport {
     /// Counterparty whose private stream was received.
     pub counterparty: String,
+    /// Counterparty Paykit receiver folder id.
+    pub counterparty_receiver_id: String,
     /// Successful intake report, when receive completed.
     pub report: Option<FfiPrivateStreamIntakeReport>,
     /// Error text, when receive failed for this counterparty.
@@ -222,10 +228,21 @@ pub struct FfiOutboundPrivateSendReport {
 pub struct FfiOutboundPrivateCounterpartySendReport {
     /// Counterparty whose queue was processed.
     pub counterparty: String,
+    /// Counterparty Paykit receiver folder id.
+    pub counterparty_receiver_id: String,
     /// Successful send report, when processing completed.
     pub report: Option<FfiOutboundPrivateSendReport>,
     /// Error text, when processing failed for this counterparty.
     pub error: Option<Arc<FfiPrivateOperationError>>,
+}
+
+/// Counterparty plus the Paykit receiver folder used for private workflows.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiCounterpartyReceiver {
+    /// Counterparty public key.
+    pub counterparty: String,
+    /// Counterparty Paykit receiver folder id.
+    pub counterparty_receiver_id: String,
 }
 
 /// Public recovery marker state tracked for one Linked Peer.
@@ -233,6 +250,8 @@ pub struct FfiOutboundPrivateCounterpartySendReport {
 pub struct FfiEncryptedLinkRecoveryMarkerReport {
     /// Counterparty public key.
     pub counterparty: String,
+    /// Counterparty Paykit receiver folder id.
+    pub counterparty_receiver_id: String,
     /// Current Linked Peer state.
     pub state: FfiLinkedPeerState,
     /// Locally published recovery attempt id.
@@ -264,9 +283,13 @@ impl FfiPaykitSdk {
     pub async fn block_peer(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<FfiLinkedPeerRecord, PaykitFfiError> {
         self.runtime
-            .block_peer(parse_public_key(counterparty)?)
+            .block_peer(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -276,9 +299,13 @@ impl FfiPaykitSdk {
     pub async fn unblock_peer(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<FfiLinkedPeerRecord, PaykitFfiError> {
         self.runtime
-            .unblock_peer(parse_public_key(counterparty)?)
+            .unblock_peer(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -288,9 +315,13 @@ impl FfiPaykitSdk {
     pub async fn initiate_link_with_peer(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<FfiLinkedPeerHandshakeReport, PaykitFfiError> {
         self.runtime
-            .initiate_link_with_peer(parse_public_key(counterparty)?)
+            .initiate_link_with_peer(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -300,9 +331,13 @@ impl FfiPaykitSdk {
     pub async fn accept_link_with_peer(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<FfiLinkedPeerHandshakeReport, PaykitFfiError> {
         self.runtime
-            .accept_link_with_peer(parse_public_key(counterparty)?)
+            .accept_link_with_peer(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -312,9 +347,13 @@ impl FfiPaykitSdk {
     pub async fn advance_link_handshake(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<FfiLinkedPeerHandshakeReport, PaykitFfiError> {
         self.runtime
-            .advance_link_handshake(parse_public_key(counterparty)?)
+            .advance_link_handshake(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -324,10 +363,15 @@ impl FfiPaykitSdk {
     pub async fn ensure_link_with_peer(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
         max_advance_steps: u32,
     ) -> Result<FfiLinkedPeerHandshakeReport, PaykitFfiError> {
         self.runtime
-            .ensure_link_with_peer(parse_public_key(counterparty)?, max_advance_steps)
+            .ensure_link_with_peer(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+                max_advance_steps,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -337,9 +381,13 @@ impl FfiPaykitSdk {
     pub async fn receive_private_messages(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<FfiPrivateStreamIntakeReport, PaykitFfiError> {
         self.runtime
-            .receive_private_messages(parse_public_key(counterparty)?)
+            .receive_private_messages(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -360,9 +408,13 @@ impl FfiPaykitSdk {
     pub async fn process_outbound_private_messages(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<FfiOutboundPrivateSendReport, PaykitFfiError> {
         self.runtime
-            .process_outbound_private_messages(parse_public_key(counterparty)?)
+            .process_outbound_private_messages(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -371,11 +423,19 @@ impl FfiPaykitSdk {
     /// List counterparties with queued private messages ready for retry.
     pub async fn pending_outbound_private_counterparties(
         &self,
-    ) -> Result<Vec<String>, PaykitFfiError> {
+    ) -> Result<Vec<FfiCounterpartyReceiver>, PaykitFfiError> {
         self.runtime
             .pending_outbound_private_counterparties()
             .await
-            .map(|keys| keys.into_iter().map(|key| app_public_key(&key)).collect())
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|(counterparty, receiver_id)| FfiCounterpartyReceiver {
+                        counterparty: app_public_key(&counterparty),
+                        counterparty_receiver_id: receiver_id.to_string(),
+                    })
+                    .collect()
+            })
             .map_err(Into::into)
     }
 
@@ -394,9 +454,13 @@ impl FfiPaykitSdk {
     pub async fn encrypted_link_recovery_marker_status(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<Option<FfiEncryptedLinkRecoveryMarkerReport>, PaykitFfiError> {
         self.runtime
-            .encrypted_link_recovery_marker_status(&parse_public_key(counterparty)?)
+            .encrypted_link_recovery_marker_status(
+                &parse_public_key(counterparty)?,
+                &parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(|report| report.map(Into::into))
             .map_err(Into::into)
@@ -406,9 +470,13 @@ impl FfiPaykitSdk {
     pub async fn publish_encrypted_link_recovery_marker(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<FfiEncryptedLinkRecoveryMarkerReport, PaykitFfiError> {
         self.runtime
-            .publish_encrypted_link_recovery_marker(parse_public_key(counterparty)?)
+            .publish_encrypted_link_recovery_marker(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -418,9 +486,13 @@ impl FfiPaykitSdk {
     pub async fn observe_encrypted_link_recovery_marker(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<FfiEncryptedLinkRecoveryMarkerReport, PaykitFfiError> {
         self.runtime
-            .observe_encrypted_link_recovery_marker(parse_public_key(counterparty)?)
+            .observe_encrypted_link_recovery_marker(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -430,9 +502,13 @@ impl FfiPaykitSdk {
     pub async fn remove_encrypted_link_recovery_marker(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<FfiEncryptedLinkRecoveryMarkerReport, PaykitFfiError> {
         self.runtime
-            .remove_encrypted_link_recovery_marker(parse_public_key(counterparty)?)
+            .remove_encrypted_link_recovery_marker(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -466,6 +542,7 @@ impl From<LinkedPeerRecord> for FfiLinkedPeerRecord {
     fn from(value: LinkedPeerRecord) -> Self {
         Self {
             counterparty: app_public_key(&value.counterparty),
+            counterparty_receiver_id: value.counterparty_receiver_id.to_string(),
             state: value.state.into(),
             last_sync_at: value.last_sync_at.map(|time| time.to_rfc3339()),
             last_private_receive_at: value.last_private_receive_at.map(|time| time.to_rfc3339()),
@@ -489,6 +566,7 @@ impl From<LinkedPeerHandshakeReport> for FfiLinkedPeerHandshakeReport {
     fn from(value: LinkedPeerHandshakeReport) -> Self {
         Self {
             counterparty: app_public_key(&value.counterparty),
+            counterparty_receiver_id: value.counterparty_receiver_id.to_string(),
             state: value.state.into(),
             generation: value.generation,
             handshake_role: value.handshake_role.map(Into::into),
@@ -520,6 +598,7 @@ impl From<PrivateStreamCounterpartyIntakeReport> for FfiPrivateStreamCounterpart
     fn from(value: PrivateStreamCounterpartyIntakeReport) -> Self {
         Self {
             counterparty: app_public_key(&value.counterparty),
+            counterparty_receiver_id: value.counterparty_receiver_id.to_string(),
             report: value.report.map(Into::into),
             error: private_receive_error_opt(value.error),
         }
@@ -592,6 +671,7 @@ impl From<OutboundPrivateCounterpartySendReport> for FfiOutboundPrivateCounterpa
     fn from(value: OutboundPrivateCounterpartySendReport) -> Self {
         Self {
             counterparty: app_public_key(&value.counterparty),
+            counterparty_receiver_id: value.counterparty_receiver_id.to_string(),
             report: value.report.map(Into::into),
             error: outbound_queue_error_opt(value.error),
         }
@@ -602,6 +682,7 @@ impl From<EncryptedLinkRecoveryMarkerReport> for FfiEncryptedLinkRecoveryMarkerR
     fn from(value: EncryptedLinkRecoveryMarkerReport) -> Self {
         Self {
             counterparty: app_public_key(&value.counterparty),
+            counterparty_receiver_id: value.counterparty_receiver_id.to_string(),
             state: value.state.into(),
             local_attempt_id: value.local_attempt_id,
             local_marker_created_at: value.local_marker_created_at.map(|time| time.to_rfc3339()),
@@ -693,6 +774,7 @@ mod tests {
                 "8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io".into(),
             )
             .unwrap(),
+            counterparty_receiver_id: paykit_sdk::PaykitReceiverId::new("bitkit").unwrap(),
             state: LinkedPeerState::RecoveryRequired,
             last_sync_at: Some("2026-06-18T11:00:00Z".parse().unwrap()),
             last_private_receive_at: None,

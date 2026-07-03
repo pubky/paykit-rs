@@ -21,6 +21,7 @@ fn receipt_access_record(
 ) -> ReceiptAccessRecord {
     ReceiptAccessRecord {
         counterparty: PubkyPublicKey::from_public_key(&public_key()),
+        counterparty_receiver_id: receiver_id(),
         stream_item_id: 0,
         receive_batch_id: 0,
         event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
@@ -146,7 +147,9 @@ fn test_receipt_issuance_record_redacts_sensitive_fields() {
     let key = prepared.access.key.as_str().to_owned();
     let encrypted_receipt = prepared.encrypted_receipt.clone();
     let access_json = paykit_lib::serialize_receipt_access_json(&prepared.access).unwrap();
-    let record = ReceiptIssuanceRecord::from_prepared(counterparty, prepared, timestamp()).unwrap();
+    let record =
+        ReceiptIssuanceRecord::from_prepared(counterparty, receiver_id(), prepared, timestamp())
+            .unwrap();
 
     let debug = format!("{record:?}");
 
@@ -217,6 +220,7 @@ fn test_receipt_access_record_deserializes_pending_retrieval_defaults() {
     let counterparty = PubkyPublicKey::from_public_key(&public_key());
     let value = serde_json::json!({
         "counterparty": counterparty.as_str(),
+        "counterparty_receiver_id": receiver_id().as_str(),
         "stream_item_id": 0,
         "receive_batch_id": 0,
         "event_id": "650e8400-e29b-41d4-a716-446655440000",

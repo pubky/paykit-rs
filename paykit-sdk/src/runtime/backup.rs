@@ -9,7 +9,7 @@ where
 {
     /// Export SDK-managed backup state.
     pub async fn export_backup_state(&self) -> Result<SdkBackupState> {
-        export_sdk_backup_state(&self.storage).await
+        export_sdk_backup_state(&self.storage, self.config.receiver_id.clone()).await
     }
 
     /// Restore SDK-managed backup state.
@@ -28,7 +28,13 @@ where
             }
             trusted_identity = Some(self.restore_validation_identity(&session_access).await?);
         }
-        restore_sdk_backup_state(&self.storage, backup, trusted_identity).await
+        restore_sdk_backup_state(
+            &self.storage,
+            backup,
+            self.config.receiver_id.clone(),
+            trusted_identity,
+        )
+        .await
     }
 
     async fn validate_backup_restore_session(

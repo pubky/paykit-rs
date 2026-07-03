@@ -27,6 +27,7 @@ async fn test_contact_records_save_list_and_remove_locally() {
     let saved = sdk
         .save_contact(ContactUpdate {
             public_key: contact_public_key.clone(),
+            receiver_id: receiver_id(),
             label: Some("Alice".into()),
         })
         .await
@@ -35,15 +36,19 @@ async fn test_contact_records_save_list_and_remove_locally() {
     assert_eq!(saved.label.as_deref(), Some("Alice"));
     assert_eq!(sdk.contact_records().await.unwrap(), vec![saved.clone()]);
     assert_eq!(
-        sdk.contact_record(&contact_public_key).await.unwrap(),
+        sdk.contact_record(&contact_public_key, &receiver_id())
+            .await
+            .unwrap(),
         Some(saved.clone())
     );
     assert_eq!(
-        sdk.remove_contact(&contact_public_key).await.unwrap(),
+        sdk.remove_contact(&contact_public_key, &receiver_id())
+            .await
+            .unwrap(),
         Some(saved)
     );
     assert!(sdk
-        .contact_record(&contact_public_key)
+        .contact_record(&contact_public_key, &receiver_id())
         .await
         .unwrap()
         .is_none());
@@ -75,6 +80,7 @@ async fn test_save_contact_empty_label_clears_existing_label() {
 
     sdk.save_contact(ContactUpdate {
         public_key: contact_public_key.clone(),
+        receiver_id: receiver_id(),
         label: Some("Alice".into()),
     })
     .await
@@ -82,6 +88,7 @@ async fn test_save_contact_empty_label_clears_existing_label() {
     let updated = sdk
         .save_contact(ContactUpdate {
             public_key: contact_public_key,
+            receiver_id: receiver_id(),
             label: Some(String::new()),
         })
         .await
@@ -205,6 +212,7 @@ async fn test_remove_contact_blocks_when_public_marker_may_exist() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
+                    receiver_id: receiver_id(),
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
@@ -228,7 +236,9 @@ async fn test_remove_contact_blocks_when_public_marker_may_exist() {
         FixedClock,
     );
 
-    let result = sdk.remove_contact(&contact_public_key).await;
+    let result = sdk
+        .remove_contact(&contact_public_key, &receiver_id())
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
 }
@@ -255,6 +265,7 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
+                    receiver_id: receiver_id(),
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
@@ -281,14 +292,16 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
         FixedClock,
     );
 
-    let result = sdk.publish_public_contact(contact_public_key.clone()).await;
+    let result = sdk
+        .publish_public_contact(contact_public_key.clone(), receiver_id())
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     let record = storage
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&contact_public_key)
+        .get(&(contact_public_key.clone(), receiver_id()))
         .unwrap()
         .clone();
     assert_eq!(
@@ -319,6 +332,7 @@ async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
+                    receiver_id: receiver_id(),
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
@@ -342,14 +356,16 @@ async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
         FixedClock,
     );
 
-    let result = sdk.remove_public_contact(contact_public_key.clone()).await;
+    let result = sdk
+        .remove_public_contact(contact_public_key.clone(), receiver_id())
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     let record = storage
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&contact_public_key)
+        .get(&(contact_public_key.clone(), receiver_id()))
         .unwrap()
         .clone();
     assert_eq!(
@@ -382,7 +398,9 @@ async fn test_remove_public_contact_without_local_record_still_requires_session(
         FixedClock,
     );
 
-    let result = sdk.remove_public_contact(contact_public_key).await;
+    let result = sdk
+        .remove_public_contact(contact_public_key, receiver_id())
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
 }
@@ -436,6 +454,7 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
+                    receiver_id: receiver_id(),
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
@@ -469,7 +488,7 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&contact_public_key)
+        .get(&(contact_public_key.clone(), receiver_id()))
         .unwrap()
         .clone();
     assert_eq!(
@@ -500,6 +519,7 @@ async fn test_sync_public_contact_markers_fails_pending_publication_when_sharing
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
+                    receiver_id: receiver_id(),
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
@@ -530,7 +550,7 @@ async fn test_sync_public_contact_markers_fails_pending_publication_when_sharing
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&contact_public_key)
+        .get(&(contact_public_key.clone(), receiver_id()))
         .unwrap()
         .clone();
     assert_eq!(
@@ -559,6 +579,7 @@ async fn test_save_contact_requires_initialized_identity() {
     let result = sdk
         .save_contact(ContactUpdate {
             public_key: contact_public_key,
+            receiver_id: receiver_id(),
             label: None,
         })
         .await;

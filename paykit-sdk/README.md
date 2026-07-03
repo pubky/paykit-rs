@@ -26,11 +26,12 @@ reservations, recovery state, and backup data. Multiple apps can be linked or
 aggregated explicitly, but they do not share one private Paykit runtime by
 default.
 
-Each runtime is configured with one Paykit receiver id. SDK counterparty APIs
-that accept only a Pubky key are same-receiver APIs: they address the
-counterparty's folder with the same receiver id. Cross-receiver flows must carry
-a receiver locator, because a Pubky key alone is not enough information to route
-private Paykit state to a specific app/runtime folder.
+Each runtime is configured with one local Paykit receiver id, but that id only
+describes this app/runtime's folder. Private and payment counterparty APIs take
+the counterparty's exact receiver id separately. A Pubky key alone is not enough
+information to route private Paykit state to a specific app/runtime folder.
+Apps can call `paykit_receiver_ids` as a discovery helper, but they still choose
+the receiver id explicitly.
 
 ## Current Scope
 

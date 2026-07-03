@@ -28,13 +28,18 @@ where
         };
         if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
             private_allowed = self
-                .private_resolution_allowed_for_peer(&request.counterparty, &mut private_state)
+                .private_resolution_allowed_for_peer(
+                    &request.counterparty,
+                    &request.counterparty_receiver_id,
+                    &mut private_state,
+                )
                 .await?;
         }
         if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
             if let Err(err) = self
                 .observe_remote_recovery_marker_for_cached_private_state(
                     &request.counterparty,
+                    &request.counterparty_receiver_id,
                     session_access.as_ref(),
                 )
                 .await
@@ -49,15 +54,28 @@ where
         }
         if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
             private_allowed = self
-                .private_resolution_allowed_for_peer(&request.counterparty, &mut private_state)
+                .private_resolution_allowed_for_peer(
+                    &request.counterparty,
+                    &request.counterparty_receiver_id,
+                    &mut private_state,
+                )
                 .await?;
         }
         let private_view = if private_allowed {
-            load_current_private_payment_list(&self.storage, &request.counterparty).await?
+            load_current_private_payment_list(
+                &self.storage,
+                &request.counterparty,
+                &request.counterparty_receiver_id,
+            )
+            .await?
         } else {
             None
         };
-        let mut candidates = private_candidates(&request.counterparty, private_view.as_ref());
+        let mut candidates = private_candidates(
+            &request.counterparty,
+            &request.counterparty_receiver_id,
+            private_view.as_ref(),
+        );
         if !candidates.is_empty() {
             private_state = ContactPaymentResolutionPrivateState::Available;
         } else if private_allowed
@@ -77,7 +95,10 @@ where
                 }
             } else {
                 match self
-                    .recover_private_candidates_for_resolution(&request.counterparty)
+                    .recover_private_candidates_for_resolution(
+                        &request.counterparty,
+                        &request.counterparty_receiver_id,
+                    )
                     .await?
                 {
                     PrivateRecoveryOutcome::Refreshed(refreshed_candidates)
@@ -113,8 +134,11 @@ where
 
         if request.include_public_endpoints {
             candidates.extend(
-                self.public_payment_candidates(&request.counterparty)
-                    .await?,
+                self.public_payment_candidates(
+                    &request.counterparty,
+                    &request.counterparty_receiver_id,
+                )
+                .await?,
             );
         }
 
@@ -124,6 +148,7 @@ where
 
         self.resolve_candidate_batch(
             request.counterparty,
+            request.counterparty_receiver_id,
             request.amount,
             candidates,
             private_state,
@@ -135,10 +160,12 @@ where
     pub async fn resolve_private_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
+        counterparty_receiver_id: PaykitReceiverId,
         amount: Option<PaymentAmountContext>,
     ) -> Result<ContactPaymentResolution> {
         self.resolve_contact_payment(ContactPaymentResolutionRequest {
             counterparty,
+            counterparty_receiver_id,
             amount,
             include_public_endpoints: false,
         })
@@ -149,9 +176,12 @@ where
     pub async fn resolve_public_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
+        counterparty_receiver_id: PaykitReceiverId,
         amount: Option<PaymentAmountContext>,
     ) -> Result<ContactPaymentResolution> {
-        let candidates = self.public_payment_candidates(&counterparty).await?;
+        let candidates = self
+            .public_payment_candidates(&counterparty, &counterparty_receiver_id)
+            .await?;
         if candidates.is_empty() {
             return Ok(status_resolution(
                 ContactPaymentResolutionStatus::NoEndpoint,
@@ -160,6 +190,7 @@ where
         }
         self.resolve_candidate_batch(
             counterparty,
+            counterparty_receiver_id,
             amount,
             candidates,
             ContactPaymentResolutionPrivateState::NoPrivateEndpoint,
@@ -179,6 +210,7 @@ where
     pub async fn prepare_and_resolve_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
+        counterparty_receiver_id: PaykitReceiverId,
         amount: Option<PaymentAmountContext>,
         include_public_endpoints: bool,
         max_advance_steps: u32,
@@ -190,21 +222,34 @@ where
 
         if self.private_payment_preparation_is_available().await? {
             match self
-                .ensure_link_with_peer(counterparty.clone(), max_advance_steps)
+                .ensure_link_with_peer(
+                    counterparty.clone(),
+                    counterparty_receiver_id.clone(),
+                    max_advance_steps,
+                )
                 .await
             {
                 Ok(report) => {
                     link_report = Some(report);
                     for _ in 0..PREPARE_CONTACT_PAYMENT_SYNC_ROUND_LIMIT {
                         match self
-                            .process_outbound_private_messages(counterparty.clone())
+                            .process_outbound_private_messages(
+                                counterparty.clone(),
+                                counterparty_receiver_id.clone(),
+                            )
                             .await
                         {
                             Ok(report) => {
                                 let outbound_progress = outbound_report_made_progress(&report);
                                 merge_outbound_report(&mut outbound_report, report);
 
-                                match self.receive_private_messages(counterparty.clone()).await {
+                                match self
+                                    .receive_private_messages(
+                                        counterparty.clone(),
+                                        counterparty_receiver_id.clone(),
+                                    )
+                                    .await
+                                {
                                     Ok(report) => {
                                         let receive_progress =
                                             receive_report_made_progress(&report);
@@ -244,6 +289,7 @@ where
         let mut resolution = self
             .resolve_contact_payment(ContactPaymentResolutionRequest {
                 counterparty,
+                counterparty_receiver_id,
                 amount,
                 include_public_endpoints,
             })
@@ -267,10 +313,11 @@ where
     async fn private_resolution_allowed_for_peer(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
         private_state: &mut ContactPaymentResolutionPrivateState,
     ) -> Result<bool> {
         match self
-            .ensure_peer_allows_private_automation(counterparty)
+            .ensure_peer_allows_private_automation(counterparty, counterparty_receiver_id)
             .await
         {
             Ok(()) => Ok(true),
@@ -285,6 +332,7 @@ where
     pub(super) async fn recover_private_candidates_for_resolution(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
     ) -> Result<PrivateRecoveryOutcome> {
         let Some(identity) = self.storage.load_identity_state().await? else {
             return Ok(PrivateRecoveryOutcome::PublicOnly);
@@ -296,8 +344,8 @@ where
         let (peer_state, has_active_link) = self
             .storage
             .transaction(|tx| {
-                let peer = tx.linked_peer(counterparty);
-                let link_state = tx.encrypted_link_state(counterparty);
+                let peer = tx.linked_peer(counterparty, counterparty_receiver_id);
+                let link_state = tx.encrypted_link_state(counterparty, counterparty_receiver_id);
                 let has_active_link = link_state
                     .as_ref()
                     .and_then(|state| state.link_snapshot.as_ref())
@@ -317,15 +365,27 @@ where
         }
 
         if has_active_link {
-            self.observe_remote_recovery_marker_for_cached_private_state(counterparty, None)
-                .await?;
+            self.observe_remote_recovery_marker_for_cached_private_state(
+                counterparty,
+                counterparty_receiver_id,
+                None,
+            )
+            .await?;
 
-            match self.receive_private_messages(counterparty.clone()).await {
+            match self
+                .receive_private_messages(counterparty.clone(), counterparty_receiver_id.clone())
+                .await
+            {
                 Ok(_) => {
-                    let private_view =
-                        load_current_private_payment_list(&self.storage, counterparty).await?;
+                    let private_view = load_current_private_payment_list(
+                        &self.storage,
+                        counterparty,
+                        counterparty_receiver_id,
+                    )
+                    .await?;
                     return Ok(PrivateRecoveryOutcome::Refreshed(private_candidates(
                         counterparty,
+                        counterparty_receiver_id,
                         private_view.as_ref(),
                     )));
                 }
@@ -348,6 +408,7 @@ where
     async fn public_payment_candidates(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
     ) -> Result<Vec<PaymentEndpointCandidate>> {
         let public_storage =
             self.pubky
@@ -361,7 +422,7 @@ where
         let payment_list = paykit_lib::get_payment_list(
             &public_storage,
             &counterparty.to_public_key()?,
-            &self.config.receiver_id,
+            counterparty_receiver_id,
         )
         .await?;
         let mut endpoints = payment_list
@@ -369,6 +430,7 @@ where
             .into_iter()
             .map(|(identifier, payload)| PaymentEndpointCandidate {
                 counterparty: counterparty.clone(),
+                counterparty_receiver_id: counterparty_receiver_id.clone(),
                 source: PaymentEndpointSource::PublicPaymentEndpoint,
                 identifier: identifier.as_str().to_owned(),
                 payload: payload.into_inner(),
@@ -393,6 +455,7 @@ where
     pub(super) async fn resolve_candidate_batch(
         &self,
         counterparty: PubkyPublicKey,
+        counterparty_receiver_id: PaykitReceiverId,
         amount: Option<PaymentAmountContext>,
         candidates: Vec<PaymentEndpointCandidate>,
         private_state: ContactPaymentResolutionPrivateState,
@@ -401,6 +464,7 @@ where
             .payment
             .select_payment_endpoints(&PaymentEndpointSelectionRequest {
                 counterparty,
+                counterparty_receiver_id,
                 amount,
                 candidates: candidates.clone(),
             })
@@ -417,6 +481,7 @@ where
 
 fn private_candidates(
     counterparty: &PubkyPublicKey,
+    counterparty_receiver_id: &PaykitReceiverId,
     view: Option<&PrivatePaymentListView>,
 ) -> Vec<PaymentEndpointCandidate> {
     let Some(view) = view else {
@@ -427,6 +492,7 @@ fn private_candidates(
         .iter()
         .map(|(identifier, payload)| PaymentEndpointCandidate {
             counterparty: counterparty.clone(),
+            counterparty_receiver_id: counterparty_receiver_id.clone(),
             source: PaymentEndpointSource::PrivatePaymentList,
             identifier: identifier.clone(),
             payload: payload.clone(),

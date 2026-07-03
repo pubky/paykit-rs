@@ -11,6 +11,7 @@ async fn test_export_backup_state_redacts_debug() {
                     tx.save_identity_state(identity(counterparty.clone()));
                     tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                         counterparty: counterparty.clone(),
+                counterparty_receiver_id: receiver_id(),
                         link_snapshot: Some(vec![1, 2, 3]),
                         handshake_snapshot: None,
                         handshake_role: None,
@@ -19,6 +20,7 @@ async fn test_export_backup_state_redacts_debug() {
                     });
                     tx.insert_outbound_private_message(crate::storage::NewOutboundPrivateMessage::new(
                         counterparty,
+                receiver_id(),
                         "paykit.private_payment_list".into(),
                         r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"btc-lightning-bolt11":"ln-private-payload-marker"}}"#.into(),
                         timestamp(),
@@ -29,13 +31,42 @@ async fn test_export_backup_state_redacts_debug() {
             .await
             .unwrap();
 
-    let backup = export_backup_state(&storage).await.unwrap();
+    let backup = export_backup_state(&storage, receiver_id()).await.unwrap();
     let debug = format!("{backup:?}");
 
+    assert_eq!(backup.local_receiver_id, receiver_id());
     assert!(!debug.contains("ln-private-payload-marker"));
     assert!(!debug.contains("[1, 2, 3]"));
     assert!(!debug.contains(counterparty.as_str()));
     assert_eq!(backup.outbound_private_messages.len(), 1);
+}
+
+#[tokio::test]
+async fn test_restore_backup_state_rejects_wrong_local_receiver_id() {
+    let storage = InMemoryStorage::new();
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        local_receiver_id: other_receiver_id(),
+        identity_state: None,
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: Vec::new(),
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
+        next_outbound_private_message_id: 0,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    };
+
+    let result = restore_backup_state(&storage, backup).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
 }
 
 #[tokio::test]
@@ -44,9 +75,11 @@ async fn test_restore_backup_state_marks_missing_link_checkpoint_recovery_requir
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
+        local_receiver_id: receiver_id(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: vec![LinkedPeerRecord {
             counterparty: counterparty.clone(),
+            counterparty_receiver_id: receiver_id(),
             state: LinkedPeerState::Linked,
             last_sync_at: Some(timestamp()),
             last_private_receive_at: None,
@@ -62,6 +95,7 @@ async fn test_restore_backup_state_marks_missing_link_checkpoint_recovery_requir
         payment_endpoint_reservations: Vec::new(),
         encrypted_link_states: vec![EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
+            counterparty_receiver_id: receiver_id(),
             link_snapshot: None,
             handshake_snapshot: None,
             handshake_role: None,
@@ -82,9 +116,16 @@ async fn test_restore_backup_state_marks_missing_link_checkpoint_recovery_requir
     let report = restore_backup_state(&storage, backup).await.unwrap();
     let restored = storage.snapshot().unwrap();
 
-    assert_eq!(report.recovery_required_peers, vec![counterparty.clone()]);
     assert_eq!(
-        restored.linked_peers.get(&counterparty).unwrap().state,
+        report.recovery_required_peers,
+        vec![recovery_required_peer(&counterparty)]
+    );
+    assert_eq!(
+        restored
+            .linked_peers
+            .get(&peer_key(&counterparty))
+            .unwrap()
+            .state,
         LinkedPeerState::RecoveryRequired
     );
     assert!(restored.peer_link_operation_leases.is_empty());
@@ -108,7 +149,7 @@ async fn test_backup_state_round_trips_contact_records() {
         .await
         .unwrap();
 
-    let backup = export_backup_state(&storage).await.unwrap();
+    let backup = export_backup_state(&storage, receiver_id()).await.unwrap();
     let restore_storage = InMemoryStorage::new();
     let report = restore_backup_state(&restore_storage, backup)
         .await
@@ -117,7 +158,7 @@ async fn test_backup_state_round_trips_contact_records() {
 
     assert_eq!(report.contact_records, 1);
     assert_eq!(
-        restored.contact_records[&contact_public_key]
+        restored.contact_records[&peer_key(&contact_public_key)]
             .label
             .as_deref(),
         Some("Alice")
@@ -134,6 +175,7 @@ async fn test_restore_backup_state_rejects_inconsistent_contact_marker_state() {
     contact.public_contact_published_at = Some(timestamp());
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
+        local_receiver_id: receiver_id(),
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
         contact_records: vec![contact],
@@ -169,6 +211,7 @@ async fn test_restore_backup_state_rejects_dual_contact_marker_timestamps() {
     contact.public_contact_last_error = Some("failed".into());
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
+        local_receiver_id: receiver_id(),
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
         contact_records: vec![contact],
@@ -201,6 +244,7 @@ async fn test_restore_backup_state_accepts_pending_contact_marker_removal() {
         .mark_public_contact_removal_pending(timestamp());
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
+        local_receiver_id: receiver_id(),
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
         contact_records: vec![contact],
@@ -234,6 +278,7 @@ async fn test_restore_backup_state_preserves_next_peer_lease_id() {
                 let lease = tx
                     .claim_peer_link_operation(
                         &counterparty,
+                        &receiver_id(),
                         timestamp(),
                         timestamp() + chrono::Duration::seconds(60),
                     )
@@ -246,6 +291,7 @@ async fn test_restore_backup_state_preserves_next_peer_lease_id() {
         .unwrap();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
+        local_receiver_id: receiver_id(),
         identity_state: None,
         linked_peers: Vec::new(),
         contact_records: Vec::new(),

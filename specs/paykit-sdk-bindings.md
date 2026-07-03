@@ -133,12 +133,12 @@ empty private publication, not the same thing as no adapter response.
 Bindings should also expose a direct reservation publication workflow for apps
 that reserve receiving details outside the SDK callback:
 
-- input: one counterparty plus the complete reserved receiving details for
-  that counterparty
+- input: one counterparty receiver plus the complete reserved receiving details
+  for that receiver
 - empty reservation list: queue an empty Private Payment List for that
-  counterparty
-- output: per-counterparty queue and delivery failures, so apps do not have to
-  merge queue reports with outbound-send reports manually
+  counterparty receiver
+- output: per-counterparty-receiver queue and delivery failures, so apps do not
+  have to merge queue reports with outbound-send reports manually
 
 The app-facing contact payment preparation helper must document its sequence:
 refresh live session capability, ensure or advance the private link when

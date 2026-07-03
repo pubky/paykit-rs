@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use paykit_lib::{receipt_path_prefix, PaykitReceiverId};
+use paykit_lib::{PaykitReceiverId, PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_RECEIVERS_PATH_PREFIX};
 
 use crate::identity::PubkyPublicKey;
 
@@ -111,7 +111,10 @@ impl PaykitSdkConfig {
     /// Return the configured Paykit Profile path.
     pub fn paykit_profile_path(&self) -> String {
         if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
-            return format!("/pub/paykit/v0/receivers/{}/profile.json", self.receiver_id);
+            return format!(
+                "{PAYKIT_RECEIVERS_PATH_PREFIX}/{}/profile.json",
+                self.receiver_id
+            );
         }
         format!("/pub/{}/profile.json", self.profile_namespace)
     }
@@ -119,7 +122,7 @@ impl PaykitSdkConfig {
     /// Return the configured Paykit Profile blob path prefix.
     pub fn paykit_profile_blob_path_prefix(&self) -> String {
         if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
-            return format!("/pub/paykit/v0/receivers/{}/blobs/", self.receiver_id);
+            return format!("{PAYKIT_RECEIVERS_PATH_PREFIX}/{}/blobs/", self.receiver_id);
         }
         format!("/pub/{}/blobs/", self.profile_namespace)
     }
@@ -127,7 +130,10 @@ impl PaykitSdkConfig {
     /// Return the configured public contact marker path prefix.
     pub fn public_contact_path_prefix(&self) -> String {
         if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
-            return format!("/pub/paykit/v0/receivers/{}/contacts/", self.receiver_id);
+            return format!(
+                "{PAYKIT_RECEIVERS_PATH_PREFIX}/{}/contacts/",
+                self.receiver_id
+            );
         }
         format!("/pub/{}/contacts/", self.profile_namespace)
     }
@@ -144,8 +150,8 @@ impl PaykitSdkConfig {
     /// Return the Pubky session capabilities required by this SDK configuration.
     pub fn required_session_capabilities(&self) -> String {
         let mut capabilities = vec![
-            format!("/pub/paykit/v0/receivers/{}/:rw", self.receiver_id),
-            format!("/pub/paykit/v0/private/{}/:rw", self.receiver_id),
+            format!("{PAYKIT_RECEIVERS_PATH_PREFIX}/{}/:rw", self.receiver_id),
+            format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{}/:rw", self.receiver_id),
         ];
         if self.profile_namespace != DEFAULT_PROFILE_NAMESPACE {
             capabilities.push(format!("/pub/{}/:rw", self.profile_namespace));
@@ -155,7 +161,7 @@ impl PaykitSdkConfig {
 
     /// Return the receiver-scoped Receipt Location prefix.
     pub fn receipt_path_prefix(&self) -> String {
-        receipt_path_prefix(&self.receiver_id)
+        format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{}/receipts", self.receiver_id)
     }
 }
 

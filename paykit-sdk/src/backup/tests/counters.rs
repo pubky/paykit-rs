@@ -6,6 +6,7 @@ async fn test_restore_backup_state_advances_counters() {
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
+        local_receiver_id: receiver_id(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -15,6 +16,7 @@ async fn test_restore_backup_state_advances_counters() {
         outbound_private_messages: vec![OutboundPrivateMessageRecord {
             outbound_message_id: 7,
             counterparty: counterparty.clone(),
+            counterparty_receiver_id: receiver_id(),
             kind: "paykit.private_payment_list".into(),
             raw_json:
                 r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
@@ -30,6 +32,7 @@ async fn test_restore_backup_state_advances_counters() {
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 9,
             counterparty,
+            counterparty_receiver_id: receiver_id(),
             receive_batch_id: 3,
             raw_json: "{}".into(),
             parsed_version: None,

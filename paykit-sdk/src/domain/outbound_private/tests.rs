@@ -11,6 +11,10 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
+fn receiver_id() -> PaykitReceiverId {
+    PaykitReceiverId::new("bitkit").unwrap()
+}
+
 fn raw_private_list() -> String {
     r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#.into()
 }
@@ -19,6 +23,7 @@ fn raw_private_list() -> String {
 fn test_failure_report_debug_redacts_errors() {
     let report = OutboundPrivateCounterpartySendReport {
         counterparty: counterparty(),
+        counterparty_receiver_id: receiver_id(),
         report: Some(OutboundPrivateSendReport {
             attempted: vec![1],
             sent: vec![],
@@ -53,13 +58,14 @@ async fn test_enqueue_private_message_stores_pending_record() {
     let record = enqueue_private_message(
         &storage,
         counterparty.clone(),
+        receiver_id(),
         raw_private_list(),
         timestamp(),
     )
     .await
     .unwrap();
 
-    let queued = queued_outbound_private_messages(&storage, &counterparty)
+    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_id())
         .await
         .unwrap();
     assert_eq!(record.outbound_message_id, 0);
@@ -72,6 +78,7 @@ async fn test_enqueue_private_message_rejects_unknown_kind() {
     let result = enqueue_private_message(
         &InMemoryStorage::new(),
         counterparty(),
+        receiver_id(),
         r#"{"version":1,"kind":"paykit.unknown"}"#.into(),
         timestamp(),
     )
@@ -85,6 +92,7 @@ async fn test_enqueue_private_message_rejects_malformed_known_body() {
     let result = enqueue_private_message(
         &InMemoryStorage::new(),
         counterparty(),
+        receiver_id(),
         r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"../bad":"ln"}}"#
             .into(),
         timestamp(),
@@ -99,6 +107,7 @@ fn test_validate_queued_outbound_private_message_rejects_malformed_known_body() 
     let record = OutboundPrivateMessageRecord {
             outbound_message_id: 7,
             counterparty: counterparty(),
+            counterparty_receiver_id: receiver_id(),
             kind: "paykit.private_payment_list".into(),
             raw_json:
                 r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"../bad":"ln"}}"#
@@ -124,6 +133,7 @@ async fn test_claim_next_outbound_private_message_reclaims_stale_sending() {
     enqueue_private_message(
         &storage,
         counterparty.clone(),
+        receiver_id(),
         raw_private_list(),
         timestamp(),
     )
@@ -133,6 +143,7 @@ async fn test_claim_next_outbound_private_message_reclaims_stale_sending() {
     let claimed = claim_next_outbound_private_message(
         &storage,
         &counterparty,
+        &receiver_id(),
         timestamp(),
         timestamp() - chrono::Duration::seconds(60),
         timestamp() - chrono::Duration::seconds(60),
@@ -146,6 +157,7 @@ async fn test_claim_next_outbound_private_message_reclaims_stale_sending() {
     let duplicate_claim = claim_next_outbound_private_message(
         &storage,
         &counterparty,
+        &receiver_id(),
         timestamp(),
         timestamp() - chrono::Duration::seconds(60),
         timestamp() - chrono::Duration::seconds(60),
@@ -157,6 +169,7 @@ async fn test_claim_next_outbound_private_message_reclaims_stale_sending() {
     let stale_claim = claim_next_outbound_private_message(
         &storage,
         &counterparty,
+        &receiver_id(),
         timestamp() + chrono::Duration::seconds(61),
         timestamp(),
         timestamp(),
@@ -176,6 +189,7 @@ async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
     enqueue_private_message(
         &storage,
         counterparty.clone(),
+        receiver_id(),
         raw_private_list(),
         timestamp(),
     )
@@ -189,6 +203,7 @@ async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
                 Ok(tx
                     .claim_peer_link_operation(
                         &counterparty,
+                        &receiver_id(),
                         timestamp(),
                         timestamp() + chrono::Duration::seconds(10),
                     )
@@ -203,6 +218,7 @@ async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
             move |tx| {
                 tx.claim_peer_link_operation(
                     &counterparty,
+                    &receiver_id(),
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
                 );
@@ -223,7 +239,7 @@ async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
     .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-    let queued = queued_outbound_private_messages(&storage, &counterparty)
+    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_id())
         .await
         .unwrap();
     assert_eq!(queued[0].status, OutboundPrivateMessageStatus::Pending);

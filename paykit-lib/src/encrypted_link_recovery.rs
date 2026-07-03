@@ -22,7 +22,7 @@ use pubky::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    encrypted_link_recovery_path_prefix,
+    pubky_routing::encrypted_link_recovery_path_prefix,
     validation::{invalid_data, invalid_wire, parse_utc_timestamp, validate_uuid_v4},
     PaykitError, PaykitReceiverId, Result,
 };

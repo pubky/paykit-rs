@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{PaykitError, PublicKey, Result};
+use crate::{PaykitError, Result};
 
 const PAYKIT_RECEIVER_ID_MAX_LEN: usize = 64;
 
@@ -50,25 +50,6 @@ impl TryFrom<String> for PaykitReceiverId {
 impl From<PaykitReceiverId> for String {
     fn from(value: PaykitReceiverId) -> Self {
         value.0
-    }
-}
-
-/// One app/runtime receiver under a Pubky identity.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PaykitReceiverLocator {
-    /// Pubky identity hosting the receiver.
-    pub public_key: PublicKey,
-    /// Receiver runtime folder under the identity.
-    pub receiver_id: PaykitReceiverId,
-}
-
-impl PaykitReceiverLocator {
-    /// Build a receiver locator from a Pubky public key and receiver id.
-    pub fn new(public_key: PublicKey, receiver_id: PaykitReceiverId) -> Self {
-        Self {
-            public_key,
-            receiver_id,
-        }
     }
 }
 

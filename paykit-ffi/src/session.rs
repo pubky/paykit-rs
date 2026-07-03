@@ -2,7 +2,7 @@ use std::{fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    PaykitSdkError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
+    PaykitReceiverId, PaykitSdkError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
     PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
     PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionProvider,
 };
@@ -16,6 +16,10 @@ use crate::secrets::FfiPubkyLocalSecretKey;
 
 pub(crate) fn parse_public_key(value: String) -> Result<PubkyPublicKey, PaykitFfiError> {
     PubkyPublicKey::from_raw_or_app_key(value).map_err(Into::into)
+}
+
+pub(crate) fn parse_receiver_id(value: String) -> Result<PaykitReceiverId, PaykitFfiError> {
+    PaykitReceiverId::new(value).map_err(|err| validation_error(err.to_string()))
 }
 
 pub(crate) fn app_public_key(value: &PubkyPublicKey) -> String {

@@ -5,6 +5,10 @@ fn public_key() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
+fn receiver_id() -> PaykitReceiverId {
+    PaykitReceiverId::new("bitkit").unwrap()
+}
+
 fn paykit_profile_path() -> String {
     crate::PaykitSdkConfig::new(crate::PaykitReceiverId::new("paykit").unwrap())
         .paykit_profile_path()
@@ -224,6 +228,7 @@ fn test_contact_profile_resolution_debug_redacts_display_data() {
 fn test_contact_update_allows_empty_label_to_clear_display_text() {
     let update = ContactUpdate {
         public_key: public_key(),
+        receiver_id: receiver_id(),
         label: Some(String::new()),
     };
 
@@ -234,6 +239,7 @@ fn test_contact_update_allows_empty_label_to_clear_display_text() {
 fn test_contact_update_rejects_control_characters() {
     let update = ContactUpdate {
         public_key: public_key(),
+        receiver_id: receiver_id(),
         label: Some("Alice\tLocal".into()),
     };
 
@@ -249,6 +255,7 @@ fn test_contact_update_debug_redacts_label() {
     let public_key_text = public_key.to_string();
     let update = ContactUpdate {
         public_key,
+        receiver_id: receiver_id(),
         label: Some("Alice Local".into()),
     };
     let debug = format!("{update:?}");
@@ -264,6 +271,7 @@ fn test_contact_record_normalizes_whitespace_labels() {
     let labeled = ContactRecord::from_update(
         ContactUpdate {
             public_key: public_key.clone(),
+            receiver_id: receiver_id(),
             label: Some("  Alice  ".into()),
         },
         None,
@@ -272,6 +280,7 @@ fn test_contact_record_normalizes_whitespace_labels() {
     let cleared = ContactRecord::from_update(
         ContactUpdate {
             public_key,
+            receiver_id: receiver_id(),
             label: Some("   ".into()),
         },
         Some(labeled.clone()),
@@ -287,6 +296,7 @@ fn test_pending_public_contact_marker_may_exist_remotely() {
     let record = ContactRecord::from_update(
         ContactUpdate {
             public_key: public_key(),
+            receiver_id: receiver_id(),
             label: None,
         },
         None,

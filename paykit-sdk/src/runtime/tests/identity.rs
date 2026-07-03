@@ -41,6 +41,7 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -60,6 +61,7 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
                 });
                 tx.save_contact_record(ContactRecord {
                     public_key: counterparty.clone(),
+                    receiver_id: receiver_id(),
                     label: Some("Alice".into()),
                     profile: None,
                     profile_fetched_at: None,
@@ -72,6 +74,7 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
                 });
                 tx.insert_outbound_private_message(crate::storage::NewOutboundPrivateMessage::new(
                     counterparty,
+                    receiver_id(),
                     "paykit.private_payment_list".into(),
                     private_list_json(),
                     FixedClock.now(),
@@ -157,6 +160,7 @@ async fn test_sign_out_clears_identity_scoped_state() {
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -176,6 +180,7 @@ async fn test_sign_out_clears_identity_scoped_state() {
                 });
                 tx.save_contact_record(ContactRecord {
                     public_key: counterparty.clone(),
+                    receiver_id: receiver_id(),
                     label: Some("Alice".into()),
                     profile: None,
                     profile_fetched_at: None,
@@ -188,6 +193,7 @@ async fn test_sign_out_clears_identity_scoped_state() {
                 });
                 tx.insert_outbound_private_message(crate::storage::NewOutboundPrivateMessage::new(
                     counterparty,
+                    receiver_id(),
                     "paykit.private_payment_list".into(),
                     private_list_json(),
                     FixedClock.now(),
@@ -255,6 +261,7 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
                 });
                 tx.save_contact_record(ContactRecord {
                     public_key: counterparty,
+                    receiver_id: receiver_id(),
                     label: Some("Alice".into()),
                     profile: None,
                     profile_fetched_at: None,

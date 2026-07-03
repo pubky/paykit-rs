@@ -4,7 +4,8 @@ use paykit_lib::PaymentReference;
 
 use crate::{
     errors::validation_error, json::FfiPrivateJsonObject,
-    private_lists::FfiOutboundPrivateMessageStatus, sdk::FfiPaykitSdk, PaykitFfiError,
+    private_lists::FfiOutboundPrivateMessageStatus, sdk::FfiPaykitSdk, session::parse_receiver_id,
+    PaykitFfiError,
 };
 
 mod conversions;
@@ -144,6 +145,8 @@ pub enum FfiPaymentRequestLifecycleState {
 pub struct FfiPaymentRequestFilter {
     /// Restrict results to one counterparty.
     pub counterparty: Option<String>,
+    /// Restrict results to one counterparty receiver/runtime folder.
+    pub counterparty_receiver_id: Option<String>,
     /// Restrict results to one local role.
     pub local_role: Option<FfiPaymentRequestLocalRole>,
     /// Restrict results to lifecycle states. Empty means all states.
@@ -182,6 +185,8 @@ pub struct FfiPaymentProofRecord {
 pub struct FfiPaymentRequestRecord {
     /// Counterparty associated with the private stream.
     pub counterparty: String,
+    /// Counterparty receiver/runtime folder associated with the private stream.
+    pub counterparty_receiver_id: String,
     /// Stable Payment Request ID.
     pub payment_request_id: String,
     /// Local role, when known.
@@ -241,10 +246,14 @@ impl FfiPaykitSdk {
     pub async fn received_payment_requests_from(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<Vec<FfiPaymentRequestRecord>, PaykitFfiError> {
         let records = self
             .runtime
-            .received_payment_requests_from(&parse_public_key(counterparty)?)
+            .received_payment_requests_from(
+                &parse_public_key(counterparty)?,
+                &parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await?;
         payment_request_records_to_ffi(records)
     }
@@ -253,10 +262,14 @@ impl FfiPaykitSdk {
     pub async fn payment_requests_with(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
     ) -> Result<Vec<FfiPaymentRequestRecord>, PaykitFfiError> {
         let records = self
             .runtime
-            .payment_requests_with(&parse_public_key(counterparty)?)
+            .payment_requests_with(
+                &parse_public_key(counterparty)?,
+                &parse_receiver_id(counterparty_receiver_id)?,
+            )
             .await?;
         payment_request_records_to_ffi(records)
     }
@@ -299,10 +312,15 @@ impl FfiPaykitSdk {
     pub async fn propose_payment_request(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
         terms: FfiPaymentRequestTerms,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
         self.runtime
-            .propose_payment_request(parse_public_key(counterparty)?, terms.try_into()?)
+            .propose_payment_request(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+                terms.try_into()?,
+            )
             .await
             .map_err(Into::into)
             .and_then(FfiPaymentRequestRecord::try_from)
@@ -312,11 +330,16 @@ impl FfiPaykitSdk {
     pub async fn accept_payment_request(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
         payment_request_id: String,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
         let payment_request_id = parse_payment_request_id(payment_request_id)?;
         self.runtime
-            .accept_payment_request(parse_public_key(counterparty)?, &payment_request_id)
+            .accept_payment_request(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+                &payment_request_id,
+            )
             .await
             .map_err(Into::into)
             .and_then(FfiPaymentRequestRecord::try_from)
@@ -326,12 +349,18 @@ impl FfiPaykitSdk {
     pub async fn reject_payment_request(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
         payment_request_id: String,
         reason: Option<String>,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
         let payment_request_id = parse_payment_request_id(payment_request_id)?;
         self.runtime
-            .reject_payment_request(parse_public_key(counterparty)?, &payment_request_id, reason)
+            .reject_payment_request(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+                &payment_request_id,
+                reason,
+            )
             .await
             .map_err(Into::into)
             .and_then(FfiPaymentRequestRecord::try_from)
@@ -341,12 +370,18 @@ impl FfiPaykitSdk {
     pub async fn cancel_payment_request(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
         payment_request_id: String,
         reason: Option<String>,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
         let payment_request_id = parse_payment_request_id(payment_request_id)?;
         self.runtime
-            .cancel_payment_request(parse_public_key(counterparty)?, &payment_request_id, reason)
+            .cancel_payment_request(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+                &payment_request_id,
+                reason,
+            )
             .await
             .map_err(Into::into)
             .and_then(FfiPaymentRequestRecord::try_from)
@@ -356,6 +391,7 @@ impl FfiPaykitSdk {
     pub async fn submit_payment_proof(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
         payment_request_id: String,
         proof: FfiPaymentProofSubmission,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
@@ -364,6 +400,7 @@ impl FfiPaykitSdk {
         self.runtime
             .submit_payment_proof(
                 parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
                 &payment_request_id,
                 proof.billing_period,
                 proof.payment_endpoint_identifier,

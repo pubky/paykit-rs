@@ -10,7 +10,7 @@ use crate::{
         require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
         NewPrivateStreamItem, NewPrivateStreamItemDetails, PeerLinkOperationLease, StorageAdapter,
     },
-    PubkyPublicKey, Result,
+    PaykitReceiverId, PubkyPublicKey, Result,
 };
 
 use paykit_lib::{
@@ -49,6 +49,8 @@ pub struct PrivateStreamIntakeReport {
 pub struct PrivateStreamCounterpartyIntakeReport {
     /// Counterparty whose private stream was received.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_id: PaykitReceiverId,
     /// Successful intake report, when receive completed.
     pub report: Option<PrivateStreamIntakeReport>,
     /// Error text, when receive failed for this counterparty.
@@ -71,6 +73,7 @@ pub struct EventIdConflict {
 pub(crate) async fn persist_private_stream_batch<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
+    counterparty_receiver_id: PaykitReceiverId,
     messages: Vec<PrivateApplicationMessage>,
     link_state: Option<EncryptedLinkStateRecord>,
     received_at: DateTime<Utc>,
@@ -81,6 +84,7 @@ where
     persist_private_stream_batch_with_link_lease(
         storage,
         counterparty,
+        counterparty_receiver_id,
         messages,
         link_state,
         None,
@@ -93,6 +97,7 @@ where
 pub(crate) async fn persist_private_stream_batch_with_link_lease<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
+    counterparty_receiver_id: PaykitReceiverId,
     messages: Vec<PrivateApplicationMessage>,
     link_state: Option<EncryptedLinkStateRecord>,
     link_lease: Option<PeerLinkOperationLease>,
@@ -111,15 +116,21 @@ where
             };
 
             for message in messages {
+                let mut classification = classify_private_application_message(&message);
+                enforce_receipt_access_receiver_scope(
+                    &mut classification,
+                    &counterparty_receiver_id,
+                );
                 let PrivateStreamMessageClassification {
                     status,
                     parse_error,
                     event,
                     receipt_access,
-                } = classify_private_application_message(&message);
+                } = classification;
                 let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
                     NewPrivateStreamItemDetails {
                         counterparty: counterparty.clone(),
+                        counterparty_receiver_id: counterparty_receiver_id.clone(),
                         receive_batch_id,
                         raw_json: message.raw_json.clone(),
                         parsed_version: message.version.map(u32::from),
@@ -136,11 +147,14 @@ where
                 let dedupe_outcome = event.map(|event| {
                     update_event_dedupe(
                         tx,
-                        &counterparty,
-                        event.event_id,
-                        event.event_kind,
-                        payload_hash(&message.raw_json),
-                        stream_item_id,
+                        EventDedupeUpdate {
+                            counterparty: &counterparty,
+                            counterparty_receiver_id: &counterparty_receiver_id,
+                            event_id: event.event_id,
+                            event_kind: event.event_kind,
+                            payload_hash: payload_hash(&message.raw_json),
+                            stream_item_id,
+                        },
                         &mut report,
                     )
                 });
@@ -149,6 +163,7 @@ where
                     if let Some(access) = receipt_access.as_ref() {
                         tx.save_receipt_access_record(ReceiptAccessRecord::from_access(
                             counterparty.clone(),
+                            counterparty_receiver_id.clone(),
                             stream_item_id,
                             receive_batch_id,
                             received_at,
@@ -167,7 +182,7 @@ where
                 }
                 tx.save_encrypted_link_state(link_state);
             }
-            if let Some(mut peer) = tx.linked_peer(&counterparty) {
+            if let Some(mut peer) = tx.linked_peer(&counterparty, &counterparty_receiver_id) {
                 if !report.stream_item_ids.is_empty() {
                     peer.last_private_receive_at = Some(received_at);
                 }
@@ -180,6 +195,23 @@ where
             Ok(report)
         })
         .await
+}
+
+fn enforce_receipt_access_receiver_scope(
+    classification: &mut PrivateStreamMessageClassification,
+    counterparty_receiver_id: &PaykitReceiverId,
+) {
+    let Some(access) = classification.receipt_access.as_ref() else {
+        return;
+    };
+    if access.has_location_for_receiver(counterparty_receiver_id) {
+        return;
+    }
+    classification.status = PrivateStreamParseStatus::MalformedRecognized;
+    classification.parse_error = Some(format!(
+        "Receipt Access location does not match counterparty receiver {counterparty_receiver_id}"
+    ));
+    classification.receipt_access = None;
 }
 
 pub(crate) struct PrivateStreamMessageClassification {
@@ -291,37 +323,49 @@ enum EventDedupeOutcome {
     Conflict,
 }
 
-fn update_event_dedupe(
-    tx: &mut dyn crate::storage::StorageTransaction,
-    counterparty: &PubkyPublicKey,
+struct EventDedupeUpdate<'a> {
+    counterparty: &'a PubkyPublicKey,
+    counterparty_receiver_id: &'a PaykitReceiverId,
     event_id: String,
     event_kind: String,
     payload_hash: String,
     stream_item_id: u64,
+}
+
+fn update_event_dedupe(
+    tx: &mut dyn crate::storage::StorageTransaction,
+    update: EventDedupeUpdate<'_>,
     report: &mut PrivateStreamIntakeReport,
 ) -> EventDedupeOutcome {
-    let Some(mut record) = tx.event_dedup_record(counterparty, &event_id) else {
+    let Some(mut record) = tx.event_dedup_record(
+        update.counterparty,
+        update.counterparty_receiver_id,
+        &update.event_id,
+    ) else {
         tx.save_event_dedup_record(EventDedupRecord {
-            counterparty: counterparty.clone(),
-            event_id,
-            event_kind,
-            payload_hash,
-            first_stream_item_id: stream_item_id,
+            counterparty: update.counterparty.clone(),
+            counterparty_receiver_id: update.counterparty_receiver_id.clone(),
+            event_id: update.event_id,
+            event_kind: update.event_kind,
+            payload_hash: update.payload_hash,
+            first_stream_item_id: update.stream_item_id,
             duplicate_stream_item_ids: Vec::new(),
             conflicting_stream_item_ids: Vec::new(),
         });
         return EventDedupeOutcome::First;
     };
 
-    let outcome = if record.payload_hash == payload_hash {
-        record.duplicate_stream_item_ids.push(stream_item_id);
+    let outcome = if record.payload_hash == update.payload_hash {
+        record.duplicate_stream_item_ids.push(update.stream_item_id);
         EventDedupeOutcome::Duplicate
     } else {
-        record.conflicting_stream_item_ids.push(stream_item_id);
+        record
+            .conflicting_stream_item_ids
+            .push(update.stream_item_id);
         report.event_conflicts.push(EventIdConflict {
             event_id: record.event_id.clone(),
             first_stream_item_id: record.first_stream_item_id,
-            conflicting_stream_item_id: stream_item_id,
+            conflicting_stream_item_id: update.stream_item_id,
         });
         EventDedupeOutcome::Conflict
     };

@@ -40,8 +40,8 @@ pub use event::EventId;
 pub use payment_amount::PaymentAmount;
 #[doc(inline)]
 pub use payment_endpoint::{
-    get_payment_endpoint, get_payment_list, remove_payment_endpoint, set_payment_endpoint,
-    PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList,
+    get_payment_endpoint, get_payment_list, list_paykit_receiver_ids, remove_payment_endpoint,
+    set_payment_endpoint, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList,
 };
 #[doc(inline)]
 pub use payment_reference::{PaymentReference, PAYMENT_REFERENCE_MAX_LEN};
@@ -63,11 +63,7 @@ pub use private_payment_list::{
 pub use pubky::PublicKey;
 pub use pubky_noise;
 #[doc(inline)]
-pub use pubky_routing::{
-    encrypted_link_recovery_path_prefix, payment_endpoint_path, payment_endpoint_path_prefix,
-    private_message_path_prefix, receipt_path_prefix, PAYKIT_PRIVATE_PATH_PREFIX,
-    PAYKIT_RECEIVERS_PATH_PREFIX,
-};
+pub use pubky_routing::{PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_RECEIVERS_PATH_PREFIX};
 #[doc(inline)]
 pub use receipt::{
     decrypt_receipt, parse_receipt_access_event_message, parse_receipt_access_json,
@@ -76,7 +72,7 @@ pub use receipt::{
     ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptDraft, ReceiptId,
 };
 #[doc(inline)]
-pub use receiver::{PaykitReceiverId, PaykitReceiverLocator};
+pub use receiver::PaykitReceiverId;
 
 /// Common result alias for Paykit operations.
 pub type Result<T> = std::result::Result<T, PaykitError>;

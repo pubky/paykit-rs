@@ -7,6 +7,25 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
+    /// List public Paykit receiver ids published by a Pubky identity.
+    ///
+    /// This is a discovery helper. Callers still choose the exact receiver id
+    /// they want to use for public/private payment workflows.
+    pub async fn paykit_receiver_ids(
+        &self,
+        owner: PubkyPublicKey,
+    ) -> Result<Vec<PaykitReceiverId>> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available".into(),
+                    source: None,
+                })?;
+        Ok(paykit_lib::list_paykit_receiver_ids(&public_storage, &owner.to_public_key()?).await?)
+    }
+
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     pub async fn sync_public_endpoints(&self) -> Result<EndpointSyncReport> {
         let details = self

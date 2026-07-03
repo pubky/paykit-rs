@@ -10,6 +10,7 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -22,6 +23,7 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: Some(vec![4, 5, 6]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -30,6 +32,7 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
                 });
                 tx.claim_peer_link_operation(
                     &counterparty,
+                    &receiver_id(),
                     FixedClock.now(),
                     FixedClock.now() + ChronoDuration::seconds(10),
                 )
@@ -48,12 +51,12 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
     );
 
     let recovery_update = sdk
-        .mark_private_recovery_pending(&counterparty, Some(1))
+        .mark_private_recovery_pending(&counterparty, &receiver_id(), Some(1))
         .await
         .unwrap();
     assert!(matches!(recovery_update, RecoveryRequiredUpdate::Skipped));
 
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -61,7 +64,7 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
     assert!(storage
         .transaction({
             let counterparty = counterparty.clone();
-            move |tx| Ok(tx.peer_link_operation_lease(&counterparty))
+            move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
         })
         .await
         .unwrap()
@@ -71,9 +74,9 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
             let counterparty = counterparty.clone();
             move |tx| {
                 let lease = tx
-                    .peer_link_operation_lease(&counterparty)
+                    .peer_link_operation_lease(&counterparty, &receiver_id())
                     .expect("test lease should still be active");
-                tx.release_peer_link_operation(&counterparty, lease.lease_id);
+                tx.release_peer_link_operation(&counterparty, &receiver_id(), lease.lease_id);
                 Ok(())
             }
         })
@@ -81,7 +84,7 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
         .unwrap();
 
     let recovery_update = sdk
-        .mark_private_recovery_pending(&counterparty, Some(2))
+        .mark_private_recovery_pending(&counterparty, &receiver_id(), Some(2))
         .await
         .unwrap();
     assert!(matches!(
@@ -89,12 +92,12 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
         RecoveryRequiredUpdate::Marked { new_episode: true }
     ));
 
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -103,7 +106,7 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
     assert!(storage
         .transaction({
             let counterparty = counterparty.clone();
-            move |tx| Ok(tx.peer_link_operation_lease(&counterparty))
+            move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
         })
         .await
         .unwrap()
@@ -120,6 +123,7 @@ async fn test_encrypted_link_recovery_marker_status_reports_peer_fields() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty,
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::RecoveryRequired,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -144,7 +148,7 @@ async fn test_encrypted_link_recovery_marker_status_reports_peer_fields() {
     );
 
     let status = sdk
-        .encrypted_link_recovery_marker_status(&counterparty)
+        .encrypted_link_recovery_marker_status(&counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -171,6 +175,7 @@ async fn test_publish_recovery_marker_disabled_does_not_mutate_link_state() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -183,6 +188,7 @@ async fn test_publish_recovery_marker_disabled_does_not_mutate_link_state() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -206,16 +212,16 @@ async fn test_publish_recovery_marker_disabled_does_not_mutate_link_state() {
     );
 
     let result = sdk
-        .publish_encrypted_link_recovery_marker(counterparty.clone())
+        .publish_encrypted_link_recovery_marker(counterparty.clone(), receiver_id())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linked);
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -242,6 +248,7 @@ async fn test_publish_recovery_marker_public_only_does_not_mutate_link_state() {
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -254,6 +261,7 @@ async fn test_publish_recovery_marker_public_only_does_not_mutate_link_state() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -274,16 +282,16 @@ async fn test_publish_recovery_marker_public_only_does_not_mutate_link_state() {
     );
 
     let result = sdk
-        .publish_encrypted_link_recovery_marker(counterparty.clone())
+        .publish_encrypted_link_recovery_marker(counterparty.clone(), receiver_id())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linked);
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -301,6 +309,7 @@ async fn test_remote_recovery_marker_observation_rejects_active_peer_lease() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -313,6 +322,7 @@ async fn test_remote_recovery_marker_observation_rejects_active_peer_lease() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -321,6 +331,7 @@ async fn test_remote_recovery_marker_observation_rejects_active_peer_lease() {
                 });
                 tx.claim_peer_link_operation(
                     &counterparty,
+                    &receiver_id(),
                     FixedClock.now(),
                     FixedClock.now() + ChronoDuration::seconds(10),
                 )
@@ -341,19 +352,20 @@ async fn test_remote_recovery_marker_observation_rejects_active_peer_lease() {
     let result = sdk
         .mark_remote_recovery_marker_observed_if_needed(
             &counterparty,
+            &receiver_id(),
             "650e8400-e29b-41d4-a716-446655440000",
             FixedClock.now() + ChronoDuration::seconds(1),
         )
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linked);
     assert!(peer.remote_recovery_attempt_id.is_none());
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -362,7 +374,7 @@ async fn test_remote_recovery_marker_observation_rejects_active_peer_lease() {
     assert!(storage
         .transaction({
             let counterparty = counterparty.clone();
-            move |tx| Ok(tx.peer_link_operation_lease(&counterparty))
+            move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
         })
         .await
         .unwrap()
@@ -379,6 +391,7 @@ async fn test_remote_recovery_marker_observation_ignores_stale_marker() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -391,6 +404,7 @@ async fn test_remote_recovery_marker_observation_ignores_stale_marker() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -413,6 +427,7 @@ async fn test_remote_recovery_marker_observation_ignores_stale_marker() {
     let changed = sdk
         .mark_remote_recovery_marker_observed_if_needed(
             &counterparty,
+            &receiver_id(),
             "650e8400-e29b-41d4-a716-446655440000",
             FixedClock.now() - ChronoDuration::seconds(1),
         )
@@ -420,13 +435,13 @@ async fn test_remote_recovery_marker_observation_ignores_stale_marker() {
         .unwrap();
 
     assert!(!changed);
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linked);
     assert!(peer.remote_recovery_attempt_id.is_none());
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -444,6 +459,7 @@ async fn test_remote_recovery_marker_observation_ignores_same_second_marker() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -456,6 +472,7 @@ async fn test_remote_recovery_marker_observation_ignores_same_second_marker() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -478,6 +495,7 @@ async fn test_remote_recovery_marker_observation_ignores_same_second_marker() {
     let changed = sdk
         .mark_remote_recovery_marker_observed_if_needed(
             &counterparty,
+            &receiver_id(),
             "650e8400-e29b-41d4-a716-446655440000",
             FixedClock.now(),
         )
@@ -485,13 +503,13 @@ async fn test_remote_recovery_marker_observation_ignores_same_second_marker() {
         .unwrap();
 
     assert!(!changed);
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linked);
     assert!(peer.remote_recovery_attempt_id.is_none());
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -574,6 +592,7 @@ async fn test_remote_recovery_marker_observation_preserves_newer_handshake() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linking,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -586,6 +605,7 @@ async fn test_remote_recovery_marker_observation_preserves_newer_handshake() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: None,
                     handshake_snapshot: Some(vec![1, 2, 3]),
                     handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
@@ -608,6 +628,7 @@ async fn test_remote_recovery_marker_observation_preserves_newer_handshake() {
     let changed = sdk
         .mark_remote_recovery_marker_observed_if_needed(
             &counterparty,
+            &receiver_id(),
             "650e8400-e29b-41d4-a716-446655440000",
             FixedClock.now() - ChronoDuration::seconds(1),
         )
@@ -615,13 +636,13 @@ async fn test_remote_recovery_marker_observation_preserves_newer_handshake() {
         .unwrap();
 
     assert!(!changed);
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linking);
     assert!(peer.remote_recovery_attempt_id.is_none());
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -855,6 +876,7 @@ async fn test_mark_private_recovery_pending_skips_active_peer_lease() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -867,6 +889,7 @@ async fn test_mark_private_recovery_pending_skips_active_peer_lease() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -875,6 +898,7 @@ async fn test_mark_private_recovery_pending_skips_active_peer_lease() {
                 });
                 tx.claim_peer_link_operation(
                     &counterparty,
+                    &receiver_id(),
                     FixedClock.now(),
                     FixedClock.now() + ChronoDuration::seconds(10),
                 )
@@ -893,17 +917,17 @@ async fn test_mark_private_recovery_pending_skips_active_peer_lease() {
     );
 
     let update = sdk
-        .mark_private_recovery_pending(&counterparty, Some(7))
+        .mark_private_recovery_pending(&counterparty, &receiver_id(), Some(7))
         .await
         .unwrap();
 
     assert!(matches!(update, RecoveryRequiredUpdate::Skipped));
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linked);
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -912,7 +936,7 @@ async fn test_mark_private_recovery_pending_skips_active_peer_lease() {
     assert!(storage
         .transaction({
             let counterparty = counterparty.clone();
-            move |tx| Ok(tx.peer_link_operation_lease(&counterparty))
+            move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
         })
         .await
         .unwrap()
@@ -929,6 +953,7 @@ async fn test_automatic_recovery_marker_publish_records_missing_session() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::RecoveryRequired,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -941,6 +966,7 @@ async fn test_automatic_recovery_marker_publish_records_missing_session() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: None,
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -960,11 +986,11 @@ async fn test_automatic_recovery_marker_publish_records_missing_session() {
         FixedClock,
     );
 
-    sdk.publish_local_recovery_marker_if_possible(&counterparty, true)
+    sdk.publish_local_recovery_marker_if_possible(&counterparty, &receiver_id(), true)
         .await;
 
     let status = sdk
-        .encrypted_link_recovery_marker_status(&counterparty)
+        .encrypted_link_recovery_marker_status(&counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -984,6 +1010,7 @@ async fn test_automatic_recovery_marker_remove_records_missing_session() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -1007,12 +1034,12 @@ async fn test_automatic_recovery_marker_remove_records_missing_session() {
         FixedClock,
     );
 
-    sdk.remove_local_recovery_marker_if_recorded(&counterparty)
+    sdk.remove_local_recovery_marker_if_recorded(&counterparty, &receiver_id())
         .await
         .unwrap();
 
     let status = sdk
-        .encrypted_link_recovery_marker_status(&counterparty)
+        .encrypted_link_recovery_marker_status(&counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -1032,6 +1059,7 @@ async fn test_mark_private_recovery_pending_preserves_marker_until_publish() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -1044,6 +1072,7 @@ async fn test_mark_private_recovery_pending_preserves_marker_until_publish() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: Some(vec![4, 5, 6]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -1064,7 +1093,7 @@ async fn test_mark_private_recovery_pending_preserves_marker_until_publish() {
     );
 
     let recovery_update = sdk
-        .mark_private_recovery_pending(&counterparty, Some(2))
+        .mark_private_recovery_pending(&counterparty, &receiver_id(), Some(2))
         .await
         .unwrap();
     assert!(matches!(
@@ -1072,7 +1101,7 @@ async fn test_mark_private_recovery_pending_preserves_marker_until_publish() {
         RecoveryRequiredUpdate::Marked { new_episode: true }
     ));
 
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();
@@ -1095,6 +1124,7 @@ fn test_local_recovery_marker_must_belong_to_current_episode() {
     let current_episode_marker_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 1, 0).unwrap();
     let mut peer = LinkedPeerRecord {
         counterparty,
+        counterparty_receiver_id: receiver_id(),
         state: LinkedPeerState::RecoveryRequired,
         last_sync_at: Some(recovery_started_at),
         last_private_receive_at: None,
@@ -1123,6 +1153,7 @@ async fn test_mark_private_recovery_pending_preserves_ongoing_local_marker() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_id: receiver_id(),
                     state: LinkedPeerState::RecoveryRequired,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -1135,6 +1166,7 @@ async fn test_mark_private_recovery_pending_preserves_ongoing_local_marker() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: Some(vec![4, 5, 6]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -1155,7 +1187,7 @@ async fn test_mark_private_recovery_pending_preserves_ongoing_local_marker() {
     );
 
     let recovery_update = sdk
-        .mark_private_recovery_pending(&counterparty, Some(2))
+        .mark_private_recovery_pending(&counterparty, &receiver_id(), Some(2))
         .await
         .unwrap();
     assert!(matches!(
@@ -1163,7 +1195,7 @@ async fn test_mark_private_recovery_pending_preserves_ongoing_local_marker() {
         RecoveryRequiredUpdate::Marked { new_episode: false }
     ));
 
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_id())
         .await
         .unwrap()
         .unwrap();

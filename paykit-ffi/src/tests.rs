@@ -76,6 +76,7 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     let outbound = paykit_sdk::storage::OutboundPrivateMessageRecord {
         outbound_message_id: 0,
         counterparty: counterparty.clone(),
+        counterparty_receiver_id: paykit_sdk::PaykitReceiverId::new("bitkit").unwrap(),
         kind: "paykit.private_payment_list".into(),
         raw_json: r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"btc-lightning-bolt11":"ln-private"}}"#.into(),
         status: OutboundPrivateMessageStatus::Pending,
@@ -98,10 +99,13 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     };
     assert_round_trip("identity", &state);
 
+    let receiver_id = paykit_sdk::PaykitReceiverId::new("bitkit").unwrap();
+
     state.contact_records = HashMap::from([(
-        counterparty.clone(),
+        (counterparty.clone(), receiver_id.clone()),
         ContactRecord {
             public_key: counterparty.clone(),
+            receiver_id: receiver_id.clone(),
             label: None,
             profile: Some(PaykitProfile {
                 display_name: Some("Bob".into()),
@@ -120,9 +124,10 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     assert_round_trip("contact", &state);
 
     state.linked_peers = HashMap::from([(
-        counterparty.clone(),
+        (counterparty.clone(), receiver_id.clone()),
         paykit_sdk::storage::LinkedPeerRecord {
             counterparty: counterparty.clone(),
+            counterparty_receiver_id: receiver_id.clone(),
             state: LinkedPeerState::Linking,
             last_sync_at: None,
             last_private_receive_at: None,
@@ -137,9 +142,10 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     assert_round_trip("linked_peer", &state);
 
     state.encrypted_link_states = HashMap::from([(
-        counterparty.clone(),
+        (counterparty.clone(), receiver_id.clone()),
         paykit_sdk::storage::EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
+            counterparty_receiver_id: receiver_id.clone(),
             link_snapshot: None,
             handshake_snapshot: Some(vec![1, 2, 3, 4, 5]),
             handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
@@ -150,9 +156,10 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     assert_round_trip("encrypted_link", &state);
 
     state.peer_link_operation_leases = HashMap::from([(
-        counterparty.clone(),
+        (counterparty.clone(), receiver_id.clone()),
         PeerLinkOperationLease {
             counterparty: counterparty.clone(),
+            counterparty_receiver_id: receiver_id.clone(),
             lease_id: 0,
             claimed_at: now,
             expires_at: now,
@@ -166,10 +173,15 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     assert_round_trip("outbound", &state);
 
     state.payment_endpoint_reservations = HashMap::from([(
-        (counterparty.clone(), "reservation-1".into()),
+        (
+            counterparty.clone(),
+            receiver_id.clone(),
+            "reservation-1".into(),
+        ),
         PaymentEndpointReservationRecord {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
+            counterparty_receiver_id: receiver_id.clone(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: "payload-hash".into(),
             outbound_message_id: outbound.outbound_message_id,
@@ -184,6 +196,7 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     state.private_stream_items = vec![paykit_sdk::storage::PrivateStreamItemRecord {
         stream_item_id: 0,
         counterparty: counterparty.clone(),
+        counterparty_receiver_id: paykit_sdk::PaykitReceiverId::new("bitkit").unwrap(),
         receive_batch_id: 0,
         raw_json: r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
             .into(),
