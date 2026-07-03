@@ -15,7 +15,7 @@ use crate::{
         FfiPrivateStreamIntakeReport,
     },
     sdk::FfiPaykitSdk,
-    session::{app_public_key, parse_public_key},
+    session::{app_public_key, parse_public_key, parse_receiver_id},
     PaykitFfiError,
 };
 
@@ -52,6 +52,8 @@ pub enum FfiContactPaymentResolutionPrivateState {
 pub struct FfiContactPaymentResolutionRequest {
     /// Counterparty to pay.
     pub counterparty: String,
+    /// Counterparty Paykit receiver folder id.
+    pub counterparty_receiver_id: String,
     /// Optional amount context used by the payment adapter.
     pub amount: Option<FfiPaymentAmountContext>,
     /// Include public Payment Endpoints after private candidates.
@@ -63,6 +65,8 @@ pub struct FfiContactPaymentResolutionRequest {
 pub struct FfiResolvedPaymentEndpoint {
     /// Counterparty that published the endpoint.
     pub counterparty: String,
+    /// Counterparty Paykit receiver folder id.
+    pub counterparty_receiver_id: String,
     /// Where the endpoint was discovered.
     pub source: FfiPaymentEndpointSource,
     /// Payment Endpoint Identifier string.
@@ -117,11 +121,13 @@ impl FfiPaykitSdk {
     pub async fn resolve_private_contact_payment(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
         amount: Option<FfiPaymentAmountContext>,
     ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
         self.runtime
             .resolve_private_contact_payment(
                 parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
                 amount.map(Into::into),
             )
             .await
@@ -133,10 +139,15 @@ impl FfiPaykitSdk {
     pub async fn resolve_public_contact_payment(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
         amount: Option<FfiPaymentAmountContext>,
     ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
         self.runtime
-            .resolve_public_contact_payment(parse_public_key(counterparty)?, amount.map(Into::into))
+            .resolve_public_contact_payment(
+                parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
+                amount.map(Into::into),
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -151,6 +162,7 @@ impl FfiPaykitSdk {
     pub async fn prepare_and_resolve_contact_payment(
         &self,
         counterparty: String,
+        counterparty_receiver_id: String,
         amount: Option<FfiPaymentAmountContext>,
         include_public_endpoints: bool,
         max_advance_steps: u32,
@@ -158,6 +170,7 @@ impl FfiPaykitSdk {
         self.runtime
             .prepare_and_resolve_contact_payment(
                 parse_public_key(counterparty)?,
+                parse_receiver_id(counterparty_receiver_id)?,
                 amount.map(Into::into),
                 include_public_endpoints,
                 max_advance_steps,
@@ -216,6 +229,7 @@ impl TryFrom<FfiContactPaymentResolutionRequest> for ContactPaymentResolutionReq
     fn try_from(value: FfiContactPaymentResolutionRequest) -> Result<Self, Self::Error> {
         Ok(Self {
             counterparty: parse_public_key(value.counterparty)?,
+            counterparty_receiver_id: parse_receiver_id(value.counterparty_receiver_id)?,
             amount: value.amount.map(Into::into),
             include_public_endpoints: value.include_public_endpoints,
         })
@@ -243,6 +257,7 @@ impl From<ResolvedPaymentEndpoint> for FfiResolvedPaymentEndpoint {
     fn from(value: ResolvedPaymentEndpoint) -> Self {
         Self {
             counterparty: app_public_key(&value.endpoint.counterparty),
+            counterparty_receiver_id: value.endpoint.counterparty_receiver_id.to_string(),
             source: value.endpoint.source.into(),
             identifier: value.endpoint.identifier,
             payload: Arc::new(FfiPaymentPayload::new(value.endpoint.payload)),
@@ -293,6 +308,7 @@ mod tests {
             payable_endpoints: vec![ResolvedPaymentEndpoint {
                 endpoint: PaymentEndpointCandidate {
                     counterparty: public_key(),
+                    counterparty_receiver_id: paykit_sdk::PaykitReceiverId::new("bitkit").unwrap(),
                     source: paykit_sdk::PaymentEndpointSource::PrivatePaymentList,
                     identifier: "btc-mainnet-address".into(),
                     payload: "bc1qprivate".into(),

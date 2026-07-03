@@ -21,9 +21,10 @@ async fn test_received_payment_request_records_flag_inbound_acceptance_for_recei
     )
     .await;
 
-    let records = received_payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+    let records =
+        received_payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+            .await
+            .unwrap();
 
     assert_eq!(records.len(), 1);
     assert_eq!(
@@ -58,9 +59,10 @@ async fn test_received_payment_request_records_mark_proposal_expired() {
     )
     .await;
 
-    let records = received_payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+    let records =
+        received_payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+            .await
+            .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -93,9 +95,10 @@ async fn test_received_payment_request_records_flag_inbound_proof_for_received_p
     )
     .await;
 
-    let records = received_payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+    let records =
+        received_payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+            .await
+            .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -134,9 +137,10 @@ async fn test_received_payment_request_records_flag_event_id_conflict() {
     )
     .await;
 
-    let records = received_payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+    let records =
+        received_payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+            .await
+            .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -163,9 +167,10 @@ async fn test_received_payment_request_records_flag_invalid_transition() {
     )
     .await;
 
-    let records = received_payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+    let records =
+        received_payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+            .await
+            .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -196,9 +201,10 @@ async fn test_received_payment_request_records_preserve_first_invalid_reason() {
     )
     .await;
 
-    let records = received_payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+    let records =
+        received_payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+            .await
+            .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -235,9 +241,10 @@ async fn test_received_payment_request_records_keep_invalid_before_later_proposa
     )
     .await;
 
-    let records = received_payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+    let records =
+        received_payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+            .await
+            .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -271,9 +278,10 @@ async fn test_received_payment_request_records_derive_cancellation() {
     )
     .await;
 
-    let records = received_payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+    let records =
+        received_payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+            .await
+            .unwrap();
 
     assert_eq!(records[0].state, PaymentRequestLifecycleState::Canceled);
     assert_eq!(
@@ -304,9 +312,10 @@ async fn test_received_payment_request_records_flag_second_cancellation() {
     )
     .await;
 
-    let records = received_payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+    let records =
+        received_payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+            .await
+            .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -350,9 +359,10 @@ async fn test_received_payment_request_records_return_newest_first() {
     )
     .await;
 
-    let records = received_payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+    let records =
+        received_payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+            .await
+            .unwrap();
 
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].payment_request_id, newer_request_id);

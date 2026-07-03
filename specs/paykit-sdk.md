@@ -31,12 +31,13 @@ or aggregated explicitly above the app-owned runtime model. That does not mean
 all apps silently share one private Paykit runtime, one Encrypted Link state
 machine, or one payment execution state.
 
-Each SDK runtime is configured with one Paykit receiver id. Counterparty APIs
-that take only a Pubky key route to the same receiver id under that
-counterparty. Cross-receiver flows, such as paying `pubkyabc/bitkit` from a
-runtime configured as another receiver, need explicit receiver-locator APIs so
-storage, private links, receipts, and recovery state are keyed by both Pubky key
-and receiver id.
+Each SDK runtime is configured with one local Paykit receiver id. That id
+describes the local app/runtime folder only. Private and payment counterparty
+APIs must receive the counterparty's exact receiver id, because a Pubky key
+alone is not enough information to route private links, private streams,
+receipts, requests, recovery state, or public endpoint reads to one app/runtime
+folder. `paykit_receiver_ids` is a discovery helper; it does not make the SDK
+guess which receiver to use.
 
 ## Design Principles
 
@@ -511,9 +512,10 @@ Tracks local Pubky identity state:
 
 ### LinkedPeerRecord
 
-One record per counterparty in the current Rust SDK:
+One record per counterparty receiver/runtime in the current Rust SDK:
 
 - counterparty public key
+- counterparty receiver id
 - relationship state: not linked, linking, linked, recovery required, blocked
 - in-progress handshake role: initiator or responder
 - last sync time
@@ -522,10 +524,11 @@ One record per counterparty in the current Rust SDK:
 - failure counters
 - policy overrides
 
-SDK APIs that accept only a counterparty Pubky key are same-receiver APIs: they
-use the local runtime receiver id for the counterparty side. Cross-receiver
-flows need an explicit receiver locator so private state can be keyed by Pubky
-key plus receiver id instead of Pubky key alone.
+Private and payment state is scoped by counterparty Pubky key plus
+counterparty receiver id. APIs that operate on private links, private streams,
+Private Payment Lists, Payment Requests, payment resolution, Receipt Access, and
+recovery markers require that exact receiver id instead of deriving it from the
+local runtime config.
 
 ### EncryptedLinkState
 
@@ -547,6 +550,7 @@ Append-only raw private stream item:
 
 - local identity
 - counterparty
+- counterparty receiver id
 - stream sequence number assigned by the SDK
 - receive batch id
 - raw UTF-8 payload, or a retained invalid-frame marker when plaintext bytes
@@ -565,6 +569,7 @@ This is the source of truth for private protocol-derived state.
 Tracks Event Message idempotency:
 
 - counterparty
+- counterparty receiver id
 - event id
 - event kind
 - payload hash of the exact stored payload
@@ -576,7 +581,7 @@ Conflicting reused Event IDs must fail closed for the affected derived state.
 
 ### PrivatePaymentListView
 
-Latest-state view per counterparty:
+Latest-state view per counterparty receiver/runtime:
 
 - latest valid stream item id
 - current Payment Endpoint map
@@ -605,6 +610,7 @@ Tracks optional contact-scoped receiving details:
 
 - reservation id
 - counterparty public key
+- counterparty receiver id
 - Payment Endpoint Identifier
 - payload hash
 - latest outbound message id used to queue the reservation for sharing
@@ -618,6 +624,7 @@ Derived record per Payment Request:
 
 - payment request id
 - proposer/payee counterparty
+- counterparty receiver id
 - current local role: payer or payee
 - immutable terms
 - proposal event id
@@ -646,6 +653,7 @@ settlement finality unless the payment adapter confirms it.
 know every counterparty in advance:
 
 - optional counterparty
+- optional counterparty receiver id
 - optional local role
 - optional lifecycle states, where an empty list means all states
 - optional recurring/one-time filter
@@ -656,6 +664,7 @@ know every counterparty in advance:
 Receipt issuance records:
 
 - counterparty that should receive Receipt Access
+- counterparty receiver id
 - receipt id and Receipt Access Event ID
 - payment reference and optional Payment Request correlation fields
 - Encrypted Receipt JSON
@@ -667,6 +676,7 @@ Receipt Access records:
 - event id
 - receipt id
 - sender/issuer counterparty
+- sender/issuer receiver id
 - Receipt Location path
 - Receipt Decryption Key
 - optional Payment Request ID
@@ -680,6 +690,7 @@ Receipt records:
 - optional Payment Request ID
 - optional Billing Period
 - issuer context
+- issuer receiver id
 - recipient public key
 - optional Payment Endpoint Identifier
 - optional Payment Amount
@@ -695,6 +706,7 @@ Durable outbound Private Application Message queue:
 
 - outbound id
 - counterparty
+- counterparty receiver id
 - Private Message Kind
 - exact raw JSON payload, including Event ID when the message kind has one
 - send status
@@ -704,7 +716,7 @@ Durable outbound Private Application Message queue:
 
 The SDK should use one generic outbound Private Application Message record type
 for all Private Application Message kinds. Event Messages are processed as FIFO
-per counterparty/Encrypted Link. Private Payment Lists use latest-state
+per counterparty receiver/Encrypted Link. Private Payment Lists use latest-state
 semantics, so older unsent lists may be superseded by a newer complete list.
 Send workers must claim the next sendable message through storage before
 sending it. A stale `Sending` queue head can be reclaimed after the lease
@@ -738,7 +750,7 @@ advanced Encrypted Link snapshot.
 
 For each receive cycle:
 
-1. Claim the per-counterparty peer link operation lease.
+1. Claim the per-counterparty-receiver peer link operation lease.
 2. Restore or establish the Encrypted Link.
 3. Receive the full batch from `paykit-lib`.
 4. Persist every received Private Application Message plaintext and parse enough
@@ -762,8 +774,8 @@ Recommended locks:
 - public endpoint lock: serializes publication and cleanup of local public
   Payment Endpoints.
 - storage-backed peer link operation lease: serializes Encrypted Link restore,
-  handshake, send, receive, and snapshot updates per counterparty.
-- outbound queue claim/lock: serializes retry workers per counterparty.
+  handshake, send, receive, and snapshot updates per counterparty receiver.
+- outbound queue claim/lock: serializes retry workers per counterparty receiver.
 - reservation transaction: stores reservation records and the outbound message
   that shares them atomically. Existing reservation IDs with the same
   counterparty, Payment Endpoint Identifier, and payload hash are idempotent;
@@ -910,6 +922,7 @@ Payment Proofs, and any other Event Message kinds.
 Input:
 
 - counterparty public key
+- counterparty receiver id
 - desired amount/asset, if known
 - payment adapter support policy
 - whether public Payment Endpoints should be included
@@ -923,8 +936,8 @@ Flow:
 3. If no cached private endpoint is available and public endpoints are not
    included, try an immediate private refresh/recovery path when an active link
    exists.
-4. If public endpoints are included, fetch the counterparty's public Payment
-   List and append those candidates after private candidates.
+4. If public endpoints are included, fetch that receiver's public Payment
+   Endpoints and append those candidates after private candidates.
 5. Pass the full candidate list to `PaymentAdapter` as one batch with amount
    context when known.
 6. Return a structured result with a general payment `status`:
@@ -1039,6 +1052,7 @@ receipt after a partial failure.
 
 Backup should include SDK-managed state:
 
+- local receiver/runtime folder id
 - public identity/capability state
 - peer records
 - Encrypted Link snapshots
@@ -1075,8 +1089,10 @@ Backup should not include:
 
 Restore flow:
 
-1. Validate local identity compatibility before replacing storage state.
-2. Validate backup record shape and every link snapshot recipient.
+1. Validate local identity and receiver id compatibility before replacing
+   storage state.
+2. Validate backup record shape plus every link snapshot recipient and receiver
+   scope.
 3. Preserve valid active Encrypted Link snapshots and in-progress handshake
    snapshots so the SDK can catch up from the restored checkpoint.
 4. Mark peers recovery-required only when no safe restored checkpoint exists,

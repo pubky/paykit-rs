@@ -45,9 +45,9 @@ Public reads use `pubky::PublicStorage`; authenticated writes use
 `pubky::PubkySession`. Missing files or directories are treated as absent data
 rather than protocol errors.
 
-Private Application Messages use `pubky-noise`. Paykit derives per-counterparty
-private folders during the Encrypted Link Handshake, while `pubky-noise` owns
-encryption, file naming, counters, and storage slots.
+Private Application Messages use `pubky-noise`. Paykit derives
+per-counterparty-receiver private folders during the Encrypted Link Handshake,
+while `pubky-noise` owns encryption, file naming, counters, and storage slots.
 
 ### Core Vocabulary
 
@@ -155,8 +155,8 @@ handle.
 
 Paykit receipts are encrypted before storage. The plaintext Receipt is created
 and read locally; the payee stores only the Encrypted Receipt at the canonical
-homeserver path derived from the Receipt ID, then sends Receipt Access to the
-counterparty over the Encrypted Link.
+homeserver path derived from the issuer receiver id and Receipt ID, then sends
+Receipt Access to the counterparty over the Encrypted Link.
 
 Receipt Access uses Event Message semantics: every valid Receipt Access message
 matters. Apps that process multiple Private Message Kinds should consume the
@@ -294,8 +294,8 @@ already have a known Receipt Access JSON payload. `decrypt_receipt` decrypts an
 Encrypted Receipt fetched by the app from its Receipt Location into the local
 plaintext Receipt.
 Receipt Location is a path on the issuer's homeserver; SDK/runtime code pairs
-it with the Receipt Access sender/issuer context when retrieving the Encrypted
-Receipt.
+it with the issuer public key and issuer receiver id when retrieving the
+Encrypted Receipt.
 
 Private Application Messages share one ordered encrypted stream. The raw stream
 API returns every received Private Application Message plaintext payload in

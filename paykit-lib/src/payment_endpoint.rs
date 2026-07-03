@@ -237,6 +237,21 @@ pub async fn get_payment_list(
     Ok(result)
 }
 
+/// Lists public Paykit receiver ids for a Pubky identity.
+///
+/// This is a discovery helper only. Payment flows should still use the exact
+/// receiver id selected by the app/user instead of guessing one.
+#[instrument(skip(storage))]
+pub async fn list_paykit_receiver_ids(
+    storage: &pubky::PublicStorage,
+    owner: &PublicKey,
+) -> Result<Vec<PaykitReceiverId>> {
+    debug!("listing Paykit receiver ids");
+    pubky_routing::fetch_paykit_receiver_ids(storage, owner)
+        .await
+        .map_err(|err| map_error("list_paykit_receiver_ids", err))
+}
+
 /// Retrieves a specific Payment Endpoint for `payee`, `receiver_id`, and `identifier`.
 ///
 /// # Semantics

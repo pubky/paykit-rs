@@ -1,4 +1,6 @@
-use crate::{private_message_path_prefix, PaykitError, PaykitReceiverId, PublicKey, Result};
+use crate::{
+    pubky_routing::private_message_path_prefix, PaykitError, PaykitReceiverId, PublicKey, Result,
+};
 
 /// Domain separation string for Paykit private payment path derivation.
 ///

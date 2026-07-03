@@ -30,13 +30,15 @@ use crate::{
     OutboundPrivateMessageStatus, PaykitSdkError, Result,
 };
 use paykit_lib::{
-    parse_private_payment_list_json, PaymentEndpointIdentifier, PrivateApplicationMessage,
-    PrivateMessageKind, ReceiptId,
+    parse_private_payment_list_json, PaykitReceiverId, PaymentEndpointIdentifier,
+    PrivateApplicationMessage, PrivateMessageKind, ReceiptId,
 };
 
 mod validation;
 
 use validation::*;
+
+type PeerStorageKey = (PubkyPublicKey, PaykitReceiverId);
 
 /// Current SDK backup schema version.
 pub const SDK_BACKUP_VERSION: u32 = 1;
@@ -50,6 +52,8 @@ pub const SDK_BACKUP_VERSION: u32 = 1;
 pub struct SdkBackupState {
     /// Backup schema version.
     pub version: u32,
+    /// Local Paykit receiver/runtime folder that exported this backup.
+    pub local_receiver_id: PaykitReceiverId,
     /// Current identity state.
     pub identity_state: Option<IdentityState>,
     /// Linked Peer records.
@@ -86,6 +90,7 @@ impl fmt::Debug for SdkBackupState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SdkBackupState")
             .field("version", &self.version)
+            .field("local_receiver_id", &self.local_receiver_id)
             .field(
                 "identity_state",
                 &self.identity_state.as_ref().map(|_| "<redacted>"),
@@ -155,8 +160,17 @@ pub struct RestoreReport {
     pub receipt_records: usize,
     /// Number of restored local receipt issuance records.
     pub receipt_issuance_records: usize,
-    /// Counterparties restored as recovery-required.
-    pub recovery_required_peers: Vec<PubkyPublicKey>,
+    /// Receiver-scoped peers restored as recovery-required.
+    pub recovery_required_peers: Vec<RestoreRecoveryRequiredPeer>,
+}
+
+/// Receiver-scoped peer that was restored as recovery-required.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoreRecoveryRequiredPeer {
+    /// Counterparty public key.
+    pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_id: PaykitReceiverId,
 }
 
 /// Backup-validated storage replacement payload.
@@ -180,7 +194,10 @@ impl ValidatedStorageState {
 }
 
 /// Export SDK-managed state from storage.
-pub async fn export_backup_state<S>(storage: &S) -> Result<SdkBackupState>
+pub async fn export_backup_state<S>(
+    storage: &S,
+    local_receiver_id: PaykitReceiverId,
+) -> Result<SdkBackupState>
 where
     S: StorageAdapter,
 {
@@ -188,6 +205,7 @@ where
         .transaction(|tx| {
             Ok(SdkBackupState::from_storage_state(
                 tx.export_storage_state(),
+                local_receiver_id,
             ))
         })
         .await
@@ -201,12 +219,18 @@ pub(crate) async fn restore_backup_state<S>(
 where
     S: StorageAdapter,
 {
-    restore_backup_state_with_identity(storage, backup, None).await
+    restore_backup_state_with_identity(storage, backup, test_receiver_id(), None).await
+}
+
+#[cfg(test)]
+fn test_receiver_id() -> PaykitReceiverId {
+    PaykitReceiverId::new("bitkit").unwrap()
 }
 
 pub(crate) async fn restore_backup_state_with_identity<S>(
     storage: &S,
     backup: SdkBackupState,
+    local_receiver_id: PaykitReceiverId,
     trusted_identity: Option<IdentityState>,
 ) -> Result<RestoreReport>
 where
@@ -218,8 +242,11 @@ where
             let current_identity = trusted_identity.as_ref().or(stored_identity.as_ref());
             let current_next_peer_link_operation_lease_id =
                 tx.export_storage_state().next_peer_link_operation_lease_id;
-            let (state, report) = backup
-                .into_storage_state(current_identity, current_next_peer_link_operation_lease_id)?;
+            let (state, report) = backup.into_storage_state(
+                current_identity,
+                &local_receiver_id,
+                current_next_peer_link_operation_lease_id,
+            )?;
             tx.replace_storage_state(state);
             Ok(report)
         })
@@ -227,14 +254,29 @@ where
 }
 
 impl SdkBackupState {
-    pub(crate) fn from_storage_state(state: StorageState) -> Self {
+    pub(crate) fn from_storage_state(
+        state: StorageState,
+        local_receiver_id: PaykitReceiverId,
+    ) -> Self {
         let mut linked_peers = state.linked_peers.into_values().collect::<Vec<_>>();
-        linked_peers
-            .sort_by(|left, right| left.counterparty.as_str().cmp(right.counterparty.as_str()));
+        linked_peers.sort_by(|left, right| {
+            left.counterparty
+                .as_str()
+                .cmp(right.counterparty.as_str())
+                .then(
+                    left.counterparty_receiver_id
+                        .as_str()
+                        .cmp(right.counterparty_receiver_id.as_str()),
+                )
+        });
 
         let mut contact_records = state.contact_records.into_values().collect::<Vec<_>>();
-        contact_records
-            .sort_by(|left, right| left.public_key.as_str().cmp(right.public_key.as_str()));
+        contact_records.sort_by(|left, right| {
+            left.public_key
+                .as_str()
+                .cmp(right.public_key.as_str())
+                .then(left.receiver_id.as_str().cmp(right.receiver_id.as_str()))
+        });
 
         let mut public_endpoint_records = state
             .public_endpoint_records
@@ -250,6 +292,11 @@ impl SdkBackupState {
             left.counterparty
                 .as_str()
                 .cmp(right.counterparty.as_str())
+                .then(
+                    left.counterparty_receiver_id
+                        .as_str()
+                        .cmp(right.counterparty_receiver_id.as_str()),
+                )
                 .then(left.reservation_id.cmp(&right.reservation_id))
         });
 
@@ -257,14 +304,27 @@ impl SdkBackupState {
             .encrypted_link_states
             .into_values()
             .collect::<Vec<_>>();
-        encrypted_link_states
-            .sort_by(|left, right| left.counterparty.as_str().cmp(right.counterparty.as_str()));
+        encrypted_link_states.sort_by(|left, right| {
+            left.counterparty
+                .as_str()
+                .cmp(right.counterparty.as_str())
+                .then(
+                    left.counterparty_receiver_id
+                        .as_str()
+                        .cmp(right.counterparty_receiver_id.as_str()),
+                )
+        });
 
         let mut event_dedup_records = state.event_dedup_records.into_values().collect::<Vec<_>>();
         event_dedup_records.sort_by(|left, right| {
             left.counterparty
                 .as_str()
                 .cmp(right.counterparty.as_str())
+                .then(
+                    left.counterparty_receiver_id
+                        .as_str()
+                        .cmp(right.counterparty_receiver_id.as_str()),
+                )
                 .then(left.event_id.cmp(&right.event_id))
         });
 
@@ -276,6 +336,11 @@ impl SdkBackupState {
             left.counterparty
                 .as_str()
                 .cmp(right.counterparty.as_str())
+                .then(
+                    left.counterparty_receiver_id
+                        .as_str()
+                        .cmp(right.counterparty_receiver_id.as_str()),
+                )
                 .then(left.event_id.cmp(&right.event_id))
         });
 
@@ -284,6 +349,11 @@ impl SdkBackupState {
             left.issuer
                 .as_str()
                 .cmp(right.issuer.as_str())
+                .then(
+                    left.issuer_receiver_id
+                        .as_str()
+                        .cmp(right.issuer_receiver_id.as_str()),
+                )
                 .then(left.receipt_id.cmp(&right.receipt_id))
         });
 
@@ -295,11 +365,17 @@ impl SdkBackupState {
             left.counterparty
                 .as_str()
                 .cmp(right.counterparty.as_str())
+                .then(
+                    left.counterparty_receiver_id
+                        .as_str()
+                        .cmp(right.counterparty_receiver_id.as_str()),
+                )
                 .then(left.receipt_id.cmp(&right.receipt_id))
         });
 
         Self {
             version: SDK_BACKUP_VERSION,
+            local_receiver_id,
             identity_state: state.identity_state,
             linked_peers,
             contact_records,
@@ -321,17 +397,18 @@ impl SdkBackupState {
     fn into_storage_state(
         self,
         current_identity: Option<&IdentityState>,
+        local_receiver_id: &PaykitReceiverId,
         next_peer_link_operation_lease_id: u64,
     ) -> Result<(ValidatedStorageState, RestoreReport)> {
-        self.validate(current_identity)?;
+        self.validate(current_identity, local_receiver_id)?;
 
         let mut identity_state = self.identity_state;
         preserve_current_sign_out_generation(&mut identity_state, current_identity);
-        let mut linked_peers = keyed_by_counterparty(self.linked_peers, "Linked Peer")?;
+        let mut linked_peers = keyed_by_peer(self.linked_peers, "Linked Peer")?;
         validate_linked_peer_records(&linked_peers)?;
         let contact_records = keyed_by_tuple(
             self.contact_records,
-            |record| record.public_key.clone(),
+            |record| (record.public_key.clone(), record.receiver_id.clone()),
             "local contact",
         )?;
         validate_contact_records(&contact_records)?;
@@ -343,12 +420,18 @@ impl SdkBackupState {
         validate_public_endpoint_records(&public_endpoint_records)?;
         let payment_endpoint_reservations = keyed_by_tuple(
             self.payment_endpoint_reservations,
-            |record| (record.counterparty.clone(), record.reservation_id.clone()),
+            |record| {
+                (
+                    record.counterparty.clone(),
+                    record.counterparty_receiver_id.clone(),
+                    record.reservation_id.clone(),
+                )
+            },
             "Payment Endpoint Reservation",
         )?;
         let mut encrypted_link_states =
-            keyed_by_counterparty(self.encrypted_link_states, "Encrypted Link state")?;
-        validate_encrypted_link_snapshots(&encrypted_link_states)?;
+            keyed_by_peer(self.encrypted_link_states, "Encrypted Link state")?;
+        validate_encrypted_link_snapshots(&encrypted_link_states, local_receiver_id)?;
         let mut outbound_private_messages =
             unique_outbound_messages(self.outbound_private_messages)?;
         validate_outbound_private_messages(&outbound_private_messages)?;
@@ -360,13 +443,25 @@ impl SdkBackupState {
         validate_private_stream_items(&private_stream_items)?;
         let event_dedup_records = keyed_by_tuple(
             self.event_dedup_records,
-            |record| (record.counterparty.clone(), record.event_id.clone()),
+            |record| {
+                (
+                    record.counterparty.clone(),
+                    record.counterparty_receiver_id.clone(),
+                    record.event_id.clone(),
+                )
+            },
             "Event dedupe",
         )?;
         validate_event_dedup_records(&event_dedup_records, &private_stream_items)?;
         let receipt_access_records = keyed_by_tuple(
             self.receipt_access_records,
-            |record| (record.counterparty.clone(), record.event_id.clone()),
+            |record| {
+                (
+                    record.counterparty.clone(),
+                    record.counterparty_receiver_id.clone(),
+                    record.event_id.clone(),
+                )
+            },
             "Receipt Access",
         )?;
         validate_receipt_access_records(&receipt_access_records, &private_stream_items)?;
@@ -377,7 +472,13 @@ impl SdkBackupState {
         )?;
         let receipt_records = keyed_by_tuple(
             self.receipt_records,
-            |record| (record.issuer.clone(), record.receipt_id.clone()),
+            |record| {
+                (
+                    record.issuer.clone(),
+                    record.issuer_receiver_id.clone(),
+                    record.receipt_id.clone(),
+                )
+            },
             "Receipt",
         )?;
         let expected_receipt_recipient = identity_state
@@ -390,7 +491,13 @@ impl SdkBackupState {
         )?;
         let receipt_issuance_records = keyed_by_tuple(
             self.receipt_issuance_records,
-            |record| (record.counterparty.clone(), record.receipt_id.clone()),
+            |record| {
+                (
+                    record.counterparty.clone(),
+                    record.counterparty_receiver_id.clone(),
+                    record.receipt_id.clone(),
+                )
+            },
             "Receipt issuance",
         )?;
         validate_receipt_issuance_records(&receipt_issuance_records, &outbound_private_messages)?;
@@ -419,6 +526,16 @@ impl SdkBackupState {
             .next_private_stream_item_id
             .max(next_private_stream_item_id(&private_stream_items));
 
+        let recovery_required_report_peers = recovery_required_peers
+            .iter()
+            .map(
+                |(counterparty, counterparty_receiver_id)| RestoreRecoveryRequiredPeer {
+                    counterparty: counterparty.clone(),
+                    counterparty_receiver_id: counterparty_receiver_id.clone(),
+                },
+            )
+            .collect();
+
         let report = RestoreReport {
             version: self.version,
             restored_identity: identity_state.is_some(),
@@ -433,7 +550,7 @@ impl SdkBackupState {
             receipt_access_records: receipt_access_records.len(),
             receipt_records: receipt_records.len(),
             receipt_issuance_records: receipt_issuance_records.len(),
-            recovery_required_peers,
+            recovery_required_peers: recovery_required_report_peers,
         };
 
         let state = StorageState {
@@ -459,11 +576,21 @@ impl SdkBackupState {
         Ok((ValidatedStorageState::new(state), report))
     }
 
-    fn validate(&self, current_identity: Option<&IdentityState>) -> Result<()> {
+    fn validate(
+        &self,
+        current_identity: Option<&IdentityState>,
+        local_receiver_id: &PaykitReceiverId,
+    ) -> Result<()> {
         if self.version != SDK_BACKUP_VERSION {
             return Err(PaykitSdkError::Protocol(format!(
                 "unsupported SDK backup version {}",
                 self.version
+            )));
+        }
+        if &self.local_receiver_id != local_receiver_id {
+            return Err(PaykitSdkError::Protocol(format!(
+                "backup receiver id '{}' does not match local receiver id '{}'",
+                self.local_receiver_id, local_receiver_id
             )));
         }
 

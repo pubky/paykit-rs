@@ -19,6 +19,21 @@ fn receiver_id() -> paykit_lib::PaykitReceiverId {
     paykit_lib::PaykitReceiverId::new("bitkit").unwrap()
 }
 
+fn other_receiver_id() -> paykit_lib::PaykitReceiverId {
+    paykit_lib::PaykitReceiverId::new("tether").unwrap()
+}
+
+fn peer_key(public_key: &PubkyPublicKey) -> (PubkyPublicKey, paykit_lib::PaykitReceiverId) {
+    (public_key.clone(), receiver_id())
+}
+
+fn recovery_required_peer(public_key: &PubkyPublicKey) -> RestoreRecoveryRequiredPeer {
+    RestoreRecoveryRequiredPeer {
+        counterparty: public_key.clone(),
+        counterparty_receiver_id: receiver_id(),
+    }
+}
+
 fn identity(public_key: PubkyPublicKey) -> IdentityState {
     IdentityState {
         public_key: Some(public_key),
@@ -42,6 +57,7 @@ fn signed_out_identity(sign_out_generation: u64) -> IdentityState {
 fn contact_record(public_key: PubkyPublicKey) -> ContactRecord {
     ContactRecord {
         public_key,
+        receiver_id: receiver_id(),
         label: Some("Alice".into()),
         profile: None,
         profile_fetched_at: None,
@@ -68,6 +84,7 @@ fn private_payment_list_outbound(
     OutboundPrivateMessageRecord {
         outbound_message_id,
         counterparty,
+        counterparty_receiver_id: receiver_id(),
         kind: PrivateMessageKind::PrivatePaymentList.as_str().into(),
         raw_json: format!(
             r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"btc-lightning-bolt11":"{payload}"}}}}"#
@@ -88,6 +105,7 @@ async fn assert_restore_rejects_outbound_record(record: OutboundPrivateMessageRe
     let next_id = record.outbound_message_id.saturating_add(1);
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
+        local_receiver_id: receiver_id(),
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),

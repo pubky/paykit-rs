@@ -78,13 +78,13 @@ context. Raw diagnostic details require an explicit debug export method.
 ### Private Payment Lists and Payment Resolution
 
 - `PaykitSdk.enqueuePrivatePaymentList` — queue current private receiving
-  details for one counterparty.
+  details for one counterparty receiver.
 - `PaykitSdk.enqueuePrivatePaymentListWithReceivingDetails` — queue an
-  explicit complete private list for one counterparty.
+  explicit complete private list for one counterparty receiver.
 - `PaykitSdk.clearPrivatePaymentList` — queue an empty private list for one
-  counterparty.
+  counterparty receiver.
 - `PaykitSdk.clearPrivatePaymentListAndProcessOutbound` — queue an empty
-  private list and attempt delivery for that counterparty.
+  private list and attempt delivery for that counterparty receiver.
 - `PaykitSdk.syncContactPrivatePaymentLists` — queue current private lists
   for saved contacts and optionally clear linked peers that are no longer
   saved contacts.
@@ -92,9 +92,9 @@ context. Raw diagnostic details require an explicit debug export method.
   contact private lists and attempt outbound delivery in one app-facing call.
 - `PaykitSdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound` —
   queue reservation-backed private lists supplied by the app and attempt
-  delivery, with per-counterparty queue and delivery failures.
+  delivery, with per-counterparty-receiver queue and delivery failures.
 - `PaykitSdk.currentPrivatePaymentList` — inspect the latest cached Private
-  Payment List view for one counterparty.
+  Payment List view for one counterparty receiver.
 - `PaykitSdk.prepareAndResolveContactPayment` — app-facing payment setup:
   refresh live session capability, ensure or advance private link state,
   drain currently available private send/receive work for the peer, then
@@ -113,8 +113,9 @@ receiving details, while `Reservations` means use exactly the supplied list,
 including an empty list.
 
 For direct reservation publication, pass one
-`PrivatePaymentListReservationUpdateInput` per counterparty. An empty reservation
-list means "publish an empty Private Payment List for this counterparty".
+`PrivatePaymentListReservationUpdateInput` per counterparty receiver. An empty
+reservation list means "publish an empty Private Payment List for this
+counterparty receiver".
 Helpers that both queue and attempt delivery return
 `PrivatePaymentListDeliveryReport` with `queued`, `cleared`,
 `failedToQueue`, and `failedToDeliver` groups. A peer whose Encrypted Link is
@@ -250,6 +251,7 @@ sdk.syncPublicEndpointsWithReceivingDetails(publicDetails)
 updates = [
     PrivatePaymentListReservationUpdateInput(
         counterparty,
+        counterpartyReceiverId,
         reservations: [
             PaymentEndpointReservationInput(
                 reservationId,
@@ -269,10 +271,10 @@ report = sdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound(
 ```
 
 An empty `reservations` list publishes an empty Private Payment List for that
-counterparty. `failedToQueue` means the SDK did not persist an outbound private
-message for that counterparty. `failedToDeliver` means the SDK queued the
-message, then delivery or reservation cleanup failed; keep the state and retry
-with `processPendingPrivateMessages`.
+counterparty receiver. `failedToQueue` means the SDK did not persist an outbound
+private message for that counterparty receiver. `failedToDeliver` means the SDK
+queued the message, then delivery or reservation cleanup failed; keep the state
+and retry with `processPendingPrivateMessages`.
 
 ### Pay A Contact
 
@@ -281,6 +283,7 @@ For normal contact payment UX, use the high-level preparation call:
 ```text
 resolution = sdk.prepareAndResolveContactPayment(
     counterparty,
+    counterpartyReceiverId,
     amount, // PaymentAmountContext or nil/null
     includePublicEndpoints,
     maxAdvanceSteps
@@ -319,7 +322,8 @@ derivable from the Pubky public key alone.
 - `EndpointSyncReport.failed` means public endpoint publication/removal was not
   fully applied. Keep local receiving details and retry sync later.
 - `PrivatePaymentListDeliveryReport.failedToQueue` is a local persistence or
-  validation problem for that counterparty; show or log it as a blocked update.
+  validation problem for that counterparty receiver; show or log it as a
+  blocked update.
 - `PrivatePaymentListDeliveryReport.failedToDeliver` is retryable workflow
   state unless the nested error says recovery is required. Keep the queued
   state and let the retry worker continue.

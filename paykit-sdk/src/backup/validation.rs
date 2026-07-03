@@ -22,29 +22,44 @@ pub(super) fn preserve_current_sign_out_generation(
     }
 }
 
-pub(super) fn keyed_by_counterparty<T>(
-    records: Vec<T>,
-    label: &str,
-) -> Result<HashMap<PubkyPublicKey, T>>
+pub(super) fn keyed_by_peer<T>(records: Vec<T>, label: &str) -> Result<HashMap<PeerStorageKey, T>>
 where
-    T: HasCounterparty,
+    T: HasPeerStorageKey,
 {
-    keyed_by_tuple(records, |record| record.counterparty().clone(), label)
+    keyed_by_tuple(
+        records,
+        |record| {
+            (
+                record.counterparty().clone(),
+                record.counterparty_receiver_id().clone(),
+            )
+        },
+        label,
+    )
 }
 
-pub(super) trait HasCounterparty {
+pub(super) trait HasPeerStorageKey {
     fn counterparty(&self) -> &PubkyPublicKey;
+    fn counterparty_receiver_id(&self) -> &PaykitReceiverId;
 }
 
-impl HasCounterparty for LinkedPeerRecord {
+impl HasPeerStorageKey for LinkedPeerRecord {
     fn counterparty(&self) -> &PubkyPublicKey {
         &self.counterparty
     }
+
+    fn counterparty_receiver_id(&self) -> &PaykitReceiverId {
+        &self.counterparty_receiver_id
+    }
 }
 
-impl HasCounterparty for EncryptedLinkStateRecord {
+impl HasPeerStorageKey for EncryptedLinkStateRecord {
     fn counterparty(&self) -> &PubkyPublicKey {
         &self.counterparty
+    }
+
+    fn counterparty_receiver_id(&self) -> &PaykitReceiverId {
+        &self.counterparty_receiver_id
     }
 }
 
@@ -133,15 +148,16 @@ pub(super) fn next_private_stream_item_id(records: &[PrivateStreamItemRecord]) -
 }
 
 pub(super) fn reconcile_restored_linked_peers(
-    linked_peers: &mut HashMap<PubkyPublicKey, LinkedPeerRecord>,
-    encrypted_link_states: &HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
+    linked_peers: &mut HashMap<PeerStorageKey, LinkedPeerRecord>,
+    encrypted_link_states: &HashMap<PeerStorageKey, EncryptedLinkStateRecord>,
     outbound_private_messages: &[OutboundPrivateMessageRecord],
-) -> Vec<PubkyPublicKey> {
-    for (counterparty, link_state) in encrypted_link_states {
+) -> Vec<PeerStorageKey> {
+    for (peer_key, link_state) in encrypted_link_states {
+        let (counterparty, counterparty_receiver_id) = peer_key;
         let restored_state = restored_peer_state_from_link_state(link_state);
         let checkpointed_at = link_state.checkpointed_at;
         linked_peers
-            .entry(counterparty.clone())
+            .entry(peer_key.clone())
             .and_modify(|peer| {
                 if matches!(
                     peer.state,
@@ -170,14 +186,15 @@ pub(super) fn reconcile_restored_linked_peers(
             .or_insert_with(|| {
                 restored_peer_record(
                     counterparty.clone(),
+                    counterparty_receiver_id.clone(),
                     restored_state.unwrap_or(LinkedPeerState::RecoveryRequired),
                     checkpointed_at,
                 )
             });
     }
 
-    for (counterparty, peer) in linked_peers.iter_mut() {
-        if !encrypted_link_states.contains_key(counterparty)
+    for (peer_key, peer) in linked_peers.iter_mut() {
+        if !encrypted_link_states.contains_key(peer_key)
             && matches!(
                 peer.state,
                 LinkedPeerState::Linked | LinkedPeerState::Linking
@@ -189,15 +206,19 @@ pub(super) fn reconcile_restored_linked_peers(
 
     let active_link_counterparties = encrypted_link_states
         .iter()
-        .filter_map(|(counterparty, state)| state.link_snapshot.is_some().then_some(counterparty))
+        .filter_map(|(peer_key, state)| state.link_snapshot.is_some().then_some(peer_key))
         .cloned()
         .collect::<HashSet<_>>();
     for message in outbound_private_messages {
+        let peer_key = (
+            message.counterparty.clone(),
+            message.counterparty_receiver_id.clone(),
+        );
         if outbound_status_requires_link(&message.status)
-            && !active_link_counterparties.contains(&message.counterparty)
+            && !active_link_counterparties.contains(&peer_key)
         {
             linked_peers
-                .entry(message.counterparty.clone())
+                .entry(peer_key)
                 .and_modify(|peer| {
                     if peer.state != LinkedPeerState::Blocked {
                         peer.state = LinkedPeerState::RecoveryRequired;
@@ -206,6 +227,7 @@ pub(super) fn reconcile_restored_linked_peers(
                 .or_insert_with(|| {
                     restored_peer_record(
                         message.counterparty.clone(),
+                        message.counterparty_receiver_id.clone(),
                         LinkedPeerState::RecoveryRequired,
                         message.updated_at,
                     )
@@ -216,10 +238,18 @@ pub(super) fn reconcile_restored_linked_peers(
     let mut peers = Vec::new();
     for record in linked_peers.values() {
         if record.state == LinkedPeerState::RecoveryRequired {
-            peers.push(record.counterparty.clone());
+            peers.push((
+                record.counterparty.clone(),
+                record.counterparty_receiver_id.clone(),
+            ));
         }
     }
-    peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    peers.sort_by(|left, right| {
+        left.0
+            .as_str()
+            .cmp(right.0.as_str())
+            .then(left.1.as_str().cmp(right.1.as_str()))
+    });
     peers
 }
 
@@ -237,11 +267,13 @@ fn restored_peer_state_from_link_state(
 
 fn restored_peer_record(
     counterparty: PubkyPublicKey,
+    counterparty_receiver_id: PaykitReceiverId,
     state: LinkedPeerState,
     last_sync_at: DateTime<Utc>,
 ) -> LinkedPeerRecord {
     LinkedPeerRecord {
         counterparty,
+        counterparty_receiver_id,
         state,
         last_sync_at: Some(last_sync_at),
         last_private_receive_at: None,
@@ -264,11 +296,11 @@ fn outbound_status_requires_link(status: &OutboundPrivateMessageStatus) -> bool 
 }
 
 pub(super) fn clear_recovery_required_link_snapshots(
-    encrypted_link_states: &mut HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
-    recovery_required_peers: &[PubkyPublicKey],
+    encrypted_link_states: &mut HashMap<PeerStorageKey, EncryptedLinkStateRecord>,
+    recovery_required_peers: &[PeerStorageKey],
 ) {
-    for counterparty in recovery_required_peers {
-        let Some(record) = encrypted_link_states.get_mut(counterparty) else {
+    for peer_key in recovery_required_peers {
+        let Some(record) = encrypted_link_states.get_mut(peer_key) else {
             continue;
         };
         let had_snapshot = record.link_snapshot.is_some()
@@ -285,15 +317,19 @@ pub(super) fn clear_recovery_required_link_snapshots(
 
 pub(super) fn mark_restored_sending_outbound_recovery_required(
     records: &mut [OutboundPrivateMessageRecord],
-    recovery_required_peers: &[PubkyPublicKey],
+    recovery_required_peers: &[PeerStorageKey],
 ) {
     let recovery_required_peers = recovery_required_peers
         .iter()
         .cloned()
         .collect::<HashSet<_>>();
     for record in records.iter_mut() {
+        let peer_key = (
+            record.counterparty.clone(),
+            record.counterparty_receiver_id.clone(),
+        );
         if record.status == OutboundPrivateMessageStatus::Sending
-            && recovery_required_peers.contains(&record.counterparty)
+            && recovery_required_peers.contains(&peer_key)
         {
             record.status = OutboundPrivateMessageStatus::RecoveryRequired;
             record.updated_at = record
@@ -306,9 +342,10 @@ pub(super) fn mark_restored_sending_outbound_recovery_required(
 }
 
 pub(super) fn validate_encrypted_link_snapshots(
-    records: &HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
+    records: &HashMap<PeerStorageKey, EncryptedLinkStateRecord>,
+    local_receiver_id: &PaykitReceiverId,
 ) -> Result<()> {
-    for (counterparty, record) in records {
+    for ((counterparty, counterparty_receiver_id), record) in records {
         let expected_recipient = counterparty.to_public_key()?;
         if let Some(snapshot_bytes) = record.link_snapshot.as_ref() {
             let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes)
@@ -316,6 +353,13 @@ pub(super) fn validate_encrypted_link_snapshots(
             if snapshot.recipient() != &expected_recipient {
                 return Err(PaykitSdkError::Protocol(format!(
                     "Encrypted Link snapshot recipient does not match counterparty {counterparty}"
+                )));
+            }
+            if snapshot.local_receiver_id() != local_receiver_id
+                || snapshot.remote_receiver_id() != counterparty_receiver_id
+            {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "Encrypted Link snapshot receiver ids do not match peer {counterparty}/{counterparty_receiver_id}"
                 )));
             }
         }
@@ -327,13 +371,20 @@ pub(super) fn validate_encrypted_link_snapshots(
                     "Encrypted Link Handshake snapshot recipient does not match counterparty {counterparty}"
                 )));
             }
+            if snapshot.local_receiver_id() != local_receiver_id
+                || snapshot.remote_receiver_id() != counterparty_receiver_id
+            {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "Encrypted Link Handshake snapshot receiver ids do not match peer {counterparty}/{counterparty_receiver_id}"
+                )));
+            }
         }
     }
     Ok(())
 }
 
 pub(super) fn validate_linked_peer_records(
-    records: &HashMap<PubkyPublicKey, LinkedPeerRecord>,
+    records: &HashMap<PeerStorageKey, LinkedPeerRecord>,
 ) -> Result<()> {
     for record in records.values() {
         validate_recovery_marker_fields(
@@ -434,7 +485,7 @@ pub(super) fn validate_public_endpoint_records(
 }
 
 pub(super) fn validate_contact_records(
-    records: &HashMap<PubkyPublicKey, ContactRecord>,
+    records: &HashMap<PeerStorageKey, ContactRecord>,
 ) -> Result<()> {
     for record in records.values() {
         if let Some(profile) = record.profile.as_ref() {
@@ -443,6 +494,7 @@ pub(super) fn validate_contact_records(
         if let Some(label) = record.label.as_deref() {
             crate::ContactUpdate {
                 public_key: record.public_key.clone(),
+                receiver_id: record.receiver_id.clone(),
                 label: Some(label.to_owned()),
             }
             .validate()?;
@@ -498,7 +550,7 @@ fn validate_contact_marker_state(record: &ContactRecord) -> Result<()> {
 }
 
 pub(super) fn validate_payment_endpoint_reservations(
-    records: &HashMap<(PubkyPublicKey, String), PaymentEndpointReservationRecord>,
+    records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), PaymentEndpointReservationRecord>,
     outbound_private_messages: &[OutboundPrivateMessageRecord],
 ) -> Result<()> {
     let outbound_by_id = outbound_private_messages
@@ -517,9 +569,11 @@ pub(super) fn validate_payment_endpoint_reservations(
                     record.reservation_id, record.outbound_message_id
                 ))
             })?;
-        if outbound.counterparty != record.counterparty {
+        if outbound.counterparty != record.counterparty
+            || outbound.counterparty_receiver_id != record.counterparty_receiver_id
+        {
             return Err(PaykitSdkError::Protocol(format!(
-                "Payment Endpoint Reservation '{}' counterparty does not match outbound message {}",
+                "Payment Endpoint Reservation '{}' peer does not match outbound message {}",
                 record.reservation_id, record.outbound_message_id
             )));
         }
@@ -659,7 +713,7 @@ pub(super) fn validate_private_stream_items(records: &[PrivateStreamItemRecord])
 }
 
 pub(super) fn validate_event_dedup_records(
-    records: &HashMap<(PubkyPublicKey, String), EventDedupRecord>,
+    records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), EventDedupRecord>,
     stream_items: &[PrivateStreamItemRecord],
 ) -> Result<()> {
     let stream_by_id = stream_items
@@ -674,9 +728,11 @@ pub(super) fn validate_event_dedup_records(
                 record.event_id, record.first_stream_item_id
             )));
         };
-        if first.counterparty != record.counterparty {
+        if first.counterparty != record.counterparty
+            || first.counterparty_receiver_id != record.counterparty_receiver_id
+        {
             return Err(PaykitSdkError::Protocol(format!(
-                "Event dedupe record '{}' counterparty does not match first stream item",
+                "Event dedupe record '{}' peer does not match first stream item",
                 record.event_id
             )));
         }
@@ -745,6 +801,12 @@ fn validate_event_dedup_stream_item(
             record.event_id, item.stream_item_id
         )));
     }
+    if item.counterparty_receiver_id != record.counterparty_receiver_id {
+        return Err(PaykitSdkError::Protocol(format!(
+            "Event dedupe record '{}' counterparty receiver does not match stream item {}",
+            record.event_id, item.stream_item_id
+        )));
+    }
 
     let classification =
         classify_private_application_message(&private_application_message_from_raw(
@@ -795,7 +857,7 @@ fn validate_event_dedup_stream_item(
 }
 
 pub(super) fn validate_receipt_access_records(
-    records: &HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
+    records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), ReceiptAccessRecord>,
     stream_items: &[PrivateStreamItemRecord],
 ) -> Result<()> {
     let stream_by_id = stream_items
@@ -811,6 +873,7 @@ pub(super) fn validate_receipt_access_records(
             )));
         };
         if item.counterparty != record.counterparty
+            || item.counterparty_receiver_id != record.counterparty_receiver_id
             || item.receive_batch_id != record.receive_batch_id
             || item.known_paykit_kind.as_deref() != Some(PrivateMessageKind::ReceiptAccess.as_str())
         {
@@ -854,6 +917,12 @@ pub(super) fn validate_receipt_access_records(
             return Err(PaykitSdkError::Protocol(format!(
                 "Receipt Access record '{}' does not match parsed stream payload",
                 record.event_id
+            )));
+        }
+        if !access.has_location_for_receiver(&record.counterparty_receiver_id) {
+            return Err(PaykitSdkError::Protocol(format!(
+                "Receipt Access record '{}' location does not match counterparty receiver {}",
+                record.event_id, record.counterparty_receiver_id
             )));
         }
     }
@@ -901,8 +970,11 @@ fn validate_receipt_access_retrieval_status(record: &ReceiptAccessRecord) -> Res
 
 pub(super) fn validate_required_private_stream_indexes(
     stream_items: &[PrivateStreamItemRecord],
-    event_dedup_records: &HashMap<(PubkyPublicKey, String), EventDedupRecord>,
-    receipt_access_records: &HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
+    event_dedup_records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), EventDedupRecord>,
+    receipt_access_records: &HashMap<
+        (PubkyPublicKey, PaykitReceiverId, String),
+        ReceiptAccessRecord,
+    >,
 ) -> Result<()> {
     for item in stream_items {
         let classification =
@@ -914,7 +986,11 @@ pub(super) fn validate_required_private_stream_indexes(
         let Some(event) = classification.event else {
             continue;
         };
-        let key = (item.counterparty.clone(), event.event_id.clone());
+        let key = (
+            item.counterparty.clone(),
+            item.counterparty_receiver_id.clone(),
+            event.event_id.clone(),
+        );
         let Some(dedupe) = event_dedup_records.get(&key) else {
             return Err(PaykitSdkError::Protocol(format!(
                 "private stream item {} is missing required Event dedupe record '{}'",
@@ -965,8 +1041,8 @@ fn event_dedup_record_contains_stream_event(
 }
 
 pub(super) fn validate_receipt_records(
-    records: &HashMap<(PubkyPublicKey, String), ReceiptRecord>,
-    access_records: &HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
+    records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), ReceiptRecord>,
+    access_records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), ReceiptAccessRecord>,
     expected_recipient: Option<&PubkyPublicKey>,
 ) -> Result<()> {
     for record in records.values() {
@@ -984,6 +1060,7 @@ pub(super) fn validate_receipt_records(
         }
         let access_key = (
             record.issuer.clone(),
+            record.issuer_receiver_id.clone(),
             record.receipt_access_event_id.clone(),
         );
         let Some(access) = access_records.get(&access_key) else {
@@ -1009,7 +1086,7 @@ pub(super) fn validate_receipt_records(
 }
 
 pub(super) fn validate_receipt_issuance_records(
-    records: &HashMap<(PubkyPublicKey, String), ReceiptIssuanceRecord>,
+    records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), ReceiptIssuanceRecord>,
     outbound_private_messages: &[OutboundPrivateMessageRecord],
 ) -> Result<()> {
     let outbound_by_id = outbound_private_messages
@@ -1092,6 +1169,7 @@ pub(super) fn validate_receipt_issuance_records(
                 )));
             };
             if outbound.counterparty != record.counterparty
+                || outbound.counterparty_receiver_id != record.counterparty_receiver_id
                 || outbound.kind != PrivateMessageKind::ReceiptAccess.as_str()
                 || outbound.raw_json != record.access_json
             {
@@ -1195,6 +1273,18 @@ fn validate_valid_private_stream_body(
             })?;
             if let Some(error) = event.validation_error() {
                 return Err(PaykitSdkError::Protocol(error.to_owned()));
+            }
+            let Some(access) = event.parsed_access() else {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "private stream item {} Receipt Access payload is malformed",
+                    record.stream_item_id
+                )));
+            };
+            if !access.has_location_for_receiver(&record.counterparty_receiver_id) {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "private stream item {} Receipt Access location does not match counterparty receiver {}",
+                    record.stream_item_id, record.counterparty_receiver_id
+                )));
             }
         }
         PrivateMessageKind::PaymentRequest

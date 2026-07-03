@@ -13,7 +13,7 @@ use paykit_sdk::{
 use crate::{
     errors::validation_error,
     json::FfiPrivateJsonObject,
-    session::{app_public_key, parse_public_key as parse_pubky_public_key},
+    session::{app_public_key, parse_public_key as parse_pubky_public_key, parse_receiver_id},
     PaykitFfiError,
 };
 
@@ -92,6 +92,10 @@ impl TryFrom<FfiPaymentRequestFilter> for PaymentRequestFilter {
     fn try_from(value: FfiPaymentRequestFilter) -> Result<Self, Self::Error> {
         Ok(Self {
             counterparty: value.counterparty.map(parse_public_key).transpose()?,
+            counterparty_receiver_id: value
+                .counterparty_receiver_id
+                .map(parse_receiver_id)
+                .transpose()?,
             local_role: value.local_role.map(TryInto::try_into).transpose()?,
             states: value
                 .states
@@ -226,6 +230,7 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
     fn try_from(value: PaymentRequestRecord) -> Result<Self, Self::Error> {
         Ok(Self {
             counterparty: app_public_key(&value.counterparty),
+            counterparty_receiver_id: value.counterparty_receiver_id.to_string(),
             payment_request_id: value.payment_request_id,
             local_role: value.local_role.map(Into::into),
             state: value.state.into(),

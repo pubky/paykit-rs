@@ -7,8 +7,8 @@ use crate::{
     domain::linked_peers::LinkedPeerHandshakeReport,
     domain::outbound_private::OutboundPrivateSendReport,
     domain::private_stream::PrivateStreamIntakeReport, domain::publication::PublicationStatus,
-    PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate, PaymentTarget, PubkyPublicKey,
-    Result,
+    PaykitReceiverId, PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate,
+    PaymentTarget, PubkyPublicKey, Result,
 };
 
 /// Pubky app profile path used by read-only fallback/helper APIs.
@@ -331,6 +331,8 @@ pub struct PaykitBlobRecord {
 pub struct ContactUpdate {
     /// Contact public key.
     pub public_key: PubkyPublicKey,
+    /// Contact receiver/runtime folder used for Paykit private workflows.
+    pub receiver_id: PaykitReceiverId,
     /// Optional local display label.
     pub label: Option<String>,
 }
@@ -339,6 +341,7 @@ impl fmt::Debug for ContactUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ContactUpdate")
             .field("public_key", &"<redacted>")
+            .field("receiver_id", &self.receiver_id)
             .field("label", &self.label.as_ref().map(|_| "<redacted>"))
             .finish()
     }
@@ -364,6 +367,8 @@ impl ContactUpdate {
 pub struct ContactRecord {
     /// Contact public key.
     pub public_key: PubkyPublicKey,
+    /// Contact receiver/runtime folder used for Paykit private workflows.
+    pub receiver_id: PaykitReceiverId,
     /// Optional local display label.
     pub label: Option<String>,
     /// Cached public profile, when fetched.
@@ -388,6 +393,7 @@ impl fmt::Debug for ContactRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ContactRecord")
             .field("public_key", &"<redacted>")
+            .field("receiver_id", &self.receiver_id)
             .field("label", &self.label.as_ref().map(|_| "<redacted>"))
             .field("profile", &self.profile.as_ref().map(|_| "<redacted>"))
             .field("profile_fetched_at", &self.profile_fetched_at)
@@ -422,12 +428,14 @@ impl ContactRecord {
         let label = normalize_label(update.label);
         match existing {
             Some(mut existing) => {
+                existing.receiver_id = update.receiver_id;
                 existing.label = label;
                 existing.updated_at = now;
                 existing
             }
             None => Self {
                 public_key: update.public_key,
+                receiver_id: update.receiver_id,
                 label,
                 profile: None,
                 profile_fetched_at: None,
@@ -706,6 +714,8 @@ pub enum ContactPaymentResolutionPrivateState {
 pub struct ContactPaymentResolutionRequest {
     /// Counterparty to pay.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder to query.
+    pub counterparty_receiver_id: PaykitReceiverId,
     /// Optional amount context used by the payment adapter.
     pub amount: Option<PaymentAmountContext>,
     /// Include public Payment Endpoints after private candidates.

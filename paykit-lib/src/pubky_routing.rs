@@ -89,6 +89,47 @@ pub async fn fetch_payment_list(
     fetch_payment_list_from_directory(storage, addr).await
 }
 
+/// Lists public Paykit receiver ids published by an identity.
+#[instrument(skip(storage), fields(owner = %owner))]
+pub async fn fetch_paykit_receiver_ids(
+    storage: &PublicStorage,
+    owner: &PublicKey,
+) -> Result<Vec<PaykitReceiverId>> {
+    let addr = format!("{owner}{}", receiver_path_prefix());
+    debug!(addr = %addr, "listing Paykit receivers");
+    let resources = list_resources(storage, addr, "list Paykit receivers").await?;
+    let mut receiver_ids = Vec::new();
+
+    for resource in resources {
+        let path = resource.path.as_str();
+        let prefix = receiver_path_prefix();
+        let suffix = path
+            .strip_prefix(&prefix)
+            .ok_or_else(|| PaykitError::InvalidData {
+                context: format!("Paykit receiver path has unexpected prefix: '{path}'"),
+                source: None,
+            })?;
+        let segment = suffix
+            .split('/')
+            .next()
+            .filter(|segment| !segment.is_empty())
+            .ok_or_else(|| PaykitError::InvalidData {
+                context: format!("cannot extract Paykit receiver id from path '{path}'"),
+                source: None,
+            })?;
+        let receiver_id =
+            PaykitReceiverId::new(segment).map_err(|err| PaykitError::InvalidData {
+                context: format!("storage returned invalid Paykit receiver id '{segment}'"),
+                source: Some(err.into()),
+            })?;
+        if !receiver_ids.contains(&receiver_id) {
+            receiver_ids.push(receiver_id);
+        }
+    }
+
+    Ok(receiver_ids)
+}
+
 /// Fetches an individual receiver-scoped public Payment Endpoint.
 #[instrument(skip(storage), fields(payee = %payee, receiver = %receiver_id, identifier = %identifier))]
 pub async fn fetch_payment_endpoint(
@@ -105,13 +146,18 @@ pub async fn fetch_payment_endpoint(
     }
 }
 
+/// Return the receiver registry path prefix.
+pub(crate) fn receiver_path_prefix() -> String {
+    format!("{PAYKIT_RECEIVERS_PATH_PREFIX}/")
+}
+
 /// Return the receiver-scoped public Payment Endpoint path prefix.
-pub fn payment_endpoint_path_prefix(receiver_id: &PaykitReceiverId) -> String {
+pub(crate) fn payment_endpoint_path_prefix(receiver_id: &PaykitReceiverId) -> String {
     format!("{PAYKIT_RECEIVERS_PATH_PREFIX}/{receiver_id}/endpoints/")
 }
 
 /// Return the receiver-scoped public Payment Endpoint path.
-pub fn payment_endpoint_path(
+pub(crate) fn payment_endpoint_path(
     receiver_id: &PaykitReceiverId,
     identifier: &PaymentEndpointIdentifier,
 ) -> String {
@@ -123,17 +169,17 @@ pub fn payment_endpoint_path(
 }
 
 /// Return the receiver-scoped private message base path.
-pub fn private_message_path_prefix(receiver_id: &PaykitReceiverId) -> String {
+pub(crate) fn private_message_path_prefix(receiver_id: &PaykitReceiverId) -> String {
     format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{receiver_id}/messages")
 }
 
 /// Return the receiver-scoped Receipt Location prefix.
-pub fn receipt_path_prefix(receiver_id: &PaykitReceiverId) -> String {
+pub(crate) fn receipt_path_prefix(receiver_id: &PaykitReceiverId) -> String {
     format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{receiver_id}/receipts")
 }
 
 /// Return the receiver-scoped Encrypted Link recovery marker base path.
-pub fn encrypted_link_recovery_path_prefix(receiver_id: &PaykitReceiverId) -> String {
+pub(crate) fn encrypted_link_recovery_path_prefix(receiver_id: &PaykitReceiverId) -> String {
     format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{receiver_id}/encrypted-link-recovery")
 }
 
@@ -319,6 +365,7 @@ mod tests {
             payment_endpoint_path(&receiver_id, &identifier),
             "/pub/paykit/v0/receivers/bitkit-9f3a/endpoints/btc-lightning-bolt11"
         );
+        assert_eq!(receiver_path_prefix(), "/pub/paykit/v0/receivers/");
         assert_eq!(
             private_message_path_prefix(&receiver_id),
             "/pub/paykit/v0/private/bitkit-9f3a/messages"

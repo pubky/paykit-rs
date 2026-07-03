@@ -101,10 +101,10 @@ use crate::{
         outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
         OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
-    PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointReservation,
-    PaymentEndpointReservationCancellation, PaymentEndpointSelectionRequest, PaymentEndpointSource,
-    PrivatePaymentListView, PubkyPublicKey, PubkySessionAccess, PubkySessionProvider,
-    ReceivingDetail, ReceivingDetailScope, Result,
+    PaykitReceiverId, PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate,
+    PaymentEndpointReservation, PaymentEndpointReservationCancellation,
+    PaymentEndpointSelectionRequest, PaymentEndpointSource, PrivatePaymentListView, PubkyPublicKey,
+    PubkySessionAccess, PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, Result,
 };
 
 mod backup;

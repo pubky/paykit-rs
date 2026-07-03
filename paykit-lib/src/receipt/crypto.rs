@@ -19,9 +19,9 @@ impl Receipt {
     /// Encrypt this receipt for storage at its canonical Receipt Location path
     /// using `key`.
     ///
-    /// The location path is derived from the Receipt ID and authenticated as
-    /// AEAD associated data; callers must use that same canonical path when
-    /// decrypting.
+    /// The location path is derived from the issuer receiver id and Receipt ID
+    /// and authenticated as AEAD associated data; callers must use that same
+    /// canonical path when decrypting.
     pub fn encrypt(
         &self,
         receiver_id: &PaykitReceiverId,

@@ -500,7 +500,7 @@ let mut link = restore_encrypted_link(
 The crate exports:
 
 - `PAYKIT_RECEIVERS_PATH_PREFIX` (`/pub/paykit/v0/receivers`) and `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) to standardize receiver-scoped Pubky path construction.
-- `PaykitReceiverId` and `PaykitReceiverLocator` for app/runtime receiver folders under a Pubky identity.
+- `PaykitReceiverId` for app/runtime receiver folders under a Pubky identity.
 - `set_payment_endpoint`, `remove_payment_endpoint`, `get_payment_list`, and `get_payment_endpoint` for Public Payment Endpoint operations over `pubky::PubkySession` and `pubky::PublicStorage`.
 - `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot`, `EncryptedLinkHandshakeSnapshot`, `PrivateApplicationMessage`, and `PrivateMessageKind` for Encrypted Link types.
 - `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `EncryptedLink::receive_private_application_messages`, `set_private_payment_list`, and `parse_private_payment_list_json` for Encrypted Link and Private Payment List operations.

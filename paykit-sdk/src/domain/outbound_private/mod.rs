@@ -11,7 +11,7 @@ use crate::{
         require_peer_link_operation_lease, NewOutboundPrivateMessage, OutboundPrivateMessageRecord,
         PeerLinkOperationLease, StorageAdapter,
     },
-    PaykitSdkError, PubkyPublicKey, Result,
+    PaykitReceiverId, PaykitSdkError, PubkyPublicKey, Result,
 };
 
 /// Delivery status for one outbound Private Application Message.
@@ -114,6 +114,8 @@ pub struct OutboundPrivateSendReport {
 pub struct OutboundPrivateCounterpartySendReport {
     /// Counterparty whose queue was processed.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_id: PaykitReceiverId,
     /// Successful send report, when processing completed.
     pub report: Option<OutboundPrivateSendReport>,
     /// Error text, when processing failed for this counterparty.
@@ -139,6 +141,7 @@ fn redacted_error(error: &str) -> String {
 pub(crate) async fn enqueue_private_message<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
+    counterparty_receiver_id: PaykitReceiverId,
     raw_json: String,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -150,6 +153,7 @@ where
         .transaction(move |tx| {
             let record = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 counterparty,
+                counterparty_receiver_id,
                 kind,
                 raw_json,
                 now,
@@ -177,6 +181,7 @@ where
             require_peer_link_operation_lease(tx, lease)?;
             let record = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 counterparty,
+                lease.counterparty_receiver_id.clone(),
                 kind,
                 raw_json,
                 now,
@@ -190,12 +195,15 @@ where
 pub(crate) async fn queued_outbound_private_messages<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
+    counterparty_receiver_id: &PaykitReceiverId,
 ) -> Result<Vec<OutboundPrivateMessageRecord>>
 where
     S: StorageAdapter,
 {
     storage
-        .transaction(|tx| Ok(tx.queued_outbound_private_messages(counterparty)))
+        .transaction(|tx| {
+            Ok(tx.queued_outbound_private_messages(counterparty, counterparty_receiver_id))
+        })
         .await
 }
 
@@ -203,6 +211,7 @@ where
 pub(crate) async fn claim_next_outbound_private_message<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
+    counterparty_receiver_id: &PaykitReceiverId,
     now: DateTime<Utc>,
     stale_before: DateTime<Utc>,
     failed_retry_after: DateTime<Utc>,
@@ -214,6 +223,7 @@ where
         .transaction(|tx| {
             Ok(tx.claim_next_outbound_private_message(
                 counterparty,
+                counterparty_receiver_id,
                 now,
                 stale_before,
                 failed_retry_after,
@@ -238,6 +248,7 @@ where
             require_peer_link_operation_lease(tx, &lease)?;
             Ok(tx.claim_next_outbound_private_message(
                 counterparty,
+                &lease.counterparty_receiver_id,
                 now,
                 stale_before,
                 failed_retry_after,

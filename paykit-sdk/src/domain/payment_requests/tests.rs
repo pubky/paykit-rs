@@ -18,6 +18,10 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
+fn receiver_id() -> PaykitReceiverId {
+    PaykitReceiverId::new("bitkit").unwrap()
+}
+
 fn private_message(raw_json: String) -> PrivateApplicationMessage {
     let value: serde_json::Value = serde_json::from_str(&raw_json).unwrap();
     PrivateApplicationMessage {
@@ -108,6 +112,7 @@ async fn persist_messages_at(
     persist_private_stream_batch(
         storage,
         counterparty,
+        receiver_id(),
         messages.into_iter().map(private_message).collect(),
         None,
         received_at,

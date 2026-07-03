@@ -1,8 +1,9 @@
 use tracing::{debug, instrument};
 
 use crate::{
-    error::map_error, receipt_path_prefix, EncryptedLink, PaykitError, PaykitReceiverId,
-    PrivateMessageKind, PublicKey, Result,
+    error::map_error,
+    pubky_routing::{receipt_path_prefix, PAYKIT_PRIVATE_PATH_PREFIX},
+    EncryptedLink, PaykitError, PaykitReceiverId, PrivateMessageKind, PublicKey, Result,
 };
 
 use super::{
@@ -11,13 +12,28 @@ use super::{
 };
 
 impl ReceiptAccess {
-    /// Return the canonical Receipt Location path for a Receipt ID.
+    /// Return the canonical Receipt Location path for a receiver and Receipt ID.
     pub fn location(receiver_id: &PaykitReceiverId, receipt_id: &ReceiptId) -> String {
         format!("{}/{receipt_id}", receipt_path_prefix(receiver_id))
     }
 
-    /// Validate that this access descriptor points at the canonical location for
-    /// its Receipt ID.
+    /// Return true when a Receipt Location points at the expected receiver
+    /// folder and Receipt ID.
+    pub fn location_matches_receiver_id(
+        location: &str,
+        receiver_id: &PaykitReceiverId,
+        receipt_id: &ReceiptId,
+    ) -> bool {
+        location == Self::location(receiver_id, receipt_id)
+    }
+
+    /// Return true when this descriptor points at the expected receiver folder.
+    pub fn has_location_for_receiver(&self, receiver_id: &PaykitReceiverId) -> bool {
+        Self::location_matches_receiver_id(&self.location, receiver_id, &self.receipt_id)
+    }
+
+    /// Validate that this access descriptor points at a canonical
+    /// receiver-scoped location for its Receipt ID.
     ///
     /// This public validator is for caller-supplied values and returns
     /// [`PaykitError::Validation`] on mismatch. Wire parsing maps the same
@@ -68,7 +84,8 @@ impl ReceiptAccess {
 }
 
 fn receiver_scoped_location_matches(location: &str, receipt_id: &ReceiptId) -> bool {
-    let Some(rest) = location.strip_prefix("/pub/paykit/v0/private/") else {
+    let private_prefix = format!("{PAYKIT_PRIVATE_PATH_PREFIX}/");
+    let Some(rest) = location.strip_prefix(&private_prefix) else {
         return false;
     };
     let Some((receiver_id, receipt_segment)) = rest.split_once("/receipts/") else {

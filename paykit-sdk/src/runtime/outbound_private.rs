@@ -11,24 +11,38 @@ where
     pub async fn process_outbound_private_messages(
         &self,
         counterparty: PubkyPublicKey,
+        counterparty_receiver_id: PaykitReceiverId,
     ) -> Result<OutboundPrivateSendReport> {
         let mut report = OutboundPrivateSendReport::default();
-        self.ensure_peer_not_recovery_required_or_blocked(&counterparty)
+        self.ensure_peer_not_recovery_required_or_blocked(&counterparty, &counterparty_receiver_id)
             .await?;
         let (session_access, _) = self.private_link_session_access().await?;
-        self.ensure_peer_allows_private_automation(&counterparty)
+        self.ensure_peer_allows_private_automation(&counterparty, &counterparty_receiver_id)
             .await?;
-        let queued = queued_outbound_private_messages(&self.storage, &counterparty).await?;
+        let queued = queued_outbound_private_messages(
+            &self.storage,
+            &counterparty,
+            &counterparty_receiver_id,
+        )
+        .await?;
         if queued.is_empty() {
-            let lease = self.claim_peer_link_operation(&counterparty).await?;
+            let lease = self
+                .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+                .await?;
             report.reservation_cleanup_failures.extend(
-                self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
-                    .await,
+                self.cancel_terminal_private_list_reservations(
+                    &counterparty,
+                    &lease.counterparty_receiver_id,
+                    Some(&lease),
+                )
+                .await,
             );
             return self.finish_peer_link_operation(lease, Ok(report)).await;
         }
 
-        let lease = self.claim_peer_link_operation(&counterparty).await?;
+        let lease = self
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .await?;
         let result = self
             .process_outbound_private_messages_with_claim(
                 counterparty,
@@ -41,7 +55,9 @@ where
     }
 
     /// List counterparties with queued private messages ready for retry.
-    pub async fn pending_outbound_private_counterparties(&self) -> Result<Vec<PubkyPublicKey>> {
+    pub async fn pending_outbound_private_counterparties(
+        &self,
+    ) -> Result<Vec<(PubkyPublicKey, PaykitReceiverId)>> {
         let now = self.clock.now();
         let (stale_before, failed_retry_after) = self.outbound_retry_thresholds(now)?;
         self.storage
@@ -52,7 +68,10 @@ where
                 for message in snapshot.outbound_private_messages {
                     by_outbound_id.insert(message.outbound_message_id, message.clone());
                     by_counterparty
-                        .entry(message.counterparty.clone())
+                        .entry((
+                            message.counterparty.clone(),
+                            message.counterparty_receiver_id.clone(),
+                        ))
                         .or_insert_with(Vec::new)
                         .push(message);
                 }
@@ -70,50 +89,66 @@ where
                 for reservation in snapshot.payment_endpoint_reservations.values() {
                     if terminal_private_list_reservation_needs_cleanup(reservation, &by_outbound_id)
                     {
-                        candidates.insert(reservation.counterparty.clone());
+                        candidates.insert((
+                            reservation.counterparty.clone(),
+                            reservation.counterparty_receiver_id.clone(),
+                        ));
                     }
                 }
 
                 let mut counterparties = candidates
                     .into_iter()
-                    .filter(|counterparty| {
-                        if snapshot.linked_peers.get(counterparty).is_some_and(|peer| {
-                            matches!(
-                                peer.state,
-                                LinkedPeerState::Linking
-                                    | LinkedPeerState::RecoveryRequired
-                                    | LinkedPeerState::Blocked
-                            )
-                        }) {
+                    .filter(|(counterparty, counterparty_receiver_id)| {
+                        if snapshot
+                            .linked_peers
+                            .get(&(counterparty.clone(), counterparty_receiver_id.clone()))
+                            .is_some_and(|peer| {
+                                matches!(
+                                    peer.state,
+                                    LinkedPeerState::Linking
+                                        | LinkedPeerState::RecoveryRequired
+                                        | LinkedPeerState::Blocked
+                                )
+                            })
+                        {
                             return false;
                         }
                         true
                     })
                     .collect::<Vec<_>>();
-                counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+                counterparties.sort_by(|(left_key, left_receiver), (right_key, right_receiver)| {
+                    left_key
+                        .as_str()
+                        .cmp(right_key.as_str())
+                        .then_with(|| left_receiver.as_str().cmp(right_receiver.as_str()))
+                });
                 Ok(counterparties)
             })
             .await
     }
-
     /// Process queued outbound private messages for every pending counterparty.
     pub async fn process_pending_private_messages(
         &self,
     ) -> Result<Vec<OutboundPrivateCounterpartySendReport>> {
         let counterparties = self.pending_outbound_private_counterparties().await?;
         let mut reports = Vec::with_capacity(counterparties.len());
-        for counterparty in counterparties {
+        for (counterparty, counterparty_receiver_id) in counterparties {
             match self
-                .process_outbound_private_messages(counterparty.clone())
+                .process_outbound_private_messages(
+                    counterparty.clone(),
+                    counterparty_receiver_id.clone(),
+                )
                 .await
             {
                 Ok(report) => reports.push(OutboundPrivateCounterpartySendReport {
                     counterparty,
+                    counterparty_receiver_id,
                     report: Some(report),
                     error: None,
                 }),
                 Err(err) => reports.push(OutboundPrivateCounterpartySendReport {
                     counterparty,
+                    counterparty_receiver_id,
                     report: None,
                     error: Some(err.to_string()),
                 }),
@@ -147,8 +182,12 @@ where
             .await?;
             let Some(sending) = sending else {
                 report.reservation_cleanup_failures.extend(
-                    self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
-                        .await,
+                    self.cancel_terminal_private_list_reservations(
+                        &counterparty,
+                        &lease.counterparty_receiver_id,
+                        Some(&lease),
+                    )
+                    .await,
                 );
                 break;
             };
@@ -189,8 +228,12 @@ where
                 }
             }
             report.reservation_cleanup_failures.extend(
-                self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
-                    .await,
+                self.cancel_terminal_private_list_reservations(
+                    &counterparty,
+                    &lease.counterparty_receiver_id,
+                    Some(&lease),
+                )
+                .await,
             );
         }
 
@@ -214,7 +257,9 @@ where
         let remote_public_key = counterparty.to_public_key()?;
         let stored_link_state = self
             .storage
-            .transaction(|tx| Ok(tx.encrypted_link_state(counterparty)))
+            .transaction(|tx| {
+                Ok(tx.encrypted_link_state(counterparty, &lease.counterparty_receiver_id))
+            })
             .await?
             .ok_or_else(|| {
                 PaykitSdkError::RecoveryRequired(format!(
@@ -241,7 +286,7 @@ where
             secret_key,
             &remote_public_key,
             &self.config.receiver_id,
-            &self.config.receiver_id,
+            &stored_link_state.counterparty_receiver_id,
             session_access.outbox_client.clone(),
             snapshot,
         )
@@ -273,6 +318,7 @@ where
         let _ = self
             .publish_local_recovery_marker_with_session(
                 counterparty,
+                &lease.counterparty_receiver_id,
                 session_access,
                 mark.new_episode,
             )
@@ -316,8 +362,12 @@ where
                 error,
             });
             report.reservation_cleanup_failures.extend(
-                self.cancel_terminal_private_list_reservations(counterparty, Some(lease))
-                    .await,
+                self.cancel_terminal_private_list_reservations(
+                    counterparty,
+                    &lease.counterparty_receiver_id,
+                    Some(lease),
+                )
+                .await,
             );
             return Ok(None);
         }
@@ -329,6 +379,7 @@ where
         let expired_releases = expired_outbound_reservation_cancellations(
             &self.storage,
             counterparty,
+            &lease.counterparty_receiver_id,
             sending.outbound_message_id,
             now,
         )
@@ -349,8 +400,12 @@ where
                 .await,
         );
         report.reservation_cleanup_failures.extend(
-            self.cancel_terminal_private_list_reservations(counterparty, Some(lease))
-                .await,
+            self.cancel_terminal_private_list_reservations(
+                counterparty,
+                &lease.counterparty_receiver_id,
+                Some(lease),
+            )
+            .await,
         );
         Ok(None)
     }
@@ -409,7 +464,12 @@ where
                     let counterparty = counterparty.clone();
                     move |tx| {
                         crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                        let mark = mark_recovery_required_in_transaction(tx, &counterparty, now)?;
+                        let mark = mark_recovery_required_in_transaction(
+                            tx,
+                            &counterparty,
+                            &lease.counterparty_receiver_id,
+                            now,
+                        )?;
                         tx.save_outbound_private_message(failed.clone())?;
                         Ok((failed, mark))
                     }
@@ -422,6 +482,7 @@ where
             self.record_outbound_recovery_marker_result(
                 report,
                 counterparty,
+                &lease.counterparty_receiver_id,
                 session_access,
                 mark.new_episode,
                 Some(failed.outbound_message_id),
@@ -437,8 +498,12 @@ where
             error,
         });
         report.reservation_cleanup_failures.extend(
-            self.cancel_terminal_private_list_reservations(counterparty, Some(lease))
-                .await,
+            self.cancel_terminal_private_list_reservations(
+                counterparty,
+                &lease.counterparty_receiver_id,
+                Some(lease),
+            )
+            .await,
         );
         Ok(())
     }
@@ -465,12 +530,18 @@ where
         &self,
         report: &mut OutboundPrivateSendReport,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
         session_access: &PubkySessionAccess,
         new_episode: bool,
         outbound_message_id: Option<u64>,
     ) {
         if let Err(err) = self
-            .publish_local_recovery_marker_with_session(counterparty, session_access, new_episode)
+            .publish_local_recovery_marker_with_session(
+                counterparty,
+                counterparty_receiver_id,
+                session_access,
+                new_episode,
+            )
             .await
         {
             report

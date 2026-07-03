@@ -65,6 +65,7 @@ fn test_payment_reference_debug_redacts_text() {
 fn test_payment_request_filter_rejects_unknown_state() {
     let filter = FfiPaymentRequestFilter {
         counterparty: None,
+        counterparty_receiver_id: None,
         local_role: None,
         states: vec![FfiPaymentRequestLifecycleState::Unknown],
         recurring: None,
@@ -86,6 +87,7 @@ fn test_payment_request_record_conversion_redacts_references() {
 
     let record = PaymentRequestRecord {
         counterparty: public_key(),
+        counterparty_receiver_id: paykit_sdk::PaykitReceiverId::new("bitkit").unwrap(),
         payment_request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
         local_role: Some(PaymentRequestLocalRole::Payer),
         state: PaymentRequestLifecycleState::Accepted,

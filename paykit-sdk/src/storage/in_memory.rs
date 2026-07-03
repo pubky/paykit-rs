@@ -99,14 +99,25 @@ impl StorageTransaction for StorageStateTransaction {
         self.state.receipt_issuance_records.clear();
     }
 
-    fn linked_peer(&self, counterparty: &PubkyPublicKey) -> Option<LinkedPeerRecord> {
-        self.state.linked_peers.get(counterparty).cloned()
+    fn linked_peer(
+        &self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
+    ) -> Option<LinkedPeerRecord> {
+        self.state
+            .linked_peers
+            .get(&(counterparty.clone(), counterparty_receiver_id.clone()))
+            .cloned()
     }
 
     fn save_linked_peer(&mut self, record: LinkedPeerRecord) {
-        self.state
-            .linked_peers
-            .insert(record.counterparty.clone(), record);
+        self.state.linked_peers.insert(
+            (
+                record.counterparty.clone(),
+                record.counterparty_receiver_id.clone(),
+            ),
+            record,
+        );
     }
 
     fn contact_records(&self) -> Vec<ContactRecord> {
@@ -120,18 +131,32 @@ impl StorageTransaction for StorageStateTransaction {
         records
     }
 
-    fn contact_record(&self, public_key: &PubkyPublicKey) -> Option<ContactRecord> {
-        self.state.contact_records.get(public_key).cloned()
+    fn contact_record(
+        &self,
+        public_key: &PubkyPublicKey,
+        receiver_id: &PaykitReceiverId,
+    ) -> Option<ContactRecord> {
+        self.state
+            .contact_records
+            .get(&(public_key.clone(), receiver_id.clone()))
+            .cloned()
     }
 
     fn save_contact_record(&mut self, record: ContactRecord) {
-        self.state
-            .contact_records
-            .insert(record.public_key.clone(), record);
+        self.state.contact_records.insert(
+            (record.public_key.clone(), record.receiver_id.clone()),
+            record,
+        );
     }
 
-    fn remove_contact_record(&mut self, public_key: &PubkyPublicKey) -> Option<ContactRecord> {
-        self.state.contact_records.remove(public_key)
+    fn remove_contact_record(
+        &mut self,
+        public_key: &PubkyPublicKey,
+        receiver_id: &PaykitReceiverId,
+    ) -> Option<ContactRecord> {
+        self.state
+            .contact_records
+            .remove(&(public_key.clone(), receiver_id.clone()))
     }
 
     fn public_endpoint_records(&self) -> Vec<PublicEndpointRecord> {
@@ -154,12 +179,16 @@ impl StorageTransaction for StorageStateTransaction {
     fn payment_endpoint_reservations(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
     ) -> Vec<PaymentEndpointReservationRecord> {
         let mut records = self
             .state
             .payment_endpoint_reservations
             .values()
-            .filter(|record| &record.counterparty == counterparty)
+            .filter(|record| {
+                &record.counterparty == counterparty
+                    && &record.counterparty_receiver_id == counterparty_receiver_id
+            })
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| record.created_at);
@@ -169,17 +198,26 @@ impl StorageTransaction for StorageStateTransaction {
     fn payment_endpoint_reservation(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
         reservation_id: &str,
     ) -> Option<PaymentEndpointReservationRecord> {
         self.state
             .payment_endpoint_reservations
-            .get(&(counterparty.clone(), reservation_id.to_owned()))
+            .get(&(
+                counterparty.clone(),
+                counterparty_receiver_id.clone(),
+                reservation_id.to_owned(),
+            ))
             .cloned()
     }
 
     fn save_payment_endpoint_reservation(&mut self, record: PaymentEndpointReservationRecord) {
         self.state.payment_endpoint_reservations.insert(
-            (record.counterparty.clone(), record.reservation_id.clone()),
+            (
+                record.counterparty.clone(),
+                record.counterparty_receiver_id.clone(),
+                record.reservation_id.clone(),
+            ),
             record,
         );
     }
@@ -187,33 +225,46 @@ impl StorageTransaction for StorageStateTransaction {
     fn remove_payment_endpoint_reservation(
         &mut self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
         reservation_id: &str,
     ) -> Option<PaymentEndpointReservationRecord> {
-        self.state
-            .payment_endpoint_reservations
-            .remove(&(counterparty.clone(), reservation_id.to_owned()))
+        self.state.payment_endpoint_reservations.remove(&(
+            counterparty.clone(),
+            counterparty_receiver_id.clone(),
+            reservation_id.to_owned(),
+        ))
     }
 
     fn encrypted_link_state(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
     ) -> Option<EncryptedLinkStateRecord> {
-        self.state.encrypted_link_states.get(counterparty).cloned()
+        self.state
+            .encrypted_link_states
+            .get(&(counterparty.clone(), counterparty_receiver_id.clone()))
+            .cloned()
     }
 
     fn save_encrypted_link_state(&mut self, record: EncryptedLinkStateRecord) {
-        self.state
-            .encrypted_link_states
-            .insert(record.counterparty.clone(), record);
+        self.state.encrypted_link_states.insert(
+            (
+                record.counterparty.clone(),
+                record.counterparty_receiver_id.clone(),
+            ),
+            record,
+        );
     }
 
     fn claim_peer_link_operation(
         &mut self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
         now: DateTime<Utc>,
         expires_at: DateTime<Utc>,
     ) -> Option<PeerLinkOperationLease> {
-        if let Some(existing) = self.state.peer_link_operation_leases.get(counterparty) {
+        let key = (counterparty.clone(), counterparty_receiver_id.clone());
+        if let Some(existing) = self.state.peer_link_operation_leases.get(&key) {
             if existing.expires_at > now {
                 return None;
             }
@@ -221,6 +272,7 @@ impl StorageTransaction for StorageStateTransaction {
 
         let lease = PeerLinkOperationLease {
             counterparty: counterparty.clone(),
+            counterparty_receiver_id: counterparty_receiver_id.clone(),
             lease_id: self.state.next_peer_link_operation_lease_id,
             claimed_at: now,
             expires_at,
@@ -228,28 +280,35 @@ impl StorageTransaction for StorageStateTransaction {
         self.state.next_peer_link_operation_lease_id += 1;
         self.state
             .peer_link_operation_leases
-            .insert(counterparty.clone(), lease.clone());
+            .insert(key, lease.clone());
         Some(lease)
     }
 
     fn peer_link_operation_lease(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
     ) -> Option<PeerLinkOperationLease> {
         self.state
             .peer_link_operation_leases
-            .get(counterparty)
+            .get(&(counterparty.clone(), counterparty_receiver_id.clone()))
             .cloned()
     }
 
-    fn release_peer_link_operation(&mut self, counterparty: &PubkyPublicKey, lease_id: u64) {
+    fn release_peer_link_operation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
+        lease_id: u64,
+    ) {
+        let key = (counterparty.clone(), counterparty_receiver_id.clone());
         if self
             .state
             .peer_link_operation_leases
-            .get(counterparty)
+            .get(&key)
             .is_some_and(|lease| lease.lease_id == lease_id)
         {
-            self.state.peer_link_operation_leases.remove(counterparty);
+            self.state.peer_link_operation_leases.remove(&key);
         }
     }
 
@@ -267,6 +326,7 @@ impl StorageTransaction for StorageStateTransaction {
     fn queued_outbound_private_messages(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
     ) -> Vec<OutboundPrivateMessageRecord> {
         let mut messages = self
             .state
@@ -274,6 +334,7 @@ impl StorageTransaction for StorageStateTransaction {
             .iter()
             .filter(|message| {
                 &message.counterparty == counterparty
+                    && &message.counterparty_receiver_id == counterparty_receiver_id
                     && matches!(
                         message.status,
                         OutboundPrivateMessageStatus::Pending
@@ -290,12 +351,16 @@ impl StorageTransaction for StorageStateTransaction {
     fn outbound_private_messages(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
     ) -> Vec<OutboundPrivateMessageRecord> {
         let mut messages = self
             .state
             .outbound_private_messages
             .iter()
-            .filter(|message| &message.counterparty == counterparty)
+            .filter(|message| {
+                &message.counterparty == counterparty
+                    && &message.counterparty_receiver_id == counterparty_receiver_id
+            })
             .cloned()
             .collect::<Vec<_>>();
         messages.sort_by_key(|message| message.outbound_message_id);
@@ -305,6 +370,7 @@ impl StorageTransaction for StorageStateTransaction {
     fn claim_next_outbound_private_message(
         &mut self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
         failed_retry_after: DateTime<Utc>,
@@ -312,6 +378,7 @@ impl StorageTransaction for StorageStateTransaction {
         supersede_outdated_private_payment_lists(
             &mut self.state,
             counterparty,
+            counterparty_receiver_id,
             now,
             stale_before,
             failed_retry_after,
@@ -324,6 +391,7 @@ impl StorageTransaction for StorageStateTransaction {
             .enumerate()
             .filter(|(_, message)| {
                 &message.counterparty == counterparty
+                    && &message.counterparty_receiver_id == counterparty_receiver_id
                     && !matches!(
                         message.status,
                         OutboundPrivateMessageStatus::Sent
@@ -388,11 +456,18 @@ impl StorageTransaction for StorageStateTransaction {
         stream_item_id
     }
 
-    fn private_stream_items(&self, counterparty: &PubkyPublicKey) -> Vec<PrivateStreamItemRecord> {
+    fn private_stream_items(
+        &self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
+    ) -> Vec<PrivateStreamItemRecord> {
         self.state
             .private_stream_items
             .iter()
-            .filter(|item| &item.counterparty == counterparty)
+            .filter(|item| {
+                &item.counterparty == counterparty
+                    && &item.counterparty_receiver_id == counterparty_receiver_id
+            })
             .cloned()
             .collect()
     }
@@ -400,34 +475,54 @@ impl StorageTransaction for StorageStateTransaction {
     fn event_dedup_record(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
         event_id: &str,
     ) -> Option<EventDedupRecord> {
         self.state
             .event_dedup_records
-            .get(&(counterparty.clone(), event_id.to_owned()))
+            .get(&(
+                counterparty.clone(),
+                counterparty_receiver_id.clone(),
+                event_id.to_owned(),
+            ))
             .cloned()
     }
 
     fn save_event_dedup_record(&mut self, record: EventDedupRecord) {
         self.state.event_dedup_records.insert(
-            (record.counterparty.clone(), record.event_id.clone()),
+            (
+                record.counterparty.clone(),
+                record.counterparty_receiver_id.clone(),
+                record.event_id.clone(),
+            ),
             record,
         );
     }
 
     fn save_receipt_access_record(&mut self, record: ReceiptAccessRecord) {
         self.state.receipt_access_records.insert(
-            (record.counterparty.clone(), record.event_id.clone()),
+            (
+                record.counterparty.clone(),
+                record.counterparty_receiver_id.clone(),
+                record.event_id.clone(),
+            ),
             record,
         );
     }
 
-    fn receipt_access_records(&self, counterparty: &PubkyPublicKey) -> Vec<ReceiptAccessRecord> {
+    fn receipt_access_records(
+        &self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
+    ) -> Vec<ReceiptAccessRecord> {
         let mut records = self
             .state
             .receipt_access_records
             .values()
-            .filter(|record| &record.counterparty == counterparty)
+            .filter(|record| {
+                &record.counterparty == counterparty
+                    && &record.counterparty_receiver_id == counterparty_receiver_id
+            })
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| record.stream_item_id);
@@ -437,34 +532,55 @@ impl StorageTransaction for StorageStateTransaction {
     fn receipt_access_record_by_receipt_id(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
         receipt_id: &str,
     ) -> Option<ReceiptAccessRecord> {
         self.state
             .receipt_access_records
             .values()
             .filter(|record| {
-                &record.counterparty == counterparty && record.receipt_id == receipt_id
+                &record.counterparty == counterparty
+                    && &record.counterparty_receiver_id == counterparty_receiver_id
+                    && record.receipt_id == receipt_id
             })
             .max_by_key(|record| record.stream_item_id)
             .cloned()
     }
 
     fn save_receipt_record(&mut self, record: ReceiptRecord) {
-        self.state
-            .receipt_records
-            .insert((record.issuer.clone(), record.receipt_id.clone()), record);
+        self.state.receipt_records.insert(
+            (
+                record.issuer.clone(),
+                record.issuer_receiver_id.clone(),
+                record.receipt_id.clone(),
+            ),
+            record,
+        );
     }
 
-    fn receipt_record(&self, issuer: &PubkyPublicKey, receipt_id: &str) -> Option<ReceiptRecord> {
+    fn receipt_record(
+        &self,
+        issuer: &PubkyPublicKey,
+        issuer_receiver_id: &PaykitReceiverId,
+        receipt_id: &str,
+    ) -> Option<ReceiptRecord> {
         self.state
             .receipt_records
-            .get(&(issuer.clone(), receipt_id.to_owned()))
+            .get(&(
+                issuer.clone(),
+                issuer_receiver_id.clone(),
+                receipt_id.to_owned(),
+            ))
             .cloned()
     }
 
     fn save_receipt_issuance_record(&mut self, record: ReceiptIssuanceRecord) {
         self.state.receipt_issuance_records.insert(
-            (record.counterparty.clone(), record.receipt_id.clone()),
+            (
+                record.counterparty.clone(),
+                record.counterparty_receiver_id.clone(),
+                record.receipt_id.clone(),
+            ),
             record,
         );
     }
@@ -472,12 +588,16 @@ impl StorageTransaction for StorageStateTransaction {
     fn receipt_issuance_records(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
     ) -> Vec<ReceiptIssuanceRecord> {
         let mut records = self
             .state
             .receipt_issuance_records
             .values()
-            .filter(|record| &record.counterparty == counterparty)
+            .filter(|record| {
+                &record.counterparty == counterparty
+                    && &record.counterparty_receiver_id == counterparty_receiver_id
+            })
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| record.created_at);
@@ -487,11 +607,16 @@ impl StorageTransaction for StorageStateTransaction {
     fn receipt_issuance_record(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_id: &PaykitReceiverId,
         receipt_id: &str,
     ) -> Option<ReceiptIssuanceRecord> {
         self.state
             .receipt_issuance_records
-            .get(&(counterparty.clone(), receipt_id.to_owned()))
+            .get(&(
+                counterparty.clone(),
+                counterparty_receiver_id.clone(),
+                receipt_id.to_owned(),
+            ))
             .cloned()
     }
 

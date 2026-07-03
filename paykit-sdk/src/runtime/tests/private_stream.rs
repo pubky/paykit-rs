@@ -18,6 +18,7 @@ async fn test_receive_private_messages_requires_pubky_session() {
             move |tx| {
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_id: receiver_id(),
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -30,13 +31,15 @@ async fn test_receive_private_messages_requires_pubky_session() {
         .await
         .unwrap();
 
-    let result = sdk.receive_private_messages(counterparty.clone()).await;
+    let result = sdk
+        .receive_private_messages(counterparty.clone(), receiver_id())
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     assert!(storage
         .transaction({
             let counterparty = counterparty.clone();
-            move |tx| Ok(tx.peer_link_operation_lease(&counterparty))
+            move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
         })
         .await
         .unwrap()
