@@ -317,11 +317,9 @@ where
 {
     let mut record = tx
         .linked_peer(counterparty, counterparty_receiver_id)
-        .ok_or_else(|| {
-            PaykitSdkError::Policy(format!(
-                "counterparty {counterparty} receiver id is required for recovery state"
-            ))
-        })?;
+        .unwrap_or_else(|| {
+            default_linked_peer(counterparty.clone(), counterparty_receiver_id.clone())
+        });
     ensure_not_blocked(&record)?;
     let new_episode = record.state != LinkedPeerState::RecoveryRequired;
     record.state = LinkedPeerState::RecoveryRequired;

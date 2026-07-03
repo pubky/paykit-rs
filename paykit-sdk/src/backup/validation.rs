@@ -663,12 +663,16 @@ fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Re
 pub(super) fn validate_private_stream_items(records: &[PrivateStreamItemRecord]) -> Result<()> {
     for record in records {
         let (parsed_version, parsed_kind, known_kind) = private_message_header(&record.raw_json)?;
-        let classification =
+        let mut classification =
             classify_private_application_message(&private_application_message_from_raw(
                 record.raw_json.clone(),
                 parsed_version,
                 parsed_kind.clone(),
             ));
+        enforce_receipt_access_receiver_scope(
+            &mut classification,
+            &record.counterparty_receiver_id,
+        );
         if record.parsed_version != parsed_version {
             return Err(PaykitSdkError::Protocol(format!(
                 "private stream item {} has stale parsed version metadata",
@@ -977,12 +981,13 @@ pub(super) fn validate_required_private_stream_indexes(
     >,
 ) -> Result<()> {
     for item in stream_items {
-        let classification =
+        let mut classification =
             classify_private_application_message(&private_application_message_from_raw(
                 item.raw_json.clone(),
                 item.parsed_version,
                 item.parsed_kind.clone(),
             ));
+        enforce_receipt_access_receiver_scope(&mut classification, &item.counterparty_receiver_id);
         let Some(event) = classification.event else {
             continue;
         };

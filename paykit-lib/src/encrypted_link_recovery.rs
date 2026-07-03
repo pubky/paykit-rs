@@ -22,7 +22,7 @@ use pubky::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    pubky_routing::encrypted_link_recovery_path_prefix,
+    pubky_routing::{encrypted_link_recovery_path_prefix, receiver_pair_path_domain},
     validation::{invalid_data, invalid_wire, parse_utc_timestamp, validate_uuid_v4},
     PaykitError, PaykitReceiverId, Result,
 };
@@ -136,16 +136,24 @@ pub fn encrypted_link_recovery_marker_paths(
 ) -> (String, String) {
     let local_base = encrypted_link_recovery_path_prefix(local_receiver_id);
     let remote_base = encrypted_link_recovery_path_prefix(remote_receiver_id);
+    let local_public_key = pubky::Keypair::from_secret(local_secret_key).public_key();
+    let path_domain = receiver_pair_path_domain(
+        RECOVERY_MARKER_PATH_DOMAIN,
+        &local_public_key,
+        local_receiver_id,
+        remote_pubkey,
+        remote_receiver_id,
+    );
     let (write_path, _) = pubky_noise::path_derivation::derive_asymmetric_paths(
         local_secret_key,
         remote_pubkey,
-        RECOVERY_MARKER_PATH_DOMAIN,
+        &path_domain,
         &local_base,
     );
     let (_, read_path) = pubky_noise::path_derivation::derive_asymmetric_paths(
         local_secret_key,
         remote_pubkey,
-        RECOVERY_MARKER_PATH_DOMAIN,
+        &path_domain,
         &remote_base,
     );
     (write_path, read_path)
@@ -311,5 +319,29 @@ mod tests {
         assert!(alice_write.starts_with("/pub/paykit/v0/private/bitkit/encrypted-link-recovery"));
         assert!(bob_write.starts_with("/pub/paykit/v0/private/tether/encrypted-link-recovery"));
         assert_ne!(alice_write, alice_read);
+    }
+
+    #[test]
+    fn test_recovery_marker_paths_include_both_receiver_ids() {
+        let (alice_secret, _) = secret_pair();
+        let (_, bob_public) = secret_pair();
+        let alice_receiver = PaykitReceiverId::new("bitkit").unwrap();
+        let bob_receiver = PaykitReceiverId::new("tether").unwrap();
+        let bob_other_receiver = PaykitReceiverId::new("processor").unwrap();
+
+        let (write_to_bob_receiver, _) = encrypted_link_recovery_marker_paths(
+            &alice_secret,
+            &bob_public,
+            &alice_receiver,
+            &bob_receiver,
+        );
+        let (write_to_bob_other_receiver, _) = encrypted_link_recovery_marker_paths(
+            &alice_secret,
+            &bob_public,
+            &alice_receiver,
+            &bob_other_receiver,
+        );
+
+        assert_ne!(write_to_bob_receiver, write_to_bob_other_receiver);
     }
 }

@@ -192,9 +192,13 @@ impl FfiPaykitSdk {
     pub async fn fetch_paykit_profile(
         &self,
         public_key: String,
+        receiver_id: String,
     ) -> Result<Option<FfiPaykitProfileRecord>, PaykitFfiError> {
         self.runtime
-            .fetch_paykit_profile(parse_public_key(public_key)?)
+            .fetch_paykit_profile(
+                parse_public_key(public_key)?,
+                parse_receiver_id(receiver_id)?,
+            )
             .await
             .map(|record| record.map(Into::into))
             .map_err(Into::into)
@@ -286,10 +290,15 @@ impl FfiPaykitSdk {
     pub async fn resolve_contact_profile(
         &self,
         public_key: String,
+        receiver_id: String,
         allow_pubky_profile_fallback: bool,
     ) -> Result<Option<FfiContactProfileResolution>, PaykitFfiError> {
         self.runtime
-            .resolve_contact_profile(parse_public_key(public_key)?, allow_pubky_profile_fallback)
+            .resolve_contact_profile(
+                parse_public_key(public_key)?,
+                parse_receiver_id(receiver_id)?,
+                allow_pubky_profile_fallback,
+            )
             .await
             .map(|resolution| resolution.map(Into::into))
             .map_err(Into::into)
@@ -299,10 +308,15 @@ impl FfiPaykitSdk {
     pub async fn resolve_profile(
         &self,
         public_key: String,
+        receiver_id: String,
         allow_pubky_profile_fallback: bool,
     ) -> Result<Option<FfiContactProfileResolution>, PaykitFfiError> {
         self.runtime
-            .resolve_profile(parse_public_key(public_key)?, allow_pubky_profile_fallback)
+            .resolve_profile(
+                parse_public_key(public_key)?,
+                parse_receiver_id(receiver_id)?,
+                allow_pubky_profile_fallback,
+            )
             .await
             .map(|resolution| resolution.map(Into::into))
             .map_err(Into::into)

@@ -1599,7 +1599,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_string() != 15207.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_paykit_profile() != 57253.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_paykit_profile() != 23428.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file() != 313.toShort()) {
@@ -1728,13 +1728,13 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_payment() != 23408.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 56264.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 34976.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 37377.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_profile() != 11432.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_profile() != 46041.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_contact_payment() != 26361.toShort()) {
@@ -2541,6 +2541,7 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_fetch_paykit_profile(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
+        `receiverId`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_file(
@@ -2756,6 +2757,7 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_resolve_contact_profile(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
+        `receiverId`: RustBufferByValue,
         `allowPubkyProfileFallback`: Byte,
     ): Long
     @JvmStatic
@@ -2768,6 +2770,7 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_resolve_profile(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
+        `receiverId`: RustBufferByValue,
         `allowPubkyProfileFallback`: Byte,
     ): Long
     @JvmStatic
@@ -4415,12 +4418,13 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
      * Fetch a public Paykit Profile.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `fetchPaykitProfile`(`publicKey`: kotlin.String): PaykitProfileRecord? {
+    public override suspend fun `fetchPaykitProfile`(`publicKey`: kotlin.String, `receiverId`: kotlin.String): PaykitProfileRecord? {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_fetch_paykit_profile(
                     thisPtr,
                     FfiConverterString.lower(`publicKey`),
+                    FfiConverterString.lower(`receiverId`),
                 )
             },
             { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -5409,12 +5413,13 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
      * Resolve display metadata for a contact.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `resolveContactProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution? {
+    public override suspend fun `resolveContactProfile`(`publicKey`: kotlin.String, `receiverId`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution? {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_resolve_contact_profile(
                     thisPtr,
                     FfiConverterString.lower(`publicKey`),
+                    FfiConverterString.lower(`receiverId`),
                     FfiConverterBoolean.lower(`allowPubkyProfileFallback`),
                 )
             },
@@ -5457,12 +5462,13 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
      * Resolve public profile metadata, preferring Paykit Profile.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `resolveProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution? {
+    public override suspend fun `resolveProfile`(`publicKey`: kotlin.String, `receiverId`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution? {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_resolve_profile(
                     thisPtr,
                     FfiConverterString.lower(`publicKey`),
+                    FfiConverterString.lower(`receiverId`),
                     FfiConverterBoolean.lower(`allowPubkyProfileFallback`),
                 )
             },

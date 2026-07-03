@@ -110,10 +110,15 @@ impl PaykitSdkConfig {
 
     /// Return the configured Paykit Profile path.
     pub fn paykit_profile_path(&self) -> String {
+        self.paykit_profile_path_for_receiver(&self.receiver_id)
+    }
+
+    /// Return the Paykit Profile path for a receiver under this SDK namespace.
+    pub fn paykit_profile_path_for_receiver(&self, receiver_id: &PaykitReceiverId) -> String {
         if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
             return format!(
                 "{PAYKIT_RECEIVERS_PATH_PREFIX}/{}/profile.json",
-                self.receiver_id
+                receiver_id
             );
         }
         format!("/pub/{}/profile.json", self.profile_namespace)
