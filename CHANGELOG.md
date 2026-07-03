@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc26] - 2026-07-03
+
+### Changed
+- SDK and FFI Pubky auth start/resume helpers are now async so Ring auth flows
+  start inside the UniFFI Tokio runtime on mobile.
+
+### Fixed
+- `ensure_link_with_peer` now starts a fresh deterministic Encrypted Link
+  handshake in the same call after a stale stored handshake fails to restore and
+  marks the peer recovery-required.
+
 ## [0.1.0-rc25] - 2026-07-02
 
 ### Changed
@@ -193,7 +204,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc25...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc26...HEAD
+[0.1.0-rc26]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc26
 [0.1.0-rc25]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc25
 [0.1.0-rc24]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc24
 [0.1.0-rc23]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc23
