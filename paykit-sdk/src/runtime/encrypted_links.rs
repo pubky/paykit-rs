@@ -346,7 +346,7 @@ where
                 .await
             {
                 Ok(report) => report,
-                Err(err) if Self::handshake_restore_error_requires_recovery(&err) => {
+                Err(err) if Self::link_handshake_error_requires_recovery(&err) => {
                     let recovery_required = self
                         .storage
                         .transaction(|tx| {
@@ -422,7 +422,7 @@ where
         {
             Ok(handshake) => handshake,
             Err(err) => {
-                if Self::handshake_restore_error_requires_recovery(&err) {
+                if Self::link_handshake_error_requires_recovery(&err) {
                     self.mark_link_recovery_required(&counterparty, lease)
                         .await?;
                 }
@@ -476,7 +476,7 @@ where
         .map_err(Into::into)
     }
 
-    fn handshake_restore_error_requires_recovery(err: &PaykitSdkError) -> bool {
+    fn link_handshake_error_requires_recovery(err: &PaykitSdkError) -> bool {
         matches!(
             err,
             PaykitSdkError::Transport { .. }
@@ -494,7 +494,19 @@ where
         expected_generation: u64,
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerHandshakeReport> {
-        match paykit_lib::advance_handshake(handshake).await? {
+        let progress = match paykit_lib::advance_handshake(handshake).await {
+            Ok(progress) => progress,
+            Err(err) => {
+                let err = PaykitSdkError::from(err);
+                if Self::link_handshake_error_requires_recovery(&err) {
+                    self.mark_link_recovery_required(&counterparty, lease)
+                        .await?;
+                }
+                return Err(err);
+            }
+        };
+
+        match progress {
             paykit_lib::HandshakeProgress::Pending(handshake) => {
                 save_link_handshake_state_if_generation_with_lease(
                     &self.storage,

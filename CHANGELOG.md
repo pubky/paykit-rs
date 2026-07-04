@@ -7,6 +7,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc27] - 2026-07-04
+
+### Fixed
+- Stored Encrypted Link handshakes that restore but fail to advance now mark
+  the peer recovery-required so `ensure_link_with_peer` can start a fresh
+  handshake instead of retrying the same stale snapshot.
+
 ## [0.1.0-rc26] - 2026-07-03
 
 ### Changed
