@@ -7,6 +7,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc29] - 2026-07-05
+
+### Fixed
+- Published release artifacts that include Encrypted Link recovery outbox
+  cleanup for delete/recreate identity flows.
+
 ## [0.1.0-rc28] - 2026-07-05
 
 ### Fixed
