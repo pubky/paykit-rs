@@ -625,6 +625,14 @@ where
 
         let (session_access, secret_key) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
+        if matches!(peer_state, Some(LinkedPeerState::RecoveryRequired)) {
+            paykit_lib::clear_encrypted_link_outbox(
+                &session_access.session,
+                &secret_key,
+                &remote_public_key,
+            )
+            .await?;
+        }
         let handshake = match role {
             EncryptedLinkHandshakeRole::Initiator => paykit_lib::initiate_encrypted_link(
                 session_access.session,

@@ -1,7 +1,9 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use pubky::{errors::RequestError, Error as PubkyError, PubkySession, PublicKey, StatusCode};
 use tracing::{debug, warn};
 
 use crate::{
+    encrypted_link::paths::compute_private_payment_paths,
     error::{NonRetryablePrivateReceiveError, NonRetryablePrivateSendError},
     PaykitError, Result,
 };
@@ -11,6 +13,7 @@ use crate::{
 // stream item, advance their local link checkpoint, and avoid wedging on the
 // same encrypted slot forever.
 const INVALID_UTF8_PRIVATE_MESSAGE_PREFIX: &str = "paykit.invalid_utf8_private_message:";
+const LIST_PAGE_LIMIT: u16 = 100;
 
 /// Private Message Kind values understood by Paykit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +203,70 @@ pub(super) async fn receive_private_application_messages(
     Ok(messages)
 }
 
+/// Delete all encrypted stream slots written by the local identity for one
+/// counterparty.
+///
+/// This clears the local write path used by the counterparty as their read path.
+/// It is intended for recovery before starting a fresh Encrypted Link Handshake
+/// after the previous link state has been abandoned. The counterparty's outbox
+/// is not touched.
+pub async fn clear_encrypted_link_outbox(
+    session: &PubkySession,
+    local_secret_key: &[u8; 32],
+    remote_pubkey: &PublicKey,
+) -> Result<usize> {
+    let (write_path, _) = compute_private_payment_paths(local_secret_key, remote_pubkey);
+    let list_path = format!("{write_path}/");
+    let storage = session.storage();
+    let mut deleted_count = 0;
+
+    loop {
+        let builder = match storage.list(&list_path) {
+            Ok(builder) => builder.shallow(true).limit(LIST_PAGE_LIMIT),
+            Err(err) if is_not_found(&err) => return Ok(deleted_count),
+            Err(err) => {
+                return Err(PaykitError::Transport {
+                    context: "list Encrypted Link outbox".into(),
+                    source: err.into(),
+                });
+            }
+        };
+
+        let page = match builder.send().await {
+            Ok(page) => page,
+            Err(err) if is_not_found(&err) => return Ok(deleted_count),
+            Err(err) => {
+                return Err(PaykitError::Transport {
+                    context: "list Encrypted Link outbox".into(),
+                    source: err.into(),
+                });
+            }
+        };
+
+        if page.is_empty() {
+            return Ok(deleted_count);
+        }
+
+        let page_len = page.len();
+        for resource in page {
+            match storage.delete(resource.path.as_str()).await {
+                Ok(_) => deleted_count += 1,
+                Err(err) if is_not_found(&err) => {}
+                Err(err) => {
+                    return Err(PaykitError::Transport {
+                        context: "clear Encrypted Link outbox".into(),
+                        source: err.into(),
+                    });
+                }
+            }
+        }
+
+        if page_len < LIST_PAGE_LIMIT as usize {
+            return Ok(deleted_count);
+        }
+    }
+}
+
 fn send_attempts_from_retries(max_send_retries: u32) -> u32 {
     max_send_retries.saturating_add(1)
 }
@@ -210,6 +277,14 @@ fn is_retryable_private_send_error(err: &pubky_noise::PubkyNoiseError) -> bool {
 
 fn is_retryable_private_receive_error(err: &pubky_noise::PubkyNoiseError) -> bool {
     matches!(err, pubky_noise::PubkyNoiseError::HomeserverResponseError)
+}
+
+fn is_not_found(err: &PubkyError) -> bool {
+    matches!(
+        err,
+        PubkyError::Request(RequestError::Server { status, .. })
+            if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
+    )
 }
 
 fn validate_private_application_message_size(

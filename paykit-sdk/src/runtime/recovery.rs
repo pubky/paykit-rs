@@ -370,6 +370,14 @@ where
                 marker_created_at,
             )
             .await?;
+        if changed {
+            paykit_lib::clear_encrypted_link_outbox(
+                &session_access.session,
+                secret_key,
+                &remote_public_key,
+            )
+            .await?;
+        }
         self.recovery_marker_report_or_default(counterparty, changed)
             .await
     }
@@ -388,7 +396,11 @@ where
                 if recovery_handshake_is_in_progress(link_state.as_ref()) {
                     return Ok(false);
                 }
-                if remote_recovery_marker_is_stale(link_state.as_ref(), marker_created_at) {
+                if remote_recovery_marker_is_stale(
+                    existing_peer.as_ref(),
+                    link_state.as_ref(),
+                    marker_created_at,
+                ) {
                     return Ok(false);
                 }
                 let has_link_state = link_state.is_some();
@@ -439,7 +451,11 @@ where
                 if recovery_handshake_is_in_progress(link_state.as_ref()) {
                     return Ok(false);
                 }
-                if remote_recovery_marker_is_stale(link_state.as_ref(), marker_created_at) {
+                if remote_recovery_marker_is_stale(
+                    existing_peer.as_ref(),
+                    link_state.as_ref(),
+                    marker_created_at,
+                ) {
                     return Ok(false);
                 }
                 let has_link_state = link_state.is_some();
@@ -616,17 +632,26 @@ fn parse_recovery_marker_created_at(marker: &EncryptedLinkRecoveryMarker) -> Res
 }
 
 fn remote_recovery_marker_is_stale(
+    peer: Option<&LinkedPeerRecord>,
     link_state: Option<&EncryptedLinkStateRecord>,
     marker_created_at: DateTime<Utc>,
 ) -> bool {
-    // Recovery marker timestamps are serialized with second precision, so
-    // same-second markers are treated as fresh and fail closed.
-    link_state
+    // Recovery marker timestamps are serialized with second precision. When a
+    // marker lands in the same second as a newer local checkpoint, prefer
+    // preserving local progress; deterministic send/receive failures will mark
+    // recovery-required again if the link is actually unusable.
+    let marker_is_before_link_checkpoint = link_state
         .and_then(|state| {
             (state.link_snapshot.is_some() || state.handshake_snapshot.is_some())
                 .then_some(state.checkpointed_at)
         })
-        .is_some_and(|checkpointed_at| marker_created_at.timestamp() < checkpointed_at.timestamp())
+        .is_some_and(|checkpointed_at| {
+            marker_created_at.timestamp() <= checkpointed_at.timestamp()
+        });
+    let marker_is_before_private_receive = peer
+        .and_then(|peer| peer.last_private_receive_at)
+        .is_some_and(|received_at| marker_created_at.timestamp() <= received_at.timestamp());
+    marker_is_before_link_checkpoint || marker_is_before_private_receive
 }
 
 fn recovery_handshake_is_in_progress(link_state: Option<&EncryptedLinkStateRecord>) -> bool {

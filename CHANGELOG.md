@@ -13,6 +13,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Remote Encrypted Link recovery markers no longer reset an already in-progress
   recovery handshake, preventing peers with mutual recovery markers from
   repeatedly restarting relink attempts.
+- Fresh recovery handshakes now clear the local encrypted outbox so peers do not
+  read stale ciphertext left at deterministic private stream paths after an
+  identity is deleted and recreated.
 
 ## [0.1.0-rc27] - 2026-07-04
 
