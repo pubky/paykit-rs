@@ -385,6 +385,9 @@ where
             .transaction(|tx| {
                 let existing_peer = tx.linked_peer(counterparty);
                 let link_state = tx.encrypted_link_state(counterparty);
+                if recovery_handshake_is_in_progress(link_state.as_ref()) {
+                    return Ok(false);
+                }
                 if remote_recovery_marker_is_stale(link_state.as_ref(), marker_created_at) {
                     return Ok(false);
                 }
@@ -433,6 +436,9 @@ where
                 crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                 let existing_peer = tx.linked_peer(counterparty);
                 let link_state = tx.encrypted_link_state(counterparty);
+                if recovery_handshake_is_in_progress(link_state.as_ref()) {
+                    return Ok(false);
+                }
                 if remote_recovery_marker_is_stale(link_state.as_ref(), marker_created_at) {
                     return Ok(false);
                 }
@@ -621,6 +627,10 @@ fn remote_recovery_marker_is_stale(
                 .then_some(state.checkpointed_at)
         })
         .is_some_and(|checkpointed_at| marker_created_at.timestamp() < checkpointed_at.timestamp())
+}
+
+fn recovery_handshake_is_in_progress(link_state: Option<&EncryptedLinkStateRecord>) -> bool {
+    link_state.is_some_and(|state| state.handshake_snapshot.is_some())
 }
 
 pub(super) fn local_recovery_marker_belongs_to_current_episode(peer: &LinkedPeerRecord) -> bool {
