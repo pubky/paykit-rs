@@ -7,6 +7,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc31] - 2026-07-06
+
+### Fixed
+- Rebuilt and republished SDK/FFI release artifacts so the Swift Package
+  manifest checksum matches the uploaded `Paykit.xcframework.zip` asset.
+
 ## [0.1.0-rc30] - 2026-07-06
 
 ### Fixed

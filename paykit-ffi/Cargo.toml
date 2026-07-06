@@ -1,6 +1,6 @@
 [package]
 name = "paykit-ffi"
-version = "0.1.0-rc30"
+version = "0.1.0-rc31"
 edition = "2021"
 rust-version = "1.91.1"
 description = "UniFFI bindings for Paykit SDK targeting iOS and Android"
