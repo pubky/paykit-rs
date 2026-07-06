@@ -7,6 +7,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc30] - 2026-07-06
+
+### Fixed
+- Rebuilt SDK and FFI release artifacts for the Encrypted Link recovery outbox
+  cleanup release.
+- Stabilized recovery marker testnet coverage around second-precision marker
+  freshness.
+
+## [0.1.0-rc29] - 2026-07-05
+
+### Fixed
+- Published release artifacts that include Encrypted Link recovery outbox
+  cleanup for delete/recreate identity flows.
+
 ## [0.1.0-rc28] - 2026-07-05
 
 ### Fixed
