@@ -3,8 +3,9 @@
 
 @interface RCT_EXTERN_MODULE(Paykit, RCTEventEmitter)
 
-RCT_EXTERN_METHOD(sdkDefaultConfig:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(sdkDefaultConfig:(NSString *)receiverId
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(sdkDefaultPubkyClientConfig:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
@@ -12,9 +13,6 @@ RCT_EXTERN_METHOD(sdkDefaultPubkyClientConfig:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(sdkRequiredSessionCapabilities:(NSString *)configJson
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(sdkCoreSessionCapabilities:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(sdkPubkyPublicKeyFromBip39Seed:(NSString *)seedBase64
                   withResolver:(RCTPromiseResolveBlock)resolve

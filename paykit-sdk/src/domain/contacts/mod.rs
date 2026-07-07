@@ -546,6 +546,7 @@ struct PublicContactDocument {
     version: u32,
     kind: String,
     public_key: PubkyPublicKey,
+    receiver_id: PaykitReceiverId,
 }
 
 pub(crate) fn profile_json(profile: &PaykitProfile) -> Result<String> {
@@ -672,11 +673,15 @@ fn direct_pubky_follow_key(path: &str) -> Option<&str> {
     Some(value)
 }
 
-pub(crate) fn public_contact_json(public_key: &PubkyPublicKey) -> Result<String> {
+pub(crate) fn public_contact_json(
+    public_key: &PubkyPublicKey,
+    receiver_id: &PaykitReceiverId,
+) -> Result<String> {
     serde_json::to_string(&PublicContactDocument {
         version: PUBLIC_CONTACT_VERSION,
         kind: PUBLIC_CONTACT_KIND.into(),
         public_key: public_key.clone(),
+        receiver_id: receiver_id.clone(),
     })
     .map_err(|err| {
         PaykitSdkError::Protocol(format!("failed to serialize Paykit public contact: {err}"))

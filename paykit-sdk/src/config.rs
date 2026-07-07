@@ -89,9 +89,6 @@ impl PaykitSdkConfig {
 
     /// Validate runtime configuration values.
     pub fn validate(&self) -> crate::Result<()> {
-        PaykitReceiverId::new(self.receiver_id.as_str()).map_err(|err| {
-            crate::PaykitSdkError::Policy(format!("invalid Paykit receiver id: {err}"))
-        })?;
         validate_profile_namespace(&self.profile_namespace)?;
         validate_runtime_duration(
             "peer link operation lease timeout",
@@ -115,40 +112,33 @@ impl PaykitSdkConfig {
 
     /// Return the Paykit Profile path for a receiver under this SDK namespace.
     pub fn paykit_profile_path_for_receiver(&self, receiver_id: &PaykitReceiverId) -> String {
-        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
-            return format!(
-                "{PAYKIT_RECEIVERS_PATH_PREFIX}/{}/profile.json",
-                receiver_id
-            );
-        }
-        format!("/pub/{}/profile.json", self.profile_namespace)
+        format!("{}/profile.json", self.profile_receiver_path(receiver_id))
     }
 
     /// Return the configured Paykit Profile blob path prefix.
     pub fn paykit_profile_blob_path_prefix(&self) -> String {
-        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
-            return format!("{PAYKIT_RECEIVERS_PATH_PREFIX}/{}/blobs/", self.receiver_id);
-        }
-        format!("/pub/{}/blobs/", self.profile_namespace)
+        format!("{}/blobs/", self.profile_receiver_path(&self.receiver_id))
     }
 
     /// Return the configured public contact marker path prefix.
     pub fn public_contact_path_prefix(&self) -> String {
-        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
-            return format!(
-                "{PAYKIT_RECEIVERS_PATH_PREFIX}/{}/contacts/",
-                self.receiver_id
-            );
-        }
-        format!("/pub/{}/contacts/", self.profile_namespace)
+        format!(
+            "{}/contacts/",
+            self.profile_receiver_path(&self.receiver_id)
+        )
     }
 
     /// Return the configured public contact marker path for one contact.
-    pub fn public_contact_path(&self, public_key: &PubkyPublicKey) -> String {
+    pub fn public_contact_path(
+        &self,
+        public_key: &PubkyPublicKey,
+        receiver_id: &PaykitReceiverId,
+    ) -> String {
         format!(
-            "{}{}.json",
+            "{}{}/{}.json",
             self.public_contact_path_prefix(),
-            public_key.as_str()
+            public_key.as_str(),
+            receiver_id.as_str()
         )
     }
 
@@ -159,7 +149,10 @@ impl PaykitSdkConfig {
             format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{}/:rw", self.receiver_id),
         ];
         if self.profile_namespace != DEFAULT_PROFILE_NAMESPACE {
-            capabilities.push(format!("/pub/{}/:rw", self.profile_namespace));
+            capabilities.push(format!(
+                "/pub/{}/receivers/{}/:rw",
+                self.profile_namespace, self.receiver_id
+            ));
         }
         capabilities.join(",")
     }
@@ -167,6 +160,13 @@ impl PaykitSdkConfig {
     /// Return the receiver-scoped Receipt Location prefix.
     pub fn receipt_path_prefix(&self) -> String {
         format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{}/receipts", self.receiver_id)
+    }
+
+    fn profile_receiver_path(&self, receiver_id: &PaykitReceiverId) -> String {
+        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
+            return format!("{PAYKIT_RECEIVERS_PATH_PREFIX}/{receiver_id}");
+        }
+        format!("/pub/{}/receivers/{receiver_id}", self.profile_namespace)
     }
 }
 

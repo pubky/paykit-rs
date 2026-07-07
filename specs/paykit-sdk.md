@@ -340,14 +340,20 @@ not collide with Payment Endpoint Identifier files.
 Apps that already have a public product namespace can configure the SDK
 profile/contact namespace segment. For example, `profile_namespace =
 "bitkit.to"` makes Paykit Profile and contact marker helpers use
-`/pub/bitkit.to/profile.json`, `/pub/bitkit.to/blobs/...`, and
-`/pub/bitkit.to/contacts/...`. This does not change core Paykit Protocol paths
-or receiver-scoped private runtime paths. The app should request the capability
-scope returned by `PaykitSdkConfig::required_session_capabilities()` and
-validate imported/completed sessions against that same scope. The default
-receiver namespace is covered by receiver-scoped public/private Paykit
-capabilities; a custom profile/contact namespace adds the matching
-`/pub/<namespace>/:rw` capability.
+`/pub/bitkit.to/receivers/{receiver_id}/profile.json`,
+`/pub/bitkit.to/receivers/{receiver_id}/blobs/...`, and
+`/pub/bitkit.to/receivers/{receiver_id}/contacts/...`. This does not change
+core Paykit Protocol paths or receiver-scoped private runtime paths. The app
+should request the capability scope returned by
+`PaykitSdkConfig::required_session_capabilities()` and validate
+imported/completed sessions against that same scope. The default receiver
+namespace is covered by receiver-scoped public/private Paykit capabilities; a
+custom profile/contact namespace adds the matching
+`/pub/<namespace>/receivers/{receiver_id}/:rw` capability.
+
+Remote Paykit Profile fetches use the same configured profile namespace. Cross-app
+profile discovery therefore requires an agreed namespace or a future receiver
+locator that carries profile namespace metadata.
 
 `image_uri` may point at the configured blob prefix or another public image
 location. The SDK can publish/delete Paykit blobs under the configured blob

@@ -313,12 +313,20 @@ fn test_public_contact_path_uses_default_profile_namespace() {
     let config = PaykitSdkConfig::new(PaykitReceiverId::new("bitkit").unwrap());
 
     assert_eq!(
-        config.public_contact_path(&public_key),
+        config.public_contact_path(&public_key, &PaykitReceiverId::new("tether").unwrap()),
         format!(
-            "/pub/paykit/v0/receivers/bitkit/contacts/{}.json",
+            "/pub/paykit/v0/receivers/bitkit/contacts/{}/tether.json",
             public_key.as_str()
         )
     );
+}
+
+#[test]
+fn test_public_contact_json_includes_receiver_id() {
+    let json = public_contact_json(&public_key(), &receiver_id()).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(value["receiver_id"], "bitkit");
 }
 
 #[test]

@@ -93,6 +93,52 @@ async fn prepared_receipt_can_be_stored_and_sent_in_retryable_steps() {
 }
 
 #[tokio::test]
+async fn prepare_receipt_rejects_receiver_mismatch_with_link_scope() {
+    let setup = PrivateTestSetup::new().await;
+    let draft = ReceiptDraft {
+        receipt_id: None,
+        payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
+        payment_request_id: None,
+        billing_period: None,
+        payment_endpoint_identifier: Some(PaymentEndpointIdentifier::new("lightning").unwrap()),
+        amount: Some(PaymentAmount::new("2500", "sats").unwrap()),
+        metadata: serde_json::Map::new(),
+    };
+
+    let result = prepare_receipt(
+        &setup.sender_link,
+        &PaykitReceiverId::new("tether").unwrap(),
+        draft,
+    );
+
+    assert!(matches!(result, Err(PaykitError::Validation(_))));
+}
+
+#[tokio::test]
+async fn send_receipt_access_rejects_receiver_mismatch_with_link_scope() {
+    let mut setup = PrivateTestSetup::new().await;
+    let draft = ReceiptDraft {
+        receipt_id: None,
+        payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
+        payment_request_id: None,
+        billing_period: None,
+        payment_endpoint_identifier: Some(PaymentEndpointIdentifier::new("lightning").unwrap()),
+        amount: Some(PaymentAmount::new("2500", "sats").unwrap()),
+        metadata: serde_json::Map::new(),
+    };
+    let prepared = prepare_receipt_for_recipient(
+        setup.sender_link.recipient().clone(),
+        &PaykitReceiverId::new("tether").unwrap(),
+        draft,
+    )
+    .unwrap();
+
+    let result = send_receipt_access(&mut setup.sender_link, &prepared.access).await;
+
+    assert!(matches!(result, Err(PaykitError::Validation(_))));
+}
+
+#[tokio::test]
 async fn receipt_access_parser_returns_all_available_receipts_in_fifo_order() {
     let mut setup = PrivateTestSetup::new().await;
     let first_receipt_id = ReceiptId::new("450e8400-e29b-41d4-a716-446655440000").unwrap();

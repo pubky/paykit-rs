@@ -4,7 +4,7 @@
 //! module centralizes public payment endpoint path construction and public
 //! storage access so call sites do not hard-code Pubky paths.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pubky::{
     errors::RequestError, Error as PubkyError, PubkyResource, PubkySession, PublicKey,
@@ -99,24 +99,23 @@ pub async fn fetch_paykit_receiver_ids(
     debug!(addr = %addr, "listing Paykit receivers");
     let resources = list_resources(storage, addr, "list Paykit receivers").await?;
     let mut receiver_ids = Vec::new();
+    let mut seen_receiver_ids = HashSet::new();
 
     for resource in resources {
         let path = resource.path.as_str();
         let prefix = receiver_path_prefix();
-        let suffix = path
-            .strip_prefix(&prefix)
-            .ok_or_else(|| PaykitError::InvalidData {
-                context: format!("Paykit receiver path has unexpected prefix: '{path}'"),
-                source: None,
-            })?;
-        let segment = suffix
+        let Some(suffix) = path.strip_prefix(&prefix) else {
+            debug!(path = %path, "skipping Paykit receiver path with unexpected prefix");
+            continue;
+        };
+        let Some(segment) = suffix
             .split('/')
             .next()
             .filter(|segment| !segment.is_empty())
-            .ok_or_else(|| PaykitError::InvalidData {
-                context: format!("cannot extract Paykit receiver id from path '{path}'"),
-                source: None,
-            })?;
+        else {
+            debug!(path = %path, "skipping Paykit receiver path without receiver id");
+            continue;
+        };
         let receiver_id = match PaykitReceiverId::new(segment) {
             Ok(receiver_id) => receiver_id,
             Err(err) => {
@@ -129,7 +128,7 @@ pub async fn fetch_paykit_receiver_ids(
                 continue;
             }
         };
-        if !receiver_ids.contains(&receiver_id) {
+        if seen_receiver_ids.insert(receiver_id.clone()) {
             receiver_ids.push(receiver_id);
         }
     }

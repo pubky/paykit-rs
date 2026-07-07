@@ -11,7 +11,9 @@ use crate::{
     domain::contacts::ContactRecord,
     domain::endpoint_reservations::{reservation_payload_hash, validate_reservation_id},
     domain::linked_peers::LinkedPeerState,
-    domain::outbound_private::validate_queued_outbound_private_message,
+    domain::outbound_private::{
+        validate_outbound_private_message, validate_queued_outbound_private_message,
+    },
     domain::private_stream::{
         classify_private_application_message, enforce_receipt_access_receiver_scope, payload_hash,
         PrivateStreamParseStatus,
@@ -435,7 +437,7 @@ impl SdkBackupState {
         validate_encrypted_link_snapshots(&encrypted_link_states, local_receiver_id)?;
         let mut outbound_private_messages =
             unique_outbound_messages(self.outbound_private_messages)?;
-        validate_outbound_private_messages(&outbound_private_messages)?;
+        validate_outbound_private_messages(&outbound_private_messages, &self.local_receiver_id)?;
         validate_payment_endpoint_reservations(
             &payment_endpoint_reservations,
             &outbound_private_messages,
@@ -501,7 +503,11 @@ impl SdkBackupState {
             },
             "Receipt issuance",
         )?;
-        validate_receipt_issuance_records(&receipt_issuance_records, &outbound_private_messages)?;
+        validate_receipt_issuance_records(
+            &receipt_issuance_records,
+            &outbound_private_messages,
+            &self.local_receiver_id,
+        )?;
 
         let recovery_required_peers = reconcile_restored_linked_peers(
             &mut linked_peers,

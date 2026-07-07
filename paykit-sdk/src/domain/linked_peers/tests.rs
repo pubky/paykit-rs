@@ -197,6 +197,39 @@ async fn test_lease_checked_recovery_preserves_current_lease_for_caller() {
 }
 
 #[tokio::test]
+async fn test_unleased_state_save_allows_expired_peer_lease() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                Ok(tx.claim_peer_link_operation(
+                    &counterparty,
+                    &receiver_id(),
+                    timestamp(),
+                    timestamp() + chrono::Duration::seconds(10),
+                ))
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let record = save_linked_peer_state(
+        &storage,
+        counterparty.clone(),
+        receiver_id(),
+        LinkedPeerState::Linked,
+        timestamp() + chrono::Duration::seconds(11),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(record.state, LinkedPeerState::Linked);
+}
+
+#[tokio::test]
 async fn test_mark_recovery_required_clears_handshake_snapshot() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();

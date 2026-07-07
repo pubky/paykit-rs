@@ -604,6 +604,7 @@ pub(super) fn validate_payment_endpoint_reservations(
 
 pub(super) fn validate_outbound_private_messages(
     records: &[OutboundPrivateMessageRecord],
+    local_receiver_id: &PaykitReceiverId,
 ) -> Result<()> {
     for record in records {
         validate_outbound_private_status(record)?;
@@ -614,6 +615,17 @@ pub(super) fn validate_outbound_private_messages(
             continue;
         }
         validate_queued_outbound_private_message(record)?;
+        let kind = validate_outbound_private_message(&record.raw_json)?;
+        if kind == PrivateMessageKind::ReceiptAccess.as_str() {
+            let access = paykit_lib::parse_receipt_access_json(&record.raw_json)
+                .map_err(|err| PaykitSdkError::Protocol(err.to_string()))?;
+            if !access.has_location_for_receiver(local_receiver_id) {
+                return Err(PaykitSdkError::Protocol(format!(
+                    "outbound Receipt Access message {} location does not match local receiver {}",
+                    record.outbound_message_id, local_receiver_id
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -812,12 +824,13 @@ fn validate_event_dedup_stream_item(
         )));
     }
 
-    let classification =
+    let mut classification =
         classify_private_application_message(&private_application_message_from_raw(
             item.raw_json.clone(),
             item.parsed_version,
             item.parsed_kind.clone(),
         ));
+    enforce_receipt_access_receiver_scope(&mut classification, &item.counterparty_receiver_id);
     let Some(event) = classification.event else {
         return Err(PaykitSdkError::Protocol(format!(
             "Event dedupe record '{}' references non-event stream item {}",
@@ -1093,6 +1106,7 @@ pub(super) fn validate_receipt_records(
 pub(super) fn validate_receipt_issuance_records(
     records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), ReceiptIssuanceRecord>,
     outbound_private_messages: &[OutboundPrivateMessageRecord],
+    local_receiver_id: &PaykitReceiverId,
 ) -> Result<()> {
     let outbound_by_id = outbound_private_messages
         .iter()
@@ -1133,6 +1147,12 @@ pub(super) fn validate_receipt_issuance_records(
             return Err(PaykitSdkError::Protocol(format!(
                 "Receipt issuance record '{}' does not match Receipt Access payload",
                 record.receipt_id
+            )));
+        }
+        if !access.has_location_for_receiver(local_receiver_id) {
+            return Err(PaykitSdkError::Protocol(format!(
+                "Receipt issuance record '{}' location does not match local receiver {}",
+                record.receipt_id, local_receiver_id
             )));
         }
 

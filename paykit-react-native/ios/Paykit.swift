@@ -119,6 +119,7 @@ class Paykit: RCTEventEmitter {
     private func configFromJson(_ json: String) throws -> FfiPaykitSdkConfig {
         let object = try jsonObject(json, label: "PaykitSdkConfig")
         return FfiPaykitSdkConfig(
+            receiverId: try requiredString(object, "receiver_id"),
             profileNamespace: try requiredString(object, "profile_namespace"),
             endpointManagementScope: try endpointManagementScope(
                 try requiredString(object, "endpoint_management_scope")
@@ -146,6 +147,7 @@ class Paykit: RCTEventEmitter {
 
     private func configJson(_ config: FfiPaykitSdkConfig) throws -> String {
         try jsonString([
+            "receiver_id": config.receiverId,
             "profile_namespace": config.profileNamespace,
             "endpoint_management_scope": endpointManagementScopeString(config.endpointManagementScope),
             "encrypted_link_recovery_markers": recoveryMarkerPolicyString(config.encryptedLinkRecoveryMarkers),
@@ -242,13 +244,14 @@ class Paykit: RCTEventEmitter {
         ])
     }
 
-    @objc(sdkDefaultConfig:rejecter:)
+    @objc(sdkDefaultConfig:withResolver:withRejecter:)
     func sdkDefaultConfig(
+        receiverId: String,
         resolve: RCTPromiseResolveBlock,
         reject: RCTPromiseRejectBlock
     ) {
         resolveResult(resolve) {
-            try configJson(defaultConfig())
+            try configJson(defaultConfig(receiverId: receiverId))
         }
     }
 
@@ -271,14 +274,6 @@ class Paykit: RCTEventEmitter {
         resolveResult(resolve) {
             try requiredSessionCapabilities(config: try configFromJson(configJson))
         }
-    }
-
-    @objc(sdkCoreSessionCapabilities:rejecter:)
-    func sdkCoreSessionCapabilities(
-        resolve: RCTPromiseResolveBlock,
-        reject: RCTPromiseRejectBlock
-    ) {
-        resolve(resultArray(coreSessionCapabilities()))
     }
 
     @objc(sdkPubkyPublicKeyFromBip39Seed:withResolver:withRejecter:)

@@ -37,7 +37,7 @@ fn test_required_capabilities_include_custom_namespace_scope() {
 
     assert!(capabilities.contains("/pub/paykit/v0/receivers/bitkit/:rw"));
     assert!(capabilities.contains("/pub/paykit/v0/private/bitkit/:rw"));
-    assert!(capabilities.contains("/pub/bitkit.to/:rw"));
+    assert!(capabilities.contains("/pub/bitkit.to/receivers/bitkit/:rw"));
 }
 
 #[test]

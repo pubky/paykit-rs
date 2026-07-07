@@ -48,6 +48,8 @@ load the native UniFFI library just to format keys.
 
 - `PaykitSdk.withPaymentAdapter` — create a runtime with payment adapter
   callbacks.
+- `paykitReceiverIds` — list a Pubky identity's Paykit receiver ids before
+  scoped public Payment List reads.
 - `PaykitSdk.syncPublicEndpoints` — publish current public receiving details
   and remove stale SDK-managed public Payment Endpoints.
 - `PaykitSdk.syncPublicEndpointsWithReceivingDetails` — publish explicit
@@ -327,7 +329,7 @@ derivable from the Pubky public key alone.
 - `PrivatePaymentListDeliveryReport.failedToDeliver` is retryable workflow
   state unless the nested error says recovery is required. Keep the queued
   state and let the retry worker continue.
-- Contact payment resolution may return public payment options while
+- Contact payment resolution may return public Payment Endpoints while
   `privateState` reports private recovery or unavailable private capability.
   Treat `status` as the general result and `privateState` as the private
   transport state.

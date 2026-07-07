@@ -223,15 +223,22 @@ remain with the integrating application and its adapters.
 
 ### Public Payment Data
 
+#### Discover Paykit Receivers
+
+`list_paykit_receiver_ids` lists receiver/runtime folders published by a Pubky
+identity so callers can choose the receiver id for scoped Payment List reads.
+
 #### Retrieve a public Payment List
 
-`get_payment_list` fetches all public Payment Endpoints published by a payee.
-The result is empty when the payee has not published any endpoints.
+`get_payment_list` fetches all public Payment Endpoints published by a payee
+receiver id. The result is empty when that receiver has not published any
+endpoints.
 
 #### Retrieve one public Payment Endpoint Payload
 
-`get_payment_endpoint` fetches one Payment Endpoint Payload for a payee and a
-Payment Endpoint Identifier. Missing files are returned as `None`.
+`get_payment_endpoint` fetches one Payment Endpoint Payload for a payee,
+receiver id, and Payment Endpoint Identifier. Missing files are returned as
+`None`.
 
 #### Store a public Payment Endpoint
 
@@ -316,6 +323,8 @@ Metadata.
 
 ### Public Payment Endpoints
 
+- `list_paykit_receiver_ids(storage, payee)`: list the payee's Paykit receiver
+  ids.
 - `set_payment_endpoint(session, receiver_id, identifier, payload)`: publish or
   update one public Payment Endpoint.
 - `remove_payment_endpoint(session, receiver_id, identifier)`: remove one public
