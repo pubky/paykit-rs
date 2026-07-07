@@ -7,6 +7,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc32] - 2026-07-07
+
+### Fixed
+- Serialized recovery-marker outbox cleanup under the peer link operation lease,
+  preventing concurrent relink handshakes from losing their first message.
+- Allowed newer recovery markers to recover stale pending handshakes after the
+  peer link operation freshness window.
+
 ## [0.1.0-rc31] - 2026-07-06
 
 ### Fixed
@@ -241,7 +249,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc26...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc32...HEAD
+[0.1.0-rc32]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc32
+[0.1.0-rc31]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc31
+[0.1.0-rc30]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc30
+[0.1.0-rc29]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc29
+[0.1.0-rc28]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc28
+[0.1.0-rc27]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc27
 [0.1.0-rc26]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc26
 [0.1.0-rc25]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc25
 [0.1.0-rc24]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc24
