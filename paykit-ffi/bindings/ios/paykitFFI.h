@@ -1180,8 +1180,7 @@ RustBuffer uniffi_paykit_fn_func_decode_sdk_state_blob_snapshot(RustBuffer bytes
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_DEFAULT_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_DEFAULT_CONFIG
-RustBuffer uniffi_paykit_fn_func_default_config(RustCallStatus *_Nonnull out_status
-
+RustBuffer uniffi_paykit_fn_func_default_config(RustBuffer receiver_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_DEFAULT_PUBKY_CLIENT_CONFIG
