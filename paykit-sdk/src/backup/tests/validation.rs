@@ -676,6 +676,73 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
 }
 
 #[tokio::test]
+async fn test_restore_backup_state_rejects_wrong_receiver_receipt_access_dedupe_index() {
+    let storage = InMemoryStorage::new();
+    let counterparty = public_key();
+    let event_id = "650e8400-e29b-41d4-a716-446655440000";
+    let receipt_id = paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+    let period = BillingPeriodRecord {
+        starts_at: "2026-06-01T00:00:00Z".into(),
+        ends_at: "2026-07-01T00:00:00Z".into(),
+    };
+    let (raw_json, original_location, _) = receipt_access_raw_with_context(
+        event_id,
+        receipt_id.as_str(),
+        "invoice-2026-0001",
+        "750e8400-e29b-41d4-a716-446655440000",
+        &period,
+    );
+    let wrong_location = paykit_lib::ReceiptAccess::location(&other_receiver_id(), &receipt_id);
+    let raw_json = raw_json.replace(&original_location, &wrong_location);
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        local_receiver_id: receiver_id(),
+        identity_state: Some(identity(counterparty.clone())),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: Vec::new(),
+        private_stream_items: vec![PrivateStreamItemRecord {
+            stream_item_id: 1,
+            counterparty: counterparty.clone(),
+            counterparty_receiver_id: receiver_id(),
+            receive_batch_id: 0,
+            raw_json: raw_json.clone(),
+            parsed_version: Some(1),
+            parsed_kind: Some("paykit.receipt_access".into()),
+            known_paykit_kind: Some("paykit.receipt_access".into()),
+            parse_status: PrivateStreamParseStatus::MalformedRecognized,
+            parse_error: Some(
+                "Receipt Access location does not match counterparty receiver bitkit".into(),
+            ),
+            received_at: timestamp(),
+        }],
+        event_dedup_records: vec![EventDedupRecord {
+            counterparty,
+            counterparty_receiver_id: receiver_id(),
+            event_id: event_id.into(),
+            event_kind: "paykit.receipt_access".into(),
+            payload_hash: payload_hash(&raw_json),
+            first_stream_item_id: 1,
+            duplicate_stream_item_ids: Vec::new(),
+            conflicting_stream_item_ids: Vec::new(),
+        }],
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
+        next_outbound_private_message_id: 0,
+        next_receive_batch_id: 1,
+        next_private_stream_item_id: 2,
+    };
+
+    let result = restore_backup_state(&storage, backup).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+}
+
+#[tokio::test]
 async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
@@ -1712,6 +1779,125 @@ async fn test_restore_backup_state_rejects_receipt_issuance_access_mismatch() {
         receipt_records: Vec::new(),
         receipt_issuance_records: vec![issuance],
         next_outbound_private_message_id: 0,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    };
+
+    let result = restore_backup_state(&storage, backup).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+}
+
+#[tokio::test]
+async fn test_restore_backup_state_rejects_receipt_issuance_wrong_local_receiver() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = public_key();
+    let counterparty = public_key();
+    let prepared = paykit_lib::prepare_receipt_for_recipient(
+        counterparty.to_public_key().unwrap(),
+        &other_receiver_id(),
+        paykit_lib::ReceiptDraft {
+            receipt_id: Some(
+                paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+            payment_reference: paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+            payment_request_id: None,
+            billing_period: None,
+            payment_endpoint_identifier: Some(
+                paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            ),
+            amount: Some(paykit_lib::PaymentAmount::new("0.001", "btc").unwrap()),
+            metadata: serde_json::Map::new(),
+        },
+    )
+    .unwrap();
+    let issuance =
+        ReceiptIssuanceRecord::from_prepared(counterparty, receiver_id(), prepared, timestamp())
+            .unwrap();
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        local_receiver_id: receiver_id(),
+        identity_state: Some(identity(local_public_key)),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: Vec::new(),
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: vec![issuance],
+        next_outbound_private_message_id: 0,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    };
+
+    let result = restore_backup_state(&storage, backup).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+}
+
+#[tokio::test]
+async fn test_restore_backup_state_rejects_outbound_receipt_access_wrong_local_receiver() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = public_key();
+    let counterparty = public_key();
+    let prepared = paykit_lib::prepare_receipt_for_recipient(
+        counterparty.to_public_key().unwrap(),
+        &other_receiver_id(),
+        paykit_lib::ReceiptDraft {
+            receipt_id: Some(
+                paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+            payment_reference: paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+            payment_request_id: None,
+            billing_period: None,
+            payment_endpoint_identifier: Some(
+                paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            ),
+            amount: Some(paykit_lib::PaymentAmount::new("0.001", "btc").unwrap()),
+            metadata: serde_json::Map::new(),
+        },
+    )
+    .unwrap();
+    let issuance = ReceiptIssuanceRecord::from_prepared(
+        counterparty.clone(),
+        receiver_id(),
+        prepared,
+        timestamp(),
+    )
+    .unwrap();
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        local_receiver_id: receiver_id(),
+        identity_state: Some(identity(local_public_key)),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: vec![OutboundPrivateMessageRecord {
+            outbound_message_id: 7,
+            counterparty,
+            counterparty_receiver_id: receiver_id(),
+            kind: PrivateMessageKind::ReceiptAccess.as_str().into(),
+            raw_json: issuance.access_json,
+            status: OutboundPrivateMessageStatus::Pending,
+            attempt_count: 0,
+            created_at: timestamp(),
+            updated_at: timestamp(),
+            last_attempt_at: None,
+            sent_at: None,
+            last_error: None,
+        }],
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
+        next_outbound_private_message_id: 8,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
     };

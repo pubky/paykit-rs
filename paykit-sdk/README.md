@@ -102,7 +102,8 @@ Common workflows:
 - request and validate `config.required_session_capabilities()` for full SDK
   auth/session handoff
 - set `profile_namespace` to a namespace segment such as `bitkit.to` when
-  profile/contact helpers should publish under `/pub/bitkit.to/...`
+  profile/contact helpers should publish under
+  `/pub/bitkit.to/receivers/{receiver_id}/...`
 - use `publish_paykit_profile` / `fetch_paykit_profile` for configured
   Paykit Profile metadata, including app-specific public fields in `extra`
 - use `publish_paykit_blob` / `delete_paykit_blob` for files under the
@@ -155,10 +156,17 @@ SDK uses receiver-scoped Paykit paths:
 - `/pub/paykit/v0/receivers/{receiver_id}/contacts/...` for optional Public Contact Markers
 
 Apps can set `profile_namespace` to use their own public app namespace, such as
-`bitkit.to`. That changes only these SDK profile/contact helper paths. Public
-Payment Endpoints and Encrypted Link/private runtime state stay under the
-configured receiver id. `profile_namespace` is not a shared-runtime selector or
+`bitkit.to`. Those helper paths still stay receiver-scoped, for example
+`/pub/bitkit.to/receivers/{receiver_id}/profile.json`,
+`/pub/bitkit.to/receivers/{receiver_id}/blobs/...`, and
+`/pub/bitkit.to/receivers/{receiver_id}/contacts/...`. Public Payment
+Endpoints and Encrypted Link/private runtime state stay under the configured
+receiver id. `profile_namespace` is not a shared-runtime selector or
 app-specific core Paykit path prefix.
+
+Remote profile fetches use the same configured profile namespace. Cross-app
+profile discovery therefore needs an agreed namespace or a future receiver
+locator that carries profile namespace metadata.
 
 The SDK rejects `pubky.app` as a configured profile namespace only as a local
 guardrail against accidental writes through Paykit helpers. It is not a

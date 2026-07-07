@@ -274,7 +274,7 @@ If a payment execution fails with an error suggesting the endpoint has been cons
 
 Private Payment Lists are end-to-end encrypted via a Noise protocol handshake managed by `pubky-noise`. `PubkyNoiseEncryptor` handles encryption, file naming, and homeserver storage via `send_message`/`receive_message`.
 
-Storage paths for private Paykit data are derived per-counterparty pair using `pubky_noise::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private/{receiver_id}/messages`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-noise` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private Paykit data.
+Storage paths for private Paykit data are derived per-counterparty receiver pair using `pubky_noise::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private/{receiver_id}/messages`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-noise` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private Paykit data.
 
 #### Handshake Initiation
 - `initiate_encrypted_link(session, sender_secret_key, receiver_pubkey, local_receiver_id, remote_receiver_id, outbox_client) -> Result<EncryptedLinkHandshake>`
@@ -501,7 +501,7 @@ The crate exports:
 
 - `PAYKIT_RECEIVERS_PATH_PREFIX` (`/pub/paykit/v0/receivers`) and `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) to standardize receiver-scoped Pubky path construction.
 - `PaykitReceiverId` for app/runtime receiver folders under a Pubky identity.
-- `set_payment_endpoint`, `remove_payment_endpoint`, `get_payment_list`, and `get_payment_endpoint` for Public Payment Endpoint operations over `pubky::PubkySession` and `pubky::PublicStorage`.
+- `list_paykit_receiver_ids`, `set_payment_endpoint`, `remove_payment_endpoint`, `get_payment_list`, and `get_payment_endpoint` for Public Payment Endpoint operations over `pubky::PubkySession` and `pubky::PublicStorage`.
 - `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot`, `EncryptedLinkHandshakeSnapshot`, `PrivateApplicationMessage`, and `PrivateMessageKind` for Encrypted Link types.
 - `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `EncryptedLink::receive_private_application_messages`, `set_private_payment_list`, and `parse_private_payment_list_json` for Encrypted Link and Private Payment List operations.
 - `PaymentAmount`, `PaymentRequest`, `PaymentRequestEvent`, `PaymentRequestEventMessage`, `PaymentRequestAcceptance`, `PaymentRequestRejection`, `PaymentRequestCancellation`, `PaymentProof`, `send_payment_request`, `serialize_payment_request_event`, `parse_payment_request_event_message`, and proof validation helpers for Payment Request exchange.

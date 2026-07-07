@@ -42,9 +42,9 @@ fn test_config_builds_default_profile_namespace_paths() {
         "/pub/paykit/v0/receivers/bitkit/blobs/"
     );
     assert_eq!(
-        config.public_contact_path(&public_key),
+        config.public_contact_path(&public_key, &PaykitReceiverId::new("tether").unwrap()),
         format!(
-            "/pub/paykit/v0/receivers/bitkit/contacts/{}.json",
+            "/pub/paykit/v0/receivers/bitkit/contacts/{}/tether.json",
             public_key.as_str()
         )
     );
@@ -66,22 +66,25 @@ fn test_config_allows_custom_profile_namespace_segment() {
     };
 
     config.validate().unwrap();
-    assert_eq!(config.paykit_profile_path(), "/pub/bitkit.to/profile.json");
+    assert_eq!(
+        config.paykit_profile_path(),
+        "/pub/bitkit.to/receivers/bitkit/profile.json"
+    );
     assert_eq!(
         config.paykit_profile_path_for_receiver(&PaykitReceiverId::new("tether").unwrap()),
-        "/pub/bitkit.to/profile.json"
+        "/pub/bitkit.to/receivers/tether/profile.json"
     );
     assert_eq!(
         config.paykit_profile_blob_path_prefix(),
-        "/pub/bitkit.to/blobs/"
+        "/pub/bitkit.to/receivers/bitkit/blobs/"
     );
     assert_eq!(
         config.public_contact_path_prefix(),
-        "/pub/bitkit.to/contacts/"
+        "/pub/bitkit.to/receivers/bitkit/contacts/"
     );
     assert_eq!(
         config.required_session_capabilities(),
-        "/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw,/pub/bitkit.to/:rw"
+        "/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw,/pub/bitkit.to/receivers/bitkit/:rw"
     );
 }
 

@@ -14,7 +14,6 @@ import com.synonym.paykit.FfiPublicContactSharingPolicy
 import com.synonym.paykit.FfiPubkyAuthRequestKind
 import com.synonym.paykit.FfiPubkyClientConfig
 import com.synonym.paykit.PaykitAndroid
-import com.synonym.paykit.coreSessionCapabilities
 import com.synonym.paykit.defaultConfig
 import com.synonym.paykit.defaultPubkyClientConfig
 import com.synonym.paykit.parsePubkyAuthUrl
@@ -110,6 +109,7 @@ class PaykitModule(private val reactContext: ReactApplicationContext) :
     private fun configFromJson(json: String): FfiPaykitSdkConfig {
         val value = JSONObject(json)
         return FfiPaykitSdkConfig(
+            receiverId = value.getString("receiver_id"),
             profileNamespace = value.getString("profile_namespace"),
             endpointManagementScope = endpointManagementScope(
                 value.getString("endpoint_management_scope")
@@ -145,6 +145,7 @@ class PaykitModule(private val reactContext: ReactApplicationContext) :
 
     private fun configJson(config: FfiPaykitSdkConfig): String {
         return JSONObject()
+            .put("receiver_id", config.receiverId)
             .put("profile_namespace", config.profileNamespace)
             .put(
                 "endpoint_management_scope",
@@ -237,9 +238,9 @@ class PaykitModule(private val reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun sdkDefaultConfig(promise: Promise) {
+    fun sdkDefaultConfig(receiverId: String, promise: Promise) {
         resolveResult(promise) {
-            configJson(defaultConfig())
+            configJson(defaultConfig(receiverId))
         }
     }
 
@@ -254,13 +255,6 @@ class PaykitModule(private val reactContext: ReactApplicationContext) :
     fun sdkRequiredSessionCapabilities(configJson: String, promise: Promise) {
         resolveResult(promise) {
             requiredSessionCapabilities(configFromJson(configJson))
-        }
-    }
-
-    @ReactMethod
-    fun sdkCoreSessionCapabilities(promise: Promise) {
-        resolveResult(promise) {
-            coreSessionCapabilities()
         }
     }
 

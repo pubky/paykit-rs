@@ -126,11 +126,14 @@ where
                 Ok(())
             })
             .await?;
-        let path = self.config.public_contact_path(&public_key);
+        let path = self.config.public_contact_path(&public_key, &receiver_id);
         let write_result = session_access
             .session
             .storage()
-            .put(path.as_str(), public_contact_json(&public_key)?)
+            .put(
+                path.as_str(),
+                public_contact_json(&public_key, &receiver_id)?,
+            )
             .await
             .map_err(|err| map_pubky_transport_error("publish public contact", err));
         if let Err(err) = write_result {
@@ -189,7 +192,7 @@ where
                 })
                 .await?;
         }
-        let path = self.config.public_contact_path(&public_key);
+        let path = self.config.public_contact_path(&public_key, &receiver_id);
         let delete_result = session_access.session.storage().delete(path.as_str()).await;
         if let Err(err) = delete_result {
             if !is_pubky_not_found(&err) {

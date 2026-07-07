@@ -121,6 +121,11 @@ impl EncryptedLink {
         &self.recipient
     }
 
+    /// Access the local Paykit receiver id for this Encrypted Link.
+    pub fn local_receiver_id(&self) -> &PaykitReceiverId {
+        &self.local_receiver_id
+    }
+
     async fn send_private_application_message_with_context(
         &mut self,
         plaintext: &[u8],

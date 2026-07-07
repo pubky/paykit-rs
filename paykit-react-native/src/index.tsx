@@ -64,6 +64,7 @@ export type PubkyAuthRequestKind =
   | 'unknown';
 
 export interface PaykitSdkConfig {
+  receiver_id: string;
   profile_namespace: string;
   endpoint_management_scope: EndpointManagementScope;
   encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy;
@@ -91,10 +92,9 @@ export interface PubkyResourceRef {
 }
 
 interface NativePaykit {
-  sdkDefaultConfig(): Promise<NativeResult>;
+  sdkDefaultConfig(receiverId: string): Promise<NativeResult>;
   sdkDefaultPubkyClientConfig(): Promise<NativeResult>;
   sdkRequiredSessionCapabilities(configJson: string): Promise<NativeResult>;
-  sdkCoreSessionCapabilities(): Promise<NativeResult>;
   sdkPubkyPublicKeyFromBip39Seed(seedBase64: string): Promise<NativeResult>;
   sdkPubkyPublicKeyFromBip39Mnemonic(
     mnemonicPhrase: string
@@ -152,9 +152,11 @@ export function parsePaykitError(error: string): PaykitErrorInfo {
   };
 }
 
-export async function defaultConfig(): Promise<Result<PaykitSdkConfig>> {
+export async function defaultConfig(
+  receiverId: string
+): Promise<Result<PaykitSdkConfig>> {
   try {
-    return resultJson(await Native.sdkDefaultConfig());
+    return resultJson(await Native.sdkDefaultConfig(receiverId));
   } catch (e) {
     return err(unknownErrorPayload(e));
   }
@@ -177,14 +179,6 @@ export async function requiredSessionCapabilities(
     return resultValue(
       await Native.sdkRequiredSessionCapabilities(JSON.stringify(config))
     );
-  } catch (e) {
-    return err(unknownErrorPayload(e));
-  }
-}
-
-export async function coreSessionCapabilities(): Promise<Result<string>> {
-  try {
-    return resultValue(await Native.sdkCoreSessionCapabilities());
   } catch (e) {
     return err(unknownErrorPayload(e));
   }

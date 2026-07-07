@@ -108,6 +108,12 @@ pub fn prepare_receipt(
     receiver_id: &PaykitReceiverId,
     draft: ReceiptDraft,
 ) -> Result<PreparedReceipt> {
+    if receiver_id != link.local_receiver_id() {
+        return Err(PaykitError::Validation(format!(
+            "Receipt receiver id {receiver_id} does not match Encrypted Link local receiver {}",
+            link.local_receiver_id()
+        )));
+    }
     prepare_receipt_for_recipient(link.recipient().clone(), receiver_id, draft)
 }
 
@@ -252,6 +258,12 @@ pub(super) fn validate_prepared_receipt(prepared: &PreparedReceipt) -> Result<()
 pub async fn send_receipt_access(link: &mut EncryptedLink, access: &ReceiptAccess) -> Result<()> {
     debug!("sending Receipt Access message");
     access.validate()?;
+    if !access.has_location_for_receiver(link.local_receiver_id()) {
+        return Err(PaykitError::Validation(format!(
+            "Receipt Access location does not match Encrypted Link local receiver {}",
+            link.local_receiver_id()
+        )));
+    }
     let json = serialize_receipt_access_json(access)
         .map_err(|err| map_error("send_receipt_access", err))?;
     link.send_receipt_access_message(json.as_bytes())

@@ -226,7 +226,7 @@ where
             if lease.is_none()
                 && tx
                     .peer_link_operation_lease(&counterparty, &counterparty_receiver_id)
-                    .is_some()
+                    .is_some_and(|active_lease| active_lease.expires_at > now)
             {
                 return Err(PaykitSdkError::Policy(format!(
                     "peer link operation already in progress for counterparty {counterparty}"

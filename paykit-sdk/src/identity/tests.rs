@@ -78,8 +78,7 @@ fn test_session_capabilities_cover_required_paykit_scopes() {
         .finish()
         .as_slice()
         .to_vec();
-    let bitkit_required =
-        "/pub/paykit/v0/receivers/paykit/:rw,/pub/paykit/v0/private/paykit/:rw,/pub/bitkit.to/:rw";
+    let bitkit_required = "/pub/paykit/v0/receivers/paykit/:rw,/pub/paykit/v0/private/paykit/:rw,/pub/bitkit.to/receivers/paykit/:rw";
     let read_only = pubky::Capabilities::builder()
         .read("/pub/paykit/")
         .finish()

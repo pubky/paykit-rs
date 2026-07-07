@@ -35,7 +35,7 @@ import {
   pubkyPublicKeyFromBip39Mnemonic,
 } from '@synonymdev/react-native-paykit';
 
-const config = await defaultConfig();
+const config = await defaultConfig('bitkit');
 if (config.isErr()) {
   throw new Error(config.error);
 }
@@ -58,12 +58,12 @@ stable `category`, `code`, and redacted `context`.
 
 ## API
 
-- `defaultConfig()` — return the default Paykit SDK config.
+- `defaultConfig(receiverId)` — return the default Paykit SDK config for a
+  Paykit receiver id.
 - `defaultPubkyClientConfig()` — return the default Pubky client config used by
   binding-owned Pubky clients.
 - `requiredSessionCapabilities(config)` — return Pubky capabilities required by
   the supplied config.
-- `coreSessionCapabilities()` — return the core Paykit Pubky capability scope.
 - `pubkyPublicKeyFromBip39Seed(seedBase64)` — derive the corresponding Pubky
   public key from a 64-byte BIP39 seed without returning the local secret key
   to JavaScript.
