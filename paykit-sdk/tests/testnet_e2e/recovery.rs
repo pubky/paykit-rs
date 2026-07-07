@@ -12,7 +12,10 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let published = pair
         .alice
         .sdk
-        .publish_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+        .publish_encrypted_link_recovery_marker(
+            pair.bob.public_key.clone(),
+            pair.bob.receiver_id.clone(),
+        )
         .await
         .expect("publishing the recovery marker should succeed");
     assert_eq!(published.state, LinkedPeerState::RecoveryRequired);
@@ -33,7 +36,7 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let err = pair
         .alice
         .sdk
-        .enqueue_private_payment_list(pair.bob.public_key.clone())
+        .enqueue_private_payment_list(pair.bob.public_key.clone(), pair.bob.receiver_id.clone())
         .await
         .expect_err("private automation must be blocked during recovery");
     assert!(
@@ -45,7 +48,10 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let observed = pair
         .bob
         .sdk
-        .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+        .observe_encrypted_link_recovery_marker(
+            pair.alice.public_key.clone(),
+            pair.alice.receiver_id.clone(),
+        )
         .await
         .expect("observing the recovery marker should succeed");
     assert!(observed.remote_marker_changed);
@@ -75,6 +81,8 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         &storage,
         bob_secret_key,
         &alice_public_key,
+        &pair.bob.receiver_id,
+        &pair.alice.receiver_id,
     )
     .await
     .expect("direct marker fetch should succeed")
@@ -85,7 +93,10 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let removed = pair
         .alice
         .sdk
-        .remove_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+        .remove_encrypted_link_recovery_marker(
+            pair.bob.public_key.clone(),
+            pair.bob.receiver_id.clone(),
+        )
         .await
         .expect("removing the recovery marker should succeed");
     assert!(removed.local_attempt_id.is_none());
@@ -97,6 +108,8 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         &storage,
         bob_secret_key,
         &alice_public_key,
+        &pair.bob.receiver_id,
+        &pair.alice.receiver_id,
     )
     .await
     .expect("direct marker fetch after removal should succeed");
@@ -108,7 +121,10 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let observed_again = pair
         .bob
         .sdk
-        .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+        .observe_encrypted_link_recovery_marker(
+            pair.alice.public_key.clone(),
+            pair.alice.receiver_id.clone(),
+        )
         .await
         .expect("re-observing after removal should succeed");
     assert!(!observed_again.remote_marker_changed);
@@ -156,7 +172,10 @@ async fn test_publish_recovery_marker_without_private_link_state_fails() {
     let err = pair
         .alice
         .sdk
-        .publish_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+        .publish_encrypted_link_recovery_marker(
+            pair.bob.public_key.clone(),
+            pair.bob.receiver_id.clone(),
+        )
         .await
         .expect_err("publishing a marker without private link state must fail");
     assert!(

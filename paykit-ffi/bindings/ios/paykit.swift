@@ -7860,6 +7860,10 @@ public func FfiConverterTypePaykitProfileRecord_lower(_ value: PaykitProfileReco
  */
 public struct PaykitSdkConfig {
     /**
+     * Receiver folder for this app/runtime under `/pub/paykit/v0/receivers`.
+     */
+    public var receiverId: String
+    /**
      * Namespace segment for SDK profile/contact public data under `/pub/`.
      */
     public var profileNamespace: String
@@ -7892,6 +7896,9 @@ public struct PaykitSdkConfig {
     // declare one manually.
     public init(
         /**
+         * Receiver folder for this app/runtime under `/pub/paykit/v0/receivers`.
+         */receiverId: String,
+        /**
          * Namespace segment for SDK profile/contact public data under `/pub/`.
          */profileNamespace: String,
         /**
@@ -7912,6 +7919,7 @@ public struct PaykitSdkConfig {
         /**
          * Minimum delay before retrying a failed outbound private send in seconds.
          */outboundPrivateRetryBackoffSecs: UInt64) {
+        self.receiverId = receiverId
         self.profileNamespace = profileNamespace
         self.endpointManagementScope = endpointManagementScope
         self.encryptedLinkRecoveryMarkers = encryptedLinkRecoveryMarkers
@@ -7929,6 +7937,9 @@ extension PaykitSdkConfig: Sendable {}
 
 extension PaykitSdkConfig: Equatable, Hashable {
     public static func ==(lhs: PaykitSdkConfig, rhs: PaykitSdkConfig) -> Bool {
+        if lhs.receiverId != rhs.receiverId {
+            return false
+        }
         if lhs.profileNamespace != rhs.profileNamespace {
             return false
         }
@@ -7954,6 +7965,7 @@ extension PaykitSdkConfig: Equatable, Hashable {
     }
 
     public func hash(into hasher: inout Hasher) {
+        hasher.combine(receiverId)
         hasher.combine(profileNamespace)
         hasher.combine(endpointManagementScope)
         hasher.combine(encryptedLinkRecoveryMarkers)
@@ -7975,6 +7987,7 @@ public struct FfiConverterTypePaykitSdkConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaykitSdkConfig {
         return
             try PaykitSdkConfig(
+                receiverId: FfiConverterString.read(from: &buf),
                 profileNamespace: FfiConverterString.read(from: &buf),
                 endpointManagementScope: FfiConverterTypeEndpointManagementScope.read(from: &buf),
                 encryptedLinkRecoveryMarkers: FfiConverterTypeEncryptedLinkRecoveryMarkerPolicy.read(from: &buf),
@@ -7986,6 +7999,7 @@ public struct FfiConverterTypePaykitSdkConfig: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: PaykitSdkConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.receiverId, into: &buf)
         FfiConverterString.write(value.profileNamespace, into: &buf)
         FfiConverterTypeEndpointManagementScope.write(value.endpointManagementScope, into: &buf)
         FfiConverterTypeEncryptedLinkRecoveryMarkerPolicy.write(value.encryptedLinkRecoveryMarkers, into: &buf)
@@ -16696,11 +16710,12 @@ public func decodeSdkStateBlobSnapshot(bytes: Data)throws  -> SdkStateBlobSnapsh
 })
 }
 /**
- * Return the default SDK configuration.
+ * Return the default SDK policy for an explicit Paykit receiver id.
  */
-public func defaultConfig() -> PaykitSdkConfig  {
-    return try!  FfiConverterTypePaykitSdkConfig_lift(try! rustCall() {
-    uniffi_paykit_fn_func_default_config($0
+public func defaultConfig(receiverId: String)throws  -> PaykitSdkConfig  {
+    return try  FfiConverterTypePaykitSdkConfig_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_func_default_config(
+        FfiConverterString.lower(receiverId),$0
     )
 })
 }
@@ -16851,7 +16866,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_decode_sdk_state_blob_snapshot() != 4823) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_default_config() != 40487) {
+    if (uniffi_paykit_checksum_func_default_config() != 50082) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_default_pubky_client_config() != 12841) {
