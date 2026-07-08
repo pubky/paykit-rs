@@ -527,6 +527,7 @@ async fn test_remote_recovery_marker_observation_ignores_marker_before_private_r
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(FixedClock.now() + ChronoDuration::seconds(4)),
                     last_private_receive_at: Some(FixedClock.now() + ChronoDuration::seconds(4)),
@@ -539,6 +540,7 @@ async fn test_remote_recovery_marker_observation_ignores_marker_before_private_r
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -561,6 +563,7 @@ async fn test_remote_recovery_marker_observation_ignores_marker_before_private_r
     let changed = sdk
         .mark_remote_recovery_marker_observed_if_needed(
             &counterparty,
+            &receiver_path(),
             "650e8400-e29b-41d4-a716-446655440000",
             FixedClock.now() + ChronoDuration::seconds(3),
         )
@@ -568,13 +571,13 @@ async fn test_remote_recovery_marker_observation_ignores_marker_before_private_r
         .unwrap();
 
     assert!(!changed);
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linked);
     assert!(peer.remote_recovery_attempt_id.is_none());
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -664,6 +667,7 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linking,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -676,6 +680,7 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: None,
                     handshake_snapshot: Some(vec![1, 2, 3]),
                     handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
@@ -698,6 +703,7 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
     let changed = sdk
         .mark_remote_recovery_marker_observed_if_needed(
             &counterparty,
+            &receiver_path(),
             "650e8400-e29b-41d4-a716-446655440000",
             FixedClock.now() + ChronoDuration::seconds(1),
         )
@@ -705,13 +711,13 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
         .unwrap();
 
     assert!(!changed);
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linking);
     assert!(peer.remote_recovery_attempt_id.is_none());
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -733,6 +739,7 @@ async fn test_remote_recovery_marker_observation_accepts_newer_marker_after_stal
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linking,
                     last_sync_at: Some(FixedClock.now() - ChronoDuration::seconds(120)),
                     last_private_receive_at: None,
@@ -745,6 +752,7 @@ async fn test_remote_recovery_marker_observation_accepts_newer_marker_after_stal
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
+                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: None,
                     handshake_snapshot: Some(vec![1, 2, 3]),
                     handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
@@ -767,6 +775,7 @@ async fn test_remote_recovery_marker_observation_accepts_newer_marker_after_stal
     let changed = sdk
         .mark_remote_recovery_marker_observed_if_needed(
             &counterparty,
+            &receiver_path(),
             "650e8400-e29b-41d4-a716-446655440000",
             FixedClock.now(),
         )
@@ -774,7 +783,7 @@ async fn test_remote_recovery_marker_observation_accepts_newer_marker_after_stal
         .unwrap();
 
     assert!(changed);
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -783,7 +792,7 @@ async fn test_remote_recovery_marker_observation_accepts_newer_marker_after_stal
         peer.remote_recovery_attempt_id.as_deref(),
         Some("650e8400-e29b-41d4-a716-446655440000")
     );
-    let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
+    let link_state = crate::load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -803,6 +812,7 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linking,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -815,6 +825,7 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty: counterparty.clone(),
+                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: None,
                     handshake_snapshot: Some(vec![1, 2, 3]),
                     handshake_role: Some(EncryptedLinkHandshakeRole::Responder),
@@ -823,6 +834,7 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
                 });
                 tx.claim_peer_link_operation(
                     &counterparty,
+                    &receiver_path(),
                     FixedClock.now(),
                     FixedClock.now() + ChronoDuration::seconds(10),
                 )
@@ -843,6 +855,7 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
     let changed = sdk
         .mark_remote_recovery_marker_observed_if_needed(
             &counterparty,
+            &receiver_path(),
             "650e8400-e29b-41d4-a716-446655440000",
             FixedClock.now() + ChronoDuration::seconds(1),
         )
@@ -850,7 +863,7 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
         .unwrap();
 
     assert!(!changed);
-    let peer = crate::load_linked_peer(&storage, &counterparty)
+    let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -859,7 +872,7 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
     assert!(storage
         .transaction({
             let counterparty = counterparty.clone();
-            move |tx| Ok(tx.peer_link_operation_lease(&counterparty))
+            move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_path()))
         })
         .await
         .unwrap()

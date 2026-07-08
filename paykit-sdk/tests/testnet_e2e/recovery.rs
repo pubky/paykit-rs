@@ -138,13 +138,16 @@ async fn wait_until_marker_is_newer_than_observer_checkpoint(
         .storage
         .transaction({
             let counterparty = counterparty.clone();
+            let counterparty_receiver_path = observer.receiver_path.clone();
             move |tx| {
-                let link_checkpoint = tx.encrypted_link_state(&counterparty).and_then(|state| {
-                    (state.link_snapshot.is_some() || state.handshake_snapshot.is_some())
-                        .then_some(state.checkpointed_at)
-                });
+                let link_checkpoint = tx
+                    .encrypted_link_state(&counterparty, &counterparty_receiver_path)
+                    .and_then(|state| {
+                        (state.link_snapshot.is_some() || state.handshake_snapshot.is_some())
+                            .then_some(state.checkpointed_at)
+                    });
                 let receive_checkpoint = tx
-                    .linked_peer(&counterparty)
+                    .linked_peer(&counterparty, &counterparty_receiver_path)
                     .and_then(|peer| peer.last_private_receive_at);
                 Ok(link_checkpoint.max(receive_checkpoint))
             }
@@ -190,22 +193,34 @@ async fn test_mutual_recovery_markers_do_not_block_relink() {
 
     pair.alice
         .sdk
-        .publish_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+        .publish_encrypted_link_recovery_marker(
+            pair.bob.public_key.clone(),
+            pair.bob.receiver_path.clone(),
+        )
         .await
         .expect("alice should publish a recovery marker");
     pair.bob
         .sdk
-        .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+        .observe_encrypted_link_recovery_marker(
+            pair.alice.public_key.clone(),
+            pair.alice.receiver_path.clone(),
+        )
         .await
         .expect("bob should observe alice's marker");
     pair.bob
         .sdk
-        .publish_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+        .publish_encrypted_link_recovery_marker(
+            pair.alice.public_key.clone(),
+            pair.alice.receiver_path.clone(),
+        )
         .await
         .expect("bob should publish a recovery marker");
     pair.alice
         .sdk
-        .observe_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+        .observe_encrypted_link_recovery_marker(
+            pair.bob.public_key.clone(),
+            pair.bob.receiver_path.clone(),
+        )
         .await
         .expect("alice should observe bob's marker");
 
@@ -217,12 +232,18 @@ async fn test_mutual_recovery_markers_do_not_block_relink() {
 
         pair.alice
             .sdk
-            .observe_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+            .observe_encrypted_link_recovery_marker(
+                pair.bob.public_key.clone(),
+                pair.bob.receiver_path.clone(),
+            )
             .await
             .expect("alice marker observation should not reset an in-progress relink");
         pair.bob
             .sdk
-            .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+            .observe_encrypted_link_recovery_marker(
+                pair.alice.public_key.clone(),
+                pair.alice.receiver_path.clone(),
+            )
             .await
             .expect("bob marker observation should not reset an in-progress relink");
 
@@ -230,7 +251,11 @@ async fn test_mutual_recovery_markers_do_not_block_relink() {
             alice_state = pair
                 .alice
                 .sdk
-                .ensure_link_with_peer(pair.bob.public_key.clone(), 1)
+                .ensure_link_with_peer(
+                    pair.bob.public_key.clone(),
+                    pair.bob.receiver_path.clone(),
+                    1,
+                )
                 .await
                 .expect("alice relink should advance")
                 .state;
@@ -239,7 +264,11 @@ async fn test_mutual_recovery_markers_do_not_block_relink() {
             bob_state = pair
                 .bob
                 .sdk
-                .ensure_link_with_peer(pair.alice.public_key.clone(), 1)
+                .ensure_link_with_peer(
+                    pair.alice.public_key.clone(),
+                    pair.alice.receiver_path.clone(),
+                    1,
+                )
                 .await
                 .expect("bob relink should advance")
                 .state;

@@ -5,7 +5,7 @@ use tracing::{debug, warn};
 use crate::{
     encrypted_link::paths::compute_private_payment_paths,
     error::{NonRetryablePrivateReceiveError, NonRetryablePrivateSendError},
-    PaykitError, Result,
+    PaykitError, PaykitReceiverPath, Result,
 };
 
 // Local marker used when decrypted private plaintext is not valid UTF-8.
@@ -214,8 +214,15 @@ pub async fn clear_encrypted_link_outbox(
     session: &PubkySession,
     local_secret_key: &[u8; 32],
     remote_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<usize> {
-    let (write_path, _) = compute_private_payment_paths(local_secret_key, remote_pubkey);
+    let (write_path, _) = compute_private_payment_paths(
+        local_secret_key,
+        remote_pubkey,
+        local_receiver_path,
+        remote_receiver_path,
+    );
     let list_path = format!("{write_path}/");
     let storage = session.storage();
     let mut deleted_count = 0;

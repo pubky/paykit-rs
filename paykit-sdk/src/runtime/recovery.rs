@@ -456,6 +456,8 @@ where
                     &session_access.session,
                     secret_key,
                     &remote_public_key,
+                    &self.config.receiver_path,
+                    &lease.counterparty_receiver_path,
                 )
                 .await?;
             }

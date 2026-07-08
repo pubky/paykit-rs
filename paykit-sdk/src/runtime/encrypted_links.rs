@@ -424,9 +424,11 @@ where
                     let recovery_required = self
                         .storage
                         .transaction(|tx| {
-                            Ok(tx.linked_peer(&counterparty).is_some_and(|peer| {
-                                peer.state == LinkedPeerState::RecoveryRequired
-                            }))
+                            Ok(tx
+                                .linked_peer(&counterparty, &lease.counterparty_receiver_path)
+                                .is_some_and(|peer| {
+                                    peer.state == LinkedPeerState::RecoveryRequired
+                                }))
                         })
                         .await?;
                     if !recovery_required {
@@ -738,6 +740,8 @@ where
                 &session_access.session,
                 &secret_key,
                 &remote_public_key,
+                &self.config.receiver_path,
+                &lease.counterparty_receiver_path,
             )
             .await?;
         }
