@@ -1,5 +1,7 @@
 use chrono::Utc;
-use paykit_sdk::{LinkedPeerState, PaykitSdkError, PubkyPublicKey, StorageAdapter};
+use paykit_sdk::{
+    LinkedPeerState, PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, StorageAdapter,
+};
 use std::time::{Duration, Instant};
 
 use crate::harness::{linked_two_party, receiving_detail, two_party, TestUser};
@@ -7,7 +9,12 @@ use crate::harness::{linked_two_party, receiving_detail, two_party, TestUser};
 #[tokio::test]
 async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let pair = linked_two_party().await;
-    wait_until_marker_is_newer_than_observer_checkpoint(&pair.bob, &pair.alice.public_key).await;
+    wait_until_marker_is_newer_than_observer_checkpoint(
+        &pair.bob,
+        &pair.alice.public_key,
+        &pair.alice.receiver_path,
+    )
+    .await;
 
     let published = pair
         .alice
@@ -133,12 +140,13 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
 async fn wait_until_marker_is_newer_than_observer_checkpoint(
     observer: &TestUser,
     counterparty: &PubkyPublicKey,
+    counterparty_receiver_path: &PaykitReceiverPath,
 ) {
     let cutoff = observer
         .storage
         .transaction({
             let counterparty = counterparty.clone();
-            let counterparty_receiver_path = observer.receiver_path.clone();
+            let counterparty_receiver_path = counterparty_receiver_path.clone();
             move |tx| {
                 let link_checkpoint = tx
                     .encrypted_link_state(&counterparty, &counterparty_receiver_path)
