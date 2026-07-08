@@ -88,15 +88,29 @@ where
         }
         let now = self.clock.now();
 
-        let counterparties = if let (Some(counterparty), Some(receiver_path)) =
-            (&filter.counterparty, &filter.counterparty_receiver_path)
-        {
-            self.ensure_peer_not_blocked(counterparty, receiver_path)
-                .await?;
-            vec![(counterparty.clone(), receiver_path.clone())]
-        } else {
-            self.payment_request_counterparties(filter.received_only)
-                .await?
+        let counterparties = match (&filter.counterparty, &filter.counterparty_receiver_path) {
+            (Some(counterparty), Some(receiver_path)) => {
+                self.ensure_peer_not_blocked(counterparty, receiver_path)
+                    .await?;
+                vec![(counterparty.clone(), receiver_path.clone())]
+            }
+            (Some(counterparty), None) => {
+                let counterparties = self
+                    .payment_request_counterparties_for_counterparty(
+                        counterparty,
+                        filter.received_only,
+                    )
+                    .await?;
+                for (_, receiver_path) in &counterparties {
+                    self.ensure_peer_not_blocked(counterparty, receiver_path)
+                        .await?;
+                }
+                counterparties
+            }
+            _ => {
+                self.payment_request_counterparties(filter.received_only)
+                    .await?
+            }
         };
 
         let mut records = Vec::new();
@@ -201,6 +215,43 @@ where
                         .as_str()
                         .cmp(right_key.as_str())
                         .then_with(|| left_receiver.as_str().cmp(right_receiver.as_str()))
+                });
+                Ok(counterparties)
+            })
+            .await
+    }
+
+    async fn payment_request_counterparties_for_counterparty(
+        &self,
+        counterparty: &PubkyPublicKey,
+        received_only: bool,
+    ) -> Result<Vec<(PubkyPublicKey, PaykitReceiverPath)>> {
+        self.storage
+            .transaction(move |tx| {
+                let snapshot = tx.export_storage_state();
+                let mut receiver_paths = HashSet::new();
+                for item in snapshot.private_stream_items {
+                    if &item.counterparty == counterparty
+                        && is_payment_request_kind(item.parsed_kind.as_deref())
+                    {
+                        receiver_paths.insert(item.counterparty_receiver_path);
+                    }
+                }
+                if !received_only {
+                    for outbound in snapshot.outbound_private_messages {
+                        if &outbound.counterparty == counterparty
+                            && is_payment_request_kind(Some(&outbound.kind))
+                        {
+                            receiver_paths.insert(outbound.counterparty_receiver_path);
+                        }
+                    }
+                }
+                let mut counterparties = receiver_paths
+                    .into_iter()
+                    .map(|receiver_path| (counterparty.clone(), receiver_path))
+                    .collect::<Vec<_>>();
+                counterparties.sort_by(|(_, left_receiver), (_, right_receiver)| {
+                    left_receiver.as_str().cmp(right_receiver.as_str())
                 });
                 Ok(counterparties)
             })

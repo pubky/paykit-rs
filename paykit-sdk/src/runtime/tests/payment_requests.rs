@@ -228,6 +228,120 @@ async fn test_list_payment_requests_filters_across_counterparties() {
 }
 
 #[tokio::test]
+async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_preserves_blocked_error(
+) {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let blocked = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let local_public_key = local_public_key.clone();
+            let blocked = blocked.clone();
+            move |tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_public_key),
+                    capability: PubkyIdentityCapability::PublicOnly,
+                    local_secret_available: false,
+                    initialized_at: FixedClock.now(),
+                    sign_out_generation: 0,
+                });
+                tx.save_linked_peer(LinkedPeerRecord {
+                    counterparty: blocked,
+                    counterparty_receiver_path: other_receiver_path(),
+                    state: LinkedPeerState::Blocked,
+                    last_sync_at: None,
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        vec![payment_request_message(
+            "650e8400-e29b-41d4-a716-446655440020",
+            "550e8400-e29b-41d4-a716-446655440020",
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        other_receiver_path(),
+        vec![payment_request_message(
+            "650e8400-e29b-41d4-a716-446655440021",
+            "550e8400-e29b-41d4-a716-446655440021",
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        blocked.clone(),
+        other_receiver_path(),
+        vec![payment_request_message(
+            "650e8400-e29b-41d4-a716-446655440022",
+            "550e8400-e29b-41d4-a716-446655440022",
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let records = sdk
+        .list_payment_requests(PaymentRequestFilter {
+            counterparty: Some(counterparty.clone()),
+            ..PaymentRequestFilter::default()
+        })
+        .await
+        .unwrap();
+    let blocked_result = sdk
+        .list_payment_requests(PaymentRequestFilter {
+            counterparty: Some(blocked),
+            ..PaymentRequestFilter::default()
+        })
+        .await;
+
+    assert_eq!(records.len(), 2);
+    assert!(records
+        .iter()
+        .all(|record| record.counterparty == counterparty));
+    assert!(records
+        .iter()
+        .any(|record| record.counterparty_receiver_path == receiver_path()));
+    assert!(records
+        .iter()
+        .any(|record| record.counterparty_receiver_path == other_receiver_path()));
+    assert!(matches!(blocked_result, Err(PaykitSdkError::Policy(_))));
+}
+
+#[tokio::test]
 async fn test_active_recurring_payment_requests_filters_accepted_recurring_requests() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

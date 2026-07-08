@@ -456,7 +456,14 @@ where
                     .into_values()
                     .collect::<Vec<_>>();
                 records.sort_by(|left, right| {
-                    left.counterparty.as_str().cmp(right.counterparty.as_str())
+                    left.counterparty
+                        .as_str()
+                        .cmp(right.counterparty.as_str())
+                        .then_with(|| {
+                            left.counterparty_receiver_path
+                                .as_str()
+                                .cmp(right.counterparty_receiver_path.as_str())
+                        })
                 });
                 Ok(records)
             })

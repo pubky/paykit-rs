@@ -77,8 +77,8 @@ pub enum PaymentRequestLifecycleState {
 /// Filter for listing SDK-derived Payment Requests.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentRequestFilter {
-    /// Restrict results to one counterparty. `None` lists across all known
-    /// counterparties with Payment Request activity.
+    /// Restrict results to one counterparty. Without a receiver path, results
+    /// include all receiver/runtime folders for that counterparty.
     pub counterparty: Option<PubkyPublicKey>,
     /// Restrict results to one counterparty receiver/runtime folder.
     pub counterparty_receiver_path: Option<PaykitReceiverPath>,

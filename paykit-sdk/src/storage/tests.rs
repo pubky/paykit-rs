@@ -23,6 +23,10 @@ fn receiver_path() -> PaykitReceiverPath {
     PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
+fn other_receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("bitkit/server").unwrap()
+}
+
 fn public_endpoint_record(identifier: &str) -> PublicEndpointRecord {
     PublicEndpointRecord {
         identifier: identifier.into(),
@@ -34,9 +38,16 @@ fn public_endpoint_record(identifier: &str) -> PublicEndpointRecord {
 }
 
 fn outbound_private_message(counterparty: PubkyPublicKey) -> NewOutboundPrivateMessage {
+    outbound_private_message_with_receiver(counterparty, receiver_path())
+}
+
+fn outbound_private_message_with_receiver(
+    counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
+) -> NewOutboundPrivateMessage {
     NewOutboundPrivateMessage::new(
         counterparty,
-        receiver_path(),
+        counterparty_receiver_path,
         "paykit.private_payment_list".into(),
         r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#.into(),
         timestamp(),
@@ -77,9 +88,16 @@ fn receipt_access_record(counterparty: PubkyPublicKey) -> ReceiptAccessRecord {
 }
 
 fn receipt_record(issuer: PubkyPublicKey) -> ReceiptRecord {
+    receipt_record_with_receiver(issuer, receiver_path())
+}
+
+fn receipt_record_with_receiver(
+    issuer: PubkyPublicKey,
+    issuer_receiver_path: PaykitReceiverPath,
+) -> ReceiptRecord {
     ReceiptRecord {
         issuer,
-        issuer_receiver_path: receiver_path(),
+        issuer_receiver_path,
         receipt_access_event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
         receipt_access_key_hash: "sha256:test".into(),
         receipt_id: "550e8400-e29b-41d4-a716-446655440000".into(),
@@ -102,10 +120,17 @@ fn receipt_record(issuer: PubkyPublicKey) -> ReceiptRecord {
 fn payment_endpoint_reservation_record(
     counterparty: PubkyPublicKey,
 ) -> PaymentEndpointReservationRecord {
+    payment_endpoint_reservation_record_with_receiver(counterparty, receiver_path())
+}
+
+fn payment_endpoint_reservation_record_with_receiver(
+    counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
+) -> PaymentEndpointReservationRecord {
     PaymentEndpointReservationRecord {
         reservation_id: "reservation-1".into(),
         counterparty,
-        counterparty_receiver_path: receiver_path(),
+        counterparty_receiver_path,
         identifier: "btc-lightning-bolt11".into(),
         payload_hash: "reserved-payload-hash".into(),
         outbound_message_id: 7,
@@ -300,6 +325,123 @@ async fn test_transaction_commits_records() {
     assert_eq!(snapshot.receipt_records.len(), 1);
     assert_eq!(snapshot.next_private_stream_item_id, 1);
     assert_eq!(snapshot.next_outbound_private_message_id, 1);
+}
+
+#[tokio::test]
+async fn test_receiver_path_scopes_peer_state_and_queue_claims() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let receiver_path = receiver_path();
+    let other_receiver_path = other_receiver_path();
+
+    let (wallet_message, server_message) = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let receiver_path = receiver_path.clone();
+            let other_receiver_path = other_receiver_path.clone();
+            move |tx| {
+                tx.save_linked_peer(LinkedPeerRecord {
+                    counterparty: counterparty.clone(),
+                    counterparty_receiver_path: receiver_path.clone(),
+                    state: LinkedPeerState::Linked,
+                    last_sync_at: Some(timestamp()),
+                    last_private_receive_at: Some(timestamp()),
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: counterparty.clone(),
+                    counterparty_receiver_path: receiver_path.clone(),
+                    link_snapshot: Some(vec![1, 2, 3]),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 0,
+                    checkpointed_at: timestamp(),
+                });
+                tx.save_payment_endpoint_reservation(
+                    payment_endpoint_reservation_record_with_receiver(
+                        counterparty.clone(),
+                        receiver_path.clone(),
+                    ),
+                );
+                tx.save_receipt_record(receipt_record_with_receiver(
+                    counterparty.clone(),
+                    receiver_path.clone(),
+                ));
+                let wallet_message =
+                    tx.insert_outbound_private_message(outbound_private_message_with_receiver(
+                        counterparty.clone(),
+                        receiver_path.clone(),
+                    ));
+                let server_message =
+                    tx.insert_outbound_private_message(outbound_private_message_with_receiver(
+                        counterparty.clone(),
+                        other_receiver_path.clone(),
+                    ));
+
+                assert!(tx
+                    .linked_peer(&counterparty, &other_receiver_path)
+                    .is_none());
+                assert!(tx
+                    .encrypted_link_state(&counterparty, &other_receiver_path)
+                    .is_none());
+                assert!(tx
+                    .payment_endpoint_reservation(
+                        &counterparty,
+                        &other_receiver_path,
+                        "reservation-1",
+                    )
+                    .is_none());
+                assert!(tx
+                    .receipt_record(
+                        &counterparty,
+                        &other_receiver_path,
+                        "550e8400-e29b-41d4-a716-446655440000",
+                    )
+                    .is_none());
+
+                Ok((wallet_message, server_message))
+            }
+        })
+        .await
+        .unwrap();
+
+    let claimed = claim_next_outbound_private_message(
+        &storage,
+        &counterparty,
+        &other_receiver_path,
+        timestamp(),
+        timestamp() - chrono::Duration::seconds(60),
+        timestamp() - chrono::Duration::seconds(60),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let wallet_queue = queued_outbound_private_messages(&storage, &counterparty, &receiver_path)
+        .await
+        .unwrap();
+    let snapshot = storage.snapshot().unwrap();
+    let wallet_record = snapshot
+        .outbound_private_messages
+        .iter()
+        .find(|message| message.outbound_message_id == wallet_message.outbound_message_id)
+        .unwrap();
+
+    assert_eq!(
+        claimed.outbound_message_id,
+        server_message.outbound_message_id
+    );
+    assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
+    assert_eq!(wallet_queue.len(), 1);
+    assert_eq!(
+        wallet_queue[0].outbound_message_id,
+        wallet_message.outbound_message_id
+    );
+    assert_eq!(wallet_record.status, OutboundPrivateMessageStatus::Pending);
 }
 
 #[tokio::test]
