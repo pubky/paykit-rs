@@ -13,8 +13,9 @@ use pubky::{
 use tracing::{debug, error, instrument, trace};
 
 use crate::{
-    PaykitError, PaykitReceiverPath, PaymentEndpointIdentifier, PaymentEndpointPayload,
-    PaymentList, Result,
+    parse_paykit_receiver_marker_json, serialize_paykit_receiver_marker, validation::invalid_data,
+    PaykitError, PaykitReceiverMarker, PaykitReceiverPath, PaymentEndpointIdentifier,
+    PaymentEndpointPayload, PaymentList, Result,
 };
 
 /// Conventional prefix for Paykit public data.
@@ -74,6 +75,49 @@ pub async fn delete_payment_endpoint(
     Ok(())
 }
 
+/// Writes or updates a receiver marker document.
+#[instrument(skip(session, marker), fields(receiver = %marker.receiver_path))]
+pub async fn upsert_paykit_receiver_marker(
+    session: &PubkySession,
+    marker: &PaykitReceiverMarker,
+) -> Result<()> {
+    let path = receiver_marker_path(&marker.receiver_path);
+    let payload = serialize_paykit_receiver_marker(marker)?;
+    debug!(path = %path, "writing Paykit receiver marker to Pubky storage");
+    session.storage().put(path, payload).await.map_err(|err| {
+        error!(error = %err, "failed to put Paykit receiver marker");
+        PaykitError::Transport {
+            context: "put Paykit receiver marker".into(),
+            source: err.into(),
+        }
+    })?;
+    Ok(())
+}
+
+/// Removes a receiver marker document.
+#[instrument(skip(session), fields(receiver = %receiver_path))]
+pub async fn delete_paykit_receiver_marker(
+    session: &PubkySession,
+    receiver_path: &PaykitReceiverPath,
+) -> Result<()> {
+    let path = receiver_marker_path(receiver_path);
+    debug!(path = %path, "deleting Paykit receiver marker from Pubky storage");
+    match session.storage().delete(path).await {
+        Ok(_) => {}
+        Err(err) if is_not_found(&err) => {
+            debug!("Paykit receiver marker already absent");
+        }
+        Err(err) => {
+            error!(error = %err, "failed to delete Paykit receiver marker");
+            return Err(PaykitError::Transport {
+                context: "delete Paykit receiver marker".into(),
+                source: err.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Fetches all public Payment Endpoints for one receiver from Pubky storage.
 ///
 /// Directory listing and per-resource fetches are not atomic; the returned list is a
@@ -87,6 +131,21 @@ pub async fn fetch_payment_list(
     let addr = format!("{payee}{}", payment_endpoint_path_prefix(receiver_path));
     debug!(addr = %addr, "listing Payment Endpoints");
     fetch_payment_list_from_directory(storage, addr).await
+}
+
+/// Fetches a public receiver marker for one receiver.
+#[instrument(skip(storage), fields(owner = %owner, receiver = %receiver_path))]
+pub async fn fetch_paykit_receiver_marker(
+    storage: &PublicStorage,
+    owner: &PublicKey,
+    receiver_path: &PaykitReceiverPath,
+) -> Result<Option<PaykitReceiverMarker>> {
+    let addr = format!("{owner}{}", receiver_marker_path(receiver_path));
+    debug!(addr = %addr, "fetching Paykit receiver marker");
+    match fetch_nonempty_text(storage, addr, "fetch Paykit receiver marker").await? {
+        Some(payload) => parse_paykit_receiver_marker_json(&payload, receiver_path).map(Some),
+        None => Ok(None),
+    }
 }
 
 /// Lists public Paykit receiver paths published by an identity.
@@ -137,7 +196,9 @@ pub async fn fetch_paykit_receiver_paths(
                     continue;
                 }
             };
-            if seen_receiver_paths.insert(receiver_path.clone()) {
+            if seen_receiver_paths.insert(receiver_path.clone())
+                && receiver_is_publicly_advertised(storage, owner, &receiver_path).await?
+            {
                 receiver_paths.push(receiver_path);
             }
         }
@@ -145,6 +206,26 @@ pub async fn fetch_paykit_receiver_paths(
 
     receiver_paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     Ok(receiver_paths)
+}
+
+async fn receiver_is_publicly_advertised(
+    storage: &PublicStorage,
+    owner: &PublicKey,
+    receiver_path: &PaykitReceiverPath,
+) -> Result<bool> {
+    if fetch_paykit_receiver_marker(storage, owner, receiver_path)
+        .await?
+        .is_some()
+    {
+        return Ok(true);
+    }
+
+    let endpoint_addr = format!("{owner}{}", payment_endpoint_path_prefix(receiver_path));
+    let resources =
+        list_resources(storage, endpoint_addr, "list receiver payment endpoints").await?;
+    Ok(resources
+        .into_iter()
+        .any(|resource| !resource.path.as_str().ends_with('/')))
 }
 
 /// Fetches an individual receiver-scoped public Payment Endpoint.
@@ -169,6 +250,11 @@ pub async fn fetch_payment_endpoint(
 /// Return the receiver registry path prefix.
 pub(crate) fn receiver_path_prefix() -> String {
     format!("{PAYKIT_PATH_PREFIX}/")
+}
+
+/// Return the receiver marker path for one Paykit receiver.
+pub(crate) fn receiver_marker_path(receiver_path: &PaykitReceiverPath) -> String {
+    format!("{PAYKIT_PATH_PREFIX}/{receiver_path}/receiver.json")
 }
 
 /// Return the receiver-scoped public Payment Endpoint path prefix.
@@ -351,6 +437,57 @@ async fn fetch_text(storage: &PublicStorage, addr: String, label: &str) -> Resul
 }
 
 #[instrument(skip(storage), fields(addr = %addr, label = %label))]
+async fn fetch_nonempty_text(
+    storage: &PublicStorage,
+    addr: String,
+    label: &str,
+) -> Result<Option<String>> {
+    trace!("fetching non-empty text resource");
+    match storage.get(&addr).await {
+        Ok(resp) => {
+            let bytes = resp.bytes().await.map_err(|err| {
+                error!(error = %err, "failed to read response bytes");
+                PaykitError::Transport {
+                    context: label.to_string(),
+                    source: err.into(),
+                }
+            })?;
+            if bytes.is_empty() {
+                return Err(invalid_data(
+                    format!("{label}: resource must not be empty"),
+                    None,
+                ));
+            }
+            let data = String::from_utf8(bytes.to_vec()).map_err(|err| {
+                let pos = err.utf8_error().valid_up_to();
+                error!(
+                    error = %err,
+                    valid_up_to = pos,
+                    "response contains invalid UTF-8 — data may be corrupt"
+                );
+                PaykitError::InvalidData {
+                    context: format!("{label}: invalid UTF-8 at byte {pos}"),
+                    source: Some(err.into()),
+                }
+            })?;
+            trace!(len = data.len(), "text resource fetched");
+            Ok(Some(data))
+        }
+        Err(err) if is_not_found(&err) => {
+            debug!("resource not found (404/GONE)");
+            Ok(None)
+        }
+        Err(err) => {
+            error!(error = %err, "transport error during fetch");
+            Err(PaykitError::Transport {
+                context: label.to_string(),
+                source: err.into(),
+            })
+        }
+    }
+}
+
+#[instrument(skip(storage), fields(addr = %addr, label = %label))]
 async fn list_resources(
     storage: &PublicStorage,
     addr: String,
@@ -436,6 +573,10 @@ mod tests {
             "/pub/paykit/v0/bitkit/wallet/endpoints/btc-lightning-bolt11"
         );
         assert_eq!(receiver_path_prefix(), "/pub/paykit/v0/");
+        assert_eq!(
+            receiver_marker_path(&receiver_path),
+            "/pub/paykit/v0/bitkit/wallet/receiver.json"
+        );
         assert_eq!(
             private_message_path_prefix(&receiver_path),
             "/pub/paykit/v0/private/bitkit/wallet/messages"

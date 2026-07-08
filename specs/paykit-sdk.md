@@ -37,7 +37,9 @@ APIs must receive the counterparty's exact receiver path, because a Pubky key
 alone is not enough information to route private links, private streams,
 receipts, requests, recovery state, or public endpoint reads to one app/runtime
 folder. `paykit_receiver_paths` is a discovery helper; it does not make the SDK
-guess which receiver to use.
+guess which receiver to use. Receivers that want to be discoverable without
+public Payment Endpoints can publish a small marker at
+`/pub/paykit/v0/{receiver_path}/receiver.json`.
 
 ## Design Principles
 
@@ -335,7 +337,9 @@ The default public profile/contact namespace is receiver-scoped:
 
 Public Payment Endpoints for the same receiver are stored under
 `/pub/paykit/v0/{receiver_path}/endpoints/...`, so SDK profile paths do
-not collide with Payment Endpoint Identifier files.
+not collide with Payment Endpoint Identifier files. Public receiver discovery
+markers are stored at `/pub/paykit/v0/{receiver_path}/receiver.json`; they
+advertise only the receiver path and coarse capabilities, not payment details.
 
 Apps that already have a public product namespace can configure the SDK
 profile/contact namespace segment. For example, `profile_namespace =

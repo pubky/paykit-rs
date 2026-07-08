@@ -326,6 +326,12 @@ public interface PaykitSdkInterface {
     public suspend fun `observeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): EncryptedLinkRecoveryMarkerReport
 
     /**
+     * Fetch one public Paykit receiver marker, if present.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `paykitReceiverMarker`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): PaykitReceiverMarker?
+
+    /**
      * List public Paykit receiver paths for a Pubky identity.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -407,6 +413,12 @@ public interface PaykitSdkInterface {
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `publishPaykitProfile`(`profile`: PaykitProfile): PaykitProfileRecord
+
+    /**
+     * Publish the configured local receiver marker.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `publishPaykitReceiverMarker`(`capabilities`: PaykitReceiverCapabilities): PaykitReceiverMarker
 
     /**
      * Publish a public Contact Marker for a local Contact Record.
@@ -497,6 +509,12 @@ public interface PaykitSdkInterface {
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `removeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): EncryptedLinkRecoveryMarkerReport
+
+    /**
+     * Remove the configured local receiver marker.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `removePaykitReceiverMarker`()
 
     /**
      * Remove a public Contact Marker.
@@ -1633,6 +1651,52 @@ public data class PaykitProfileRecord (
      * Local observation/publication time as RFC3339 text.
      */
     val `updatedAt`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Public capabilities advertised by a Paykit receiver marker.
+ */
+@kotlinx.serialization.Serializable
+public data class PaykitReceiverCapabilities (
+    /**
+     * Receiver can participate in private Paykit payment workflows.
+     */
+    val `privatePayments`: kotlin.Boolean,
+    /**
+     * Receiver can send or receive Payment Request messages.
+     */
+    val `paymentRequests`: kotlin.Boolean,
+    /**
+     * Receiver can issue or retrieve Paykit Receipts.
+     */
+    val `receipts`: kotlin.Boolean,
+    /**
+     * Receiver can execute outgoing payments itself.
+     */
+    val `outgoingPayments`: kotlin.Boolean
+) {
+    public companion object
+}
+
+
+
+/**
+ * Lightweight public marker for one Paykit receiver path.
+ */
+@kotlinx.serialization.Serializable
+public data class PaykitReceiverMarker (
+    /**
+     * Receiver path this marker belongs to.
+     */
+    val `receiverPath`: kotlin.String,
+    /**
+     * Public receiver capabilities.
+     */
+    val `capabilities`: PaykitReceiverCapabilities
 ) {
     public companion object
 }

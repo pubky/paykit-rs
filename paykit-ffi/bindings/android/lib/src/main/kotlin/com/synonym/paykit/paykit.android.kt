@@ -1446,6 +1446,12 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1638,6 +1644,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 54332.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_receiver_marker() != 47993.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_receiver_paths() != 12509.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1675,6 +1684,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_profile() != 19918.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_receiver_marker() != 26480.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 54711.toShort()) {
@@ -1720,6 +1732,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 54279.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_paykit_receiver_marker() != 64082.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact() != 4060.toShort()) {
@@ -2080,6 +2095,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_paykit_receiver_marker(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_paykit_receiver_paths(
     ): Short
     @JvmStatic
@@ -2117,6 +2135,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_profile(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_receiver_marker(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact(
@@ -2162,6 +2183,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_remove_paykit_receiver_marker(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact(
@@ -2622,6 +2646,12 @@ internal object UniffiLib : Library {
         `counterpartyReceiverPath`: RustBufferByValue,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_paykit_receiver_marker(
+        `ptr`: Pointer?,
+        `publicKey`: RustBufferByValue,
+        `receiverPath`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_paykit_receiver_paths(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
@@ -2696,6 +2726,11 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_publish_paykit_profile(
         `ptr`: Pointer?,
         `profile`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_publish_paykit_receiver_marker(
+        `ptr`: Pointer?,
+        `capabilities`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_publish_public_contact(
@@ -2781,6 +2816,10 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
         `counterparty`: RustBufferByValue,
         `counterpartyReceiverPath`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_remove_paykit_receiver_marker(
+        `ptr`: Pointer?,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_remove_public_contact(
@@ -4793,6 +4832,30 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
+     * Fetch one public Paykit receiver marker, if present.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `paykitReceiverMarker`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): PaykitReceiverMarker? {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_paykit_receiver_marker(
+                    thisPtr,
+                    FfiConverterString.lower(`publicKey`),
+                    FfiConverterString.lower(`receiverPath`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterOptionalTypeFfiPaykitReceiverMarker.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
      * List public Paykit receiver paths for a Pubky identity.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -5102,6 +5165,29 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterTypePaykitProfileRecord.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Publish the configured local receiver marker.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `publishPaykitReceiverMarker`(`capabilities`: PaykitReceiverCapabilities): PaykitReceiverMarker {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_publish_paykit_receiver_marker(
+                    thisPtr,
+                    FfiConverterTypePaykitReceiverCapabilities.lower(`capabilities`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypePaykitReceiverMarker.lift(it) },
             // Error FFI converter
             PaykitExceptionErrorHandler,
         )
@@ -5457,6 +5543,29 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterTypeEncryptedLinkRecoveryMarkerReport.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Remove the configured local receiver marker.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `removePaykitReceiverMarker`() {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_remove_paykit_receiver_marker(
+                    thisPtr,
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_void(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_void(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_void(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
+            // lift function
+            { Unit },
+
             // Error FFI converter
             PaykitExceptionErrorHandler,
         )
@@ -9519,6 +9628,56 @@ public object FfiConverterTypePaykitProfileRecord: FfiConverterRustBuffer<Paykit
 
 
 
+public object FfiConverterTypePaykitReceiverCapabilities: FfiConverterRustBuffer<PaykitReceiverCapabilities> {
+    override fun read(buf: ByteBuffer): PaykitReceiverCapabilities {
+        return PaykitReceiverCapabilities(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PaykitReceiverCapabilities): ULong = (
+            FfiConverterBoolean.allocationSize(value.`privatePayments`) +
+            FfiConverterBoolean.allocationSize(value.`paymentRequests`) +
+            FfiConverterBoolean.allocationSize(value.`receipts`) +
+            FfiConverterBoolean.allocationSize(value.`outgoingPayments`)
+    )
+
+    override fun write(value: PaykitReceiverCapabilities, buf: ByteBuffer) {
+        FfiConverterBoolean.write(value.`privatePayments`, buf)
+        FfiConverterBoolean.write(value.`paymentRequests`, buf)
+        FfiConverterBoolean.write(value.`receipts`, buf)
+        FfiConverterBoolean.write(value.`outgoingPayments`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypePaykitReceiverMarker: FfiConverterRustBuffer<PaykitReceiverMarker> {
+    override fun read(buf: ByteBuffer): PaykitReceiverMarker {
+        return PaykitReceiverMarker(
+            FfiConverterString.read(buf),
+            FfiConverterTypePaykitReceiverCapabilities.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PaykitReceiverMarker): ULong = (
+            FfiConverterString.allocationSize(value.`receiverPath`) +
+            FfiConverterTypePaykitReceiverCapabilities.allocationSize(value.`capabilities`)
+    )
+
+    override fun write(value: PaykitReceiverMarker, buf: ByteBuffer) {
+        FfiConverterString.write(value.`receiverPath`, buf)
+        FfiConverterTypePaykitReceiverCapabilities.write(value.`capabilities`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypePaykitSdkConfig: FfiConverterRustBuffer<PaykitSdkConfig> {
     override fun read(buf: ByteBuffer): PaykitSdkConfig {
         return PaykitSdkConfig(
@@ -11943,6 +12102,35 @@ public object FfiConverterOptionalTypeFfiPaykitProfileRecord: FfiConverterRustBu
         } else {
             buf.put(1)
             FfiConverterTypePaykitProfileRecord.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiPaykitReceiverMarker: FfiConverterRustBuffer<PaykitReceiverMarker?> {
+    override fun read(buf: ByteBuffer): PaykitReceiverMarker? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypePaykitReceiverMarker.read(buf)
+    }
+
+    override fun allocationSize(value: PaykitReceiverMarker?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypePaykitReceiverMarker.allocationSize(value)
+        }
+    }
+
+    override fun write(value: PaykitReceiverMarker?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypePaykitReceiverMarker.write(value, buf)
         }
     }
 }

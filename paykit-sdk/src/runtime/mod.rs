@@ -6,8 +6,9 @@ use std::{
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use paykit_lib::{
-    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaymentEndpointIdentifier, PaymentProof,
-    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestId,
+    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaykitReceiverCapabilities,
+    PaykitReceiverMarker, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
+    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestId,
     PaymentRequestRejection, PaymentRequestTerms, PrivateMessageKind, ReceiptDraft,
 };
 use pubky::{errors::RequestError, Error as PubkyError, StatusCode};

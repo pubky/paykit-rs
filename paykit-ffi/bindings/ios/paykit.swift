@@ -707,6 +707,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func observeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverPath: String) async throws  -> EncryptedLinkRecoveryMarkerReport
 
     /**
+     * Fetch one public Paykit receiver marker, if present.
+     */
+    func paykitReceiverMarker(publicKey: String, receiverPath: String) async throws  -> PaykitReceiverMarker?
+
+    /**
      * List public Paykit receiver paths for a Pubky identity.
      */
     func paykitReceiverPaths(publicKey: String) async throws  -> [String]
@@ -775,6 +780,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Publish this identity's Paykit Profile.
      */
     func publishPaykitProfile(profile: PaykitProfile) async throws  -> PaykitProfileRecord
+
+    /**
+     * Publish the configured local receiver marker.
+     */
+    func publishPaykitReceiverMarker(capabilities: PaykitReceiverCapabilities) async throws  -> PaykitReceiverMarker
 
     /**
      * Publish a public Contact Marker for a local Contact Record.
@@ -850,6 +860,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Remove the local public recovery marker for a counterparty.
      */
     func removeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverPath: String) async throws  -> EncryptedLinkRecoveryMarkerReport
+
+    /**
+     * Remove the configured local receiver marker.
+     */
+    func removePaykitReceiverMarker() async throws
 
     /**
      * Remove a public Contact Marker.
@@ -1779,6 +1794,26 @@ open func observeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyR
 }
 
     /**
+     * Fetch one public Paykit receiver marker, if present.
+     */
+open func paykitReceiverMarker(publicKey: String, receiverPath: String)async throws  -> PaykitReceiverMarker?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_paykit_receiver_marker(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypePaykitReceiverMarker.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * List public Paykit receiver paths for a Pubky identity.
      */
 open func paykitReceiverPaths(publicKey: String)async throws  -> [String]  {
@@ -2039,6 +2074,26 @@ open func publishPaykitProfile(profile: PaykitProfile)async throws  -> PaykitPro
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePaykitProfileRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Publish the configured local receiver marker.
+     */
+open func publishPaykitReceiverMarker(capabilities: PaykitReceiverCapabilities)async throws  -> PaykitReceiverMarker  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_publish_paykit_receiver_marker(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaykitReceiverCapabilities_lower(capabilities)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaykitReceiverMarker_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -2339,6 +2394,26 @@ open func removeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyRe
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeEncryptedLinkRecoveryMarkerReport_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Remove the configured local receiver marker.
+     */
+open func removePaykitReceiverMarker()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_remove_paykit_receiver_marker(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -7866,6 +7941,208 @@ public func FfiConverterTypePaykitProfileRecord_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypePaykitProfileRecord_lower(_ value: PaykitProfileRecord) -> RustBuffer {
     return FfiConverterTypePaykitProfileRecord.lower(value)
+}
+
+
+/**
+ * Public capabilities advertised by a Paykit receiver marker.
+ */
+public struct PaykitReceiverCapabilities {
+    /**
+     * Receiver can participate in private Paykit payment workflows.
+     */
+    public var privatePayments: Bool
+    /**
+     * Receiver can send or receive Payment Request messages.
+     */
+    public var paymentRequests: Bool
+    /**
+     * Receiver can issue or retrieve Paykit Receipts.
+     */
+    public var receipts: Bool
+    /**
+     * Receiver can execute outgoing payments itself.
+     */
+    public var outgoingPayments: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Receiver can participate in private Paykit payment workflows.
+         */privatePayments: Bool,
+        /**
+         * Receiver can send or receive Payment Request messages.
+         */paymentRequests: Bool,
+        /**
+         * Receiver can issue or retrieve Paykit Receipts.
+         */receipts: Bool,
+        /**
+         * Receiver can execute outgoing payments itself.
+         */outgoingPayments: Bool) {
+        self.privatePayments = privatePayments
+        self.paymentRequests = paymentRequests
+        self.receipts = receipts
+        self.outgoingPayments = outgoingPayments
+    }
+}
+
+#if compiler(>=6)
+extension PaykitReceiverCapabilities: Sendable {}
+#endif
+
+
+extension PaykitReceiverCapabilities: Equatable, Hashable {
+    public static func ==(lhs: PaykitReceiverCapabilities, rhs: PaykitReceiverCapabilities) -> Bool {
+        if lhs.privatePayments != rhs.privatePayments {
+            return false
+        }
+        if lhs.paymentRequests != rhs.paymentRequests {
+            return false
+        }
+        if lhs.receipts != rhs.receipts {
+            return false
+        }
+        if lhs.outgoingPayments != rhs.outgoingPayments {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(privatePayments)
+        hasher.combine(paymentRequests)
+        hasher.combine(receipts)
+        hasher.combine(outgoingPayments)
+    }
+}
+
+extension PaykitReceiverCapabilities: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaykitReceiverCapabilities: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaykitReceiverCapabilities {
+        return
+            try PaykitReceiverCapabilities(
+                privatePayments: FfiConverterBool.read(from: &buf),
+                paymentRequests: FfiConverterBool.read(from: &buf),
+                receipts: FfiConverterBool.read(from: &buf),
+                outgoingPayments: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaykitReceiverCapabilities, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.privatePayments, into: &buf)
+        FfiConverterBool.write(value.paymentRequests, into: &buf)
+        FfiConverterBool.write(value.receipts, into: &buf)
+        FfiConverterBool.write(value.outgoingPayments, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitReceiverCapabilities_lift(_ buf: RustBuffer) throws -> PaykitReceiverCapabilities {
+    return try FfiConverterTypePaykitReceiverCapabilities.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitReceiverCapabilities_lower(_ value: PaykitReceiverCapabilities) -> RustBuffer {
+    return FfiConverterTypePaykitReceiverCapabilities.lower(value)
+}
+
+
+/**
+ * Lightweight public marker for one Paykit receiver path.
+ */
+public struct PaykitReceiverMarker {
+    /**
+     * Receiver path this marker belongs to.
+     */
+    public var receiverPath: String
+    /**
+     * Public receiver capabilities.
+     */
+    public var capabilities: PaykitReceiverCapabilities
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Receiver path this marker belongs to.
+         */receiverPath: String,
+        /**
+         * Public receiver capabilities.
+         */capabilities: PaykitReceiverCapabilities) {
+        self.receiverPath = receiverPath
+        self.capabilities = capabilities
+    }
+}
+
+#if compiler(>=6)
+extension PaykitReceiverMarker: Sendable {}
+#endif
+
+
+extension PaykitReceiverMarker: Equatable, Hashable {
+    public static func ==(lhs: PaykitReceiverMarker, rhs: PaykitReceiverMarker) -> Bool {
+        if lhs.receiverPath != rhs.receiverPath {
+            return false
+        }
+        if lhs.capabilities != rhs.capabilities {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(receiverPath)
+        hasher.combine(capabilities)
+    }
+}
+
+extension PaykitReceiverMarker: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaykitReceiverMarker: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaykitReceiverMarker {
+        return
+            try PaykitReceiverMarker(
+                receiverPath: FfiConverterString.read(from: &buf),
+                capabilities: FfiConverterTypePaykitReceiverCapabilities.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaykitReceiverMarker, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.receiverPath, into: &buf)
+        FfiConverterTypePaykitReceiverCapabilities.write(value.capabilities, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitReceiverMarker_lift(_ buf: RustBuffer) throws -> PaykitReceiverMarker {
+    return try FfiConverterTypePaykitReceiverMarker.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitReceiverMarker_lower(_ value: PaykitReceiverMarker) -> RustBuffer {
+    return FfiConverterTypePaykitReceiverMarker.lower(value)
 }
 
 
@@ -15632,6 +15909,30 @@ fileprivate struct FfiConverterOptionTypePaykitProfileRecord: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypePaykitReceiverMarker: FfiConverterRustBuffer {
+    typealias SwiftType = PaykitReceiverMarker?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePaykitReceiverMarker.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePaykitReceiverMarker.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePaymentAmountContext: FfiConverterRustBuffer {
     typealias SwiftType = PaymentAmountContext?
 
@@ -17030,6 +17331,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 54332) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_receiver_marker() != 47993) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_receiver_paths() != 12509) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17067,6 +17371,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_profile() != 19918) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_receiver_marker() != 26480) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 54711) {
@@ -17112,6 +17419,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 54279) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_paykit_receiver_marker() != 64082) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact() != 4060) {

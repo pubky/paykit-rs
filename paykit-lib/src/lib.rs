@@ -13,6 +13,7 @@ mod private_payment_list;
 mod pubky_routing;
 mod receipt;
 mod receiver;
+mod receiver_marker;
 mod shared_wire;
 mod validation;
 
@@ -73,6 +74,12 @@ pub use receipt::{
 };
 #[doc(inline)]
 pub use receiver::PaykitReceiverPath;
+#[doc(inline)]
+pub use receiver_marker::{
+    get_paykit_receiver_marker, parse_paykit_receiver_marker_json, publish_paykit_receiver_marker,
+    remove_paykit_receiver_marker, serialize_paykit_receiver_marker, PaykitReceiverCapabilities,
+    PaykitReceiverMarker,
+};
 
 /// Common result alias for Paykit operations.
 pub type Result<T> = std::result::Result<T, PaykitError>;
