@@ -14,7 +14,7 @@ async fn test_enqueue_private_payment_list_requires_live_session_for_stored_link
     );
 
     let result = sdk
-        .enqueue_private_payment_list(counterparty, receiver_id())
+        .enqueue_private_payment_list(counterparty, receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -35,7 +35,7 @@ async fn test_enqueue_private_payment_list_requires_private_capable_identity() {
     );
 
     let result = sdk
-        .enqueue_private_payment_list(counterparty, receiver_id())
+        .enqueue_private_payment_list(counterparty, receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -51,7 +51,7 @@ async fn test_sync_contact_private_payment_lists_reports_contact_and_clear_failu
         .transaction({
             let unlisted = unlisted.clone();
             move |tx| {
-                let mut peer = default_linked_peer(unlisted.clone(), receiver_id());
+                let mut peer = default_linked_peer(unlisted.clone(), receiver_path());
                 peer.state = LinkedPeerState::Linked;
                 tx.save_linked_peer(peer);
                 Ok(())
@@ -68,7 +68,7 @@ async fn test_sync_contact_private_payment_lists_reports_contact_and_clear_failu
     );
     sdk.save_contact(ContactUpdate {
         public_key: contact.clone(),
-        receiver_id: receiver_id(),
+        receiver_path: receiver_path(),
         label: None,
     })
     .await
@@ -103,7 +103,7 @@ async fn test_sync_private_payment_lists_with_reservations_reports_queue_failure
         .sync_private_payment_lists_with_reservations_and_process_outbound(
             vec![PrivatePaymentListReservationUpdate {
                 counterparty: counterparty.clone(),
-                counterparty_receiver_id: receiver_id(),
+                counterparty_receiver_path: receiver_path(),
                 reservations: vec![PaymentEndpointReservation {
                     reservation_id: "reservation-1".into(),
                     receiving_detail: ReceivingDetail {
@@ -145,7 +145,7 @@ async fn test_enqueue_private_payment_list_with_reservations_cancels_on_prefligh
     let result = sdk
         .enqueue_private_payment_list_with_reservations(
             counterparty,
-            receiver_id(),
+            receiver_path(),
             vec![PaymentEndpointReservation {
                 reservation_id: "reservation-1".into(),
                 receiving_detail: ReceivingDetail {
@@ -183,7 +183,7 @@ async fn test_sync_private_payment_lists_with_reservations_reports_duplicate_upd
             vec![
                 PrivatePaymentListReservationUpdate {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     reservations: vec![PaymentEndpointReservation {
                         reservation_id: "reservation-1".into(),
                         receiving_detail: ReceivingDetail {
@@ -196,7 +196,7 @@ async fn test_sync_private_payment_lists_with_reservations_reports_duplicate_upd
                 },
                 PrivatePaymentListReservationUpdate {
                     counterparty,
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     reservations: vec![PaymentEndpointReservation {
                         reservation_id: "reservation-2".into(),
                         receiving_detail: ReceivingDetail {
@@ -239,7 +239,7 @@ async fn test_enqueue_private_payment_list_uses_fallback_details() {
     );
 
     let outbound = sdk
-        .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_id())
+        .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_path())
         .await
         .unwrap();
 
@@ -268,7 +268,7 @@ async fn test_enqueue_private_payment_list_waits_for_peer_operation_lease() {
                 assert!(tx
                     .claim_peer_link_operation(
                         &counterparty,
-                        &receiver_id(),
+                        &receiver_path(),
                         FixedClock.now(),
                         FixedClock.now() + ChronoDuration::seconds(60),
                     )
@@ -287,7 +287,7 @@ async fn test_enqueue_private_payment_list_waits_for_peer_operation_lease() {
     );
 
     let result = sdk
-        .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_id())
+        .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
@@ -306,7 +306,7 @@ async fn test_enqueue_private_payment_list_uses_reserved_details() {
     );
 
     let outbound = sdk
-        .enqueue_private_payment_list_from_receiving_details(counterparty.clone(), receiver_id())
+        .enqueue_private_payment_list_from_receiving_details(counterparty.clone(), receiver_path())
         .await
         .unwrap();
 
@@ -348,7 +348,7 @@ async fn test_enqueue_private_payment_list_cancels_invalid_reservations() {
     );
 
     let result = sdk
-        .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_id())
+        .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
@@ -379,7 +379,7 @@ async fn test_enqueue_private_payment_list_cancels_unpersisted_reservations_afte
     );
 
     let result = sdk
-        .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_id())
+        .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
@@ -399,7 +399,7 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
     queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         vec![PaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
             receiving_detail: ReceivingDetail {
@@ -416,7 +416,7 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
     let latest = queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         vec![PaymentEndpointReservation {
             reservation_id: "reservation-2".into(),
             receiving_detail: ReceivingDetail {
@@ -435,7 +435,7 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
             let counterparty = counterparty.clone();
             move |tx| {
                 let mut sent = tx
-                    .outbound_private_messages(&counterparty, &receiver_id())
+                    .outbound_private_messages(&counterparty, &receiver_path())
                     .into_iter()
                     .find(|message| message.outbound_message_id == latest.outbound_message_id)
                     .unwrap();
@@ -443,7 +443,7 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
                 tx.save_outbound_private_message(sent)?;
                 let claimed = tx.claim_next_outbound_private_message(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     FixedClock.now(),
                     FixedClock.now() - ChronoDuration::seconds(1),
                     FixedClock.now() - ChronoDuration::seconds(1),
@@ -467,7 +467,7 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
     );
 
     let failures = sdk
-        .cancel_unattempted_superseded_reservations(&counterparty, &receiver_id(), None)
+        .cancel_unattempted_superseded_reservations(&counterparty, &receiver_path(), None)
         .await;
 
     assert!(failures.is_empty());
@@ -489,7 +489,7 @@ async fn test_terminal_private_list_reservation_cleanup_cancels_invalid_message_
     let queued = queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         vec![PaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
             receiving_detail: ReceivingDetail {
@@ -508,7 +508,7 @@ async fn test_terminal_private_list_reservation_cleanup_cancels_invalid_message_
             let counterparty = counterparty.clone();
             move |tx| {
                 let mut invalid = tx
-                    .outbound_private_messages(&counterparty, &receiver_id())
+                    .outbound_private_messages(&counterparty, &receiver_path())
                     .into_iter()
                     .find(|message| message.outbound_message_id == queued.outbound_message_id)
                     .unwrap();
@@ -533,7 +533,7 @@ async fn test_terminal_private_list_reservation_cleanup_cancels_invalid_message_
     );
 
     let failures = sdk
-        .cancel_terminal_private_list_reservations(&counterparty, &receiver_id(), None)
+        .cancel_terminal_private_list_reservations(&counterparty, &receiver_path(), None)
         .await;
 
     assert!(failures.is_empty());
@@ -557,7 +557,7 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
                     crate::storage::PaymentEndpointReservationRecord {
                         reservation_id: "reservation-1".into(),
                         counterparty,
-                        counterparty_receiver_id: receiver_id(),
+                        counterparty_receiver_path: receiver_path(),
                         identifier: "btc-lightning-bolt11".into(),
                         payload_hash: reservation_payload_hash("one"),
                         outbound_message_id: 2,
@@ -587,7 +587,7 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
         cancellation: PaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("one"),
             attribution: HashMap::new(),
@@ -605,7 +605,7 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
             .snapshot()
             .unwrap()
             .payment_endpoint_reservations
-            .get(&(counterparty, receiver_id(), "reservation-1".into()))
+            .get(&(counterparty, receiver_path(), "reservation-1".into()))
             .unwrap()
             .outbound_message_id,
         2
@@ -624,7 +624,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
                     crate::storage::PaymentEndpointReservationRecord {
                         reservation_id: "reservation-1".into(),
                         counterparty: counterparty.clone(),
-                        counterparty_receiver_id: receiver_id(),
+                        counterparty_receiver_path: receiver_path(),
                         identifier: "btc-lightning-bolt11".into(),
                         payload_hash: reservation_payload_hash("one"),
                         outbound_message_id: 1,
@@ -637,7 +637,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
                 Ok(tx
                     .claim_peer_link_operation(
                         &counterparty,
-                        &receiver_id(),
+                        &receiver_path(),
                         FixedClock.now(),
                         FixedClock.now() + ChronoDuration::seconds(10),
                     )
@@ -652,7 +652,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
             move |tx| {
                 let _ = tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     FixedClock.now() + ChronoDuration::seconds(11),
                     FixedClock.now() + ChronoDuration::seconds(71),
                 );
@@ -676,7 +676,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
         cancellation: PaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("one"),
             attribution: HashMap::new(),
@@ -693,7 +693,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
         .snapshot()
         .unwrap()
         .payment_endpoint_reservations
-        .contains_key(&(counterparty, receiver_id(), "reservation-1".into())));
+        .contains_key(&(counterparty, receiver_path(), "reservation-1".into())));
 }
 
 #[tokio::test]
@@ -708,7 +708,7 @@ async fn test_reservation_cleanup_failure_keeps_cancellation_claim() {
                     crate::storage::PaymentEndpointReservationRecord {
                         reservation_id: "reservation-1".into(),
                         counterparty: counterparty.clone(),
-                        counterparty_receiver_id: receiver_id(),
+                        counterparty_receiver_path: receiver_path(),
                         identifier: "btc-lightning-bolt11".into(),
                         payload_hash: reservation_payload_hash("one"),
                         outbound_message_id: 1,
@@ -735,7 +735,7 @@ async fn test_reservation_cleanup_failure_keeps_cancellation_claim() {
         cancellation: PaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("one"),
             attribution: HashMap::new(),
@@ -751,7 +751,7 @@ async fn test_reservation_cleanup_failure_keeps_cancellation_claim() {
         .snapshot()
         .unwrap()
         .payment_endpoint_reservations
-        .get(&(counterparty, receiver_id(), "reservation-1".into()))
+        .get(&(counterparty, receiver_path(), "reservation-1".into()))
         .unwrap()
         .clone();
     assert_eq!(record.cancellation_started_at, Some(FixedClock.now()));
@@ -769,7 +769,7 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
                     crate::storage::PaymentEndpointReservationRecord {
                         reservation_id: "reservation-1".into(),
                         counterparty: counterparty.clone(),
-                        counterparty_receiver_id: receiver_id(),
+                        counterparty_receiver_path: receiver_path(),
                         identifier: "btc-lightning-bolt11".into(),
                         payload_hash: reservation_payload_hash("one"),
                         outbound_message_id: 1,
@@ -782,7 +782,7 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
                 Ok(tx
                     .claim_peer_link_operation(
                         &counterparty,
-                        &receiver_id(),
+                        &receiver_path(),
                         FixedClock.now(),
                         FixedClock.now() + ChronoDuration::seconds(10),
                     )
@@ -808,7 +808,7 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
         cancellation: PaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("one"),
             attribution: HashMap::new(),
@@ -825,7 +825,7 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
         .snapshot()
         .unwrap()
         .payment_endpoint_reservations
-        .contains_key(&(counterparty, receiver_id(), "reservation-1".into())));
+        .contains_key(&(counterparty, receiver_path(), "reservation-1".into())));
 }
 
 #[tokio::test]
@@ -836,7 +836,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
     queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         vec![PaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
             receiving_detail: ReceivingDetail {
@@ -853,7 +853,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
     let latest = queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         vec![PaymentEndpointReservation {
             reservation_id: "reservation-2".into(),
             receiving_detail: ReceivingDetail {
@@ -872,7 +872,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
             let counterparty = counterparty.clone();
             move |tx| {
                 let mut sent = tx
-                    .outbound_private_messages(&counterparty, &receiver_id())
+                    .outbound_private_messages(&counterparty, &receiver_path())
                     .into_iter()
                     .find(|message| message.outbound_message_id == latest.outbound_message_id)
                     .unwrap();
@@ -895,7 +895,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
     );
 
     let result = sdk
-        .process_outbound_private_messages(counterparty.clone(), receiver_id())
+        .process_outbound_private_messages(counterparty.clone(), receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -917,7 +917,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
     queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         vec![PaymentEndpointReservation {
             reservation_id: "existing-reservation".into(),
             receiving_detail: ReceivingDetail {
@@ -943,7 +943,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
     );
 
     let result = sdk
-        .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_id())
+        .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
@@ -983,7 +983,7 @@ async fn test_current_private_payment_list_reads_cached_view_for_public_only_ide
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![private_list_message("ln-private")],
         None,
         FixedClock.now(),
@@ -999,7 +999,7 @@ async fn test_current_private_payment_list_reads_cached_view_for_public_only_ide
     );
 
     let view = sdk
-        .current_private_payment_list(&counterparty, &receiver_id())
+        .current_private_payment_list(&counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();

@@ -7,7 +7,7 @@ use paykit_sdk::{
 use crate::{
     json::parse_json_object,
     sdk::FfiPaykitSdk,
-    session::{app_public_key, parse_public_key, parse_receiver_id},
+    session::{app_public_key, parse_public_key, parse_receiver_path},
     PaykitFfiError,
 };
 
@@ -141,8 +141,8 @@ pub struct FfiPaykitBlobRecord {
 pub struct FfiContactUpdate {
     /// Contact public key.
     pub public_key: String,
-    /// Contact Paykit receiver folder id.
-    pub receiver_id: String,
+    /// Contact Paykit receiver path.
+    pub receiver_path: String,
     /// Optional local display label.
     pub label: Option<String>,
 }
@@ -152,8 +152,8 @@ pub struct FfiContactUpdate {
 pub struct FfiContactRecord {
     /// Contact public key.
     pub public_key: String,
-    /// Contact Paykit receiver folder id.
-    pub receiver_id: String,
+    /// Contact Paykit receiver path.
+    pub receiver_path: String,
     /// Optional local display label.
     pub label: Option<String>,
     /// Cached public profile, when fetched.
@@ -192,12 +192,12 @@ impl FfiPaykitSdk {
     pub async fn fetch_paykit_profile(
         &self,
         public_key: String,
-        receiver_id: String,
+        receiver_path: String,
     ) -> Result<Option<FfiPaykitProfileRecord>, PaykitFfiError> {
         self.runtime
             .fetch_paykit_profile(
                 parse_public_key(public_key)?,
-                parse_receiver_id(receiver_id)?,
+                parse_receiver_path(receiver_path)?,
             )
             .await
             .map(|record| record.map(Into::into))
@@ -290,13 +290,13 @@ impl FfiPaykitSdk {
     pub async fn resolve_contact_profile(
         &self,
         public_key: String,
-        receiver_id: String,
+        receiver_path: String,
         allow_pubky_profile_fallback: bool,
     ) -> Result<Option<FfiContactProfileResolution>, PaykitFfiError> {
         self.runtime
             .resolve_contact_profile(
                 parse_public_key(public_key)?,
-                parse_receiver_id(receiver_id)?,
+                parse_receiver_path(receiver_path)?,
                 allow_pubky_profile_fallback,
             )
             .await
@@ -308,13 +308,13 @@ impl FfiPaykitSdk {
     pub async fn resolve_profile(
         &self,
         public_key: String,
-        receiver_id: String,
+        receiver_path: String,
         allow_pubky_profile_fallback: bool,
     ) -> Result<Option<FfiContactProfileResolution>, PaykitFfiError> {
         self.runtime
             .resolve_profile(
                 parse_public_key(public_key)?,
-                parse_receiver_id(receiver_id)?,
+                parse_receiver_path(receiver_path)?,
                 allow_pubky_profile_fallback,
             )
             .await
@@ -350,12 +350,12 @@ impl FfiPaykitSdk {
     pub async fn contact_record(
         &self,
         public_key: String,
-        receiver_id: String,
+        receiver_path: String,
     ) -> Result<Option<FfiContactRecord>, PaykitFfiError> {
         self.runtime
             .contact_record(
                 &parse_public_key(public_key)?,
-                &parse_receiver_id(receiver_id)?,
+                &parse_receiver_path(receiver_path)?,
             )
             .await
             .map(|record| record.map(Into::into))
@@ -375,12 +375,12 @@ impl FfiPaykitSdk {
     pub async fn remove_contact(
         &self,
         public_key: String,
-        receiver_id: String,
+        receiver_path: String,
     ) -> Result<Option<FfiContactRecord>, PaykitFfiError> {
         self.runtime
             .remove_contact(
                 &parse_public_key(public_key)?,
-                &parse_receiver_id(receiver_id)?,
+                &parse_receiver_path(receiver_path)?,
             )
             .await
             .map(|record| record.map(Into::into))
@@ -391,12 +391,12 @@ impl FfiPaykitSdk {
     pub async fn refresh_contact_paykit_profile(
         &self,
         public_key: String,
-        receiver_id: String,
+        receiver_path: String,
     ) -> Result<Option<FfiContactRecord>, PaykitFfiError> {
         self.runtime
             .refresh_contact_paykit_profile(
                 parse_public_key(public_key)?,
-                parse_receiver_id(receiver_id)?,
+                parse_receiver_path(receiver_path)?,
             )
             .await
             .map(|record| record.map(Into::into))
@@ -407,12 +407,12 @@ impl FfiPaykitSdk {
     pub async fn publish_public_contact(
         &self,
         public_key: String,
-        receiver_id: String,
+        receiver_path: String,
     ) -> Result<FfiContactRecord, PaykitFfiError> {
         self.runtime
             .publish_public_contact(
                 parse_public_key(public_key)?,
-                parse_receiver_id(receiver_id)?,
+                parse_receiver_path(receiver_path)?,
             )
             .await
             .map(Into::into)
@@ -423,12 +423,12 @@ impl FfiPaykitSdk {
     pub async fn remove_public_contact(
         &self,
         public_key: String,
-        receiver_id: String,
+        receiver_path: String,
     ) -> Result<Option<FfiContactRecord>, PaykitFfiError> {
         self.runtime
             .remove_public_contact(
                 parse_public_key(public_key)?,
-                parse_receiver_id(receiver_id)?,
+                parse_receiver_path(receiver_path)?,
             )
             .await
             .map(|record| record.map(Into::into))
@@ -556,7 +556,7 @@ impl TryFrom<FfiContactUpdate> for ContactUpdate {
     fn try_from(value: FfiContactUpdate) -> Result<Self, Self::Error> {
         Ok(Self {
             public_key: parse_public_key(value.public_key)?,
-            receiver_id: parse_receiver_id(value.receiver_id)?,
+            receiver_path: parse_receiver_path(value.receiver_path)?,
             label: value.label,
         })
     }
@@ -566,7 +566,7 @@ impl From<ContactRecord> for FfiContactRecord {
     fn from(value: ContactRecord) -> Self {
         Self {
             public_key: app_public_key(&value.public_key),
-            receiver_id: value.receiver_id.to_string(),
+            receiver_path: value.receiver_path.to_string(),
             label: value.label,
             profile: value.profile.map(Into::into),
             profile_fetched_at: value.profile_fetched_at.map(|time| time.to_rfc3339()),

@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    InMemoryStorage, LinkedPeerState, PaykitReceiverId, PaykitSdk, PaykitSdkConfig, PaymentAdapter,
-    PaymentEndpointCandidate, PaymentEndpointSelectionRequest, PaymentTarget, PubkyLocalSecretKey,
-    PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap, PubkySessionProvider,
-    ReceivingDetail, ReceivingDetailScope, Result,
+    InMemoryStorage, LinkedPeerState, PaykitReceiverPath, PaykitSdk, PaykitSdkConfig,
+    PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointSelectionRequest, PaymentTarget,
+    PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
+    PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, Result,
 };
 use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
@@ -144,7 +144,7 @@ pub struct TestUser {
     pub adapter: TestnetPaymentAdapter,
     pub access: PubkySessionAccess,
     pub public_key: PubkyPublicKey,
-    pub receiver_id: PaykitReceiverId,
+    pub receiver_path: PaykitReceiverPath,
 }
 
 impl TestUser {
@@ -155,12 +155,12 @@ impl TestUser {
     /// `PubkySessionAccess::validate` holds and the session is
     /// private-link-capable.
     pub async fn sign_up(testnet: &EphemeralTestnet) -> TestUser {
-        Self::sign_up_with_receiver(testnet, receiver_id("test-receiver")).await
+        Self::sign_up_with_receiver(testnet, receiver_path("bitkit/wallet")).await
     }
 
     pub async fn sign_up_with_receiver(
         testnet: &EphemeralTestnet,
-        receiver_id: PaykitReceiverId,
+        receiver_path: PaykitReceiverPath,
     ) -> TestUser {
         let keypair = Keypair::random();
         let secret_key = PubkyLocalSecretKey::new(keypair.secret_key());
@@ -168,7 +168,7 @@ impl TestUser {
             PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
         let bootstrap =
             PubkySessionBootstrap::with_pubky(testnet.sdk().expect("testnet Pubky client"));
-        let config = PaykitSdkConfig::new(receiver_id.clone());
+        let config = PaykitSdkConfig::new(receiver_path.clone());
         let result = bootstrap
             .sign_up(
                 &secret_key,
@@ -198,7 +198,7 @@ impl TestUser {
             adapter,
             access: result.access,
             public_key: result.public_key,
-            receiver_id,
+            receiver_path,
         }
     }
 }
@@ -212,8 +212,8 @@ pub struct TwoParty {
 
 pub async fn two_party() -> TwoParty {
     let testnet = build_testnet().await;
-    let alice = TestUser::sign_up_with_receiver(&testnet, receiver_id("alice-receiver")).await;
-    let bob = TestUser::sign_up_with_receiver(&testnet, receiver_id("bob-receiver")).await;
+    let alice = TestUser::sign_up_with_receiver(&testnet, receiver_path("bitkit/wallet")).await;
+    let bob = TestUser::sign_up_with_receiver(&testnet, receiver_path("bitkit/server")).await;
     TwoParty {
         _testnet: testnet,
         alice,
@@ -226,14 +226,14 @@ pub async fn linked_two_party() -> TwoParty {
     let pair = two_party().await;
     pair.alice
         .sdk
-        .initiate_link_with_peer(pair.bob.public_key.clone(), pair.bob.receiver_id.clone())
+        .initiate_link_with_peer(pair.bob.public_key.clone(), pair.bob.receiver_path.clone())
         .await
         .expect("initiating the Encrypted Link Handshake should succeed");
     pair.bob
         .sdk
         .accept_link_with_peer(
             pair.alice.public_key.clone(),
-            pair.alice.receiver_id.clone(),
+            pair.alice.receiver_path.clone(),
         )
         .await
         .expect("accepting the Encrypted Link Handshake should succeed");
@@ -259,7 +259,7 @@ pub async fn drive_link_to_linked(alice: &TestUser, bob: &TestUser) {
         if alice_state != LinkedPeerState::Linked {
             alice_state = alice
                 .sdk
-                .advance_link_handshake(bob.public_key.clone(), bob.receiver_id.clone())
+                .advance_link_handshake(bob.public_key.clone(), bob.receiver_path.clone())
                 .await
                 .expect("initiator handshake advance should succeed")
                 .state;
@@ -267,7 +267,7 @@ pub async fn drive_link_to_linked(alice: &TestUser, bob: &TestUser) {
         if bob_state != LinkedPeerState::Linked {
             bob_state = bob
                 .sdk
-                .advance_link_handshake(alice.public_key.clone(), alice.receiver_id.clone())
+                .advance_link_handshake(alice.public_key.clone(), alice.receiver_path.clone())
                 .await
                 .expect("responder handshake advance should succeed")
                 .state;
@@ -276,8 +276,8 @@ pub async fn drive_link_to_linked(alice: &TestUser, bob: &TestUser) {
     }
 }
 
-pub fn receiver_id(value: &str) -> PaykitReceiverId {
-    PaykitReceiverId::new(value).expect("test receiver id should be valid")
+pub fn receiver_path(value: &str) -> PaykitReceiverPath {
+    PaykitReceiverPath::new(value).expect("test receiver path should be valid")
 }
 
 pub fn receiving_detail(identifier: &str, payload: &str) -> ReceivingDetail {

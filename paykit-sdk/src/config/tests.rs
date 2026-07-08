@@ -1,7 +1,7 @@
 use super::*;
 
-fn receiver_config(receiver_id: &str) -> PaykitSdkConfig {
-    PaykitSdkConfig::new(PaykitReceiverId::new(receiver_id).unwrap())
+fn receiver_config(receiver_path: &str) -> PaykitSdkConfig {
+    PaykitSdkConfig::new(PaykitReceiverPath::new(receiver_path).unwrap())
 }
 
 #[test]
@@ -26,35 +26,38 @@ fn test_config_validate_rejects_oversized_timeouts() {
 
 #[test]
 fn test_config_builds_default_profile_namespace_paths() {
-    let config = receiver_config("bitkit");
+    let config = receiver_config("bitkit/wallet");
     let public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
 
     assert_eq!(
         config.paykit_profile_path(),
-        "/pub/paykit/v0/receivers/bitkit/profile.json"
+        "/pub/paykit/v0/bitkit/wallet/profile.json"
     );
     assert_eq!(
-        config.paykit_profile_path_for_receiver(&PaykitReceiverId::new("tether").unwrap()),
-        "/pub/paykit/v0/receivers/tether/profile.json"
+        config.paykit_profile_path_for_receiver(&PaykitReceiverPath::new("tether/wallet").unwrap()),
+        "/pub/paykit/v0/tether/wallet/profile.json"
     );
     assert_eq!(
         config.paykit_profile_blob_path_prefix(),
-        "/pub/paykit/v0/receivers/bitkit/blobs/"
+        "/pub/paykit/v0/bitkit/wallet/blobs/"
     );
     assert_eq!(
-        config.public_contact_path(&public_key, &PaykitReceiverId::new("tether").unwrap()),
+        config.public_contact_path(
+            &public_key,
+            &PaykitReceiverPath::new("tether/wallet").unwrap()
+        ),
         format!(
-            "/pub/paykit/v0/receivers/bitkit/contacts/{}/tether.json",
+            "/pub/paykit/v0/bitkit/wallet/contacts/{}/tether/wallet.json",
             public_key.as_str()
         )
     );
     assert_eq!(
         config.receipt_path_prefix(),
-        "/pub/paykit/v0/private/bitkit/receipts"
+        "/pub/paykit/v0/private/bitkit/wallet/receipts"
     );
     assert_eq!(
         config.required_session_capabilities(),
-        "/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw"
+        "/pub/paykit/v0/bitkit/wallet/:rw,/pub/paykit/v0/private/bitkit/wallet/:rw"
     );
 }
 
@@ -62,29 +65,29 @@ fn test_config_builds_default_profile_namespace_paths() {
 fn test_config_allows_custom_profile_namespace_segment() {
     let config = PaykitSdkConfig {
         profile_namespace: "bitkit.to".into(),
-        ..receiver_config("bitkit")
+        ..receiver_config("bitkit/wallet")
     };
 
     config.validate().unwrap();
     assert_eq!(
         config.paykit_profile_path(),
-        "/pub/bitkit.to/receivers/bitkit/profile.json"
+        "/pub/bitkit.to/bitkit/wallet/profile.json"
     );
     assert_eq!(
-        config.paykit_profile_path_for_receiver(&PaykitReceiverId::new("tether").unwrap()),
-        "/pub/bitkit.to/receivers/tether/profile.json"
+        config.paykit_profile_path_for_receiver(&PaykitReceiverPath::new("tether/wallet").unwrap()),
+        "/pub/bitkit.to/tether/wallet/profile.json"
     );
     assert_eq!(
         config.paykit_profile_blob_path_prefix(),
-        "/pub/bitkit.to/receivers/bitkit/blobs/"
+        "/pub/bitkit.to/bitkit/wallet/blobs/"
     );
     assert_eq!(
         config.public_contact_path_prefix(),
-        "/pub/bitkit.to/receivers/bitkit/contacts/"
+        "/pub/bitkit.to/bitkit/wallet/contacts/"
     );
     assert_eq!(
         config.required_session_capabilities(),
-        "/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw,/pub/bitkit.to/receivers/bitkit/:rw"
+        "/pub/paykit/v0/bitkit/wallet/:rw,/pub/paykit/v0/private/bitkit/wallet/:rw,/pub/bitkit.to/bitkit/wallet/:rw"
     );
 }
 
@@ -97,7 +100,7 @@ fn test_config_uses_namespace_capability_when_public_contact_sharing_enabled() {
 
     assert_eq!(
         config.required_session_capabilities(),
-        "/pub/paykit/v0/receivers/test/:rw,/pub/paykit/v0/private/test/:rw"
+        "/pub/paykit/v0/test/wallet/:rw,/pub/paykit/v0/private/test/wallet/:rw"
     );
 }
 

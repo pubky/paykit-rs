@@ -4,7 +4,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305,
 };
 
-use crate::{PaykitError, PaykitReceiverId, Result};
+use crate::{PaykitError, PaykitReceiverPath, Result};
 
 use super::{
     wire::{EncryptedReceiptWire, ReceiptWire},
@@ -19,15 +19,15 @@ impl Receipt {
     /// Encrypt this receipt for storage at its canonical Receipt Location path
     /// using `key`.
     ///
-    /// The location path is derived from the issuer receiver id and Receipt ID
+    /// The location path is derived from the issuer receiver path and Receipt ID
     /// and authenticated as AEAD associated data; callers must use that same
     /// canonical path when decrypting.
     pub fn encrypt(
         &self,
-        receiver_id: &PaykitReceiverId,
+        receiver_path: &PaykitReceiverPath,
         key: &ReceiptDecryptionKey,
     ) -> Result<String> {
-        let location = ReceiptAccess::location(receiver_id, &self.receipt_id);
+        let location = ReceiptAccess::location(receiver_path, &self.receipt_id);
         self.encrypt_for_location(key, &location)
     }
 

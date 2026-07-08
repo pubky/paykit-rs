@@ -9,7 +9,7 @@ where
 {
     /// Export SDK-managed backup state.
     pub async fn export_backup_state(&self) -> Result<SdkBackupState> {
-        export_sdk_backup_state(&self.storage, self.config.receiver_id.clone()).await
+        export_sdk_backup_state(&self.storage, self.config.receiver_path.clone()).await
     }
 
     /// Restore SDK-managed backup state.
@@ -31,7 +31,7 @@ where
         restore_sdk_backup_state(
             &self.storage,
             backup,
-            self.config.receiver_id.clone(),
+            self.config.receiver_path.clone(),
             trusted_identity,
         )
         .await

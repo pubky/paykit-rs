@@ -30,7 +30,7 @@ where
             private_allowed = self
                 .private_resolution_allowed_for_peer(
                     &request.counterparty,
-                    &request.counterparty_receiver_id,
+                    &request.counterparty_receiver_path,
                     &mut private_state,
                 )
                 .await?;
@@ -39,7 +39,7 @@ where
             if let Err(err) = self
                 .observe_remote_recovery_marker_for_cached_private_state(
                     &request.counterparty,
-                    &request.counterparty_receiver_id,
+                    &request.counterparty_receiver_path,
                     session_access.as_ref(),
                 )
                 .await
@@ -56,7 +56,7 @@ where
             private_allowed = self
                 .private_resolution_allowed_for_peer(
                     &request.counterparty,
-                    &request.counterparty_receiver_id,
+                    &request.counterparty_receiver_path,
                     &mut private_state,
                 )
                 .await?;
@@ -65,7 +65,7 @@ where
             load_current_private_payment_list(
                 &self.storage,
                 &request.counterparty,
-                &request.counterparty_receiver_id,
+                &request.counterparty_receiver_path,
             )
             .await?
         } else {
@@ -73,7 +73,7 @@ where
         };
         let mut candidates = private_candidates(
             &request.counterparty,
-            &request.counterparty_receiver_id,
+            &request.counterparty_receiver_path,
             private_view.as_ref(),
         );
         if !candidates.is_empty() {
@@ -97,7 +97,7 @@ where
                 match self
                     .recover_private_candidates_for_resolution(
                         &request.counterparty,
-                        &request.counterparty_receiver_id,
+                        &request.counterparty_receiver_path,
                     )
                     .await?
                 {
@@ -136,7 +136,7 @@ where
             candidates.extend(
                 self.public_payment_candidates(
                     &request.counterparty,
-                    &request.counterparty_receiver_id,
+                    &request.counterparty_receiver_path,
                 )
                 .await?,
             );
@@ -148,7 +148,7 @@ where
 
         self.resolve_candidate_batch(
             request.counterparty,
-            request.counterparty_receiver_id,
+            request.counterparty_receiver_path,
             request.amount,
             candidates,
             private_state,
@@ -160,12 +160,12 @@ where
     pub async fn resolve_private_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         amount: Option<PaymentAmountContext>,
     ) -> Result<ContactPaymentResolution> {
         self.resolve_contact_payment(ContactPaymentResolutionRequest {
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             amount,
             include_public_endpoints: false,
         })
@@ -176,11 +176,11 @@ where
     pub async fn resolve_public_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         amount: Option<PaymentAmountContext>,
     ) -> Result<ContactPaymentResolution> {
         let candidates = self
-            .public_payment_candidates(&counterparty, &counterparty_receiver_id)
+            .public_payment_candidates(&counterparty, &counterparty_receiver_path)
             .await?;
         if candidates.is_empty() {
             return Ok(status_resolution(
@@ -190,7 +190,7 @@ where
         }
         self.resolve_candidate_batch(
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             amount,
             candidates,
             ContactPaymentResolutionPrivateState::NoPrivateEndpoint,
@@ -210,7 +210,7 @@ where
     pub async fn prepare_and_resolve_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         amount: Option<PaymentAmountContext>,
         include_public_endpoints: bool,
         max_advance_steps: u32,
@@ -224,7 +224,7 @@ where
             match self
                 .ensure_link_with_peer(
                     counterparty.clone(),
-                    counterparty_receiver_id.clone(),
+                    counterparty_receiver_path.clone(),
                     max_advance_steps,
                 )
                 .await
@@ -235,7 +235,7 @@ where
                         match self
                             .process_outbound_private_messages(
                                 counterparty.clone(),
-                                counterparty_receiver_id.clone(),
+                                counterparty_receiver_path.clone(),
                             )
                             .await
                         {
@@ -246,7 +246,7 @@ where
                                 match self
                                     .receive_private_messages(
                                         counterparty.clone(),
-                                        counterparty_receiver_id.clone(),
+                                        counterparty_receiver_path.clone(),
                                     )
                                     .await
                                 {
@@ -289,7 +289,7 @@ where
         let mut resolution = self
             .resolve_contact_payment(ContactPaymentResolutionRequest {
                 counterparty,
-                counterparty_receiver_id,
+                counterparty_receiver_path,
                 amount,
                 include_public_endpoints,
             })
@@ -313,11 +313,11 @@ where
     async fn private_resolution_allowed_for_peer(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
         private_state: &mut ContactPaymentResolutionPrivateState,
     ) -> Result<bool> {
         match self
-            .ensure_peer_allows_private_automation(counterparty, counterparty_receiver_id)
+            .ensure_peer_allows_private_automation(counterparty, counterparty_receiver_path)
             .await
         {
             Ok(()) => Ok(true),
@@ -332,7 +332,7 @@ where
     pub(super) async fn recover_private_candidates_for_resolution(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<PrivateRecoveryOutcome> {
         let Some(identity) = self.storage.load_identity_state().await? else {
             return Ok(PrivateRecoveryOutcome::PublicOnly);
@@ -344,8 +344,8 @@ where
         let (peer_state, has_active_link) = self
             .storage
             .transaction(|tx| {
-                let peer = tx.linked_peer(counterparty, counterparty_receiver_id);
-                let link_state = tx.encrypted_link_state(counterparty, counterparty_receiver_id);
+                let peer = tx.linked_peer(counterparty, counterparty_receiver_path);
+                let link_state = tx.encrypted_link_state(counterparty, counterparty_receiver_path);
                 let has_active_link = link_state
                     .as_ref()
                     .and_then(|state| state.link_snapshot.as_ref())
@@ -367,25 +367,25 @@ where
         if has_active_link {
             self.observe_remote_recovery_marker_for_cached_private_state(
                 counterparty,
-                counterparty_receiver_id,
+                counterparty_receiver_path,
                 None,
             )
             .await?;
 
             match self
-                .receive_private_messages(counterparty.clone(), counterparty_receiver_id.clone())
+                .receive_private_messages(counterparty.clone(), counterparty_receiver_path.clone())
                 .await
             {
                 Ok(_) => {
                     let private_view = load_current_private_payment_list(
                         &self.storage,
                         counterparty,
-                        counterparty_receiver_id,
+                        counterparty_receiver_path,
                     )
                     .await?;
                     return Ok(PrivateRecoveryOutcome::Refreshed(private_candidates(
                         counterparty,
-                        counterparty_receiver_id,
+                        counterparty_receiver_path,
                         private_view.as_ref(),
                     )));
                 }
@@ -408,7 +408,7 @@ where
     async fn public_payment_candidates(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PaymentEndpointCandidate>> {
         let public_storage =
             self.pubky
@@ -422,7 +422,7 @@ where
         let payment_list = paykit_lib::get_payment_list(
             &public_storage,
             &counterparty.to_public_key()?,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
         )
         .await?;
         let mut endpoints = payment_list
@@ -430,7 +430,7 @@ where
             .into_iter()
             .map(|(identifier, payload)| PaymentEndpointCandidate {
                 counterparty: counterparty.clone(),
-                counterparty_receiver_id: counterparty_receiver_id.clone(),
+                counterparty_receiver_path: counterparty_receiver_path.clone(),
                 source: PaymentEndpointSource::PublicPaymentEndpoint,
                 identifier: identifier.as_str().to_owned(),
                 payload: payload.into_inner(),
@@ -455,7 +455,7 @@ where
     pub(super) async fn resolve_candidate_batch(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         amount: Option<PaymentAmountContext>,
         candidates: Vec<PaymentEndpointCandidate>,
         private_state: ContactPaymentResolutionPrivateState,
@@ -464,7 +464,7 @@ where
             .payment
             .select_payment_endpoints(&PaymentEndpointSelectionRequest {
                 counterparty,
-                counterparty_receiver_id,
+                counterparty_receiver_path,
                 amount,
                 candidates: candidates.clone(),
             })
@@ -481,7 +481,7 @@ where
 
 fn private_candidates(
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     view: Option<&PrivatePaymentListView>,
 ) -> Vec<PaymentEndpointCandidate> {
     let Some(view) = view else {
@@ -492,7 +492,7 @@ fn private_candidates(
         .iter()
         .map(|(identifier, payload)| PaymentEndpointCandidate {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: counterparty_receiver_id.clone(),
+            counterparty_receiver_path: counterparty_receiver_path.clone(),
             source: PaymentEndpointSource::PrivatePaymentList,
             identifier: identifier.clone(),
             payload: payload.clone(),

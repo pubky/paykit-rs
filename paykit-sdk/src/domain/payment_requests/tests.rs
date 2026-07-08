@@ -18,8 +18,8 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
-fn receiver_id() -> PaykitReceiverId {
-    PaykitReceiverId::new("bitkit").unwrap()
+fn receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
 fn private_message(raw_json: String) -> PrivateApplicationMessage {
@@ -112,7 +112,7 @@ async fn persist_messages_at(
     persist_private_stream_batch(
         storage,
         counterparty,
-        receiver_id(),
+        receiver_path(),
         messages.into_iter().map(private_message).collect(),
         None,
         received_at,

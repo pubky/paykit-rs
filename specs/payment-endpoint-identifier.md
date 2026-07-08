@@ -14,10 +14,10 @@ in Paykit: short, structured strings that name an unambiguous way for a payee
 to receive value. It also describes the recommended interoperable payload
 convention for the receiving details that accompany each identifier.
 
-The intent is to give implementers and downstream bindings (Swift, Kotlin,
-React Native) a single, consistent vocabulary to exchange, so that a payer
-and payee who independently support "`btc-lightning-bolt12`" can recognise
-each other without side-channel coordination.
+The intent is to give implementers and downstream bindings (Swift, Kotlin) a
+single, consistent vocabulary to exchange, so that a payer and payee who
+independently support "`btc-lightning-bolt12`" can recognise each other without
+side-channel coordination.
 
 ## 1. Status of this document
 

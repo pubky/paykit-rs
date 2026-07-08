@@ -11,8 +11,8 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
-fn receiver_id() -> PaykitReceiverId {
-    PaykitReceiverId::new("bitkit").unwrap()
+fn receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
 #[tokio::test]
@@ -23,7 +23,7 @@ async fn test_save_link_handshake_state_marks_peer_linking() {
     let report = save_link_handshake_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         EncryptedLinkHandshakeRole::Initiator,
         vec![1, 2, 3],
         timestamp(),
@@ -36,12 +36,12 @@ async fn test_save_link_handshake_state_marks_peer_linking() {
         report.handshake_role,
         Some(EncryptedLinkHandshakeRole::Initiator)
     );
-    let peer = load_linked_peer(&storage, &counterparty, &receiver_id())
+    let peer = load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linking);
-    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_id())
+    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -56,7 +56,7 @@ async fn test_save_linked_peer_link_state_clears_pending_handshake() {
     save_link_handshake_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         EncryptedLinkHandshakeRole::Responder,
         vec![1, 2, 3],
         timestamp(),
@@ -67,7 +67,7 @@ async fn test_save_linked_peer_link_state_clears_pending_handshake() {
     let report = save_linked_peer_link_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![4, 5, 6],
         timestamp(),
     )
@@ -77,7 +77,7 @@ async fn test_save_linked_peer_link_state_clears_pending_handshake() {
     assert_eq!(report.state, LinkedPeerState::Linked);
     assert_eq!(report.handshake_role, None);
     assert_eq!(report.generation, 1);
-    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_id())
+    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -93,7 +93,7 @@ async fn test_unleased_recovery_rejects_active_peer_lease() {
     save_linked_peer_link_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![4, 5, 6],
         timestamp(),
     )
@@ -105,7 +105,7 @@ async fn test_unleased_recovery_rejects_active_peer_lease() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
                 ))
@@ -118,19 +118,19 @@ async fn test_unleased_recovery_rejects_active_peer_lease() {
     let result = mark_recovery_required_inner(
         &storage,
         counterparty.clone(),
-        Some(receiver_id()),
+        Some(receiver_path()),
         None,
         timestamp(),
     )
     .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-    let peer = load_linked_peer(&storage, &counterparty, &receiver_id())
+    let peer = load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::Linked);
-    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_id())
+    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -141,7 +141,7 @@ async fn test_unleased_recovery_rejects_active_peer_lease() {
     assert!(storage
         .transaction({
             let counterparty = counterparty.clone();
-            move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
+            move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_path()))
         })
         .await
         .unwrap()
@@ -155,7 +155,7 @@ async fn test_lease_checked_recovery_preserves_current_lease_for_caller() {
     save_linked_peer_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         LinkedPeerState::Linked,
         timestamp(),
     )
@@ -167,7 +167,7 @@ async fn test_lease_checked_recovery_preserves_current_lease_for_caller() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
                 ))
@@ -189,7 +189,7 @@ async fn test_lease_checked_recovery_preserves_current_lease_for_caller() {
     assert!(storage
         .transaction({
             let counterparty = counterparty.clone();
-            move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
+            move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_path()))
         })
         .await
         .unwrap()
@@ -206,7 +206,7 @@ async fn test_unleased_state_save_allows_expired_peer_lease() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
                 ))
@@ -219,7 +219,7 @@ async fn test_unleased_state_save_allows_expired_peer_lease() {
     let record = save_linked_peer_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         LinkedPeerState::Linked,
         timestamp() + chrono::Duration::seconds(11),
     )
@@ -236,7 +236,7 @@ async fn test_mark_recovery_required_clears_handshake_snapshot() {
     save_link_handshake_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         EncryptedLinkHandshakeRole::Responder,
         vec![1, 2, 3],
         timestamp(),
@@ -247,7 +247,7 @@ async fn test_mark_recovery_required_clears_handshake_snapshot() {
     let mark = mark_recovery_required_inner(
         &storage,
         counterparty.clone(),
-        Some(receiver_id()),
+        Some(receiver_path()),
         None,
         timestamp(),
     )
@@ -255,12 +255,12 @@ async fn test_mark_recovery_required_clears_handshake_snapshot() {
     .unwrap();
 
     assert!(mark.new_episode);
-    let peer = load_linked_peer(&storage, &counterparty, &receiver_id())
+    let peer = load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
-    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_id())
+    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -277,7 +277,7 @@ async fn test_save_link_handshake_state_rejects_blocked_peer() {
     save_linked_peer_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         LinkedPeerState::Blocked,
         timestamp(),
     )
@@ -287,7 +287,7 @@ async fn test_save_link_handshake_state_rejects_blocked_peer() {
     let result = save_link_handshake_state(
         &storage,
         counterparty,
-        receiver_id(),
+        receiver_path(),
         EncryptedLinkHandshakeRole::Initiator,
         vec![1, 2, 3],
         timestamp(),
@@ -304,7 +304,7 @@ async fn test_generation_checked_handshake_save_keeps_newer_link() {
     save_link_handshake_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         EncryptedLinkHandshakeRole::Initiator,
         vec![1, 2, 3],
         timestamp(),
@@ -314,7 +314,7 @@ async fn test_generation_checked_handshake_save_keeps_newer_link() {
     save_linked_peer_link_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![4, 5, 6],
         timestamp(),
     )
@@ -324,7 +324,7 @@ async fn test_generation_checked_handshake_save_keeps_newer_link() {
     let report = save_link_handshake_state_if_generation(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         EncryptedLinkHandshakeRole::Initiator,
         vec![7, 8, 9],
         0,
@@ -335,7 +335,7 @@ async fn test_generation_checked_handshake_save_keeps_newer_link() {
 
     assert_eq!(report.state, LinkedPeerState::Linked);
     assert_eq!(report.generation, 1);
-    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_id())
+    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -350,7 +350,7 @@ async fn test_generation_checked_handshake_save_preserves_recovery_required() {
     save_link_handshake_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         EncryptedLinkHandshakeRole::Initiator,
         vec![1, 2, 3],
         timestamp(),
@@ -360,7 +360,7 @@ async fn test_generation_checked_handshake_save_preserves_recovery_required() {
     mark_recovery_required_inner(
         &storage,
         counterparty.clone(),
-        Some(receiver_id()),
+        Some(receiver_path()),
         None,
         timestamp(),
     )
@@ -370,7 +370,7 @@ async fn test_generation_checked_handshake_save_preserves_recovery_required() {
     let report = save_link_handshake_state_if_generation(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         EncryptedLinkHandshakeRole::Initiator,
         vec![7, 8, 9],
         0,
@@ -382,12 +382,12 @@ async fn test_generation_checked_handshake_save_preserves_recovery_required() {
     assert_eq!(report.state, LinkedPeerState::RecoveryRequired);
     assert_eq!(report.generation, 1);
     assert_eq!(report.handshake_role, None);
-    let peer = load_linked_peer(&storage, &counterparty, &receiver_id())
+    let peer = load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
-    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_id())
+    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -406,7 +406,7 @@ async fn test_lease_checked_handshake_save_rejects_stale_lease() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
                 ))
@@ -421,7 +421,7 @@ async fn test_lease_checked_handshake_save_rejects_stale_lease() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
                 ))
@@ -442,7 +442,7 @@ async fn test_lease_checked_handshake_save_rejects_stale_lease() {
     .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_id())
+    let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();
     assert!(link_state.is_none());
@@ -450,7 +450,7 @@ async fn test_lease_checked_handshake_save_rejects_stale_lease() {
         storage
             .transaction({
                 let counterparty = counterparty.clone();
-                move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
+                move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_path()))
             })
             .await
             .unwrap(),
@@ -465,7 +465,7 @@ async fn test_lease_checked_recovery_rejects_stale_lease() {
     save_linked_peer_state(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         LinkedPeerState::Linked,
         timestamp(),
     )
@@ -478,7 +478,7 @@ async fn test_lease_checked_recovery_rejects_stale_lease() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
                 ))
@@ -493,7 +493,7 @@ async fn test_lease_checked_recovery_rejects_stale_lease() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
                 ))
@@ -512,7 +512,7 @@ async fn test_lease_checked_recovery_rejects_stale_lease() {
     .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-    let peer = load_linked_peer(&storage, &counterparty, &receiver_id())
+    let peer = load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -521,7 +521,7 @@ async fn test_lease_checked_recovery_rejects_stale_lease() {
         storage
             .transaction({
                 let counterparty = counterparty.clone();
-                move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
+                move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_path()))
             })
             .await
             .unwrap(),

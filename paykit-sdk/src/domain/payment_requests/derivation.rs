@@ -9,7 +9,7 @@ use super::*;
 pub(crate) async fn received_payment_request_records<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentRequestRecord>>
 where
@@ -17,7 +17,7 @@ where
 {
     let (items, dedupe_records) = storage
         .transaction(|tx| {
-            let items = tx.private_stream_items(counterparty, counterparty_receiver_id);
+            let items = tx.private_stream_items(counterparty, counterparty_receiver_path);
             let mut dedupe_records = HashMap::new();
             for item in &items {
                 let Some(message) = payment_request_message_from_item(item) else {
@@ -29,9 +29,11 @@ where
                 let Some(event_id) = parsed.event_id() else {
                     continue;
                 };
-                if let Some(record) =
-                    tx.event_dedup_record(counterparty, counterparty_receiver_id, event_id.as_str())
-                {
+                if let Some(record) = tx.event_dedup_record(
+                    counterparty,
+                    counterparty_receiver_path,
+                    event_id.as_str(),
+                ) {
                     dedupe_records.insert(event_id.as_str().to_owned(), record);
                 }
             }
@@ -40,7 +42,7 @@ where
         .await?;
     derive_received_payment_request_records(
         counterparty.clone(),
-        counterparty_receiver_id.clone(),
+        counterparty_receiver_path.clone(),
         items,
         dedupe_records,
         now,
@@ -55,7 +57,7 @@ where
 pub(crate) async fn payment_request_records<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentRequestRecord>>
 where
@@ -63,8 +65,8 @@ where
 {
     let (items, outbound, dedupe_records) = storage
         .transaction(|tx| {
-            let items = tx.private_stream_items(counterparty, counterparty_receiver_id);
-            let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_id);
+            let items = tx.private_stream_items(counterparty, counterparty_receiver_path);
+            let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_path);
             let mut dedupe_records = HashMap::new();
             for item in &items {
                 let Some(message) = payment_request_message_from_item(item) else {
@@ -76,9 +78,11 @@ where
                 let Some(event_id) = parsed.event_id() else {
                     continue;
                 };
-                if let Some(record) =
-                    tx.event_dedup_record(counterparty, counterparty_receiver_id, event_id.as_str())
-                {
+                if let Some(record) = tx.event_dedup_record(
+                    counterparty,
+                    counterparty_receiver_path,
+                    event_id.as_str(),
+                ) {
                     dedupe_records.insert(event_id.as_str().to_owned(), record);
                 }
             }
@@ -87,7 +91,7 @@ where
         .await?;
     derive_payment_request_records(
         counterparty.clone(),
-        counterparty_receiver_id.clone(),
+        counterparty_receiver_path.clone(),
         items,
         outbound,
         dedupe_records,
@@ -96,7 +100,7 @@ where
 }
 fn derive_received_payment_request_records(
     counterparty: PubkyPublicKey,
-    counterparty_receiver_id: PaykitReceiverId,
+    counterparty_receiver_path: PaykitReceiverPath,
     mut items: Vec<PrivateStreamItemRecord>,
     dedupe_records: HashMap<String, EventDedupRecord>,
     now: DateTime<Utc>,
@@ -132,7 +136,7 @@ fn derive_received_payment_request_records(
                         record_for(
                             &mut records,
                             &counterparty,
-                            &counterparty_receiver_id,
+                            &counterparty_receiver_path,
                             payment_request_id,
                         )
                         .mark_invalid(&item, "Event ID reused with different payload");
@@ -148,7 +152,7 @@ fn derive_received_payment_request_records(
         let record = record_for(
             &mut records,
             &counterparty,
-            &counterparty_receiver_id,
+            &counterparty_receiver_path,
             payment_request_id,
         );
         if !parsed.is_valid() {
@@ -249,7 +253,7 @@ impl StoredPaymentRequestEvent {
 
 fn derive_payment_request_records(
     counterparty: PubkyPublicKey,
-    counterparty_receiver_id: PaykitReceiverId,
+    counterparty_receiver_path: PaykitReceiverPath,
     mut items: Vec<PrivateStreamItemRecord>,
     outbound: Vec<OutboundPrivateMessageRecord>,
     dedupe_records: HashMap<String, EventDedupRecord>,
@@ -296,7 +300,7 @@ fn derive_payment_request_records(
                         record_for(
                             &mut records,
                             &counterparty,
-                            &counterparty_receiver_id,
+                            &counterparty_receiver_path,
                             payment_request_id,
                         )
                         .mark_invalid(&item, "Event ID reused with different payload");
@@ -337,7 +341,7 @@ fn derive_payment_request_records(
             record_for(
                 &mut records,
                 &counterparty,
-                &counterparty_receiver_id,
+                &counterparty_receiver_path,
                 payment_request_id,
             )
             .mark_invalid(
@@ -382,7 +386,7 @@ fn derive_payment_request_records(
             let record = record_for(
                 &mut records,
                 &counterparty,
-                &counterparty_receiver_id,
+                &counterparty_receiver_path,
                 stored.payment_request_id(),
             );
             mark_invalid_stored(record, &stored, "Event ID reused with different payload");
@@ -400,7 +404,7 @@ fn derive_payment_request_records(
     events.retain(|event| !pre_invalid_request_ids.contains(&event.payment_request_id()));
     events = dedupe_stored_events(
         &counterparty,
-        &counterparty_receiver_id,
+        &counterparty_receiver_path,
         &mut records,
         events,
         tainted_events,
@@ -411,7 +415,7 @@ fn derive_payment_request_records(
         let record = record_for(
             &mut records,
             &counterparty,
-            &counterparty_receiver_id,
+            &counterparty_receiver_path,
             payment_request_id,
         );
         apply_stored_event(record, &event);
@@ -472,7 +476,7 @@ struct TaintedEventSeed {
 
 fn dedupe_stored_events(
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     records: &mut HashMap<String, PaymentRequestRecord>,
     events: Vec<StoredPaymentRequestEvent>,
     tainted_events: Vec<StoredPaymentRequestEvent>,
@@ -526,7 +530,7 @@ fn dedupe_stored_events(
                 let first_record = record_for(
                     records,
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     first.payment_request_id.clone(),
                 );
                 mark_invalid_stored(
@@ -539,7 +543,7 @@ fn dedupe_stored_events(
             let current_record = record_for(
                 records,
                 counterparty,
-                counterparty_receiver_id,
+                counterparty_receiver_path,
                 event.payment_request_id(),
             );
             mark_invalid_stored(
@@ -575,7 +579,7 @@ fn dedupe_stored_events(
 fn record_for<'a>(
     records: &'a mut HashMap<String, PaymentRequestRecord>,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     payment_request_id: String,
 ) -> &'a mut PaymentRequestRecord {
     records
@@ -583,7 +587,7 @@ fn record_for<'a>(
         .or_insert_with(|| {
             PaymentRequestRecord::new(
                 counterparty.clone(),
-                counterparty_receiver_id.clone(),
+                counterparty_receiver_path.clone(),
                 payment_request_id,
             )
         })

@@ -6,7 +6,7 @@ use crate::{
     json::FfiPrivateJsonObject,
     payment_requests::{FfiBillingPeriod, FfiPaymentReference},
     sdk::FfiPaykitSdk,
-    session::parse_receiver_id,
+    session::parse_receiver_path,
     PaykitFfiError,
 };
 
@@ -82,8 +82,8 @@ pub enum FfiReceiptRetrievalStatus {
 pub struct FfiReceiptIssuanceView {
     /// Counterparty that should receive Receipt Access.
     pub counterparty: String,
-    /// Counterparty Paykit receiver folder id.
-    pub counterparty_receiver_id: String,
+    /// Counterparty Paykit receiver path.
+    pub counterparty_receiver_path: String,
     /// Receipt ID.
     pub receipt_id: String,
     /// Receipt Access Event ID.
@@ -117,8 +117,8 @@ pub struct FfiReceiptIssuanceView {
 pub struct FfiReceiptAccessView {
     /// Counterparty that sent the Receipt Access event.
     pub counterparty: String,
-    /// Counterparty Paykit receiver folder id.
-    pub counterparty_receiver_id: String,
+    /// Counterparty Paykit receiver path.
+    pub counterparty_receiver_path: String,
     /// Receipt Access Event ID.
     pub event_id: String,
     /// Receipt ID.
@@ -144,8 +144,8 @@ pub struct FfiReceiptAccessView {
 pub struct FfiReceiptRecord {
     /// Counterparty that issued the Receipt Access event.
     pub issuer: String,
-    /// Issuer Paykit receiver folder id.
-    pub issuer_receiver_id: String,
+    /// Issuer Paykit receiver path.
+    pub issuer_receiver_path: String,
     /// Receipt Access Event ID used for retrieval.
     pub receipt_access_event_id: String,
     /// Receipt ID.
@@ -180,13 +180,13 @@ impl FfiPaykitSdk {
     pub async fn prepare_receipt_issuance(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
         draft: FfiReceiptDraft,
     ) -> Result<FfiReceiptIssuanceView, PaykitFfiError> {
         self.runtime
             .prepare_receipt_issuance(
                 parse_public_key(counterparty)?,
-                parse_receiver_id(counterparty_receiver_id)?,
+                parse_receiver_path(counterparty_receiver_path)?,
                 draft.try_into()?,
             )
             .await
@@ -198,13 +198,13 @@ impl FfiPaykitSdk {
     pub async fn issue_receipt(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
         draft: FfiReceiptDraft,
     ) -> Result<FfiReceiptIssuanceView, PaykitFfiError> {
         self.runtime
             .issue_receipt(
                 parse_public_key(counterparty)?,
-                parse_receiver_id(counterparty_receiver_id)?,
+                parse_receiver_path(counterparty_receiver_path)?,
                 draft.try_into()?,
             )
             .await
@@ -216,13 +216,13 @@ impl FfiPaykitSdk {
     pub async fn process_receipt_issuance(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
         receipt_id: String,
     ) -> Result<FfiReceiptIssuanceView, PaykitFfiError> {
         self.runtime
             .process_receipt_issuance(
                 parse_public_key(counterparty)?,
-                parse_receiver_id(counterparty_receiver_id)?,
+                parse_receiver_path(counterparty_receiver_path)?,
                 &receipt_id,
             )
             .await
@@ -234,13 +234,13 @@ impl FfiPaykitSdk {
     pub async fn receipt_issuance_records(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
     ) -> Result<Vec<FfiReceiptIssuanceView>, PaykitFfiError> {
         let records = self
             .runtime
             .receipt_issuance_records(
                 &parse_public_key(counterparty)?,
-                &parse_receiver_id(counterparty_receiver_id)?,
+                &parse_receiver_path(counterparty_receiver_path)?,
             )
             .await?;
         receipt_issuance_views_to_ffi(records)
@@ -250,13 +250,13 @@ impl FfiPaykitSdk {
     pub async fn issued_receipts_to(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
     ) -> Result<Vec<FfiReceiptIssuanceView>, PaykitFfiError> {
         let records = self
             .runtime
             .issued_receipts_to(
                 &parse_public_key(counterparty)?,
-                &parse_receiver_id(counterparty_receiver_id)?,
+                &parse_receiver_path(counterparty_receiver_path)?,
             )
             .await?;
         receipt_issuance_views_to_ffi(records)
@@ -272,13 +272,13 @@ impl FfiPaykitSdk {
     pub async fn retrieve_receipt(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
         receipt_id: String,
     ) -> Result<FfiReceiptRecord, PaykitFfiError> {
         self.runtime
             .retrieve_receipt(
                 parse_public_key(counterparty)?,
-                parse_receiver_id(counterparty_receiver_id)?,
+                parse_receiver_path(counterparty_receiver_path)?,
                 &receipt_id,
             )
             .await
@@ -290,13 +290,13 @@ impl FfiPaykitSdk {
     pub async fn receipt_access_records(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
     ) -> Result<Vec<FfiReceiptAccessView>, PaykitFfiError> {
         let records = self
             .runtime
             .receipt_access_records(
                 &parse_public_key(counterparty)?,
-                &parse_receiver_id(counterparty_receiver_id)?,
+                &parse_receiver_path(counterparty_receiver_path)?,
             )
             .await?;
         receipt_access_views_to_ffi(records)
@@ -306,13 +306,13 @@ impl FfiPaykitSdk {
     pub async fn receipt_access_from(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
     ) -> Result<Vec<FfiReceiptAccessView>, PaykitFfiError> {
         let records = self
             .runtime
             .receipt_access_from(
                 &parse_public_key(counterparty)?,
-                &parse_receiver_id(counterparty_receiver_id)?,
+                &parse_receiver_path(counterparty_receiver_path)?,
             )
             .await?;
         receipt_access_views_to_ffi(records)
@@ -328,13 +328,13 @@ impl FfiPaykitSdk {
     pub async fn receipt_records(
         &self,
         issuer: String,
-        issuer_receiver_id: String,
+        issuer_receiver_path: String,
     ) -> Result<Vec<FfiReceiptRecord>, PaykitFfiError> {
         let records = self
             .runtime
             .receipt_records(
                 &parse_public_key(issuer)?,
-                &parse_receiver_id(issuer_receiver_id)?,
+                &parse_receiver_path(issuer_receiver_path)?,
             )
             .await?;
         receipt_records_to_ffi(records)
@@ -344,13 +344,13 @@ impl FfiPaykitSdk {
     pub async fn receipts_from(
         &self,
         issuer: String,
-        issuer_receiver_id: String,
+        issuer_receiver_path: String,
     ) -> Result<Vec<FfiReceiptRecord>, PaykitFfiError> {
         let records = self
             .runtime
             .receipts_from(
                 &parse_public_key(issuer)?,
-                &parse_receiver_id(issuer_receiver_id)?,
+                &parse_receiver_path(issuer_receiver_path)?,
             )
             .await?;
         receipt_records_to_ffi(records)

@@ -26,14 +26,14 @@ async fn test_payment_request_records_merge_outbound_acceptance() {
     enqueue_payment_request_acceptance(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &acceptance,
         timestamp(),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -79,14 +79,14 @@ async fn test_payment_request_records_allow_rejection_after_proposal_expiry() {
     enqueue_payment_request_rejection(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &rejection,
         timestamp(),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -124,7 +124,7 @@ async fn test_payment_request_records_use_outbound_update_time_for_freshness() {
     enqueue_payment_request_acceptance(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &acceptance,
         timestamp(),
     )
@@ -134,7 +134,7 @@ async fn test_payment_request_records_use_outbound_update_time_for_freshness() {
     storage
         .transaction(|tx| {
             let mut outbound =
-                tx.outbound_private_messages(&counterparty, &receiver_id())[0].clone();
+                tx.outbound_private_messages(&counterparty, &receiver_path())[0].clone();
             outbound.status = OutboundPrivateMessageStatus::Sent;
             outbound.updated_at = updated_at;
             outbound.sent_at = Some(updated_at);
@@ -144,7 +144,7 @@ async fn test_payment_request_records_use_outbound_update_time_for_freshness() {
         .await
         .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -172,7 +172,7 @@ async fn test_payment_request_records_keep_latest_freshness_after_later_applied_
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
@@ -182,7 +182,7 @@ async fn test_payment_request_records_keep_latest_freshness_after_later_applied_
     storage
         .transaction(|tx| {
             let mut outbound =
-                tx.outbound_private_messages(&counterparty, &receiver_id())[0].clone();
+                tx.outbound_private_messages(&counterparty, &receiver_path())[0].clone();
             outbound.status = OutboundPrivateMessageStatus::Sent;
             outbound.updated_at = updated_at;
             outbound.sent_at = Some(updated_at);
@@ -201,7 +201,7 @@ async fn test_payment_request_records_keep_latest_freshness_after_later_applied_
     )
     .await;
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -226,7 +226,7 @@ async fn test_payment_request_records_merge_sent_request_acceptance() {
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
@@ -242,7 +242,7 @@ async fn test_payment_request_records_merge_sent_request_acceptance() {
     )
     .await;
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -259,7 +259,7 @@ async fn test_payment_request_records_do_not_compare_independent_source_ids() {
     enqueue_untyped_private_message(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#.into(),
         timestamp(),
     )
@@ -277,7 +277,7 @@ async fn test_payment_request_records_do_not_compare_independent_source_ids() {
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
@@ -293,7 +293,7 @@ async fn test_payment_request_records_do_not_compare_independent_source_ids() {
     )
     .await;
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -332,7 +332,7 @@ async fn test_payment_request_records_merge_outbound_proof() {
     enqueue_payment_request_acceptance(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &acceptance,
         timestamp(),
     )
@@ -348,14 +348,14 @@ async fn test_payment_request_records_merge_outbound_proof() {
     enqueue_payment_proof(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &proof,
         timestamp(),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -401,7 +401,7 @@ async fn test_payment_request_records_preserve_outbound_fifo_when_clock_moves_ba
     enqueue_payment_request_acceptance(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &acceptance,
         timestamp() + ChronoDuration::minutes(5),
     )
@@ -417,14 +417,14 @@ async fn test_payment_request_records_preserve_outbound_fifo_when_clock_moves_ba
     enqueue_payment_proof(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &proof,
         timestamp() + ChronoDuration::minutes(1),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -452,7 +452,7 @@ async fn test_payment_request_records_apply_proposal_before_cross_source_accepta
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp() + ChronoDuration::minutes(5),
     )
@@ -468,7 +468,7 @@ async fn test_payment_request_records_apply_proposal_before_cross_source_accepta
     )
     .await;
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -493,7 +493,7 @@ async fn test_payment_request_records_flag_later_acceptance_after_local_cancella
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
@@ -508,7 +508,7 @@ async fn test_payment_request_records_flag_later_acceptance_after_local_cancella
     enqueue_payment_request_cancellation(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &cancellation,
         timestamp() + ChronoDuration::minutes(1),
     )
@@ -525,7 +525,7 @@ async fn test_payment_request_records_flag_later_acceptance_after_local_cancella
     )
     .await;
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -556,7 +556,7 @@ async fn test_payment_request_records_apply_later_cancellation_after_acceptance(
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
@@ -581,14 +581,14 @@ async fn test_payment_request_records_apply_later_cancellation_after_acceptance(
     enqueue_payment_request_cancellation(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &cancellation,
         timestamp() + ChronoDuration::minutes(2),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -629,7 +629,7 @@ async fn test_payment_request_records_surface_recovery_required_outbound_event()
     enqueue_payment_request_acceptance(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &acceptance,
         timestamp(),
     )
@@ -638,7 +638,7 @@ async fn test_payment_request_records_surface_recovery_required_outbound_event()
     storage
         .transaction(|tx| {
             let mut outbound =
-                tx.outbound_private_messages(&counterparty, &receiver_id())[0].clone();
+                tx.outbound_private_messages(&counterparty, &receiver_path())[0].clone();
             outbound.status = OutboundPrivateMessageStatus::RecoveryRequired;
             outbound.updated_at = timestamp() + ChronoDuration::minutes(1);
             outbound.last_error = Some("Encrypted Link recovery is required".into());
@@ -648,7 +648,7 @@ async fn test_payment_request_records_surface_recovery_required_outbound_event()
         .await
         .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -683,7 +683,7 @@ async fn test_payment_request_records_preserve_inbound_fifo_with_same_timestamp(
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
@@ -703,7 +703,7 @@ async fn test_payment_request_records_preserve_inbound_fifo_with_same_timestamp(
     )
     .await;
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -743,7 +743,7 @@ async fn test_payment_request_records_ignore_duplicate_outbound_event() {
     enqueue_payment_request_acceptance(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &acceptance,
         timestamp(),
     )
@@ -752,14 +752,14 @@ async fn test_payment_request_records_ignore_duplicate_outbound_event() {
     enqueue_payment_request_acceptance(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &acceptance,
         timestamp(),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -802,7 +802,7 @@ async fn test_payment_request_records_flag_outbound_event_id_conflict() {
     enqueue_payment_request_acceptance(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &acceptance,
         timestamp(),
     )
@@ -811,14 +811,14 @@ async fn test_payment_request_records_flag_outbound_event_id_conflict() {
     enqueue_payment_request_rejection(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &rejection,
         timestamp(),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -873,14 +873,14 @@ async fn test_payment_request_records_flag_outbound_reuse_of_tainted_event_id() 
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
     let outbound = records
@@ -916,7 +916,7 @@ async fn test_payment_request_records_flag_cross_direction_duplicate_event_id() 
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
@@ -924,7 +924,7 @@ async fn test_payment_request_records_flag_cross_direction_duplicate_event_id() 
     .unwrap();
     persist_messages(&storage, counterparty.clone(), vec![raw]).await;
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -971,14 +971,14 @@ async fn test_payment_request_records_keep_preinvalid_position_during_later_conf
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
     let inbound = records
@@ -1025,14 +1025,14 @@ async fn test_payment_request_records_flag_outbound_reuse_of_malformed_event_id(
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
     let outbound = records
@@ -1075,14 +1075,14 @@ async fn test_payment_request_records_taint_event_id_without_request_id() {
     enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request,
         timestamp(),
     )
     .await
     .unwrap();
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 
@@ -1117,7 +1117,7 @@ async fn test_payment_request_records_keep_malformed_inbound_audit_position() {
     )
     .await;
 
-    let records = payment_request_records(&storage, &counterparty, &receiver_id(), timestamp())
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await
         .unwrap();
 

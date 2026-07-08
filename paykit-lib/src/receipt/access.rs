@@ -3,7 +3,7 @@ use tracing::{debug, instrument};
 use crate::{
     error::map_error,
     pubky_routing::{receipt_path_prefix, PAYKIT_PRIVATE_PATH_PREFIX},
-    EncryptedLink, PaykitError, PaykitReceiverId, PrivateMessageKind, PublicKey, Result,
+    EncryptedLink, PaykitError, PaykitReceiverPath, PrivateMessageKind, PublicKey, Result,
 };
 
 use super::{
@@ -13,23 +13,23 @@ use super::{
 
 impl ReceiptAccess {
     /// Return the canonical Receipt Location path for a receiver and Receipt ID.
-    pub fn location(receiver_id: &PaykitReceiverId, receipt_id: &ReceiptId) -> String {
-        format!("{}/{receipt_id}", receipt_path_prefix(receiver_id))
+    pub fn location(receiver_path: &PaykitReceiverPath, receipt_id: &ReceiptId) -> String {
+        format!("{}/{receipt_id}", receipt_path_prefix(receiver_path))
     }
 
     /// Return true when a Receipt Location points at the expected receiver
     /// folder and Receipt ID.
-    pub fn location_matches_receiver_id(
+    pub fn location_matches_receiver_path(
         location: &str,
-        receiver_id: &PaykitReceiverId,
+        receiver_path: &PaykitReceiverPath,
         receipt_id: &ReceiptId,
     ) -> bool {
-        location == Self::location(receiver_id, receipt_id)
+        location == Self::location(receiver_path, receipt_id)
     }
 
-    /// Return true when this descriptor points at the expected receiver folder.
-    pub fn has_location_for_receiver(&self, receiver_id: &PaykitReceiverId) -> bool {
-        Self::location_matches_receiver_id(&self.location, receiver_id, &self.receipt_id)
+    /// Return true when this descriptor points at the expected receiver path.
+    pub fn has_location_for_receiver(&self, receiver_path: &PaykitReceiverPath) -> bool {
+        Self::location_matches_receiver_path(&self.location, receiver_path, &self.receipt_id)
     }
 
     /// Validate that this access descriptor points at a canonical
@@ -88,13 +88,13 @@ fn receiver_scoped_location_matches(location: &str, receipt_id: &ReceiptId) -> b
     let Some(rest) = location.strip_prefix(&private_prefix) else {
         return false;
     };
-    let Some((receiver_id, receipt_segment)) = rest.split_once("/receipts/") else {
+    let Some((receiver_path, receipt_segment)) = rest.split_once("/receipts/") else {
         return false;
     };
     if receipt_segment != receipt_id.as_str() {
         return false;
     }
-    PaykitReceiverId::new(receiver_id).is_ok()
+    PaykitReceiverPath::new(receiver_path).is_ok()
 }
 
 /// Prepare a plaintext Receipt, Encrypted Receipt, and Receipt Access
@@ -105,16 +105,16 @@ fn receiver_scoped_location_matches(location: &str, receipt_id: &ReceiptId) -> b
 #[instrument(skip(link, draft))]
 pub fn prepare_receipt(
     link: &EncryptedLink,
-    receiver_id: &PaykitReceiverId,
+    receiver_path: &PaykitReceiverPath,
     draft: ReceiptDraft,
 ) -> Result<PreparedReceipt> {
-    if receiver_id != link.local_receiver_id() {
+    if receiver_path != link.local_receiver_path() {
         return Err(PaykitError::Validation(format!(
-            "Receipt receiver id {receiver_id} does not match Encrypted Link local receiver {}",
-            link.local_receiver_id()
+            "Receipt receiver path {receiver_path} does not match Encrypted Link local receiver {}",
+            link.local_receiver_path()
         )));
     }
-    prepare_receipt_for_recipient(link.recipient().clone(), receiver_id, draft)
+    prepare_receipt_for_recipient(link.recipient().clone(), receiver_path, draft)
 }
 
 /// Prepare a plaintext Receipt, Encrypted Receipt, and Receipt Access
@@ -125,11 +125,11 @@ pub fn prepare_receipt(
 #[instrument(skip(recipient_public_key, draft))]
 pub fn prepare_receipt_for_recipient(
     recipient_public_key: PublicKey,
-    receiver_id: &PaykitReceiverId,
+    receiver_path: &PaykitReceiverPath,
     draft: ReceiptDraft,
 ) -> Result<PreparedReceipt> {
     prepare_receipt_for_recipient_at_location(recipient_public_key, draft, |receipt_id| {
-        ReceiptAccess::location(receiver_id, receipt_id)
+        ReceiptAccess::location(receiver_path, receipt_id)
     })
 }
 
@@ -258,10 +258,10 @@ pub(super) fn validate_prepared_receipt(prepared: &PreparedReceipt) -> Result<()
 pub async fn send_receipt_access(link: &mut EncryptedLink, access: &ReceiptAccess) -> Result<()> {
     debug!("sending Receipt Access message");
     access.validate()?;
-    if !access.has_location_for_receiver(link.local_receiver_id()) {
+    if !access.has_location_for_receiver(link.local_receiver_path()) {
         return Err(PaykitError::Validation(format!(
             "Receipt Access location does not match Encrypted Link local receiver {}",
-            link.local_receiver_id()
+            link.local_receiver_path()
         )));
     }
     let json = serialize_receipt_access_json(access)

@@ -24,7 +24,7 @@ async fn test_payment_requests_with_allows_public_only_identity() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440000",
             "550e8400-e29b-41d4-a716-446655440000",
@@ -44,7 +44,7 @@ async fn test_payment_requests_with_allows_public_only_identity() {
     );
 
     let records = sdk
-        .payment_requests_with(&counterparty, &receiver_id())
+        .payment_requests_with(&counterparty, &receiver_path())
         .await
         .unwrap();
 
@@ -71,7 +71,7 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty,
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::RecoveryRequired,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -90,7 +90,7 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440000",
             "550e8400-e29b-41d4-a716-446655440000",
@@ -110,7 +110,7 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
     );
 
     let records = sdk
-        .payment_requests_with(&counterparty, &receiver_id())
+        .payment_requests_with(&counterparty, &receiver_path())
         .await
         .unwrap();
 
@@ -142,7 +142,7 @@ async fn test_list_payment_requests_filters_across_counterparties() {
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: blocked,
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Blocked,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -161,7 +161,7 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     persist_private_stream_batch(
         &storage,
         first.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440000",
             "550e8400-e29b-41d4-a716-446655440000",
@@ -175,7 +175,7 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     persist_private_stream_batch(
         &storage,
         second.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440001",
             "550e8400-e29b-41d4-a716-446655440001",
@@ -189,7 +189,7 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     persist_private_stream_batch(
         &storage,
         blocked,
-        receiver_id(),
+        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440002",
             "550e8400-e29b-41d4-a716-446655440002",
@@ -299,7 +299,7 @@ async fn test_enqueue_payment_request_event_requires_private_capable_identity() 
     );
 
     let result = sdk
-        .enqueue_raw_payment_request_acceptance(counterparty, receiver_id(), &event)
+        .enqueue_raw_payment_request_acceptance(counterparty, receiver_path(), &event)
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -313,7 +313,7 @@ async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![payment_request_message(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
             request_id.as_str(),
@@ -333,7 +333,7 @@ async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
     );
 
     let result = sdk
-        .accept_payment_request(counterparty, receiver_id(), &request_id)
+        .accept_payment_request(counterparty, receiver_path(), &request_id)
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
@@ -352,7 +352,7 @@ async fn test_reject_payment_request_allows_expired_proposal_before_readiness_ch
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![payment_request_message(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
             request_id.as_str(),
@@ -372,7 +372,7 @@ async fn test_reject_payment_request_allows_expired_proposal_before_readiness_ch
     );
 
     let result = sdk
-        .reject_payment_request(counterparty, receiver_id(), &request_id, None)
+        .reject_payment_request(counterparty, receiver_path(), &request_id, None)
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -391,7 +391,7 @@ async fn test_accept_payment_request_does_not_queue_without_private_send_readine
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![payment_request_message(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
             request_id.as_str(),
@@ -411,7 +411,7 @@ async fn test_accept_payment_request_does_not_queue_without_private_send_readine
     );
 
     let result = sdk
-        .accept_payment_request(counterparty, receiver_id(), &request_id)
+        .accept_payment_request(counterparty, receiver_path(), &request_id)
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -476,7 +476,7 @@ async fn queue_request_with_inbound_acceptance(
     crate::domain::payment_requests::enqueue_payment_request_event(
         storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &request_event,
         FixedClock.now(),
     )
@@ -485,7 +485,7 @@ async fn queue_request_with_inbound_acceptance(
     persist_private_stream_batch(
         storage,
         counterparty,
-        receiver_id(),
+        receiver_path(),
         vec![payment_request_acceptance_message(
             acceptance_event_id,
             request_id,

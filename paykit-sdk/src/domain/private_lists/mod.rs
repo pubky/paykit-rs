@@ -20,7 +20,7 @@ use crate::{
         OutboundPrivateMessageRecord, PeerLinkOperationLease, PrivateStreamItemRecord,
         StorageAdapter,
     },
-    PaykitReceiverId, PubkyPublicKey, Result,
+    PaykitReceiverPath, PubkyPublicKey, Result,
 };
 
 /// Derived latest-state view of a counterparty's Private Payment List.
@@ -72,7 +72,7 @@ pub struct PrivatePaymentListSyncChange {
     /// Counterparty affected by the sync.
     pub counterparty: PubkyPublicKey,
     /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: PaykitReceiverId,
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Queued outbound message id, when queueing succeeded.
     pub outbound_message_id: Option<u64>,
     /// Error text, when queueing failed.
@@ -83,7 +83,10 @@ impl fmt::Debug for PrivatePaymentListSyncChange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PrivatePaymentListSyncChange")
             .field("counterparty", &self.counterparty.redacted_app_key())
-            .field("counterparty_receiver_id", &self.counterparty_receiver_id)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("outbound_message_id", &self.outbound_message_id)
             .field("error", &self.error.as_ref().map(|_| "<redacted>"))
             .finish()
@@ -96,7 +99,7 @@ pub struct PrivatePaymentListReservationUpdate {
     /// Counterparty that should receive the Private Payment List.
     pub counterparty: PubkyPublicKey,
     /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: PaykitReceiverId,
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Complete reserved receiving details to share with this counterparty.
     ///
     /// An empty list queues an empty Private Payment List for this counterparty.
@@ -107,7 +110,10 @@ impl fmt::Debug for PrivatePaymentListReservationUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PrivatePaymentListReservationUpdate")
             .field("counterparty", &self.counterparty.redacted_app_key())
-            .field("counterparty_receiver_id", &self.counterparty_receiver_id)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("reservations", &self.reservations.len())
             .finish()
     }
@@ -119,7 +125,7 @@ pub struct PrivatePaymentListDeliveryFailure {
     /// Counterparty whose outbound delivery failed.
     pub counterparty: PubkyPublicKey,
     /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: PaykitReceiverId,
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Outbound message id, when the failure is tied to one message.
     pub outbound_message_id: Option<u64>,
     /// Reservation id, when the failure is tied to reservation cleanup.
@@ -132,7 +138,10 @@ impl fmt::Debug for PrivatePaymentListDeliveryFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PrivatePaymentListDeliveryFailure")
             .field("counterparty", &self.counterparty.redacted_app_key())
-            .field("counterparty_receiver_id", &self.counterparty_receiver_id)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("outbound_message_id", &self.outbound_message_id)
             .field("reservation_id", &self.reservation_id)
             .field(
@@ -171,13 +180,13 @@ impl fmt::Debug for PrivatePaymentListDeliveryReport {
 pub(crate) async fn current_private_payment_list<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Result<Option<PrivatePaymentListView>>
 where
     S: StorageAdapter,
 {
     let items = storage
-        .transaction(|tx| Ok(tx.private_stream_items(counterparty, counterparty_receiver_id)))
+        .transaction(|tx| Ok(tx.private_stream_items(counterparty, counterparty_receiver_path)))
         .await?;
     derive_private_payment_list_view(items)
 }
@@ -190,7 +199,7 @@ where
 pub(crate) async fn enqueue_private_payment_list<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
-    counterparty_receiver_id: PaykitReceiverId,
+    counterparty_receiver_path: PaykitReceiverPath,
     receiving_details: Vec<ReceivingDetail>,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -203,7 +212,7 @@ where
     enqueue_private_message(
         storage,
         counterparty,
-        counterparty_receiver_id,
+        counterparty_receiver_path,
         raw_json,
         now,
     )

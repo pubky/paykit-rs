@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{PaykitError, PaykitReceiverId, PublicKey, Result};
+use crate::{PaykitError, PaykitReceiverPath, PublicKey, Result};
 
 const SNAPSHOT_WIRE_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 struct SnapshotWire {
     version: u32,
-    local_receiver_id: PaykitReceiverId,
-    remote_receiver_id: PaykitReceiverId,
+    local_receiver_path: PaykitReceiverPath,
+    remote_receiver_path: PaykitReceiverPath,
     state: Vec<u8>,
 }
 
@@ -22,10 +22,10 @@ pub struct EncryptedLinkSnapshot {
     state: pubky_noise::serializer::PubkyNoiseSessionState,
     /// The counterparty's public key (derived from `state.endpoint_pubkey`).
     recipient: PublicKey,
-    /// Local receiver folder used by this link.
-    local_receiver_id: PaykitReceiverId,
-    /// Counterparty receiver folder used by this link.
-    remote_receiver_id: PaykitReceiverId,
+    /// Local receiver path used by this link.
+    local_receiver_path: PaykitReceiverPath,
+    /// Counterparty receiver path used by this link.
+    remote_receiver_path: PaykitReceiverPath,
 }
 
 fn recipient_from_snapshot_state(
@@ -48,8 +48,8 @@ impl std::fmt::Debug for EncryptedLinkSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptedLinkSnapshot")
             .field("recipient", &self.recipient)
-            .field("local_receiver_id", &self.local_receiver_id)
-            .field("remote_receiver_id", &self.remote_receiver_id)
+            .field("local_receiver_path", &self.local_receiver_path)
+            .field("remote_receiver_path", &self.remote_receiver_path)
             .finish_non_exhaustive()
     }
 }
@@ -58,14 +58,14 @@ impl EncryptedLinkSnapshot {
     pub(super) fn from_state(
         state: pubky_noise::serializer::PubkyNoiseSessionState,
         recipient: PublicKey,
-        local_receiver_id: PaykitReceiverId,
-        remote_receiver_id: PaykitReceiverId,
+        local_receiver_path: PaykitReceiverPath,
+        remote_receiver_path: PaykitReceiverPath,
     ) -> Self {
         Self {
             state,
             recipient,
-            local_receiver_id,
-            remote_receiver_id,
+            local_receiver_path,
+            remote_receiver_path,
         }
     }
 
@@ -80,12 +80,12 @@ impl EncryptedLinkSnapshot {
     /// Serialize to the receiver-scoped snapshot wire format for durable storage.
     ///
     /// The output contains the Noise session state plus the local and remote
-    /// receiver ids needed to restore it into the same Paykit folders.
+    /// receiver paths needed to restore it into the same Paykit folders.
     pub fn serialize(&self) -> Vec<u8> {
         let wire = SnapshotWire {
             version: SNAPSHOT_WIRE_VERSION,
-            local_receiver_id: self.local_receiver_id.clone(),
-            remote_receiver_id: self.remote_receiver_id.clone(),
+            local_receiver_path: self.local_receiver_path.clone(),
+            remote_receiver_path: self.remote_receiver_path.clone(),
             state: self.state.serialize(),
         };
         serde_json::to_vec(&wire).expect("Encrypted Link snapshot wire serialization is infallible")
@@ -104,8 +104,8 @@ impl EncryptedLinkSnapshot {
         Ok(Self {
             state,
             recipient,
-            local_receiver_id: wire.local_receiver_id,
-            remote_receiver_id: wire.remote_receiver_id,
+            local_receiver_path: wire.local_receiver_path,
+            remote_receiver_path: wire.remote_receiver_path,
         })
     }
 
@@ -114,27 +114,27 @@ impl EncryptedLinkSnapshot {
         &self.recipient
     }
 
-    /// Access the local receiver id embedded in the snapshot.
-    pub fn local_receiver_id(&self) -> &PaykitReceiverId {
-        &self.local_receiver_id
+    /// Access the local receiver path embedded in the snapshot.
+    pub fn local_receiver_path(&self) -> &PaykitReceiverPath {
+        &self.local_receiver_path
     }
 
-    /// Access the remote receiver id embedded in the snapshot.
-    pub fn remote_receiver_id(&self) -> &PaykitReceiverId {
-        &self.remote_receiver_id
+    /// Access the remote receiver path embedded in the snapshot.
+    pub fn remote_receiver_path(&self) -> &PaykitReceiverPath {
+        &self.remote_receiver_path
     }
 
     pub(super) fn validate_receiver_scope(
         &self,
-        local_receiver_id: &PaykitReceiverId,
-        remote_receiver_id: &PaykitReceiverId,
+        local_receiver_path: &PaykitReceiverPath,
+        remote_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         validate_receiver_scope(
             "Encrypted Link snapshot",
-            &self.local_receiver_id,
-            &self.remote_receiver_id,
-            local_receiver_id,
-            remote_receiver_id,
+            &self.local_receiver_path,
+            &self.remote_receiver_path,
+            local_receiver_path,
+            remote_receiver_path,
         )
     }
 }
@@ -180,18 +180,18 @@ pub struct EncryptedLinkHandshakeSnapshot {
     state: pubky_noise::serializer::PubkyNoiseSessionState,
     /// The counterparty's public key (derived from `state.endpoint_pubkey`).
     recipient: PublicKey,
-    /// Local receiver folder used by this handshake.
-    local_receiver_id: PaykitReceiverId,
-    /// Counterparty receiver folder used by this handshake.
-    remote_receiver_id: PaykitReceiverId,
+    /// Local receiver path used by this handshake.
+    local_receiver_path: PaykitReceiverPath,
+    /// Counterparty receiver path used by this handshake.
+    remote_receiver_path: PaykitReceiverPath,
 }
 
 impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptedLinkHandshakeSnapshot")
             .field("recipient", &self.recipient)
-            .field("local_receiver_id", &self.local_receiver_id)
-            .field("remote_receiver_id", &self.remote_receiver_id)
+            .field("local_receiver_path", &self.local_receiver_path)
+            .field("remote_receiver_path", &self.remote_receiver_path)
             .finish_non_exhaustive()
     }
 }
@@ -200,14 +200,14 @@ impl EncryptedLinkHandshakeSnapshot {
     pub(super) fn from_state(
         state: pubky_noise::serializer::PubkyNoiseSessionState,
         recipient: PublicKey,
-        local_receiver_id: PaykitReceiverId,
-        remote_receiver_id: PaykitReceiverId,
+        local_receiver_path: PaykitReceiverPath,
+        remote_receiver_path: PaykitReceiverPath,
     ) -> Self {
         Self {
             state,
             recipient,
-            local_receiver_id,
-            remote_receiver_id,
+            local_receiver_path,
+            remote_receiver_path,
         }
     }
 
@@ -222,12 +222,12 @@ impl EncryptedLinkHandshakeSnapshot {
     /// Serialize to the receiver-scoped snapshot wire format for durable storage.
     ///
     /// The output contains the Noise session state plus the local and remote
-    /// receiver ids needed to restore it into the same Paykit folders.
+    /// receiver paths needed to restore it into the same Paykit folders.
     pub fn serialize(&self) -> Vec<u8> {
         let wire = SnapshotWire {
             version: SNAPSHOT_WIRE_VERSION,
-            local_receiver_id: self.local_receiver_id.clone(),
-            remote_receiver_id: self.remote_receiver_id.clone(),
+            local_receiver_path: self.local_receiver_path.clone(),
+            remote_receiver_path: self.remote_receiver_path.clone(),
             state: self.state.serialize(),
         };
         serde_json::to_vec(&wire)
@@ -247,8 +247,8 @@ impl EncryptedLinkHandshakeSnapshot {
         Ok(Self {
             state,
             recipient,
-            local_receiver_id: wire.local_receiver_id,
-            remote_receiver_id: wire.remote_receiver_id,
+            local_receiver_path: wire.local_receiver_path,
+            remote_receiver_path: wire.remote_receiver_path,
         })
     }
 
@@ -257,37 +257,37 @@ impl EncryptedLinkHandshakeSnapshot {
         &self.recipient
     }
 
-    /// Access the local receiver id embedded in the snapshot.
-    pub fn local_receiver_id(&self) -> &PaykitReceiverId {
-        &self.local_receiver_id
+    /// Access the local receiver path embedded in the snapshot.
+    pub fn local_receiver_path(&self) -> &PaykitReceiverPath {
+        &self.local_receiver_path
     }
 
-    /// Access the remote receiver id embedded in the snapshot.
-    pub fn remote_receiver_id(&self) -> &PaykitReceiverId {
-        &self.remote_receiver_id
+    /// Access the remote receiver path embedded in the snapshot.
+    pub fn remote_receiver_path(&self) -> &PaykitReceiverPath {
+        &self.remote_receiver_path
     }
 
     pub(super) fn validate_receiver_scope(
         &self,
-        local_receiver_id: &PaykitReceiverId,
-        remote_receiver_id: &PaykitReceiverId,
+        local_receiver_path: &PaykitReceiverPath,
+        remote_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         validate_receiver_scope(
             "Encrypted Link Handshake snapshot",
-            &self.local_receiver_id,
-            &self.remote_receiver_id,
-            local_receiver_id,
-            remote_receiver_id,
+            &self.local_receiver_path,
+            &self.remote_receiver_path,
+            local_receiver_path,
+            remote_receiver_path,
         )
     }
 }
 
 fn validate_receiver_scope(
     snapshot_kind: &'static str,
-    snapshot_local: &PaykitReceiverId,
-    snapshot_remote: &PaykitReceiverId,
-    restore_local: &PaykitReceiverId,
-    restore_remote: &PaykitReceiverId,
+    snapshot_local: &PaykitReceiverPath,
+    snapshot_remote: &PaykitReceiverPath,
+    restore_local: &PaykitReceiverPath,
+    restore_remote: &PaykitReceiverPath,
 ) -> Result<()> {
     if snapshot_local != restore_local || snapshot_remote != restore_remote {
         return Err(PaykitError::Validation(format!(

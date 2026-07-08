@@ -390,8 +390,8 @@ impl ReceiptAccess {
 mod tests {
     use super::*;
 
-    fn receiver_id() -> crate::PaykitReceiverId {
-        crate::PaykitReceiverId::new("bitkit").unwrap()
+    fn receiver_path() -> crate::PaykitReceiverPath {
+        crate::PaykitReceiverPath::new("bitkit/wallet").unwrap()
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
             payment_reference: receipt.payment_reference.clone(),
             payment_request_id: receipt.payment_request_id.clone(),
             billing_period: None,
-            location: ReceiptAccess::location(&receiver_id(), &receipt.receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &receipt.receipt_id),
             key: ReceiptDecryptionKey::generate(),
         };
         let prepared = PreparedReceipt {

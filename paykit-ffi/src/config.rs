@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use paykit_sdk::{
-    EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitReceiverId, PaykitSdkConfig,
-    PublicContactSharingPolicy,
+    EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitReceiverPath,
+    PaykitSdkConfig, PublicContactSharingPolicy,
 };
 
 use crate::errors::{validation_error, PaykitFfiError};
@@ -44,8 +44,8 @@ pub enum FfiPublicContactSharingPolicy {
 /// Runtime configuration for Paykit SDK bindings.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiPaykitSdkConfig {
-    /// Receiver folder for this app/runtime under `/pub/paykit/v0/receivers`.
-    pub receiver_id: String,
+    /// Receiver folder for this app/runtime under `/pub/paykit/v0/{app}/{wallet|server}`.
+    pub receiver_path: String,
     /// Namespace segment for SDK profile/contact public data under `/pub/`.
     pub profile_namespace: String,
     /// Public endpoint management scope.
@@ -69,11 +69,11 @@ pub struct FfiPubkyClientConfig {
     pub request_timeout_secs: u64,
 }
 
-/// Return the default SDK policy for an explicit Paykit receiver id.
+/// Return the default SDK policy for an explicit Paykit receiver path.
 #[uniffi::export]
-pub fn default_config(receiver_id: String) -> Result<FfiPaykitSdkConfig, PaykitFfiError> {
+pub fn default_config(receiver_path: String) -> Result<FfiPaykitSdkConfig, PaykitFfiError> {
     Ok(PaykitSdkConfig::new(
-        PaykitReceiverId::new(receiver_id).map_err(|err| validation_error(err.to_string()))?,
+        PaykitReceiverPath::new(receiver_path).map_err(|err| validation_error(err.to_string()))?,
     )
     .into())
 }
@@ -101,7 +101,7 @@ impl TryFrom<FfiPaykitSdkConfig> for PaykitSdkConfig {
 
     fn try_from(value: FfiPaykitSdkConfig) -> Result<Self, Self::Error> {
         Ok(Self {
-            receiver_id: PaykitReceiverId::new(value.receiver_id)
+            receiver_path: PaykitReceiverPath::new(value.receiver_path)
                 .map_err(|err| validation_error(err.to_string()))?,
             profile_namespace: value.profile_namespace,
             endpoint_management_scope: value.endpoint_management_scope.try_into()?,
@@ -123,7 +123,7 @@ impl TryFrom<FfiPaykitSdkConfig> for PaykitSdkConfig {
 impl From<PaykitSdkConfig> for FfiPaykitSdkConfig {
     fn from(value: PaykitSdkConfig) -> Self {
         Self {
-            receiver_id: value.receiver_id.to_string(),
+            receiver_path: value.receiver_path.to_string(),
             profile_namespace: value.profile_namespace,
             endpoint_management_scope: value.endpoint_management_scope.into(),
             encrypted_link_recovery_markers: value.encrypted_link_recovery_markers.into(),

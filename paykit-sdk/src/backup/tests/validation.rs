@@ -7,7 +7,7 @@ async fn test_restore_backup_state_rejects_malformed_link_snapshot() {
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -15,7 +15,7 @@ async fn test_restore_backup_state_rejects_malformed_link_snapshot() {
         payment_endpoint_reservations: Vec::new(),
         encrypted_link_states: vec![EncryptedLinkStateRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             link_snapshot: Some(vec![1, 2, 3]),
             handshake_snapshot: None,
             handshake_role: None,
@@ -45,7 +45,7 @@ fn test_recovery_required_restore_state_drops_link_snapshots() {
         peer_key(&counterparty),
         EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             link_snapshot: Some(vec![1]),
             handshake_snapshot: Some(vec![2]),
             handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
@@ -73,7 +73,7 @@ fn test_restore_reconciliation_preserves_active_link_checkpoint() {
         peer_key(&counterparty),
         LinkedPeerRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             state: LinkedPeerState::Linked,
             last_sync_at: Some(timestamp()),
             last_private_receive_at: None,
@@ -89,7 +89,7 @@ fn test_restore_reconciliation_preserves_active_link_checkpoint() {
         peer_key(&counterparty),
         EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             link_snapshot: Some(vec![1]),
             handshake_snapshot: None,
             handshake_role: None,
@@ -115,7 +115,7 @@ fn test_restore_reconciliation_preserves_handshake_checkpoint() {
         peer_key(&counterparty),
         EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             link_snapshot: None,
             handshake_snapshot: Some(vec![2]),
             handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
@@ -140,7 +140,7 @@ fn test_restore_reconciliation_preserves_existing_recovery_required_peer() {
         peer_key(&counterparty),
         LinkedPeerRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             state: LinkedPeerState::RecoveryRequired,
             last_sync_at: Some(timestamp()),
             last_private_receive_at: None,
@@ -156,7 +156,7 @@ fn test_restore_reconciliation_preserves_existing_recovery_required_peer() {
         peer_key(&counterparty),
         EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             link_snapshot: Some(vec![1]),
             handshake_snapshot: None,
             handshake_role: None,
@@ -181,7 +181,7 @@ fn test_restore_reconciliation_marks_missing_checkpoint_recovery_required() {
         peer_key(&counterparty),
         LinkedPeerRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             state: LinkedPeerState::Linked,
             last_sync_at: Some(timestamp()),
             last_private_receive_at: None,
@@ -197,7 +197,7 @@ fn test_restore_reconciliation_marks_missing_checkpoint_recovery_required() {
         peer_key(&counterparty),
         EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             link_snapshot: None,
             handshake_snapshot: None,
             handshake_role: None,
@@ -222,7 +222,7 @@ fn test_restore_reconciliation_marks_missing_link_state_recovery_required() {
         peer_key(&counterparty),
         LinkedPeerRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             state: LinkedPeerState::Linked,
             last_sync_at: Some(timestamp()),
             last_private_receive_at: None,
@@ -251,11 +251,11 @@ async fn test_restore_backup_state_rejects_local_recovery_marker_without_created
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: vec![LinkedPeerRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             state: LinkedPeerState::RecoveryRequired,
             last_sync_at: Some(timestamp()),
             last_private_receive_at: None,
@@ -292,11 +292,11 @@ async fn test_restore_backup_state_rejects_invalid_remote_recovery_attempt_id() 
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: vec![LinkedPeerRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             state: LinkedPeerState::RecoveryRequired,
             last_sync_at: Some(timestamp()),
             last_private_receive_at: None,
@@ -332,7 +332,7 @@ async fn test_restore_backup_state_rejects_records_without_identity() {
     let storage = InMemoryStorage::new();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: None,
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -367,7 +367,7 @@ async fn test_restore_backup_state_rejects_invalid_public_endpoint_record() {
     let local_public_key = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -402,7 +402,7 @@ async fn test_restore_backup_state_rejects_inconsistent_public_endpoint_status()
     let local_public_key = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -437,7 +437,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_metadata() {
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -448,7 +448,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_metadata() {
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json:
                 r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
@@ -480,7 +480,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_status() {
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -491,7 +491,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_status() {
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json:
                 r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
@@ -534,11 +534,11 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_error() {
     );
     let raw_json = raw_json.replace(
         &location,
-        "/pub/paykit/v0/private/bitkit/receipts/not-the-receipt-id",
+        "/pub/paykit/v0/private/bitkit/wallet/receipts/not-the-receipt-id",
     );
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -549,7 +549,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_error() {
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json,
             parsed_version: Some(1),
@@ -580,7 +580,7 @@ async fn test_restore_backup_state_rejects_stale_dedupe_event_header() {
     let raw_json = payment_request_json("650e8400-e29b-41d4-a716-446655440000");
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -591,7 +591,7 @@ async fn test_restore_backup_state_rejects_stale_dedupe_event_header() {
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json: raw_json.clone(),
             parsed_version: Some(1),
@@ -603,7 +603,7 @@ async fn test_restore_backup_state_rejects_stale_dedupe_event_header() {
         }],
         event_dedup_records: vec![EventDedupRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             event_id: "750e8400-e29b-41d4-a716-446655440000".into(),
             event_kind: "paykit.payment_request".into(),
             payload_hash: payload_hash(&raw_json),
@@ -631,7 +631,7 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
     let raw_json = payment_request_json("650e8400-e29b-41d4-a716-446655440000");
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -642,7 +642,7 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json: raw_json.clone(),
             parsed_version: Some(1),
@@ -654,7 +654,7 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
         }],
         event_dedup_records: vec![EventDedupRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
             event_kind: "paykit.payment_request".into(),
             payload_hash: payload_hash(&raw_json),
@@ -692,11 +692,11 @@ async fn test_restore_backup_state_rejects_wrong_receiver_receipt_access_dedupe_
         "750e8400-e29b-41d4-a716-446655440000",
         &period,
     );
-    let wrong_location = paykit_lib::ReceiptAccess::location(&other_receiver_id(), &receipt_id);
+    let wrong_location = paykit_lib::ReceiptAccess::location(&other_receiver_path(), &receipt_id);
     let raw_json = raw_json.replace(&original_location, &wrong_location);
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -707,7 +707,7 @@ async fn test_restore_backup_state_rejects_wrong_receiver_receipt_access_dedupe_
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json: raw_json.clone(),
             parsed_version: Some(1),
@@ -721,7 +721,7 @@ async fn test_restore_backup_state_rejects_wrong_receiver_receipt_access_dedupe_
         }],
         event_dedup_records: vec![EventDedupRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             event_id: event_id.into(),
             event_kind: "paykit.receipt_access".into(),
             payload_hash: payload_hash(&raw_json),
@@ -761,7 +761,7 @@ async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
     );
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -773,7 +773,7 @@ async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
             PrivateStreamItemRecord {
                 stream_item_id: 1,
                 counterparty: counterparty.clone(),
-                counterparty_receiver_id: receiver_id(),
+                counterparty_receiver_path: receiver_path(),
                 receive_batch_id: 0,
                 raw_json: request_json.clone(),
                 parsed_version: Some(1),
@@ -786,7 +786,7 @@ async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
             PrivateStreamItemRecord {
                 stream_item_id: 2,
                 counterparty: counterparty.clone(),
-                counterparty_receiver_id: receiver_id(),
+                counterparty_receiver_path: receiver_path(),
                 receive_batch_id: 0,
                 raw_json: receipt_access_json,
                 parsed_version: Some(1),
@@ -799,7 +799,7 @@ async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
         ],
         event_dedup_records: vec![EventDedupRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             event_id: event_id.into(),
             event_kind: "paykit.payment_request".into(),
             payload_hash: payload_hash(&request_json),
@@ -825,7 +825,7 @@ async fn test_restore_backup_state_rejects_missing_event_dedupe_index() {
     let raw_json = payment_request_json("650e8400-e29b-41d4-a716-446655440000");
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -836,7 +836,7 @@ async fn test_restore_backup_state_rejects_missing_event_dedupe_index() {
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json,
             parsed_version: Some(1),
@@ -878,7 +878,7 @@ async fn test_restore_backup_state_rejects_missing_receipt_access_index() {
     );
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -889,7 +889,7 @@ async fn test_restore_backup_state_rejects_missing_receipt_access_index() {
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json: raw_json.clone(),
             parsed_version: Some(1),
@@ -901,7 +901,7 @@ async fn test_restore_backup_state_rejects_missing_receipt_access_index() {
         }],
         event_dedup_records: vec![EventDedupRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             event_id: event_id.into(),
             event_kind: "paykit.receipt_access".into(),
             payload_hash: payload_hash(&raw_json),
@@ -942,7 +942,7 @@ async fn test_restore_backup_state_rejects_receipt_access_context_mismatch() {
     );
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -953,7 +953,7 @@ async fn test_restore_backup_state_rejects_receipt_access_context_mismatch() {
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json,
             parsed_version: Some(1),
@@ -966,7 +966,7 @@ async fn test_restore_backup_state_rejects_receipt_access_context_mismatch() {
         event_dedup_records: Vec::new(),
         receipt_access_records: vec![ReceiptAccessRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             stream_item_id: 1,
             receive_batch_id: 0,
             event_id: event_id.into(),
@@ -1013,13 +1013,13 @@ async fn test_restore_backup_state_rejects_receipt_access_receiver_mismatch() {
         &period,
     );
     let wrong_location = paykit_lib::ReceiptAccess::location(
-        &other_receiver_id(),
+        &other_receiver_path(),
         &paykit_lib::ReceiptId::new(receipt_id).unwrap(),
     );
     let raw_json = raw_json.replace(&original_location, &wrong_location);
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1030,7 +1030,7 @@ async fn test_restore_backup_state_rejects_receipt_access_receiver_mismatch() {
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json,
             parsed_version: Some(1),
@@ -1043,7 +1043,7 @@ async fn test_restore_backup_state_rejects_receipt_access_receiver_mismatch() {
         event_dedup_records: Vec::new(),
         receipt_access_records: vec![ReceiptAccessRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             stream_item_id: 1,
             receive_batch_id: 0,
             event_id: event_id.into(),
@@ -1092,7 +1092,7 @@ async fn test_restore_backup_state_rejects_inconsistent_receipt_access_status() 
     );
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1103,7 +1103,7 @@ async fn test_restore_backup_state_rejects_inconsistent_receipt_access_status() 
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json,
             parsed_version: Some(1),
@@ -1116,7 +1116,7 @@ async fn test_restore_backup_state_rejects_inconsistent_receipt_access_status() 
         event_dedup_records: Vec::new(),
         receipt_access_records: vec![ReceiptAccessRecord {
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             stream_item_id: 1,
             receive_batch_id: 0,
             event_id: event_id.into(),
@@ -1154,7 +1154,7 @@ async fn test_restore_backup_state_preserves_invalid_outbound_audit_record() {
     invalid.last_error = Some("invalid private message JSON".into());
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1194,7 +1194,7 @@ async fn test_restore_backup_state_preserves_recovery_required_outbound_audit_re
     recovery_required.last_error = Some("Encrypted Link recovery is required".into());
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1233,7 +1233,7 @@ async fn test_restore_backup_state_marks_sending_outbound_recovery_required() {
     sending.last_attempt_at = Some(timestamp());
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1307,7 +1307,7 @@ async fn test_restore_backup_state_rejects_wrong_identity() {
 
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(backup_public_key)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1339,7 +1339,7 @@ async fn test_restore_backup_state_preserves_current_sign_out_generation() {
     storage.save_identity_state(current_identity).await.unwrap();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1383,7 +1383,7 @@ async fn test_restore_backup_state_allows_trusted_identity_switch() {
     trusted_identity.sign_out_generation = 3;
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(backup_public_key.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1401,7 +1401,7 @@ async fn test_restore_backup_state_allows_trusted_identity_switch() {
         next_private_stream_item_id: 0,
     };
 
-    restore_backup_state_with_identity(&storage, backup, receiver_id(), Some(trusted_identity))
+    restore_backup_state_with_identity(&storage, backup, receiver_path(), Some(trusted_identity))
         .await
         .unwrap();
 
@@ -1419,7 +1419,7 @@ async fn test_restore_identity_less_backup_preserves_signed_out_generation() {
         .unwrap();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: None,
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1450,7 +1450,7 @@ async fn test_restore_backup_state_rejects_orphan_endpoint_reservation() {
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1458,7 +1458,7 @@ async fn test_restore_backup_state_rejects_orphan_endpoint_reservation() {
         payment_endpoint_reservations: vec![PaymentEndpointReservationRecord {
             reservation_id: "reservation-1".into(),
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("ln-private"),
             outbound_message_id: 7,
@@ -1490,7 +1490,7 @@ async fn test_restore_backup_state_rejects_invalid_endpoint_reservation_id() {
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1498,7 +1498,7 @@ async fn test_restore_backup_state_rejects_invalid_endpoint_reservation_id() {
         payment_endpoint_reservations: vec![PaymentEndpointReservationRecord {
             reservation_id: "reservation\n1".into(),
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("ln-private"),
             outbound_message_id: 7,
@@ -1534,7 +1534,7 @@ async fn test_restore_backup_state_rejects_mismatched_endpoint_reservation_paylo
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1542,7 +1542,7 @@ async fn test_restore_backup_state_rejects_mismatched_endpoint_reservation_paylo
         payment_endpoint_reservations: vec![PaymentEndpointReservationRecord {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("different-payload"),
             outbound_message_id: 7,
@@ -1579,7 +1579,7 @@ async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
     let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     let access = ReceiptAccessRecord {
         counterparty: counterparty.clone(),
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         stream_item_id: 0,
         receive_batch_id: 0,
         event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
@@ -1587,7 +1587,7 @@ async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
         payment_reference: "invoice-2026-0001".into(),
         payment_request_id: None,
         billing_period: None,
-        location: format!("/pub/paykit/v0/private/bitkit/receipts/{receipt_id}"),
+        location: format!("/pub/paykit/v0/private/bitkit/wallet/receipts/{receipt_id}"),
         key: "receipt-secret".into(),
         retrieval_status: crate::ReceiptRetrievalStatus::Pending,
         retrieval_attempted_at: None,
@@ -1597,7 +1597,7 @@ async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
     };
     let receipt = ReceiptRecord {
         issuer: counterparty.clone(),
-        issuer_receiver_id: receiver_id(),
+        issuer_receiver_path: receiver_path(),
         receipt_access_event_id: access.event_id.clone(),
         receipt_access_key_hash: receipt_access_key_hash("wrong-secret"),
         receipt_id: receipt_id.into(),
@@ -1613,7 +1613,7 @@ async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
     };
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1658,7 +1658,7 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
     );
     let access = ReceiptAccessRecord {
         counterparty: issuer.clone(),
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         stream_item_id: 1,
         receive_batch_id: 0,
         event_id: event_id.into(),
@@ -1676,7 +1676,7 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
     };
     let receipt = ReceiptRecord {
         issuer: issuer.clone(),
-        issuer_receiver_id: receiver_id(),
+        issuer_receiver_path: receiver_path(),
         receipt_access_event_id: event_id.into(),
         receipt_access_key_hash: receipt_access_key_hash(&key),
         receipt_id: receipt_id.into(),
@@ -1692,7 +1692,7 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
     };
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1703,7 +1703,7 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty: issuer.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json: raw_json.clone(),
             parsed_version: Some(1),
@@ -1715,7 +1715,7 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
         }],
         event_dedup_records: vec![EventDedupRecord {
             counterparty: issuer,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             event_id: event_id.into(),
             event_kind: "paykit.receipt_access".into(),
             payload_hash: payload_hash(&raw_json),
@@ -1743,7 +1743,7 @@ async fn test_restore_backup_state_rejects_receipt_issuance_access_mismatch() {
     let counterparty = public_key();
     let prepared = paykit_lib::prepare_receipt_for_recipient(
         counterparty.to_public_key().unwrap(),
-        &receiver_id(),
+        &receiver_path(),
         paykit_lib::ReceiptDraft {
             receipt_id: Some(
                 paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
@@ -1760,12 +1760,12 @@ async fn test_restore_backup_state_rejects_receipt_issuance_access_mismatch() {
     )
     .unwrap();
     let mut issuance =
-        ReceiptIssuanceRecord::from_prepared(counterparty, receiver_id(), prepared, timestamp())
+        ReceiptIssuanceRecord::from_prepared(counterparty, receiver_path(), prepared, timestamp())
             .unwrap();
     issuance.payment_reference = "different-reference".into();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1795,7 +1795,7 @@ async fn test_restore_backup_state_rejects_receipt_issuance_wrong_local_receiver
     let counterparty = public_key();
     let prepared = paykit_lib::prepare_receipt_for_recipient(
         counterparty.to_public_key().unwrap(),
-        &other_receiver_id(),
+        &other_receiver_path(),
         paykit_lib::ReceiptDraft {
             receipt_id: Some(
                 paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
@@ -1812,11 +1812,11 @@ async fn test_restore_backup_state_rejects_receipt_issuance_wrong_local_receiver
     )
     .unwrap();
     let issuance =
-        ReceiptIssuanceRecord::from_prepared(counterparty, receiver_id(), prepared, timestamp())
+        ReceiptIssuanceRecord::from_prepared(counterparty, receiver_path(), prepared, timestamp())
             .unwrap();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1846,7 +1846,7 @@ async fn test_restore_backup_state_rejects_outbound_receipt_access_wrong_local_r
     let counterparty = public_key();
     let prepared = paykit_lib::prepare_receipt_for_recipient(
         counterparty.to_public_key().unwrap(),
-        &other_receiver_id(),
+        &other_receiver_path(),
         paykit_lib::ReceiptDraft {
             receipt_id: Some(
                 paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
@@ -1864,14 +1864,14 @@ async fn test_restore_backup_state_rejects_outbound_receipt_access_wrong_local_r
     .unwrap();
     let issuance = ReceiptIssuanceRecord::from_prepared(
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         prepared,
         timestamp(),
     )
     .unwrap();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -1881,7 +1881,7 @@ async fn test_restore_backup_state_rejects_outbound_receipt_access_wrong_local_r
         outbound_private_messages: vec![OutboundPrivateMessageRecord {
             outbound_message_id: 7,
             counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             kind: PrivateMessageKind::ReceiptAccess.as_str().into(),
             raw_json: issuance.access_json,
             status: OutboundPrivateMessageStatus::Pending,
@@ -1927,10 +1927,10 @@ async fn test_restore_backup_state_rejects_duplicate_receipt_issuance_ids() {
     };
     let first = ReceiptIssuanceRecord::from_prepared(
         first_counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         paykit_lib::prepare_receipt_for_recipient(
             first_counterparty.to_public_key().unwrap(),
-            &receiver_id(),
+            &receiver_path(),
             draft(),
         )
         .unwrap(),
@@ -1939,10 +1939,10 @@ async fn test_restore_backup_state_rejects_duplicate_receipt_issuance_ids() {
     .unwrap();
     let second = ReceiptIssuanceRecord::from_prepared(
         second_counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         paykit_lib::prepare_receipt_for_recipient(
             second_counterparty.to_public_key().unwrap(),
-            &receiver_id(),
+            &receiver_path(),
             draft(),
         )
         .unwrap(),
@@ -1951,7 +1951,7 @@ async fn test_restore_backup_state_rejects_duplicate_receipt_issuance_ids() {
     .unwrap();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),

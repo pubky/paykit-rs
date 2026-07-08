@@ -21,7 +21,7 @@ use crate::{
     domain::outbound_private::validate_outbound_private_message,
     domain::records::{AmountRecord, BillingPeriodRecord},
     storage::{NewOutboundPrivateMessage, StorageAdapter},
-    PaykitReceiverId, PaykitSdkError, PubkyPublicKey, Result,
+    PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
 
 /// Builder for caller-provided receipt fields.
@@ -198,7 +198,7 @@ pub struct ReceiptIssuanceRecord {
     /// Counterparty that should receive Receipt Access.
     pub counterparty: PubkyPublicKey,
     /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: PaykitReceiverId,
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Receipt ID.
     pub receipt_id: String,
     /// Receipt Access Event ID.
@@ -238,14 +238,14 @@ pub struct ReceiptIssuanceRecord {
 impl ReceiptIssuanceRecord {
     pub(crate) fn from_prepared(
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         prepared: PreparedReceipt,
         now: DateTime<Utc>,
     ) -> Result<Self> {
         let access_json = serialize_receipt_access_json(&prepared.access)?;
         Ok(Self {
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             receipt_id: prepared.receipt.receipt_id.as_str().to_owned(),
             receipt_access_event_id: prepared.access.event_id.as_str().to_owned(),
             payment_reference: prepared.receipt.payment_reference.as_str().to_owned(),
@@ -314,7 +314,10 @@ impl fmt::Debug for ReceiptIssuanceRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReceiptIssuanceRecord")
             .field("counterparty", &self.counterparty)
-            .field("counterparty_receiver_id", &self.counterparty_receiver_id)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("receipt_id", &self.receipt_id)
             .field("receipt_access_event_id", &self.receipt_access_event_id)
             .field("payment_reference", &"<redacted>")
@@ -354,7 +357,7 @@ pub struct ReceiptIssuanceView {
     /// Counterparty that should receive Receipt Access.
     pub counterparty: PubkyPublicKey,
     /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: PaykitReceiverId,
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Receipt ID.
     pub receipt_id: String,
     /// Receipt Access Event ID.
@@ -387,7 +390,10 @@ impl fmt::Debug for ReceiptIssuanceView {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReceiptIssuanceView")
             .field("counterparty", &self.counterparty)
-            .field("counterparty_receiver_id", &self.counterparty_receiver_id)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("receipt_id", &self.receipt_id)
             .field("receipt_access_event_id", &self.receipt_access_event_id)
             .field("payment_reference", &"<redacted>")
@@ -412,7 +418,7 @@ impl From<&ReceiptIssuanceRecord> for ReceiptIssuanceView {
     fn from(record: &ReceiptIssuanceRecord) -> Self {
         Self {
             counterparty: record.counterparty.clone(),
-            counterparty_receiver_id: record.counterparty_receiver_id.clone(),
+            counterparty_receiver_path: record.counterparty_receiver_path.clone(),
             receipt_id: record.receipt_id.clone(),
             receipt_access_event_id: record.receipt_access_event_id.clone(),
             payment_reference: record.payment_reference.clone(),
@@ -436,7 +442,7 @@ pub struct ReceiptAccessRecord {
     /// Counterparty that sent the Receipt Access event.
     pub counterparty: PubkyPublicKey,
     /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: PaykitReceiverId,
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Stream item id that first carried this Event ID.
     pub stream_item_id: u64,
     /// Receive batch id that contained the stream item.
@@ -477,7 +483,7 @@ pub struct ReceiptAccessView {
     /// Counterparty that sent the Receipt Access event.
     pub counterparty: PubkyPublicKey,
     /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: PaykitReceiverId,
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Receipt Access Event ID.
     pub event_id: String,
     /// Receipt ID.
@@ -502,7 +508,10 @@ impl fmt::Debug for ReceiptAccessView {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReceiptAccessView")
             .field("counterparty", &self.counterparty)
-            .field("counterparty_receiver_id", &self.counterparty_receiver_id)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("event_id", &self.event_id)
             .field("receipt_id", &self.receipt_id)
             .field("payment_reference", &"<redacted>")
@@ -520,7 +529,7 @@ impl From<&ReceiptAccessRecord> for ReceiptAccessView {
     fn from(record: &ReceiptAccessRecord) -> Self {
         Self {
             counterparty: record.counterparty.clone(),
-            counterparty_receiver_id: record.counterparty_receiver_id.clone(),
+            counterparty_receiver_path: record.counterparty_receiver_path.clone(),
             event_id: record.event_id.clone(),
             receipt_id: record.receipt_id.clone(),
             payment_reference: record.payment_reference.clone(),
@@ -537,7 +546,7 @@ impl From<&ReceiptAccessRecord> for ReceiptAccessView {
 impl ReceiptAccessRecord {
     pub(crate) fn from_access(
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         stream_item_id: u64,
         receive_batch_id: u64,
         received_at: DateTime<Utc>,
@@ -545,7 +554,7 @@ impl ReceiptAccessRecord {
     ) -> Self {
         Self {
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             stream_item_id,
             receive_batch_id,
             event_id: access.event_id.as_str().to_owned(),
@@ -624,7 +633,7 @@ pub struct ReceiptRecord {
     /// Counterparty that issued the Receipt Access event.
     pub issuer: PubkyPublicKey,
     /// Issuer receiver/runtime folder.
-    pub issuer_receiver_id: PaykitReceiverId,
+    pub issuer_receiver_path: PaykitReceiverPath,
     /// Receipt Access Event ID used for retrieval.
     pub receipt_access_event_id: String,
     /// Hash of the Receipt Access key that decrypted the Receipt.
@@ -661,7 +670,7 @@ impl ReceiptRecord {
     ) -> Self {
         Self {
             issuer,
-            issuer_receiver_id: access.counterparty_receiver_id.clone(),
+            issuer_receiver_path: access.counterparty_receiver_path.clone(),
             receipt_access_event_id: access.event_id.clone(),
             receipt_access_key_hash: receipt_access_key_hash(&access.key),
             receipt_id: receipt.receipt_id.as_str().to_owned(),
@@ -718,13 +727,13 @@ impl fmt::Debug for ReceiptRecord {
 pub(crate) async fn receipt_access_records<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Result<Vec<ReceiptAccessRecord>>
 where
     S: StorageAdapter,
 {
     storage
-        .transaction(|tx| Ok(tx.receipt_access_records(counterparty, counterparty_receiver_id)))
+        .transaction(|tx| Ok(tx.receipt_access_records(counterparty, counterparty_receiver_path)))
         .await
 }
 
@@ -733,7 +742,7 @@ where
 pub(crate) async fn receipt_access_record_by_receipt_id<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     receipt_id: &str,
 ) -> Result<Option<ReceiptAccessRecord>>
 where
@@ -743,7 +752,7 @@ where
         .transaction(|tx| {
             Ok(tx.receipt_access_record_by_receipt_id(
                 counterparty,
-                counterparty_receiver_id,
+                counterparty_receiver_path,
                 receipt_id,
             ))
         })
@@ -795,7 +804,7 @@ pub(crate) async fn store_encrypted_receipt_json(
 
 pub(crate) fn receipt_issuance_record_matches_draft(
     record: &ReceiptIssuanceRecord,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     draft: &ReceiptDraft,
 ) -> Result<bool> {
     let access = paykit_lib::parse_receipt_access_json(&record.access_json)?;
@@ -803,34 +812,36 @@ pub(crate) fn receipt_issuance_record_matches_draft(
         paykit_lib::decrypt_receipt(&record.encrypted_receipt, &access.key, &access.location)?;
     let expected_receipt_id = draft.receipt_id.as_ref().map(|id| id.as_str());
     let expected_recipient = record.counterparty.to_public_key()?;
-    Ok(&record.counterparty_receiver_id == counterparty_receiver_id
-        && Some(receipt.receipt_id.as_str()) == expected_receipt_id
-        && receipt.payment_reference == draft.payment_reference
-        && receipt.payment_request_id == draft.payment_request_id
-        && receipt.billing_period == draft.billing_period
-        && receipt.recipient_public_key == expected_recipient
-        && receipt.payment_endpoint_identifier == draft.payment_endpoint_identifier
-        && receipt.amount == draft.amount
-        && receipt.metadata == draft.metadata)
+    Ok(
+        &record.counterparty_receiver_path == counterparty_receiver_path
+            && Some(receipt.receipt_id.as_str()) == expected_receipt_id
+            && receipt.payment_reference == draft.payment_reference
+            && receipt.payment_request_id == draft.payment_request_id
+            && receipt.billing_period == draft.billing_period
+            && receipt.recipient_public_key == expected_recipient
+            && receipt.payment_endpoint_identifier == draft.payment_endpoint_identifier
+            && receipt.amount == draft.amount
+            && receipt.metadata == draft.metadata,
+    )
 }
 
 pub(crate) async fn receipt_issuance_records<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Result<Vec<ReceiptIssuanceRecord>>
 where
     S: StorageAdapter,
 {
     storage
-        .transaction(|tx| Ok(tx.receipt_issuance_records(counterparty, counterparty_receiver_id)))
+        .transaction(|tx| Ok(tx.receipt_issuance_records(counterparty, counterparty_receiver_path)))
         .await
 }
 
 pub(crate) async fn receipt_issuance_record<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     receipt_id: &str,
 ) -> Result<Option<ReceiptIssuanceRecord>>
 where
@@ -838,7 +849,7 @@ where
 {
     storage
         .transaction(|tx| {
-            Ok(tx.receipt_issuance_record(counterparty, counterparty_receiver_id, receipt_id))
+            Ok(tx.receipt_issuance_record(counterparty, counterparty_receiver_path, receipt_id))
         })
         .await
 }
@@ -876,7 +887,7 @@ where
         .transaction(move |tx| {
             let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 record.counterparty.clone(),
-                record.counterparty_receiver_id.clone(),
+                record.counterparty_receiver_path.clone(),
                 kind,
                 record.access_json.clone(),
                 now,

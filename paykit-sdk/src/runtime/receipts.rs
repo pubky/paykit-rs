@@ -15,7 +15,7 @@ where
     pub async fn prepare_receipt_issuance(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         draft: ReceiptDraft,
     ) -> Result<ReceiptIssuanceView> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
@@ -25,7 +25,7 @@ where
                 source: None,
             });
         }
-        self.ensure_peer_not_blocked(&counterparty, &counterparty_receiver_id)
+        self.ensure_peer_not_blocked(&counterparty, &counterparty_receiver_path)
             .await?;
 
         if let Some(receipt_id) = draft.receipt_id.as_ref() {
@@ -34,7 +34,7 @@ where
                     .await?
             {
                 if existing.counterparty != counterparty
-                    || existing.counterparty_receiver_id != counterparty_receiver_id
+                    || existing.counterparty_receiver_path != counterparty_receiver_path
                 {
                     return Err(PaykitSdkError::Protocol(format!(
                         "Receipt issuance {} already exists for a different counterparty receiver",
@@ -43,7 +43,7 @@ where
                 }
                 if !receipt_issuance_record_matches_draft(
                     &existing,
-                    &counterparty_receiver_id,
+                    &counterparty_receiver_path,
                     &draft,
                 )? {
                     return Err(PaykitSdkError::Protocol(format!(
@@ -57,11 +57,14 @@ where
 
         let now = self.clock.now();
         let recipient = counterparty.to_public_key()?;
-        let prepared =
-            paykit_lib::prepare_receipt_for_recipient(recipient, &self.config.receiver_id, draft)?;
+        let prepared = paykit_lib::prepare_receipt_for_recipient(
+            recipient,
+            &self.config.receiver_path,
+            draft,
+        )?;
         let record = ReceiptIssuanceRecord::from_prepared(
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             prepared,
             now,
         )?;
@@ -94,7 +97,7 @@ where
     pub async fn issue_receipt(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         draft: ReceiptDraft,
     ) -> Result<ReceiptIssuanceView> {
         if draft.receipt_id.is_none() {
@@ -105,11 +108,11 @@ where
         let record = self
             .prepare_receipt_issuance(
                 counterparty.clone(),
-                counterparty_receiver_id.clone(),
+                counterparty_receiver_path.clone(),
                 draft,
             )
             .await?;
-        self.process_receipt_issuance(counterparty, counterparty_receiver_id, &record.receipt_id)
+        self.process_receipt_issuance(counterparty, counterparty_receiver_path, &record.receipt_id)
             .await
     }
 
@@ -117,23 +120,23 @@ where
     pub async fn process_receipt_issuance(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         receipt_id: &str,
     ) -> Result<ReceiptIssuanceView> {
         let (session_access, _) = self.private_link_session_access().await?;
         let record = load_receipt_issuance_record(
             &self.storage,
             &counterparty,
-            &counterparty_receiver_id,
+            &counterparty_receiver_path,
             receipt_id,
         )
         .await?
         .ok_or_else(|| {
                 PaykitSdkError::NotFound(format!(
-                    "Receipt issuance {receipt_id} for counterparty {counterparty}/{counterparty_receiver_id} was not found"
+                    "Receipt issuance {receipt_id} for counterparty {counterparty}/{counterparty_receiver_path} was not found"
                 ))
             })?;
-        self.ensure_private_outbound_ready(&counterparty, &record.counterparty_receiver_id)
+        self.ensure_private_outbound_ready(&counterparty, &record.counterparty_receiver_path)
             .await?;
         if record.status == ReceiptIssuanceStatus::AccessQueued {
             return Ok(ReceiptIssuanceView::from(&record));
@@ -196,16 +199,16 @@ where
     pub async fn receipt_issuance_records(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptIssuanceView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
-        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_id)
+        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
             .await?;
         let mut records =
-            load_receipt_issuance_records(&self.storage, counterparty, counterparty_receiver_id)
+            load_receipt_issuance_records(&self.storage, counterparty, counterparty_receiver_path)
                 .await?
                 .iter()
                 .map(ReceiptIssuanceView::from)
@@ -218,9 +221,9 @@ where
     pub async fn issued_receipts_to(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptIssuanceView>> {
-        self.receipt_issuance_records(counterparty, counterparty_receiver_id)
+        self.receipt_issuance_records(counterparty, counterparty_receiver_path)
             .await
     }
 
@@ -241,7 +244,7 @@ where
                             .linked_peers
                             .get(&(
                                 record.counterparty.clone(),
-                                record.counterparty_receiver_id.clone(),
+                                record.counterparty_receiver_path.clone(),
                             ))
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
@@ -262,7 +265,7 @@ where
     pub async fn retrieve_receipt(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         receipt_id: &str,
     ) -> Result<ReceiptRecord> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
@@ -272,17 +275,17 @@ where
                 context: "no local Pubky identity available for receipt retrieval".into(),
                 source: None,
             })?;
-        self.ensure_peer_not_blocked(&counterparty, &counterparty_receiver_id)
+        self.ensure_peer_not_blocked(&counterparty, &counterparty_receiver_path)
             .await?;
         let (stored_receipt, access_records, conflicted_access_count, stored_receipt_conflicted) =
             self.storage
                 .transaction(|tx| {
                     let stored_receipt =
-                        tx.receipt_record(&counterparty, &counterparty_receiver_id, receipt_id);
+                        tx.receipt_record(&counterparty, &counterparty_receiver_path, receipt_id);
                     let stored_receipt_conflicted = stored_receipt.as_ref().is_some_and(|record| {
                         tx.event_dedup_record(
                             &counterparty,
-                            &counterparty_receiver_id,
+                            &counterparty_receiver_path,
                             &record.receipt_access_event_id,
                         )
                         .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
@@ -290,7 +293,7 @@ where
                     let mut access_records = Vec::new();
                     let mut conflicted_access_count = 0usize;
                     for record in tx
-                        .receipt_access_records(&counterparty, &counterparty_receiver_id)
+                        .receipt_access_records(&counterparty, &counterparty_receiver_path)
                         .into_iter()
                         .filter(|record| record.receipt_id == receipt_id)
                     {
@@ -436,18 +439,18 @@ where
     pub async fn receipt_access_records(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptAccessView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
-        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_id)
+        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
             .await?;
         self.storage
             .transaction(|tx| {
                 let mut records = tx
-                    .receipt_access_records(counterparty, counterparty_receiver_id)
+                    .receipt_access_records(counterparty, counterparty_receiver_path)
                     .into_iter()
                     .filter(|record| !Self::receipt_access_event_is_conflicted(tx, record))
                     .map(|record| ReceiptAccessView::from(&record))
@@ -462,9 +465,9 @@ where
     pub async fn receipt_access_from(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptAccessView>> {
-        self.receipt_access_records(counterparty, counterparty_receiver_id)
+        self.receipt_access_records(counterparty, counterparty_receiver_path)
             .await
     }
 
@@ -485,7 +488,7 @@ where
                             .linked_peers
                             .get(&(
                                 record.counterparty.clone(),
-                                record.counterparty_receiver_id.clone(),
+                                record.counterparty_receiver_path.clone(),
                             ))
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
@@ -502,13 +505,13 @@ where
     pub async fn receipt_records(
         &self,
         issuer: &PubkyPublicKey,
-        issuer_receiver_id: &PaykitReceiverId,
+        issuer_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         let Some(local_public_key) = identity.public_key else {
             return Ok(Vec::new());
         };
-        self.ensure_peer_not_blocked(issuer, issuer_receiver_id)
+        self.ensure_peer_not_blocked(issuer, issuer_receiver_path)
             .await?;
         self.storage
             .transaction(|tx| {
@@ -517,7 +520,7 @@ where
                     .receipt_records
                     .into_values()
                     .filter(|record| &record.issuer == issuer)
-                    .filter(|record| &record.issuer_receiver_id == issuer_receiver_id)
+                    .filter(|record| &record.issuer_receiver_path == issuer_receiver_path)
                     .filter(|record| record.recipient_public_key == local_public_key)
                     .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
                     .collect::<Vec<_>>();
@@ -531,9 +534,9 @@ where
     pub async fn receipts_from(
         &self,
         issuer: &PubkyPublicKey,
-        issuer_receiver_id: &PaykitReceiverId,
+        issuer_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptRecord>> {
-        self.receipt_records(issuer, issuer_receiver_id).await
+        self.receipt_records(issuer, issuer_receiver_path).await
     }
 
     /// List decrypted receipts across non-blocked issuers, newest first.
@@ -552,7 +555,7 @@ where
                     .filter(|record| {
                         !snapshot
                             .linked_peers
-                            .get(&(record.issuer.clone(), record.issuer_receiver_id.clone()))
+                            .get(&(record.issuer.clone(), record.issuer_receiver_path.clone()))
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
                     .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
@@ -608,7 +611,7 @@ where
     ) -> bool {
         tx.event_dedup_record(
             &access.counterparty,
-            &access.counterparty_receiver_id,
+            &access.counterparty_receiver_path,
             &access.event_id,
         )
         .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
@@ -620,7 +623,7 @@ where
     ) -> bool {
         tx.event_dedup_record(
             &record.issuer,
-            &record.issuer_receiver_id,
+            &record.issuer_receiver_path,
             &record.receipt_access_event_id,
         )
         .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())

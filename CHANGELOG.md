@@ -20,6 +20,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ### Removed
 - Removed default Paykit profile/contact path constants and broad core session
   capability helpers. Apps must pass an explicit receiver path/config.
+- Removed the unmaintained `paykit-react-native` package. Supported platform
+  bindings are Swift and Kotlin.
 
 ## [0.1.0-rc32] - 2026-07-07
 

@@ -15,22 +15,22 @@ fn public_key() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
-fn receiver_id() -> paykit_lib::PaykitReceiverId {
-    paykit_lib::PaykitReceiverId::new("bitkit").unwrap()
+fn receiver_path() -> paykit_lib::PaykitReceiverPath {
+    paykit_lib::PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
-fn other_receiver_id() -> paykit_lib::PaykitReceiverId {
-    paykit_lib::PaykitReceiverId::new("tether").unwrap()
+fn other_receiver_path() -> paykit_lib::PaykitReceiverPath {
+    paykit_lib::PaykitReceiverPath::new("tether/wallet").unwrap()
 }
 
-fn peer_key(public_key: &PubkyPublicKey) -> (PubkyPublicKey, paykit_lib::PaykitReceiverId) {
-    (public_key.clone(), receiver_id())
+fn peer_key(public_key: &PubkyPublicKey) -> (PubkyPublicKey, paykit_lib::PaykitReceiverPath) {
+    (public_key.clone(), receiver_path())
 }
 
 fn recovery_required_peer(public_key: &PubkyPublicKey) -> RestoreRecoveryRequiredPeer {
     RestoreRecoveryRequiredPeer {
         counterparty: public_key.clone(),
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
     }
 }
 
@@ -57,7 +57,7 @@ fn signed_out_identity(sign_out_generation: u64) -> IdentityState {
 fn contact_record(public_key: PubkyPublicKey) -> ContactRecord {
     ContactRecord {
         public_key,
-        receiver_id: receiver_id(),
+        receiver_path: receiver_path(),
         label: Some("Alice".into()),
         profile: None,
         profile_fetched_at: None,
@@ -84,7 +84,7 @@ fn private_payment_list_outbound(
     OutboundPrivateMessageRecord {
         outbound_message_id,
         counterparty,
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         kind: PrivateMessageKind::PrivatePaymentList.as_str().into(),
         raw_json: format!(
             r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"btc-lightning-bolt11":"{payload}"}}}}"#
@@ -105,7 +105,7 @@ async fn assert_restore_rejects_outbound_record(record: OutboundPrivateMessageRe
     let next_id = record.outbound_message_id.saturating_add(1);
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -136,7 +136,7 @@ fn receipt_access_raw_with_context(
     billing_period: &BillingPeriodRecord,
 ) -> (String, String, String) {
     let receipt_id = ReceiptId::new(receipt_id).unwrap();
-    let location = paykit_lib::ReceiptAccess::location(&receiver_id(), &receipt_id);
+    let location = paykit_lib::ReceiptAccess::location(&receiver_path(), &receipt_id);
     let key = paykit_lib::ReceiptDecryptionKey::generate()
         .as_str()
         .to_owned();

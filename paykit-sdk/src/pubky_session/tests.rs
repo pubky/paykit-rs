@@ -1,7 +1,7 @@
 use super::*;
 
 fn scoped_capabilities() -> String {
-    crate::PaykitSdkConfig::new(crate::PaykitReceiverId::new("bitkit").unwrap())
+    crate::PaykitSdkConfig::new(crate::PaykitReceiverPath::new("bitkit/wallet").unwrap())
         .required_session_capabilities()
 }
 
@@ -52,16 +52,13 @@ fn test_parse_pubky_auth_url_rejects_invalid_url() {
 fn test_parse_pubky_resource_normalizes_uri() {
     let public_key = PubkyLocalSecretKey::new([4; 32]).public_key();
     let resource = parse_pubky_resource(&format!(
-        "pubky://{}/pub/paykit/v0/receivers/paykit/profile.json",
+        "pubky://{}/pub/paykit/v0/paykit/wallet/profile.json",
         public_key.as_str()
     ))
     .unwrap();
 
     assert_eq!(resource.public_key, public_key);
-    assert_eq!(
-        resource.path,
-        "/pub/paykit/v0/receivers/paykit/profile.json"
-    );
+    assert_eq!(resource.path, "/pub/paykit/v0/paykit/wallet/profile.json");
     assert!(resource.transport_url.starts_with("https://"));
 }
 
@@ -69,16 +66,13 @@ fn test_parse_pubky_resource_normalizes_uri() {
 fn test_parse_pubky_resource_accepts_pubky_identifier_form() {
     let public_key = PubkyLocalSecretKey::new([5; 32]).public_key();
     let resource = parse_pubky_resource(&format!(
-        "pubky{}/pub/paykit/v0/receivers/paykit/profile.json",
+        "pubky{}/pub/paykit/v0/paykit/wallet/profile.json",
         public_key.as_str()
     ))
     .unwrap();
 
     assert_eq!(resource.public_key, public_key);
-    assert_eq!(
-        resource.path,
-        "/pub/paykit/v0/receivers/paykit/profile.json"
-    );
+    assert_eq!(resource.path, "/pub/paykit/v0/paykit/wallet/profile.json");
 }
 
 #[test]
@@ -97,7 +91,7 @@ fn test_parse_capabilities_rejects_invalid_entries() {
     );
     assert_eq!(
         capabilities,
-        "/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw"
+        "/pub/paykit/v0/bitkit/wallet/:rw,/pub/paykit/v0/private/bitkit/wallet/:rw"
     );
     assert!(parse_capabilities("/:rw,not-a-capability").is_err());
     assert!(parse_capabilities("/:rw,").is_err());
@@ -109,7 +103,7 @@ fn test_parse_capabilities_rejects_invalid_entries() {
 fn test_validate_auth_url_capabilities_requires_exact_match() {
     let capabilities = scoped_capabilities();
     let auth_url =
-        "pubkyauth://signin?caps=/pub/paykit/v0/receivers/bitkit/:rw,/pub/paykit/v0/private/bitkit/:rw&relay=https://httprelay.pubky.app/inbox/&secret=e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3s";
+        "pubkyauth://signin?caps=/pub/paykit/v0/bitkit/wallet/:rw,/pub/paykit/v0/private/bitkit/wallet/:rw&relay=https://httprelay.pubky.app/inbox/&secret=e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3s";
 
     assert!(validate_auth_url_capabilities(auth_url, &capabilities).is_ok());
     assert!(validate_auth_url_capabilities(auth_url, "/:rw").is_err());
