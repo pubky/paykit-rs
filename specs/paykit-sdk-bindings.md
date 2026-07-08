@@ -4,8 +4,8 @@
 
 Define the platform binding surface for Paykit SDK.
 
-Paykit SDK bindings should provide the app-facing mobile surface for Swift and
-Kotlin apps. Platform integrators should not need to
+Paykit SDK bindings should provide the app-facing mobile surface for Swift,
+Kotlin, and React Native apps. Platform integrators should not need to
 reimplement SDK state-machine rules or combine low-level `paykit-lib` calls
 themselves. The bindings should make common Paykit workflows easy, while
 keeping sensitive low-level state and protocol escape hatches out of the
@@ -39,6 +39,9 @@ paykit-sdk/
 
 paykit-ffi/
   SDK handle, FFI-safe DTOs, callback adapters, error mapping
+
+paykit-react-native/
+  TypeScript wrapper, discriminated unions, promise/callback bridge
 ```
 
 Platform apps should depend on SDK bindings as the normal Paykit integration
@@ -49,9 +52,10 @@ a concrete SDK workflow, diagnostic export, or protocol-only use case that
 needs it. Those escape hatches should be clearly separated from the default app
 API.
 
-React Native should be added later as a maintained wrapper on top of the
-Swift/Kotlin binding surface once there is a tested owner for that package. It
-is intentionally not part of the v0 checked-in binding surface.
+For React Native, distinguish the generated native SDK bindings from the
+hand-written TypeScript facade. The TypeScript facade may expose a smaller
+helper surface, but a React Native app-facing SDK runtime wrapper should expose
+the default workflows below before it replaces direct native SDK use.
 
 ## Runtime Handle
 
@@ -73,7 +77,7 @@ panic-style constructors.
 ## Storage Binding Shape
 
 Do not expose `StorageTransaction` or record-level storage mutation APIs to
-Swift or Kotlin.
+Swift, Kotlin, or React Native.
 
 ### StateBlobStorageAdapter
 
@@ -141,6 +145,11 @@ refresh live session capability, ensure or advance the private link when
 possible, drain currently available private send/receive work for the peer,
 then resolve endpoints private-first with optional public fallback.
 
+React Native bindings should keep SDK state blob storage in the native module by
+default. Passing `SdkStateBlob` bytes through the JavaScript bridge
+should be an explicit advanced mode because it creates extra copies, increases
+devtools/logging exposure, and can add bridge-size and performance risks.
+
 ## Pubky Session Binding Shape
 
 Bindings should make session capability explicit.
@@ -164,8 +173,8 @@ Bindings should document that apps must export and persist an SDK backup before
 explicit sign-out if they want to restore the same user's private Paykit state
 later.
 
-The binding-level session API should not ask Swift or Kotlin to construct Rust
-`pubky::PubkySession` or `pubky::Pubky` values directly. For
+The binding-level session API should not ask Swift, Kotlin, or React Native to
+construct Rust `pubky::PubkySession` or `pubky::Pubky` values directly. For
 ordinary app use, SDK bindings should turn app-provided session material,
 imported session secrets, or an auth handoff result into the Rust Pubky access
 needed by the SDK. SDK bindings use `PubkySessionBootstrap` for signup, signin,
@@ -242,6 +251,7 @@ Recommended shapes:
 - Swift: enums with associated values or wrapper structs where generated FFI
   enums are not ergonomic.
 - Kotlin: sealed classes or tagged data wrappers.
+- React Native: TypeScript discriminated unions.
 
 Platform enum/union wrappers that mirror SDK statuses, lifecycle states,
 payment resolution results, recovery states, or error codes should include an
