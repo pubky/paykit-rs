@@ -244,12 +244,12 @@ impl PubkySessionBootstrap {
     }
 
     /// Start a sign-in auth flow for an external signer such as Pubky Ring.
-    pub fn start_sign_in_auth(&self, capabilities: &str) -> Result<PubkyAuthRequest> {
-        self.start_auth(capabilities, AuthFlowKind::signin())
+    pub async fn start_sign_in_auth(&self, capabilities: &str) -> Result<PubkyAuthRequest> {
+        self.start_auth(capabilities, AuthFlowKind::signin()).await
     }
 
     /// Start a signup auth flow for an external signer such as Pubky Ring.
-    pub fn start_sign_up_auth(
+    pub async fn start_sign_up_auth(
         &self,
         capabilities: &str,
         homeserver_public_key: &PubkyPublicKey,
@@ -259,12 +259,13 @@ impl PubkySessionBootstrap {
             capabilities,
             AuthFlowKind::signup(homeserver_public_key.to_public_key()?, signup_token),
         )
+        .await
     }
 
     /// Resume a short-lived auth flow from its authorization URL.
     ///
     /// The requested capabilities must exactly match `expected_capabilities`.
-    pub fn resume_auth(
+    pub async fn resume_auth(
         &self,
         authorization_url: &str,
         expected_capabilities: &str,
@@ -300,7 +301,7 @@ impl PubkySessionBootstrap {
             .map_err(|err| map_pubky_identity_error("approve Pubky auth flow", err))
     }
 
-    fn start_auth(&self, capabilities: &str, kind: AuthFlowKind) -> Result<PubkyAuthRequest> {
+    async fn start_auth(&self, capabilities: &str, kind: AuthFlowKind) -> Result<PubkyAuthRequest> {
         let capabilities = parse_capabilities(capabilities)?;
         let flow = self
             .pubky

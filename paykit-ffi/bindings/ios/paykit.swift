@@ -3893,7 +3893,7 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     /**
      * Resume a short-lived auth flow from its authorization URL.
      */
-    func resumeAuth(authorizationUrl: String, expectedCapabilities: String) throws  -> PubkyAuthRequest
+    func resumeAuth(authorizationUrl: String, expectedCapabilities: String) async throws  -> PubkyAuthRequest
 
     /**
      * Sign in with a local Pubky secret key and return session access material.
@@ -3908,12 +3908,12 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     /**
      * Start a sign-in auth flow for an external signer.
      */
-    func startSignInAuth(capabilities: String) throws  -> PubkyAuthRequest
+    func startSignInAuth(capabilities: String) async throws  -> PubkyAuthRequest
 
     /**
      * Start a signup auth flow for an external signer.
      */
-    func startSignUpAuth(capabilities: String, homeserverPublicKey: String, signupToken: String?) throws  -> PubkyAuthRequest
+    func startSignUpAuth(capabilities: String, homeserverPublicKey: String, signupToken: String?) async throws  -> PubkyAuthRequest
 
 }
 /**
@@ -4035,13 +4035,21 @@ open func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretK
     /**
      * Resume a short-lived auth flow from its authorization URL.
      */
-open func resumeAuth(authorizationUrl: String, expectedCapabilities: String)throws  -> PubkyAuthRequest  {
-    return try  FfiConverterTypePubkyAuthRequest_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
-    uniffi_paykit_fn_method_ffipubkysessionbootstrap_resume_auth(self.uniffiClonePointer(),
-        FfiConverterString.lower(authorizationUrl),
-        FfiConverterString.lower(expectedCapabilities),$0
-    )
-})
+open func resumeAuth(authorizationUrl: String, expectedCapabilities: String)async throws  -> PubkyAuthRequest  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkysessionbootstrap_resume_auth(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(authorizationUrl),FfiConverterString.lower(expectedCapabilities)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_pointer,
+            completeFunc: ffi_paykit_rust_future_complete_pointer,
+            freeFunc: ffi_paykit_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePubkyAuthRequest_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
 }
 
     /**
@@ -4087,25 +4095,41 @@ open func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: Strin
     /**
      * Start a sign-in auth flow for an external signer.
      */
-open func startSignInAuth(capabilities: String)throws  -> PubkyAuthRequest  {
-    return try  FfiConverterTypePubkyAuthRequest_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
-    uniffi_paykit_fn_method_ffipubkysessionbootstrap_start_sign_in_auth(self.uniffiClonePointer(),
-        FfiConverterString.lower(capabilities),$0
-    )
-})
+open func startSignInAuth(capabilities: String)async throws  -> PubkyAuthRequest  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkysessionbootstrap_start_sign_in_auth(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(capabilities)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_pointer,
+            completeFunc: ffi_paykit_rust_future_complete_pointer,
+            freeFunc: ffi_paykit_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePubkyAuthRequest_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
 }
 
     /**
      * Start a signup auth flow for an external signer.
      */
-open func startSignUpAuth(capabilities: String, homeserverPublicKey: String, signupToken: String?)throws  -> PubkyAuthRequest  {
-    return try  FfiConverterTypePubkyAuthRequest_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
-    uniffi_paykit_fn_method_ffipubkysessionbootstrap_start_sign_up_auth(self.uniffiClonePointer(),
-        FfiConverterString.lower(capabilities),
-        FfiConverterString.lower(homeserverPublicKey),
-        FfiConverterOptionString.lower(signupToken),$0
-    )
-})
+open func startSignUpAuth(capabilities: String, homeserverPublicKey: String, signupToken: String?)async throws  -> PubkyAuthRequest  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkysessionbootstrap_start_sign_up_auth(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(capabilities),FfiConverterString.lower(homeserverPublicKey),FfiConverterOptionString.lower(signupToken)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_pointer,
+            completeFunc: ffi_paykit_rust_future_complete_pointer,
+            freeFunc: ffi_paykit_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePubkyAuthRequest_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
 }
 
 
@@ -16671,7 +16695,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 19676) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 48603) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 45596) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 58947) {
@@ -16680,10 +16704,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 31163) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 7015) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 47023) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_up_auth() != 3775) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_up_auth() != 45811) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffireservationattribution_export_fields() != 11904) {

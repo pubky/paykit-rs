@@ -278,17 +278,17 @@ impl FfiPubkySessionBootstrap {
     }
 
     /// Start a sign-in auth flow for an external signer.
-    pub fn start_sign_in_auth(
+    pub async fn start_sign_in_auth(
         &self,
         capabilities: String,
     ) -> Result<Arc<FfiPubkyAuthRequest>, PaykitFfiError> {
         Ok(Arc::new(FfiPubkyAuthRequest {
-            inner: AsyncMutex::new(Some(self.inner.start_sign_in_auth(&capabilities)?)),
+            inner: AsyncMutex::new(Some(self.inner.start_sign_in_auth(&capabilities).await?)),
         }))
     }
 
     /// Start a signup auth flow for an external signer.
-    pub fn start_sign_up_auth(
+    pub async fn start_sign_up_auth(
         &self,
         capabilities: String,
         homeserver_public_key: String,
@@ -296,16 +296,16 @@ impl FfiPubkySessionBootstrap {
     ) -> Result<Arc<FfiPubkyAuthRequest>, PaykitFfiError> {
         let homeserver = parse_public_key(homeserver_public_key)?;
         Ok(Arc::new(FfiPubkyAuthRequest {
-            inner: AsyncMutex::new(Some(self.inner.start_sign_up_auth(
-                &capabilities,
-                &homeserver,
-                signup_token,
-            )?)),
+            inner: AsyncMutex::new(Some(
+                self.inner
+                    .start_sign_up_auth(&capabilities, &homeserver, signup_token)
+                    .await?,
+            )),
         }))
     }
 
     /// Resume a short-lived auth flow from its authorization URL.
-    pub fn resume_auth(
+    pub async fn resume_auth(
         &self,
         authorization_url: String,
         expected_capabilities: String,
@@ -313,7 +313,8 @@ impl FfiPubkySessionBootstrap {
         Ok(Arc::new(FfiPubkyAuthRequest {
             inner: AsyncMutex::new(Some(
                 self.inner
-                    .resume_auth(&authorization_url, &expected_capabilities)?,
+                    .resume_auth(&authorization_url, &expected_capabilities)
+                    .await?,
             )),
         }))
     }

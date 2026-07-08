@@ -1,10 +1,13 @@
-use paykit_sdk::{LinkedPeerState, PaykitSdkError};
+use chrono::Utc;
+use paykit_sdk::{LinkedPeerState, PaykitSdkError, PubkyPublicKey, StorageAdapter};
+use std::time::{Duration, Instant};
 
-use crate::harness::{linked_two_party, receiving_detail, two_party};
+use crate::harness::{linked_two_party, receiving_detail, two_party, TestUser};
 
 #[tokio::test]
 async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let pair = linked_two_party().await;
+    wait_until_marker_is_newer_than_observer_checkpoint(&pair.bob, &pair.alice.public_key).await;
 
     let published = pair
         .alice
@@ -111,6 +114,41 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     assert!(!observed_again.remote_marker_changed);
 }
 
+async fn wait_until_marker_is_newer_than_observer_checkpoint(
+    observer: &TestUser,
+    counterparty: &PubkyPublicKey,
+) {
+    let cutoff = observer
+        .storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let link_checkpoint = tx.encrypted_link_state(&counterparty).and_then(|state| {
+                    (state.link_snapshot.is_some() || state.handshake_snapshot.is_some())
+                        .then_some(state.checkpointed_at)
+                });
+                let receive_checkpoint = tx
+                    .linked_peer(&counterparty)
+                    .and_then(|peer| peer.last_private_receive_at);
+                Ok(link_checkpoint.max(receive_checkpoint))
+            }
+        })
+        .await
+        .expect("observer checkpoint lookup should succeed");
+
+    let Some(cutoff) = cutoff else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Utc::now().timestamp() <= cutoff.timestamp() {
+        assert!(
+            Instant::now() < deadline,
+            "test clock did not advance past observer checkpoint"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 #[tokio::test]
 async fn test_publish_recovery_marker_without_private_link_state_fails() {
     let pair = two_party().await;
@@ -125,4 +163,69 @@ async fn test_publish_recovery_marker_without_private_link_state_fails() {
         matches!(err, PaykitSdkError::Policy(_)),
         "unexpected error: {err:?}"
     );
+}
+
+#[tokio::test]
+async fn test_mutual_recovery_markers_do_not_block_relink() {
+    let pair = linked_two_party().await;
+
+    pair.alice
+        .sdk
+        .publish_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+        .await
+        .expect("alice should publish a recovery marker");
+    pair.bob
+        .sdk
+        .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+        .await
+        .expect("bob should observe alice's marker");
+    pair.bob
+        .sdk
+        .publish_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+        .await
+        .expect("bob should publish a recovery marker");
+    pair.alice
+        .sdk
+        .observe_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+        .await
+        .expect("alice should observe bob's marker");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut alice_state = LinkedPeerState::RecoveryRequired;
+    let mut bob_state = LinkedPeerState::RecoveryRequired;
+    while alice_state != LinkedPeerState::Linked || bob_state != LinkedPeerState::Linked {
+        assert!(Instant::now() < deadline, "relink timed out");
+
+        pair.alice
+            .sdk
+            .observe_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+            .await
+            .expect("alice marker observation should not reset an in-progress relink");
+        pair.bob
+            .sdk
+            .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+            .await
+            .expect("bob marker observation should not reset an in-progress relink");
+
+        if alice_state != LinkedPeerState::Linked {
+            alice_state = pair
+                .alice
+                .sdk
+                .ensure_link_with_peer(pair.bob.public_key.clone(), 1)
+                .await
+                .expect("alice relink should advance")
+                .state;
+        }
+        if bob_state != LinkedPeerState::Linked {
+            bob_state = pair
+                .bob
+                .sdk
+                .ensure_link_with_peer(pair.alice.public_key.clone(), 1)
+                .await
+                .expect("bob relink should advance")
+                .state;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

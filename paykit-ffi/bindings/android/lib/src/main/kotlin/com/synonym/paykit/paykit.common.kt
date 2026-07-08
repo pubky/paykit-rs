@@ -783,8 +783,8 @@ public interface PubkySessionBootstrapInterface {
     /**
      * Resume a short-lived auth flow from its authorization URL.
      */
-    @Throws(PaykitException::class)
-    public fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): PubkyAuthRequest
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): PubkyAuthRequest
 
     /**
      * Sign in with a local Pubky secret key and return session access material.
@@ -801,14 +801,14 @@ public interface PubkySessionBootstrapInterface {
     /**
      * Start a sign-in auth flow for an external signer.
      */
-    @Throws(PaykitException::class)
-    public fun `startSignInAuth`(`capabilities`: kotlin.String): PubkyAuthRequest
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `startSignInAuth`(`capabilities`: kotlin.String): PubkyAuthRequest
 
     /**
      * Start a signup auth flow for an external signer.
      */
-    @Throws(PaykitException::class)
-    public fun `startSignUpAuth`(`capabilities`: kotlin.String, `homeserverPublicKey`: kotlin.String, `signupToken`: kotlin.String?): PubkyAuthRequest
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `startSignUpAuth`(`capabilities`: kotlin.String, `homeserverPublicKey`: kotlin.String, `signupToken`: kotlin.String?): PubkyAuthRequest
 
     public companion object
 }

@@ -13,5 +13,7 @@ pub use link::{
     close_encrypted_link, restore_encrypted_link, restore_encrypted_link_from_config,
     EncryptedLink, DEFAULT_MAX_SEND_RETRIES,
 };
-pub use private_application_message::{PrivateApplicationMessage, PrivateMessageKind};
+pub use private_application_message::{
+    clear_encrypted_link_outbox, PrivateApplicationMessage, PrivateMessageKind,
+};
 pub use snapshot::{EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot};

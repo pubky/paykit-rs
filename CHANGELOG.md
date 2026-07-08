@@ -7,6 +7,62 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc32] - 2026-07-07
+
+### Fixed
+- Serialized recovery-marker outbox cleanup under the peer link operation lease,
+  preventing concurrent relink handshakes from losing their first message.
+- Allowed newer recovery markers to recover stale pending handshakes after the
+  peer link operation freshness window.
+
+## [0.1.0-rc31] - 2026-07-06
+
+### Fixed
+- Rebuilt and republished SDK/FFI release artifacts so the Swift Package
+  manifest checksum matches the uploaded `Paykit.xcframework.zip` asset.
+
+## [0.1.0-rc30] - 2026-07-06
+
+### Fixed
+- Rebuilt SDK and FFI release artifacts for the Encrypted Link recovery outbox
+  cleanup release.
+- Stabilized recovery marker testnet coverage around second-precision marker
+  freshness.
+
+## [0.1.0-rc29] - 2026-07-05
+
+### Fixed
+- Published release artifacts that include Encrypted Link recovery outbox
+  cleanup for delete/recreate identity flows.
+
+## [0.1.0-rc28] - 2026-07-05
+
+### Fixed
+- Remote Encrypted Link recovery markers no longer reset an already in-progress
+  recovery handshake, preventing peers with mutual recovery markers from
+  repeatedly restarting relink attempts.
+- Fresh recovery handshakes now clear the local encrypted outbox so peers do not
+  read stale ciphertext left at deterministic private stream paths after an
+  identity is deleted and recreated.
+
+## [0.1.0-rc27] - 2026-07-04
+
+### Fixed
+- Stored Encrypted Link handshakes that restore but fail to advance now mark
+  the peer recovery-required so `ensure_link_with_peer` can start a fresh
+  handshake instead of retrying the same stale snapshot.
+
+## [0.1.0-rc26] - 2026-07-03
+
+### Changed
+- SDK and FFI Pubky auth start/resume helpers are now async so Ring auth flows
+  start inside the UniFFI Tokio runtime on mobile.
+
+### Fixed
+- `ensure_link_with_peer` now starts a fresh deterministic Encrypted Link
+  handshake in the same call after a stale stored handshake fails to restore and
+  marks the peer recovery-required.
+
 ## [0.1.0-rc25] - 2026-07-02
 
 ### Changed
@@ -193,7 +249,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc25...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc32...HEAD
+[0.1.0-rc32]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc32
+[0.1.0-rc31]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc31
+[0.1.0-rc30]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc30
+[0.1.0-rc29]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc29
+[0.1.0-rc28]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc28
+[0.1.0-rc27]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc27
+[0.1.0-rc26]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc26
 [0.1.0-rc25]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc25
 [0.1.0-rc24]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc24
 [0.1.0-rc23]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc23

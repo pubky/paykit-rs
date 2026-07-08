@@ -341,9 +341,28 @@ where
             if report.state == LinkedPeerState::Linked {
                 return Ok(report);
             }
-            report = self
+            report = match self
                 .advance_link_handshake_with_claim(counterparty.clone(), lease.clone())
-                .await?;
+                .await
+            {
+                Ok(report) => report,
+                Err(err) if Self::link_handshake_error_requires_recovery(&err) => {
+                    let recovery_required = self
+                        .storage
+                        .transaction(|tx| {
+                            Ok(tx.linked_peer(&counterparty).is_some_and(|peer| {
+                                peer.state == LinkedPeerState::RecoveryRequired
+                            }))
+                        })
+                        .await?;
+                    if !recovery_required {
+                        return Err(err);
+                    }
+                    self.start_link_handshake_with_claim(counterparty.clone(), role, lease.clone())
+                        .await?
+                }
+                Err(err) => return Err(err),
+            };
         }
 
         Ok(report)
@@ -403,7 +422,7 @@ where
         {
             Ok(handshake) => handshake,
             Err(err) => {
-                if Self::handshake_restore_error_requires_recovery(&err) {
+                if Self::link_handshake_error_requires_recovery(&err) {
                     self.mark_link_recovery_required(&counterparty, lease)
                         .await?;
                 }
@@ -457,7 +476,7 @@ where
         .map_err(Into::into)
     }
 
-    fn handshake_restore_error_requires_recovery(err: &PaykitSdkError) -> bool {
+    fn link_handshake_error_requires_recovery(err: &PaykitSdkError) -> bool {
         matches!(
             err,
             PaykitSdkError::Transport { .. }
@@ -475,7 +494,19 @@ where
         expected_generation: u64,
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerHandshakeReport> {
-        match paykit_lib::advance_handshake(handshake).await? {
+        let progress = match paykit_lib::advance_handshake(handshake).await {
+            Ok(progress) => progress,
+            Err(err) => {
+                let err = PaykitSdkError::from(err);
+                if Self::link_handshake_error_requires_recovery(&err) {
+                    self.mark_link_recovery_required(&counterparty, lease)
+                        .await?;
+                }
+                return Err(err);
+            }
+        };
+
+        match progress {
             paykit_lib::HandshakeProgress::Pending(handshake) => {
                 save_link_handshake_state_if_generation_with_lease(
                     &self.storage,
@@ -594,6 +625,14 @@ where
 
         let (session_access, secret_key) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
+        if matches!(peer_state, Some(LinkedPeerState::RecoveryRequired)) {
+            paykit_lib::clear_encrypted_link_outbox(
+                &session_access.session,
+                &secret_key,
+                &remote_public_key,
+            )
+            .await?;
+        }
         let handshake = match role {
             EncryptedLinkHandshakeRole::Initiator => paykit_lib::initiate_encrypted_link(
                 session_access.session,

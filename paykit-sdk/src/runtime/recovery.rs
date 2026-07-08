@@ -363,17 +363,33 @@ where
 
         let attempt_id = marker.attempt_id().to_owned();
         let marker_created_at = parse_recovery_marker_created_at(&marker)?;
-        let changed = self
-            .mark_remote_recovery_marker_observed_if_needed(
-                counterparty,
-                &attempt_id,
-                marker_created_at,
-            )
-            .await?;
+        let lease = self.claim_peer_link_operation(counterparty).await?;
+        let result = async {
+            let changed = self
+                .mark_remote_recovery_marker_observed_with_lease(
+                    counterparty,
+                    &attempt_id,
+                    marker_created_at,
+                    lease.clone(),
+                )
+                .await?;
+            if changed {
+                paykit_lib::clear_encrypted_link_outbox(
+                    &session_access.session,
+                    secret_key,
+                    &remote_public_key,
+                )
+                .await?;
+            }
+            Ok(changed)
+        }
+        .await;
+        let changed = self.finish_peer_link_operation(lease, result).await?;
         self.recovery_marker_report_or_default(counterparty, changed)
             .await
     }
 
+    #[cfg(test)]
     pub(super) async fn mark_remote_recovery_marker_observed_if_needed(
         &self,
         counterparty: &PubkyPublicKey,
@@ -385,7 +401,18 @@ where
             .transaction(|tx| {
                 let existing_peer = tx.linked_peer(counterparty);
                 let link_state = tx.encrypted_link_state(counterparty);
-                if remote_recovery_marker_is_stale(link_state.as_ref(), marker_created_at) {
+                if recovery_handshake_is_recently_in_progress(
+                    link_state.as_ref(),
+                    marker_created_at,
+                    self.config.peer_link_operation_lease_timeout,
+                ) {
+                    return Ok(false);
+                }
+                if remote_recovery_marker_is_stale(
+                    existing_peer.as_ref(),
+                    link_state.as_ref(),
+                    marker_created_at,
+                ) {
                     return Ok(false);
                 }
                 let has_link_state = link_state.is_some();
@@ -433,7 +460,18 @@ where
                 crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                 let existing_peer = tx.linked_peer(counterparty);
                 let link_state = tx.encrypted_link_state(counterparty);
-                if remote_recovery_marker_is_stale(link_state.as_ref(), marker_created_at) {
+                if recovery_handshake_is_recently_in_progress(
+                    link_state.as_ref(),
+                    marker_created_at,
+                    self.config.peer_link_operation_lease_timeout,
+                ) {
+                    return Ok(false);
+                }
+                if remote_recovery_marker_is_stale(
+                    existing_peer.as_ref(),
+                    link_state.as_ref(),
+                    marker_created_at,
+                ) {
                     return Ok(false);
                 }
                 let has_link_state = link_state.is_some();
@@ -610,17 +648,46 @@ fn parse_recovery_marker_created_at(marker: &EncryptedLinkRecoveryMarker) -> Res
 }
 
 fn remote_recovery_marker_is_stale(
+    peer: Option<&LinkedPeerRecord>,
     link_state: Option<&EncryptedLinkStateRecord>,
     marker_created_at: DateTime<Utc>,
 ) -> bool {
-    // Recovery marker timestamps are serialized with second precision, so
-    // same-second markers are treated as fresh and fail closed.
-    link_state
+    // Recovery marker timestamps are serialized with second precision. When a
+    // marker lands in the same second as a newer local checkpoint, prefer
+    // preserving local progress; deterministic send/receive failures will mark
+    // recovery-required again if the link is actually unusable.
+    let marker_is_before_link_checkpoint = link_state
         .and_then(|state| {
             (state.link_snapshot.is_some() || state.handshake_snapshot.is_some())
                 .then_some(state.checkpointed_at)
         })
-        .is_some_and(|checkpointed_at| marker_created_at.timestamp() < checkpointed_at.timestamp())
+        .is_some_and(|checkpointed_at| {
+            marker_created_at.timestamp() <= checkpointed_at.timestamp()
+        });
+    let marker_is_before_private_receive = peer
+        .and_then(|peer| peer.last_private_receive_at)
+        .is_some_and(|received_at| marker_created_at.timestamp() <= received_at.timestamp());
+    marker_is_before_link_checkpoint || marker_is_before_private_receive
+}
+
+fn recovery_handshake_is_recently_in_progress(
+    link_state: Option<&EncryptedLinkStateRecord>,
+    marker_created_at: DateTime<Utc>,
+    freshness_window: std::time::Duration,
+) -> bool {
+    let Some(link_state) = link_state else {
+        return false;
+    };
+    if link_state.handshake_snapshot.is_none() {
+        return false;
+    }
+    if marker_created_at.timestamp() <= link_state.checkpointed_at.timestamp() {
+        return true;
+    }
+    let Ok(freshness_window) = ChronoDuration::from_std(freshness_window) else {
+        return false;
+    };
+    marker_created_at <= link_state.checkpointed_at + freshness_window
 }
 
 pub(super) fn local_recovery_marker_belongs_to_current_episode(peer: &LinkedPeerRecord) -> bool {
