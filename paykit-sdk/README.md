@@ -33,7 +33,9 @@ information to route private Paykit state to a specific app/runtime folder.
 Apps can call `paykit_receiver_paths` as a discovery helper, but they still choose
 the receiver path explicitly. A receiver with no public Payment Endpoints can
 publish a lightweight receiver marker so it is still discoverable from the
-Pubky identity.
+Pubky identity. Marker publication is explicit because it makes the receiver
+publicly discoverable; SDK setup, auth, and profile helpers do not publish it
+automatically.
 
 ## Current Scope
 

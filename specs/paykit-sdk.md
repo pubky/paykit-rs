@@ -39,7 +39,9 @@ receipts, requests, recovery state, or public endpoint reads to one app/runtime
 folder. `paykit_receiver_paths` is a discovery helper; it does not make the SDK
 guess which receiver to use. Receivers that want to be discoverable without
 public Payment Endpoints can publish a small marker at
-`/pub/paykit/v0/{receiver_path}/receiver.json`.
+`/pub/paykit/v0/{receiver_path}/receiver.json`. Publishing or removing that
+marker is an explicit app decision, not an automatic SDK setup, auth, or profile
+side effect.
 
 ## Design Principles
 
