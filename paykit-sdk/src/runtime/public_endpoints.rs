@@ -7,14 +7,14 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
-    /// List public Paykit receiver ids published by a Pubky identity.
+    /// List public Paykit receiver paths published by a Pubky identity.
     ///
-    /// This is a discovery helper. Callers still choose the exact receiver id
+    /// This is a discovery helper. Callers still choose the exact receiver path
     /// they want to use for public/private payment workflows.
-    pub async fn paykit_receiver_ids(
+    pub async fn paykit_receiver_paths(
         &self,
         owner: PubkyPublicKey,
-    ) -> Result<Vec<PaykitReceiverId>> {
+    ) -> Result<Vec<PaykitReceiverPath>> {
         let public_storage =
             self.pubky
                 .load_public_storage()
@@ -23,7 +23,10 @@ where
                     context: "no Pubky public storage available".into(),
                     source: None,
                 })?;
-        Ok(paykit_lib::list_paykit_receiver_ids(&public_storage, &owner.to_public_key()?).await?)
+        Ok(
+            paykit_lib::list_paykit_receiver_paths(&public_storage, &owner.to_public_key()?)
+                .await?,
+        )
     }
 
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
@@ -65,7 +68,7 @@ where
                 .await?;
             match paykit_lib::set_payment_endpoint(
                 &session_access.session,
-                &self.config.receiver_id,
+                &self.config.receiver_path,
                 identifier.clone(),
                 payload.clone(),
             )
@@ -131,7 +134,7 @@ where
                 let current = paykit_lib::get_payment_list(
                     &session_access.outbox_client.public_storage(),
                     &local_public_key,
-                    &self.config.receiver_id,
+                    &self.config.receiver_path,
                 )
                 .await?;
                 let remote_identifiers = current
@@ -202,7 +205,7 @@ where
                 .await?;
             match paykit_lib::remove_payment_endpoint(
                 &session_access.session,
-                &self.config.receiver_id,
+                &self.config.receiver_path,
                 identifier,
             )
             .await

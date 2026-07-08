@@ -10,7 +10,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ### Changed
 - Public Payment Endpoints, private message paths, receipt locations, recovery
   markers, Paykit Profile paths, Contact Record paths, and Paykit blob paths
-  are now scoped under explicit receiver ids.
+  are now scoped under explicit receiver paths.
 - Encrypted Link and handshake snapshots now persist receiver scope with the
   underlying Noise state and reject restore into mismatched receiver paths.
 - SDK and FFI session bootstrap now require caller-provided
@@ -19,7 +19,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Removed
 - Removed default Paykit profile/contact path constants and broad core session
-  capability helpers. Apps must pass an explicit receiver id/config.
+  capability helpers. Apps must pass an explicit receiver path/config.
 
 ## [0.1.0-rc25] - 2026-07-02
 

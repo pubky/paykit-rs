@@ -27,7 +27,7 @@ class Paykit: RCTEventEmitter {
         ])) ?? "{\"category\":\"platform\",\"code\":\"error\",\"context\":\"failed to encode error\"}"
     }
 
-    private func errorArray(_ error: PaykitFfiError) -> [String] {
+    private func errorArray(_ error: PaykitError) -> [String] {
         switch error {
         case let .Storage(code: code, context: context):
             return errorArray(category: "storage", code: code, context: context)
@@ -54,7 +54,7 @@ class Paykit: RCTEventEmitter {
     ) {
         do {
             resolve(resultArray(try block()))
-        } catch let error as PaykitFfiError {
+        } catch let error as PaykitError {
             resolve(errorArray(error))
         } catch let error as NSError where error.domain == "Paykit" {
             resolve(errorArray(
@@ -116,10 +116,10 @@ class Paykit: RCTEventEmitter {
         return data
     }
 
-    private func configFromJson(_ json: String) throws -> FfiPaykitSdkConfig {
+    private func configFromJson(_ json: String) throws -> PaykitSdkConfig {
         let object = try jsonObject(json, label: "PaykitSdkConfig")
-        return FfiPaykitSdkConfig(
-            receiverId: try requiredString(object, "receiver_id"),
+        return PaykitSdkConfig(
+            receiverPath: try requiredString(object, "receiver_path"),
             profileNamespace: try requiredString(object, "profile_namespace"),
             endpointManagementScope: try endpointManagementScope(
                 try requiredString(object, "endpoint_management_scope")
@@ -145,9 +145,9 @@ class Paykit: RCTEventEmitter {
         )
     }
 
-    private func configJson(_ config: FfiPaykitSdkConfig) throws -> String {
+    private func configJson(_ config: PaykitSdkConfig) throws -> String {
         try jsonString([
-            "receiver_id": config.receiverId,
+            "receiver_path": config.receiverPath,
             "profile_namespace": config.profileNamespace,
             "endpoint_management_scope": endpointManagementScopeString(config.endpointManagementScope),
             "encrypted_link_recovery_markers": recoveryMarkerPolicyString(config.encryptedLinkRecoveryMarkers),
@@ -158,13 +158,13 @@ class Paykit: RCTEventEmitter {
         ])
     }
 
-    private func pubkyClientConfigJson(_ config: FfiPubkyClientConfig) throws -> String {
+    private func pubkyClientConfigJson(_ config: PubkyClientConfig) throws -> String {
         try jsonString([
             "request_timeout_secs": config.requestTimeoutSecs
         ])
     }
 
-    private func authDetailsJson(_ details: FfiPubkyAuthDetails) throws -> String {
+    private func authDetailsJson(_ details: PubkyAuthDetails) throws -> String {
         try jsonString([
             "kind": authRequestKindString(details.kind),
             "capabilities": details.capabilities ?? NSNull(),
@@ -173,7 +173,7 @@ class Paykit: RCTEventEmitter {
         ])
     }
 
-    private func resourceRefJson(_ resource: FfiPubkyResourceRef) throws -> String {
+    private func resourceRefJson(_ resource: PubkyResourceRef) throws -> String {
         try jsonString([
             "public_key": resource.publicKey,
             "path": resource.path,
@@ -181,7 +181,7 @@ class Paykit: RCTEventEmitter {
         ])
     }
 
-    private func endpointManagementScope(_ value: String) throws -> FfiEndpointManagementScope {
+    private func endpointManagementScope(_ value: String) throws -> EndpointManagementScope {
         switch value {
         case "managed_only": return .managedOnly
         case "full_paykit_namespace": return .fullPaykitNamespace
@@ -189,7 +189,7 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    private func endpointManagementScopeString(_ value: FfiEndpointManagementScope) -> String {
+    private func endpointManagementScopeString(_ value: EndpointManagementScope) -> String {
         switch value {
         case .managedOnly: return "managed_only"
         case .fullPaykitNamespace: return "full_paykit_namespace"
@@ -197,7 +197,7 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    private func recoveryMarkerPolicy(_ value: String) throws -> FfiEncryptedLinkRecoveryMarkerPolicy {
+    private func recoveryMarkerPolicy(_ value: String) throws -> EncryptedLinkRecoveryMarkerPolicy {
         switch value {
         case "enabled": return .enabled
         case "disabled": return .disabled
@@ -205,7 +205,7 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    private func recoveryMarkerPolicyString(_ value: FfiEncryptedLinkRecoveryMarkerPolicy) -> String {
+    private func recoveryMarkerPolicyString(_ value: EncryptedLinkRecoveryMarkerPolicy) -> String {
         switch value {
         case .enabled: return "enabled"
         case .disabled: return "disabled"
@@ -213,7 +213,7 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    private func publicContactSharingPolicy(_ value: String) throws -> FfiPublicContactSharingPolicy {
+    private func publicContactSharingPolicy(_ value: String) throws -> PublicContactSharingPolicy {
         switch value {
         case "local_only": return .localOnly
         case "configured_public_namespace": return .configuredPublicNamespace
@@ -221,7 +221,7 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    private func publicContactSharingPolicyString(_ value: FfiPublicContactSharingPolicy) -> String {
+    private func publicContactSharingPolicyString(_ value: PublicContactSharingPolicy) -> String {
         switch value {
         case .localOnly: return "local_only"
         case .configuredPublicNamespace: return "configured_public_namespace"
@@ -229,7 +229,7 @@ class Paykit: RCTEventEmitter {
         }
     }
 
-    private func authRequestKindString(_ value: FfiPubkyAuthRequestKind) -> String {
+    private func authRequestKindString(_ value: PubkyAuthRequestKind) -> String {
         switch value {
         case .signIn: return "sign_in"
         case .signUp: return "sign_up"
@@ -246,12 +246,12 @@ class Paykit: RCTEventEmitter {
 
     @objc(sdkDefaultConfig:withResolver:withRejecter:)
     func sdkDefaultConfig(
-        receiverId: String,
+        receiverPath: String,
         resolve: RCTPromiseResolveBlock,
         reject: RCTPromiseRejectBlock
     ) {
         resolveResult(resolve) {
-            try configJson(defaultConfig(receiverId: receiverId))
+            try configJson(defaultConfig(receiverPath: receiverPath))
         }
     }
 

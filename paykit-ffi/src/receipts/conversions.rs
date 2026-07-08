@@ -94,7 +94,7 @@ impl From<ReceiptIssuanceView> for FfiReceiptIssuanceView {
     fn from(value: ReceiptIssuanceView) -> Self {
         Self {
             counterparty: app_public_key(&value.counterparty),
-            counterparty_receiver_id: value.counterparty_receiver_id.to_string(),
+            counterparty_receiver_path: value.counterparty_receiver_path.to_string(),
             receipt_id: value.receipt_id,
             receipt_access_event_id: value.receipt_access_event_id,
             payment_reference: Arc::new(FfiPaymentReference::from_validated_text(
@@ -118,7 +118,7 @@ impl From<ReceiptAccessView> for FfiReceiptAccessView {
     fn from(value: ReceiptAccessView) -> Self {
         Self {
             counterparty: app_public_key(&value.counterparty),
-            counterparty_receiver_id: value.counterparty_receiver_id.to_string(),
+            counterparty_receiver_path: value.counterparty_receiver_path.to_string(),
             event_id: value.event_id,
             receipt_id: value.receipt_id,
             payment_reference: Arc::new(FfiPaymentReference::from_validated_text(
@@ -140,7 +140,7 @@ impl TryFrom<ReceiptRecord> for FfiReceiptRecord {
     fn try_from(value: ReceiptRecord) -> Result<Self, Self::Error> {
         Ok(Self {
             issuer: app_public_key(&value.issuer),
-            issuer_receiver_id: value.issuer_receiver_id.to_string(),
+            issuer_receiver_path: value.issuer_receiver_path.to_string(),
             receipt_access_event_id: value.receipt_access_event_id,
             receipt_id: value.receipt_id,
             payment_reference: Arc::new(FfiPaymentReference::from_validated_text(

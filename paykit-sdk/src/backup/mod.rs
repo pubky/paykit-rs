@@ -33,7 +33,7 @@ use crate::{
     OutboundPrivateMessageStatus, PaykitSdkError, Result,
 };
 use paykit_lib::{
-    parse_private_payment_list_json, PaykitReceiverId, PaymentEndpointIdentifier,
+    parse_private_payment_list_json, PaykitReceiverPath, PaymentEndpointIdentifier,
     PrivateApplicationMessage, PrivateMessageKind, ReceiptId,
 };
 
@@ -41,7 +41,7 @@ mod validation;
 
 use validation::*;
 
-type PeerStorageKey = (PubkyPublicKey, PaykitReceiverId);
+type PeerStorageKey = (PubkyPublicKey, PaykitReceiverPath);
 
 /// Current SDK backup schema version.
 pub const SDK_BACKUP_VERSION: u32 = 1;
@@ -56,7 +56,7 @@ pub struct SdkBackupState {
     /// Backup schema version.
     pub version: u32,
     /// Local Paykit receiver/runtime folder that exported this backup.
-    pub local_receiver_id: PaykitReceiverId,
+    pub local_receiver_path: PaykitReceiverPath,
     /// Current identity state.
     pub identity_state: Option<IdentityState>,
     /// Linked Peer records.
@@ -93,7 +93,7 @@ impl fmt::Debug for SdkBackupState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SdkBackupState")
             .field("version", &self.version)
-            .field("local_receiver_id", &self.local_receiver_id)
+            .field("local_receiver_path", &self.local_receiver_path)
             .field(
                 "identity_state",
                 &self.identity_state.as_ref().map(|_| "<redacted>"),
@@ -173,7 +173,7 @@ pub struct RestoreRecoveryRequiredPeer {
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
     /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: PaykitReceiverId,
+    pub counterparty_receiver_path: PaykitReceiverPath,
 }
 
 /// Backup-validated storage replacement payload.
@@ -199,7 +199,7 @@ impl ValidatedStorageState {
 /// Export SDK-managed state from storage.
 pub async fn export_backup_state<S>(
     storage: &S,
-    local_receiver_id: PaykitReceiverId,
+    local_receiver_path: PaykitReceiverPath,
 ) -> Result<SdkBackupState>
 where
     S: StorageAdapter,
@@ -208,7 +208,7 @@ where
         .transaction(|tx| {
             Ok(SdkBackupState::from_storage_state(
                 tx.export_storage_state(),
-                local_receiver_id,
+                local_receiver_path,
             ))
         })
         .await
@@ -222,18 +222,18 @@ pub(crate) async fn restore_backup_state<S>(
 where
     S: StorageAdapter,
 {
-    restore_backup_state_with_identity(storage, backup, test_receiver_id(), None).await
+    restore_backup_state_with_identity(storage, backup, test_receiver_path(), None).await
 }
 
 #[cfg(test)]
-fn test_receiver_id() -> PaykitReceiverId {
-    PaykitReceiverId::new("bitkit").unwrap()
+fn test_receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
 pub(crate) async fn restore_backup_state_with_identity<S>(
     storage: &S,
     backup: SdkBackupState,
-    local_receiver_id: PaykitReceiverId,
+    local_receiver_path: PaykitReceiverPath,
     trusted_identity: Option<IdentityState>,
 ) -> Result<RestoreReport>
 where
@@ -247,7 +247,7 @@ where
                 tx.export_storage_state().next_peer_link_operation_lease_id;
             let (state, report) = backup.into_storage_state(
                 current_identity,
-                &local_receiver_id,
+                &local_receiver_path,
                 current_next_peer_link_operation_lease_id,
             )?;
             tx.replace_storage_state(state);
@@ -259,7 +259,7 @@ where
 impl SdkBackupState {
     pub(crate) fn from_storage_state(
         state: StorageState,
-        local_receiver_id: PaykitReceiverId,
+        local_receiver_path: PaykitReceiverPath,
     ) -> Self {
         let mut linked_peers = state.linked_peers.into_values().collect::<Vec<_>>();
         linked_peers.sort_by(|left, right| {
@@ -267,9 +267,9 @@ impl SdkBackupState {
                 .as_str()
                 .cmp(right.counterparty.as_str())
                 .then(
-                    left.counterparty_receiver_id
+                    left.counterparty_receiver_path
                         .as_str()
-                        .cmp(right.counterparty_receiver_id.as_str()),
+                        .cmp(right.counterparty_receiver_path.as_str()),
                 )
         });
 
@@ -278,7 +278,11 @@ impl SdkBackupState {
             left.public_key
                 .as_str()
                 .cmp(right.public_key.as_str())
-                .then(left.receiver_id.as_str().cmp(right.receiver_id.as_str()))
+                .then(
+                    left.receiver_path
+                        .as_str()
+                        .cmp(right.receiver_path.as_str()),
+                )
         });
 
         let mut public_endpoint_records = state
@@ -296,9 +300,9 @@ impl SdkBackupState {
                 .as_str()
                 .cmp(right.counterparty.as_str())
                 .then(
-                    left.counterparty_receiver_id
+                    left.counterparty_receiver_path
                         .as_str()
-                        .cmp(right.counterparty_receiver_id.as_str()),
+                        .cmp(right.counterparty_receiver_path.as_str()),
                 )
                 .then(left.reservation_id.cmp(&right.reservation_id))
         });
@@ -312,9 +316,9 @@ impl SdkBackupState {
                 .as_str()
                 .cmp(right.counterparty.as_str())
                 .then(
-                    left.counterparty_receiver_id
+                    left.counterparty_receiver_path
                         .as_str()
-                        .cmp(right.counterparty_receiver_id.as_str()),
+                        .cmp(right.counterparty_receiver_path.as_str()),
                 )
         });
 
@@ -324,9 +328,9 @@ impl SdkBackupState {
                 .as_str()
                 .cmp(right.counterparty.as_str())
                 .then(
-                    left.counterparty_receiver_id
+                    left.counterparty_receiver_path
                         .as_str()
-                        .cmp(right.counterparty_receiver_id.as_str()),
+                        .cmp(right.counterparty_receiver_path.as_str()),
                 )
                 .then(left.event_id.cmp(&right.event_id))
         });
@@ -340,9 +344,9 @@ impl SdkBackupState {
                 .as_str()
                 .cmp(right.counterparty.as_str())
                 .then(
-                    left.counterparty_receiver_id
+                    left.counterparty_receiver_path
                         .as_str()
-                        .cmp(right.counterparty_receiver_id.as_str()),
+                        .cmp(right.counterparty_receiver_path.as_str()),
                 )
                 .then(left.event_id.cmp(&right.event_id))
         });
@@ -353,9 +357,9 @@ impl SdkBackupState {
                 .as_str()
                 .cmp(right.issuer.as_str())
                 .then(
-                    left.issuer_receiver_id
+                    left.issuer_receiver_path
                         .as_str()
-                        .cmp(right.issuer_receiver_id.as_str()),
+                        .cmp(right.issuer_receiver_path.as_str()),
                 )
                 .then(left.receipt_id.cmp(&right.receipt_id))
         });
@@ -369,16 +373,16 @@ impl SdkBackupState {
                 .as_str()
                 .cmp(right.counterparty.as_str())
                 .then(
-                    left.counterparty_receiver_id
+                    left.counterparty_receiver_path
                         .as_str()
-                        .cmp(right.counterparty_receiver_id.as_str()),
+                        .cmp(right.counterparty_receiver_path.as_str()),
                 )
                 .then(left.receipt_id.cmp(&right.receipt_id))
         });
 
         Self {
             version: SDK_BACKUP_VERSION,
-            local_receiver_id,
+            local_receiver_path,
             identity_state: state.identity_state,
             linked_peers,
             contact_records,
@@ -400,10 +404,10 @@ impl SdkBackupState {
     fn into_storage_state(
         self,
         current_identity: Option<&IdentityState>,
-        local_receiver_id: &PaykitReceiverId,
+        local_receiver_path: &PaykitReceiverPath,
         next_peer_link_operation_lease_id: u64,
     ) -> Result<(ValidatedStorageState, RestoreReport)> {
-        self.validate(current_identity, local_receiver_id)?;
+        self.validate(current_identity, local_receiver_path)?;
 
         let mut identity_state = self.identity_state;
         preserve_current_sign_out_generation(&mut identity_state, current_identity);
@@ -411,7 +415,7 @@ impl SdkBackupState {
         validate_linked_peer_records(&linked_peers)?;
         let contact_records = keyed_by_tuple(
             self.contact_records,
-            |record| (record.public_key.clone(), record.receiver_id.clone()),
+            |record| (record.public_key.clone(), record.receiver_path.clone()),
             "local contact",
         )?;
         validate_contact_records(&contact_records)?;
@@ -426,7 +430,7 @@ impl SdkBackupState {
             |record| {
                 (
                     record.counterparty.clone(),
-                    record.counterparty_receiver_id.clone(),
+                    record.counterparty_receiver_path.clone(),
                     record.reservation_id.clone(),
                 )
             },
@@ -434,10 +438,10 @@ impl SdkBackupState {
         )?;
         let mut encrypted_link_states =
             keyed_by_peer(self.encrypted_link_states, "Encrypted Link state")?;
-        validate_encrypted_link_snapshots(&encrypted_link_states, local_receiver_id)?;
+        validate_encrypted_link_snapshots(&encrypted_link_states, local_receiver_path)?;
         let mut outbound_private_messages =
             unique_outbound_messages(self.outbound_private_messages)?;
-        validate_outbound_private_messages(&outbound_private_messages, &self.local_receiver_id)?;
+        validate_outbound_private_messages(&outbound_private_messages, &self.local_receiver_path)?;
         validate_payment_endpoint_reservations(
             &payment_endpoint_reservations,
             &outbound_private_messages,
@@ -449,7 +453,7 @@ impl SdkBackupState {
             |record| {
                 (
                     record.counterparty.clone(),
-                    record.counterparty_receiver_id.clone(),
+                    record.counterparty_receiver_path.clone(),
                     record.event_id.clone(),
                 )
             },
@@ -461,7 +465,7 @@ impl SdkBackupState {
             |record| {
                 (
                     record.counterparty.clone(),
-                    record.counterparty_receiver_id.clone(),
+                    record.counterparty_receiver_path.clone(),
                     record.event_id.clone(),
                 )
             },
@@ -478,7 +482,7 @@ impl SdkBackupState {
             |record| {
                 (
                     record.issuer.clone(),
-                    record.issuer_receiver_id.clone(),
+                    record.issuer_receiver_path.clone(),
                     record.receipt_id.clone(),
                 )
             },
@@ -497,7 +501,7 @@ impl SdkBackupState {
             |record| {
                 (
                     record.counterparty.clone(),
-                    record.counterparty_receiver_id.clone(),
+                    record.counterparty_receiver_path.clone(),
                     record.receipt_id.clone(),
                 )
             },
@@ -506,7 +510,7 @@ impl SdkBackupState {
         validate_receipt_issuance_records(
             &receipt_issuance_records,
             &outbound_private_messages,
-            &self.local_receiver_id,
+            &self.local_receiver_path,
         )?;
 
         let recovery_required_peers = reconcile_restored_linked_peers(
@@ -536,9 +540,9 @@ impl SdkBackupState {
         let recovery_required_report_peers = recovery_required_peers
             .iter()
             .map(
-                |(counterparty, counterparty_receiver_id)| RestoreRecoveryRequiredPeer {
+                |(counterparty, counterparty_receiver_path)| RestoreRecoveryRequiredPeer {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_id: counterparty_receiver_id.clone(),
+                    counterparty_receiver_path: counterparty_receiver_path.clone(),
                 },
             )
             .collect();
@@ -586,7 +590,7 @@ impl SdkBackupState {
     fn validate(
         &self,
         current_identity: Option<&IdentityState>,
-        local_receiver_id: &PaykitReceiverId,
+        local_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         if self.version != SDK_BACKUP_VERSION {
             return Err(PaykitSdkError::Protocol(format!(
@@ -594,10 +598,10 @@ impl SdkBackupState {
                 self.version
             )));
         }
-        if &self.local_receiver_id != local_receiver_id {
+        if &self.local_receiver_path != local_receiver_path {
             return Err(PaykitSdkError::Protocol(format!(
-                "backup receiver id '{}' does not match local receiver id '{}'",
-                self.local_receiver_id, local_receiver_id
+                "backup receiver path '{}' does not match local receiver path '{}'",
+                self.local_receiver_path, local_receiver_path
             )));
         }
 

@@ -30,8 +30,8 @@ on low-level `paykit-lib` protocol bindings.
 - `PubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
   session state.
-- `defaultConfig(receiverId)` — return the default `PaykitSdkConfig` policy
-  for an explicit Paykit receiver id.
+- `defaultConfig(receiverPath)` — return the default `PaykitSdkConfig` policy
+  for an explicit Paykit receiver path.
 - `defaultPubkyClientConfig()` — return default `PubkyClientConfig`.
 - `requiredSessionCapabilities(config)` — return Pubky capabilities required by
   a config.
@@ -48,7 +48,7 @@ load the native UniFFI library just to format keys.
 
 - `PaykitSdk.withPaymentAdapter` — create a runtime with payment adapter
   callbacks.
-- `paykitReceiverIds` — list a Pubky identity's Paykit receiver ids before
+- `paykitReceiverPaths` — list a Pubky identity's Paykit receiver paths before
   scoped public Payment List reads.
 - `PaykitSdk.syncPublicEndpoints` — publish current public receiving details
   and remove stale SDK-managed public Payment Endpoints.
@@ -253,7 +253,7 @@ sdk.syncPublicEndpointsWithReceivingDetails(publicDetails)
 updates = [
     PrivatePaymentListReservationUpdateInput(
         counterparty,
-        counterpartyReceiverId,
+        counterpartyReceiverPath,
         reservations: [
             PaymentEndpointReservationInput(
                 reservationId,
@@ -285,7 +285,7 @@ For normal contact payment UX, use the high-level preparation call:
 ```text
 resolution = sdk.prepareAndResolveContactPayment(
     counterparty,
-    counterpartyReceiverId,
+    counterpartyReceiverPath,
     amount, // PaymentAmountContext or nil/null
     includePublicEndpoints,
     maxAdvanceSteps

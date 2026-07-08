@@ -6,7 +6,7 @@ async fn test_restore_backup_state_marks_link_state_without_peer_recovery_requir
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -14,7 +14,7 @@ async fn test_restore_backup_state_marks_link_state_without_peer_recovery_requir
         payment_endpoint_reservations: Vec::new(),
         encrypted_link_states: vec![EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             link_snapshot: None,
             handshake_snapshot: None,
             handshake_role: None,
@@ -51,7 +51,7 @@ async fn test_restore_backup_state_preserves_private_stream_without_forcing_reco
     let counterparty = public_key();
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_id: receiver_id(),
+        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
@@ -62,7 +62,7 @@ async fn test_restore_backup_state_preserves_private_stream_without_forcing_reco
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 1,
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json:
                 r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#

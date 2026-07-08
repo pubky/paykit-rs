@@ -5,7 +5,7 @@ use crate::{
     domain::outbound_private::OutboundPrivateMessageStatus,
     identity::PubkyPublicKey,
     storage::{OutboundPrivateMessageRecord, StorageState},
-    PaykitReceiverId,
+    PaykitReceiverPath,
 };
 
 pub(super) fn is_claimable_outbound_private_message(
@@ -88,7 +88,7 @@ pub(crate) fn outbound_private_queue_head_is_claimable(
 pub(super) fn supersede_outdated_private_payment_lists(
     state: &mut StorageState,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     now: DateTime<Utc>,
     stale_before: DateTime<Utc>,
     failed_retry_after: DateTime<Utc>,
@@ -98,7 +98,7 @@ pub(super) fn supersede_outdated_private_payment_lists(
         .iter()
         .filter(|message| {
             &message.counterparty == counterparty
-                && &message.counterparty_receiver_id == counterparty_receiver_id
+                && &message.counterparty_receiver_path == counterparty_receiver_path
                 && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
                 && !matches!(
                     message.status,
@@ -115,7 +115,7 @@ pub(super) fn supersede_outdated_private_payment_lists(
 
     for message in state.outbound_private_messages.iter_mut() {
         if &message.counterparty == counterparty
-            && &message.counterparty_receiver_id == counterparty_receiver_id
+            && &message.counterparty_receiver_path == counterparty_receiver_path
             && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
             && message.outbound_message_id < latest_private_list_id
             && message.status != OutboundPrivateMessageStatus::Sending

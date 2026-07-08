@@ -10,16 +10,16 @@ where
     pub(super) async fn ensure_peer_allows_private_automation(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         let (peer_state, has_active_link) = self
             .storage
             .transaction(|tx| {
                 let peer_state = tx
-                    .linked_peer(counterparty, counterparty_receiver_id)
+                    .linked_peer(counterparty, counterparty_receiver_path)
                     .map(|peer| peer.state);
                 let has_active_link = tx
-                    .encrypted_link_state(counterparty, counterparty_receiver_id)
+                    .encrypted_link_state(counterparty, counterparty_receiver_path)
                     .and_then(|state| state.link_snapshot)
                     .is_some();
                 Ok((peer_state, has_active_link))
@@ -45,15 +45,15 @@ where
     pub(super) async fn private_queue_readiness(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<PrivateQueueReadiness> {
         let (peer_state, has_active_link, has_restorable_handshake) = self
             .storage
             .transaction(|tx| {
                 let peer_state = tx
-                    .linked_peer(counterparty, counterparty_receiver_id)
+                    .linked_peer(counterparty, counterparty_receiver_path)
                     .map(|peer| peer.state);
-                let state = tx.encrypted_link_state(counterparty, counterparty_receiver_id);
+                let state = tx.encrypted_link_state(counterparty, counterparty_receiver_path);
                 let has_active_link = state
                     .as_ref()
                     .and_then(|state| state.link_snapshot.as_ref())
@@ -92,13 +92,13 @@ where
     pub(super) async fn ensure_peer_not_blocked(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         let peer_state = self
             .storage
             .transaction(|tx| {
                 Ok(tx
-                    .linked_peer(counterparty, counterparty_receiver_id)
+                    .linked_peer(counterparty, counterparty_receiver_path)
                     .map(|peer| peer.state))
             })
             .await?;
@@ -114,13 +114,13 @@ where
     pub(super) async fn ensure_peer_not_recovery_required_or_blocked(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         let peer_state = self
             .storage
             .transaction(|tx| {
                 Ok(tx
-                    .linked_peer(counterparty, counterparty_receiver_id)
+                    .linked_peer(counterparty, counterparty_receiver_path)
                     .map(|peer| peer.state))
             })
             .await?;
@@ -143,7 +143,7 @@ where
     pub async fn block_peer(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<LinkedPeerRecord> {
         let local_public_key = self.require_initialized_identity("block peer").await?;
         if counterparty == local_public_key {
@@ -152,7 +152,7 @@ where
             ));
         }
         let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
         let result = self
             .block_peer_with_claim(counterparty, lease.clone())
@@ -170,18 +170,23 @@ where
             .transaction(move |tx| {
                 crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                 let mut record = tx
-                    .linked_peer(&counterparty, &lease.counterparty_receiver_id)
+                    .linked_peer(&counterparty, &lease.counterparty_receiver_path)
                     .unwrap_or_else(|| {
                         default_linked_peer(
                             counterparty.clone(),
-                            lease.counterparty_receiver_id.clone(),
+                            lease.counterparty_receiver_path.clone(),
                         )
                     });
                 record.state = LinkedPeerState::Blocked;
                 record.last_sync_at = Some(now);
                 record.failure_count = 0;
                 tx.save_linked_peer(record.clone());
-                clear_encrypted_link_state(tx, &counterparty, &lease.counterparty_receiver_id, now);
+                clear_encrypted_link_state(
+                    tx,
+                    &counterparty,
+                    &lease.counterparty_receiver_path,
+                    now,
+                );
                 Ok(record)
             })
             .await
@@ -194,7 +199,7 @@ where
     pub async fn unblock_peer(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<LinkedPeerRecord> {
         let local_public_key = self.require_initialized_identity("unblock peer").await?;
         if counterparty == local_public_key {
@@ -203,7 +208,7 @@ where
             ));
         }
         let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
         let result = self
             .unblock_peer_with_claim(counterparty, lease.clone())
@@ -221,11 +226,11 @@ where
             .transaction(move |tx| {
                 crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                 let mut record = tx
-                    .linked_peer(&counterparty, &lease.counterparty_receiver_id)
+                    .linked_peer(&counterparty, &lease.counterparty_receiver_path)
                     .unwrap_or_else(|| {
                         default_linked_peer(
                             counterparty.clone(),
-                            lease.counterparty_receiver_id.clone(),
+                            lease.counterparty_receiver_path.clone(),
                         )
                     });
                 if record.state != LinkedPeerState::Blocked {
@@ -235,7 +240,12 @@ where
                 record.last_sync_at = Some(now);
                 record.failure_count = 0;
                 tx.save_linked_peer(record.clone());
-                clear_encrypted_link_state(tx, &counterparty, &lease.counterparty_receiver_id, now);
+                clear_encrypted_link_state(
+                    tx,
+                    &counterparty,
+                    &lease.counterparty_receiver_path,
+                    now,
+                );
                 Ok(record)
             })
             .await
@@ -245,11 +255,11 @@ where
     pub async fn initiate_link_with_peer(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<LinkedPeerHandshakeReport> {
         self.start_link_handshake(
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             EncryptedLinkHandshakeRole::Initiator,
         )
         .await
@@ -259,11 +269,11 @@ where
     pub async fn accept_link_with_peer(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<LinkedPeerHandshakeReport> {
         self.start_link_handshake(
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             EncryptedLinkHandshakeRole::Responder,
         )
         .await
@@ -273,13 +283,16 @@ where
     pub async fn advance_link_handshake(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<LinkedPeerHandshakeReport> {
-        self.ensure_peer_not_recovery_required_or_blocked(&counterparty, &counterparty_receiver_id)
-            .await?;
+        self.ensure_peer_not_recovery_required_or_blocked(
+            &counterparty,
+            &counterparty_receiver_path,
+        )
+        .await?;
         let _ = self.private_link_session_access().await?;
         let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
         let result = self
             .advance_link_handshake_with_claim(counterparty, lease.clone())
@@ -297,7 +310,7 @@ where
     pub async fn ensure_link_with_peer(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         max_advance_steps: u32,
     ) -> Result<LinkedPeerHandshakeReport> {
         let (session_access, _) = self.private_link_session_access().await?;
@@ -309,7 +322,7 @@ where
         }
         let role = deterministic_handshake_role(&local_public_key, &counterparty);
         let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
         let result = self
             .ensure_link_with_peer_with_claim(counterparty, role, max_advance_steps, lease.clone())
@@ -328,9 +341,9 @@ where
             .storage
             .transaction(|tx| {
                 Ok((
-                    tx.linked_peer(&counterparty, &lease.counterparty_receiver_id)
+                    tx.linked_peer(&counterparty, &lease.counterparty_receiver_path)
                         .map(|peer| peer.state),
-                    tx.encrypted_link_state(&counterparty, &lease.counterparty_receiver_id),
+                    tx.encrypted_link_state(&counterparty, &lease.counterparty_receiver_path),
                 ))
             })
             .await?;
@@ -351,7 +364,7 @@ where
                 .await?;
                 LinkedPeerHandshakeReport {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_id: state.counterparty_receiver_id,
+                    counterparty_receiver_path: state.counterparty_receiver_path,
                     state: LinkedPeerState::Linked,
                     generation: state.generation,
                     handshake_role: None,
@@ -368,7 +381,7 @@ where
                     .await?;
                     self.publish_local_recovery_marker_if_possible(
                         &counterparty,
-                        &lease.counterparty_receiver_id,
+                        &lease.counterparty_receiver_path,
                         mark.new_episode,
                     )
                     .await;
@@ -386,7 +399,7 @@ where
                 .await?;
                 LinkedPeerHandshakeReport {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_id: state.counterparty_receiver_id,
+                    counterparty_receiver_path: state.counterparty_receiver_path,
                     state: LinkedPeerState::Linking,
                     generation: state.generation,
                     handshake_role: state.handshake_role,
@@ -417,13 +430,13 @@ where
     ) -> Result<LinkedPeerHandshakeReport> {
         self.ensure_peer_not_recovery_required_or_blocked(
             &counterparty,
-            &lease.counterparty_receiver_id,
+            &lease.counterparty_receiver_path,
         )
         .await?;
         let Some(stored_link_state) = self
             .storage
             .transaction(|tx| {
-                Ok(tx.encrypted_link_state(&counterparty, &lease.counterparty_receiver_id))
+                Ok(tx.encrypted_link_state(&counterparty, &lease.counterparty_receiver_path))
             })
             .await?
         else {
@@ -442,7 +455,7 @@ where
             .await?;
             return Ok(LinkedPeerHandshakeReport {
                 counterparty: counterparty.clone(),
-                counterparty_receiver_id: stored_link_state.counterparty_receiver_id,
+                counterparty_receiver_path: stored_link_state.counterparty_receiver_path,
                 state: LinkedPeerState::Linked,
                 generation: stored_link_state.generation,
                 handshake_role: None,
@@ -467,7 +480,7 @@ where
         let handshake = match self
             .restore_link_handshake_from_snapshot(
                 counterparty.clone(),
-                &stored_link_state.counterparty_receiver_id,
+                &stored_link_state.counterparty_receiver_path,
                 snapshot_bytes,
             )
             .await
@@ -497,7 +510,7 @@ where
         counterparty: &PubkyPublicKey,
         lease: PeerLinkOperationLease,
     ) -> Result<()> {
-        let counterparty_receiver_id = lease.counterparty_receiver_id.clone();
+        let counterparty_receiver_path = lease.counterparty_receiver_path.clone();
         let mark = mark_recovery_required_with_lease(
             &self.storage,
             counterparty.clone(),
@@ -507,7 +520,7 @@ where
         .await?;
         self.publish_local_recovery_marker_if_possible(
             counterparty,
-            &counterparty_receiver_id,
+            &counterparty_receiver_path,
             mark.new_episode,
         )
         .await;
@@ -517,7 +530,7 @@ where
     async fn restore_link_handshake_from_snapshot(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
         snapshot_bytes: &[u8],
     ) -> Result<paykit_lib::EncryptedLinkHandshake> {
         let (session_access, secret_key) = self.private_link_session_access().await?;
@@ -527,8 +540,8 @@ where
             session_access.session,
             secret_key,
             &remote_public_key,
-            &self.config.receiver_id,
-            counterparty_receiver_id,
+            &self.config.receiver_path,
+            counterparty_receiver_path,
             session_access.outbox_client,
             snapshot,
         )
@@ -568,7 +581,7 @@ where
                 .await
             }
             paykit_lib::HandshakeProgress::Complete(link) => {
-                let counterparty_receiver_id = lease.counterparty_receiver_id.clone();
+                let counterparty_receiver_path = lease.counterparty_receiver_path.clone();
                 let report = save_linked_peer_link_state_if_generation_with_lease(
                     &self.storage,
                     counterparty.clone(),
@@ -580,7 +593,7 @@ where
                 .await?;
                 self.remove_local_recovery_marker_if_recorded(
                     &counterparty,
-                    &counterparty_receiver_id,
+                    &counterparty_receiver_path,
                 )
                 .await?;
                 Ok(report)
@@ -591,12 +604,12 @@ where
     async fn start_link_handshake(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         role: EncryptedLinkHandshakeRole,
     ) -> Result<LinkedPeerHandshakeReport> {
         let _ = self.private_link_session_access().await?;
         let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
         let result = self
             .start_link_handshake_with_claim(counterparty, role, lease.clone())
@@ -614,7 +627,7 @@ where
             .storage
             .transaction(|tx| {
                 Ok(tx
-                    .linked_peer(&counterparty, &lease.counterparty_receiver_id)
+                    .linked_peer(&counterparty, &lease.counterparty_receiver_path)
                     .map(|peer| peer.state))
             })
             .await?;
@@ -628,7 +641,7 @@ where
             if let Some(existing) = self
                 .storage
                 .transaction(|tx| {
-                    Ok(tx.encrypted_link_state(&counterparty, &lease.counterparty_receiver_id))
+                    Ok(tx.encrypted_link_state(&counterparty, &lease.counterparty_receiver_path))
                 })
                 .await?
             {
@@ -643,7 +656,7 @@ where
                     .await?;
                     return Ok(LinkedPeerHandshakeReport {
                         counterparty,
-                        counterparty_receiver_id: existing.counterparty_receiver_id,
+                        counterparty_receiver_path: existing.counterparty_receiver_path,
                         state: LinkedPeerState::Linked,
                         generation: existing.generation,
                         handshake_role: None,
@@ -660,7 +673,7 @@ where
                         .await?;
                         self.publish_local_recovery_marker_if_possible(
                             &counterparty,
-                            &lease.counterparty_receiver_id,
+                            &lease.counterparty_receiver_path,
                             mark.new_episode,
                         )
                         .await;
@@ -678,7 +691,7 @@ where
                     .await?;
                     return Ok(LinkedPeerHandshakeReport {
                         counterparty,
-                        counterparty_receiver_id: existing.counterparty_receiver_id,
+                        counterparty_receiver_path: existing.counterparty_receiver_path,
                         state: LinkedPeerState::Linking,
                         generation: existing.generation,
                         handshake_role: existing.handshake_role,
@@ -694,16 +707,16 @@ where
                 session_access.session,
                 secret_key,
                 &remote_public_key,
-                &self.config.receiver_id,
-                &lease.counterparty_receiver_id,
+                &self.config.receiver_path,
+                &lease.counterparty_receiver_path,
                 session_access.outbox_client,
             )?,
             EncryptedLinkHandshakeRole::Responder => paykit_lib::accept_encrypted_link(
                 session_access.session,
                 secret_key,
                 &remote_public_key,
-                &self.config.receiver_id,
-                &lease.counterparty_receiver_id,
+                &self.config.receiver_path,
+                &lease.counterparty_receiver_path,
                 session_access.outbox_client,
             )?,
         };
@@ -722,7 +735,7 @@ where
     pub(super) async fn claim_peer_link_operation(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<PeerLinkOperationLease> {
         let now = self.clock.now();
         let lease_timeout = ChronoDuration::from_std(self.config.peer_link_operation_lease_timeout)
@@ -734,7 +747,7 @@ where
             .transaction(|tx| {
                 Ok(tx.claim_peer_link_operation(
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     now,
                     expires_at,
                 ))
@@ -755,7 +768,7 @@ where
             .transaction(|tx| {
                 tx.release_peer_link_operation(
                     &lease.counterparty,
-                    &lease.counterparty_receiver_id,
+                    &lease.counterparty_receiver_path,
                     lease.lease_id,
                 );
                 Ok(())
@@ -799,13 +812,13 @@ where
 fn clear_encrypted_link_state(
     tx: &mut dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     now: DateTime<Utc>,
 ) {
-    if let Some(link_state) = tx.encrypted_link_state(counterparty, counterparty_receiver_id) {
+    if let Some(link_state) = tx.encrypted_link_state(counterparty, counterparty_receiver_path) {
         tx.save_encrypted_link_state(EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: link_state.counterparty_receiver_id,
+            counterparty_receiver_path: link_state.counterparty_receiver_path,
             link_snapshot: None,
             handshake_snapshot: None,
             handshake_role: None,

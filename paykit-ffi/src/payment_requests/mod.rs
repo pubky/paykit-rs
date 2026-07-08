@@ -4,8 +4,8 @@ use paykit_lib::PaymentReference;
 
 use crate::{
     errors::validation_error, json::FfiPrivateJsonObject,
-    private_lists::FfiOutboundPrivateMessageStatus, sdk::FfiPaykitSdk, session::parse_receiver_id,
-    PaykitFfiError,
+    private_lists::FfiOutboundPrivateMessageStatus, sdk::FfiPaykitSdk,
+    session::parse_receiver_path, PaykitFfiError,
 };
 
 mod conversions;
@@ -146,7 +146,7 @@ pub struct FfiPaymentRequestFilter {
     /// Restrict results to one counterparty.
     pub counterparty: Option<String>,
     /// Restrict results to one counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: Option<String>,
+    pub counterparty_receiver_path: Option<String>,
     /// Restrict results to one local role.
     pub local_role: Option<FfiPaymentRequestLocalRole>,
     /// Restrict results to lifecycle states. Empty means all states.
@@ -186,7 +186,7 @@ pub struct FfiPaymentRequestRecord {
     /// Counterparty associated with the private stream.
     pub counterparty: String,
     /// Counterparty receiver/runtime folder associated with the private stream.
-    pub counterparty_receiver_id: String,
+    pub counterparty_receiver_path: String,
     /// Stable Payment Request ID.
     pub payment_request_id: String,
     /// Local role, when known.
@@ -246,13 +246,13 @@ impl FfiPaykitSdk {
     pub async fn received_payment_requests_from(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
     ) -> Result<Vec<FfiPaymentRequestRecord>, PaykitFfiError> {
         let records = self
             .runtime
             .received_payment_requests_from(
                 &parse_public_key(counterparty)?,
-                &parse_receiver_id(counterparty_receiver_id)?,
+                &parse_receiver_path(counterparty_receiver_path)?,
             )
             .await?;
         payment_request_records_to_ffi(records)
@@ -262,13 +262,13 @@ impl FfiPaykitSdk {
     pub async fn payment_requests_with(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
     ) -> Result<Vec<FfiPaymentRequestRecord>, PaykitFfiError> {
         let records = self
             .runtime
             .payment_requests_with(
                 &parse_public_key(counterparty)?,
-                &parse_receiver_id(counterparty_receiver_id)?,
+                &parse_receiver_path(counterparty_receiver_path)?,
             )
             .await?;
         payment_request_records_to_ffi(records)
@@ -312,13 +312,13 @@ impl FfiPaykitSdk {
     pub async fn propose_payment_request(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
         terms: FfiPaymentRequestTerms,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
         self.runtime
             .propose_payment_request(
                 parse_public_key(counterparty)?,
-                parse_receiver_id(counterparty_receiver_id)?,
+                parse_receiver_path(counterparty_receiver_path)?,
                 terms.try_into()?,
             )
             .await
@@ -330,14 +330,14 @@ impl FfiPaykitSdk {
     pub async fn accept_payment_request(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
         payment_request_id: String,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
         let payment_request_id = parse_payment_request_id(payment_request_id)?;
         self.runtime
             .accept_payment_request(
                 parse_public_key(counterparty)?,
-                parse_receiver_id(counterparty_receiver_id)?,
+                parse_receiver_path(counterparty_receiver_path)?,
                 &payment_request_id,
             )
             .await
@@ -349,7 +349,7 @@ impl FfiPaykitSdk {
     pub async fn reject_payment_request(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
         payment_request_id: String,
         reason: Option<String>,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
@@ -357,7 +357,7 @@ impl FfiPaykitSdk {
         self.runtime
             .reject_payment_request(
                 parse_public_key(counterparty)?,
-                parse_receiver_id(counterparty_receiver_id)?,
+                parse_receiver_path(counterparty_receiver_path)?,
                 &payment_request_id,
                 reason,
             )
@@ -370,7 +370,7 @@ impl FfiPaykitSdk {
     pub async fn cancel_payment_request(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
         payment_request_id: String,
         reason: Option<String>,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
@@ -378,7 +378,7 @@ impl FfiPaykitSdk {
         self.runtime
             .cancel_payment_request(
                 parse_public_key(counterparty)?,
-                parse_receiver_id(counterparty_receiver_id)?,
+                parse_receiver_path(counterparty_receiver_path)?,
                 &payment_request_id,
                 reason,
             )
@@ -391,7 +391,7 @@ impl FfiPaykitSdk {
     pub async fn submit_payment_proof(
         &self,
         counterparty: String,
-        counterparty_receiver_id: String,
+        counterparty_receiver_path: String,
         payment_request_id: String,
         proof: FfiPaymentProofSubmission,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
@@ -400,7 +400,7 @@ impl FfiPaykitSdk {
         self.runtime
             .submit_payment_proof(
                 parse_public_key(counterparty)?,
-                parse_receiver_id(counterparty_receiver_id)?,
+                parse_receiver_path(counterparty_receiver_path)?,
                 &payment_request_id,
                 proof.billing_period,
                 proof.payment_endpoint_identifier,

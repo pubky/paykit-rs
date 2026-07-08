@@ -26,12 +26,12 @@ reservations, recovery state, and backup data. Multiple apps can be linked or
 aggregated explicitly, but they do not share one private Paykit runtime by
 default.
 
-Each runtime is configured with one local Paykit receiver id, but that id only
-describes this app/runtime's folder. Private and payment counterparty APIs take
-the counterparty's exact receiver id separately. A Pubky key alone is not enough
+Each runtime is configured with one local Paykit receiver path, but that path
+only describes this app/runtime's folder. Private and payment counterparty APIs take
+the counterparty's exact receiver path separately. A Pubky key alone is not enough
 information to route private Paykit state to a specific app/runtime folder.
-Apps can call `paykit_receiver_ids` as a discovery helper, but they still choose
-the receiver id explicitly.
+Apps can call `paykit_receiver_paths` as a discovery helper, but they still choose
+the receiver path explicitly.
 
 ## Current Scope
 
@@ -75,7 +75,7 @@ SDK.
 Typical startup:
 
 ```rust,no_run
-use paykit_sdk::{PaykitReceiverId, PaykitSdk, PaykitSdkConfig};
+use paykit_sdk::{PaykitReceiverPath, PaykitSdk, PaykitSdkConfig};
 
 # async fn example<S, K, P>(storage: S, pubky: K, payment: P) -> paykit_sdk::Result<()>
 # where
@@ -83,7 +83,7 @@ use paykit_sdk::{PaykitReceiverId, PaykitSdk, PaykitSdkConfig};
 #     K: paykit_sdk::PubkySessionProvider,
 #     P: paykit_sdk::PaymentAdapter,
 # {
-let config = PaykitSdkConfig::new(PaykitReceiverId::new("bitkit")?);
+let config = PaykitSdkConfig::new(PaykitReceiverPath::new("bitkit/wallet")?);
 let sdk = PaykitSdk::try_new(storage, pubky, payment, config)?;
 let report = sdk.initialize().await?;
 
@@ -103,7 +103,7 @@ Common workflows:
   auth/session handoff
 - set `profile_namespace` to a namespace segment such as `bitkit.to` when
   profile/contact helpers should publish under
-  `/pub/bitkit.to/receivers/{receiver_id}/...`
+  `/pub/bitkit.to/{receiver_path}/...`
 - use `publish_paykit_profile` / `fetch_paykit_profile` for configured
   Paykit Profile metadata, including app-specific public fields in `extra`
 - use `publish_paykit_blob` / `delete_paykit_blob` for files under the
@@ -151,22 +151,22 @@ Common workflows:
 The SDK profile/contact namespace is SDK-level Paykit app data. By default the
 SDK uses receiver-scoped Paykit paths:
 
-- `/pub/paykit/v0/receivers/{receiver_id}/profile.json` for Paykit Profile
-- `/pub/paykit/v0/receivers/{receiver_id}/blobs/...` for Paykit Profile blobs
-- `/pub/paykit/v0/receivers/{receiver_id}/contacts/...` for optional Public Contact Markers
+- `/pub/paykit/v0/{receiver_path}/profile.json` for Paykit Profile
+- `/pub/paykit/v0/{receiver_path}/blobs/...` for Paykit Profile blobs
+- `/pub/paykit/v0/{receiver_path}/contacts/...` for optional Public Contact Markers
 
 Apps can set `profile_namespace` to use their own public app namespace, such as
 `bitkit.to`. Those helper paths still stay receiver-scoped, for example
-`/pub/bitkit.to/receivers/{receiver_id}/profile.json`,
-`/pub/bitkit.to/receivers/{receiver_id}/blobs/...`, and
-`/pub/bitkit.to/receivers/{receiver_id}/contacts/...`. Public Payment
+`/pub/bitkit.to/{receiver_path}/profile.json`,
+`/pub/bitkit.to/{receiver_path}/blobs/...`, and
+`/pub/bitkit.to/{receiver_path}/contacts/...`. Public Payment
 Endpoints and Encrypted Link/private runtime state stay under the configured
-receiver id. `profile_namespace` is not a shared-runtime selector or
+receiver path. `profile_namespace` is not a shared-runtime selector or
 app-specific core Paykit path prefix.
 
 Remote profile fetches use the same configured profile namespace. Cross-app
-profile discovery therefore needs an agreed namespace or a future receiver
-locator that carries profile namespace metadata.
+profile discovery therefore needs an agreed namespace or explicit metadata that
+describes which profile namespace a receiver path uses.
 
 The SDK rejects `pubky.app` as a configured profile namespace only as a local
 guardrail against accidental writes through Paykit helpers. It is not a

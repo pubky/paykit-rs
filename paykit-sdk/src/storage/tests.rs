@@ -19,8 +19,8 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
-fn receiver_id() -> PaykitReceiverId {
-    PaykitReceiverId::new("bitkit").unwrap()
+fn receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
 fn public_endpoint_record(identifier: &str) -> PublicEndpointRecord {
@@ -36,7 +36,7 @@ fn public_endpoint_record(identifier: &str) -> PublicEndpointRecord {
 fn outbound_private_message(counterparty: PubkyPublicKey) -> NewOutboundPrivateMessage {
     NewOutboundPrivateMessage::new(
         counterparty,
-        receiver_id(),
+        receiver_path(),
         "paykit.private_payment_list".into(),
         r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#.into(),
         timestamp(),
@@ -46,7 +46,7 @@ fn outbound_private_message(counterparty: PubkyPublicKey) -> NewOutboundPrivateM
 fn outbound_payment_request_message(counterparty: PubkyPublicKey) -> NewOutboundPrivateMessage {
     NewOutboundPrivateMessage::new(
             counterparty,
-            receiver_id(),
+            receiver_path(),
             "paykit.payment_request".into(),
             r#"{"version":1,"kind":"paykit.payment_request","event_id":"650e8400-e29b-41d4-a716-446655440000","payment_request_id":"550e8400-e29b-41d4-a716-446655440000","request":{"payment_request_id":"550e8400-e29b-41d4-a716-446655440000","terms":{"amount":{"value":"1","asset":"btc"},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{}}}}"#.into(),
             timestamp(),
@@ -56,7 +56,7 @@ fn outbound_payment_request_message(counterparty: PubkyPublicKey) -> NewOutbound
 fn receipt_access_record(counterparty: PubkyPublicKey) -> ReceiptAccessRecord {
     ReceiptAccessRecord {
         counterparty,
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         stream_item_id: 0,
         receive_batch_id: 0,
         event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
@@ -64,8 +64,9 @@ fn receipt_access_record(counterparty: PubkyPublicKey) -> ReceiptAccessRecord {
         payment_reference: "invoice-2026-0001".into(),
         payment_request_id: None,
         billing_period: None,
-        location: "/pub/paykit/v0/private/bitkit/receipts/550e8400-e29b-41d4-a716-446655440000"
-            .into(),
+        location:
+            "/pub/paykit/v0/private/bitkit/wallet/receipts/550e8400-e29b-41d4-a716-446655440000"
+                .into(),
         key: "receipt-secret".into(),
         retrieval_status: crate::ReceiptRetrievalStatus::Pending,
         retrieval_attempted_at: None,
@@ -78,7 +79,7 @@ fn receipt_access_record(counterparty: PubkyPublicKey) -> ReceiptAccessRecord {
 fn receipt_record(issuer: PubkyPublicKey) -> ReceiptRecord {
     ReceiptRecord {
         issuer,
-        issuer_receiver_id: receiver_id(),
+        issuer_receiver_path: receiver_path(),
         receipt_access_event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
         receipt_access_key_hash: "sha256:test".into(),
         receipt_id: "550e8400-e29b-41d4-a716-446655440000".into(),
@@ -91,8 +92,9 @@ fn receipt_record(issuer: PubkyPublicKey) -> ReceiptRecord {
         payment_endpoint_identifier: None,
         amount: None,
         metadata: serde_json::Map::new(),
-        location: "/pub/paykit/v0/private/bitkit/receipts/550e8400-e29b-41d4-a716-446655440000"
-            .into(),
+        location:
+            "/pub/paykit/v0/private/bitkit/wallet/receipts/550e8400-e29b-41d4-a716-446655440000"
+                .into(),
         retrieved_at: timestamp(),
     }
 }
@@ -103,7 +105,7 @@ fn payment_endpoint_reservation_record(
     PaymentEndpointReservationRecord {
         reservation_id: "reservation-1".into(),
         counterparty,
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         identifier: "btc-lightning-bolt11".into(),
         payload_hash: "reserved-payload-hash".into(),
         outbound_message_id: 7,
@@ -149,7 +151,7 @@ fn test_sensitive_storage_debug_is_redacted() {
     let stream_counterparty = counterparty();
     let link_state = EncryptedLinkStateRecord {
         counterparty: stream_counterparty.clone(),
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         link_snapshot: Some(vec![1, 2, 3]),
         handshake_snapshot: Some(vec![4, 5, 6]),
         handshake_role: None,
@@ -165,7 +167,7 @@ fn test_sensitive_storage_debug_is_redacted() {
         0,
         NewPrivateStreamItem::new(NewPrivateStreamItemDetails {
             counterparty: stream_counterparty,
-            counterparty_receiver_id: receiver_id(),
+            counterparty_receiver_path: receiver_path(),
             receive_batch_id: 0,
             raw_json: r#"{"key":"secret"}"#.into(),
             parsed_version: Some(1),
@@ -183,7 +185,7 @@ fn test_sensitive_storage_debug_is_redacted() {
     let contact_public_key = counterparty();
     let contact = ContactRecord {
         public_key: contact_public_key.clone(),
-        receiver_id: receiver_id(),
+        receiver_path: receiver_path(),
         label: Some("contact-secret".into()),
         profile: Some(crate::PaykitProfile {
             display_name: Some("profile-secret".into()),
@@ -200,7 +202,7 @@ fn test_sensitive_storage_debug_is_redacted() {
     };
     let storage_state = StorageState {
         contact_records: HashMap::from([(
-            (contact_public_key.clone(), receiver_id()),
+            (contact_public_key.clone(), receiver_path()),
             contact.clone(),
         )]),
         public_endpoint_records: HashMap::from([(
@@ -233,7 +235,7 @@ async fn test_transaction_commits_records() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(timestamp()),
                     last_private_receive_at: Some(timestamp()),
@@ -253,7 +255,7 @@ async fn test_transaction_commits_records() {
                 let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
                     NewPrivateStreamItemDetails {
                         counterparty: counterparty.clone(),
-                        counterparty_receiver_id: receiver_id(),
+                        counterparty_receiver_path: receiver_path(),
                         receive_batch_id: 7,
                         raw_json: r#"{"version":1,"kind":"paykit.test"}"#.into(),
                         parsed_version: Some(1),
@@ -267,7 +269,7 @@ async fn test_transaction_commits_records() {
 
                 tx.save_event_dedup_record(EventDedupRecord {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
                     event_kind: "paykit.test".into(),
                     payload_hash: "hash".into(),
@@ -288,7 +290,7 @@ async fn test_transaction_commits_records() {
     let snapshot = storage.snapshot().unwrap();
     assert_eq!(stream_item_id, 0);
     assert_eq!(
-        snapshot.linked_peers[&(counterparty.clone(), receiver_id())].state,
+        snapshot.linked_peers[&(counterparty.clone(), receiver_path())].state,
         LinkedPeerState::Linked
     );
     assert_eq!(snapshot.public_endpoint_records.len(), 1);
@@ -314,7 +316,7 @@ async fn test_save_outbound_private_message_rejects_missing_record() {
                 tx.save_outbound_private_message(OutboundPrivateMessageRecord {
                     outbound_message_id: 99,
                     counterparty,
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     kind: "paykit.private_payment_list".into(),
                     raw_json:
                         r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
@@ -373,7 +375,7 @@ async fn test_invalid_outbound_private_message_does_not_block_later_records() {
     let claimed = claim_next_outbound_private_message(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         timestamp(),
         timestamp() - chrono::Duration::seconds(60),
         timestamp() - chrono::Duration::seconds(60),
@@ -384,7 +386,7 @@ async fn test_invalid_outbound_private_message_does_not_block_later_records() {
 
     assert_eq!(claimed.outbound_message_id, second.outbound_message_id);
     assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
-    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_id())
+    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();
     assert_eq!(queued.len(), 1);
@@ -414,7 +416,7 @@ async fn test_private_payment_list_queue_sends_only_latest_state() {
     let claimed = claim_next_outbound_private_message(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         timestamp(),
         timestamp() - chrono::Duration::seconds(60),
         timestamp() - chrono::Duration::seconds(60),
@@ -460,7 +462,7 @@ async fn test_private_payment_list_queue_reclaims_stale_sending_before_newer_lis
     let claimed = claim_next_outbound_private_message(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         timestamp(),
         timestamp() - chrono::Duration::seconds(60),
         timestamp() - chrono::Duration::seconds(60),
@@ -511,7 +513,7 @@ async fn test_event_message_queue_preserves_fifo() {
     let claimed = claim_next_outbound_private_message(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         timestamp(),
         timestamp() - chrono::Duration::seconds(60),
         timestamp() - chrono::Duration::seconds(60),
@@ -522,7 +524,7 @@ async fn test_event_message_queue_preserves_fifo() {
 
     assert_eq!(claimed.outbound_message_id, first.outbound_message_id);
     assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
-    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_id())
+    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();
     assert!(queued
@@ -541,7 +543,7 @@ async fn test_peer_link_operation_lease_blocks_until_released() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(60),
                 ))
@@ -556,7 +558,7 @@ async fn test_peer_link_operation_lease_blocks_until_released() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(60),
                 ))
@@ -570,7 +572,7 @@ async fn test_peer_link_operation_lease_blocks_until_released() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                tx.release_peer_link_operation(&counterparty, &receiver_id(), first.lease_id);
+                tx.release_peer_link_operation(&counterparty, &receiver_path(), first.lease_id);
                 Ok(())
             }
         })
@@ -582,7 +584,7 @@ async fn test_peer_link_operation_lease_blocks_until_released() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(60),
                 ))
@@ -614,7 +616,7 @@ async fn test_clear_identity_scoped_state_preserves_identity_only() {
                 tx.save_identity_state(identity);
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(timestamp()),
                     last_private_receive_at: None,
@@ -633,7 +635,7 @@ async fn test_clear_identity_scoped_state_preserves_identity_only() {
                 tx.insert_private_stream_item(NewPrivateStreamItem::new(
                     NewPrivateStreamItemDetails {
                         counterparty: counterparty.clone(),
-                        counterparty_receiver_id: receiver_id(),
+                        counterparty_receiver_path: receiver_path(),
                         receive_batch_id: 0,
                         raw_json: r#"{"version":1,"kind":"paykit.test"}"#.into(),
                         parsed_version: Some(1),
@@ -686,7 +688,7 @@ async fn test_clear_private_identity_scoped_state_preserves_public_endpoints() {
                 tx.save_identity_state(identity);
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(timestamp()),
                     last_private_receive_at: None,
@@ -703,7 +705,7 @@ async fn test_clear_private_identity_scoped_state_preserves_public_endpoints() {
                 ));
                 tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(60),
                 );
@@ -712,7 +714,7 @@ async fn test_clear_private_identity_scoped_state_preserves_public_endpoints() {
                 tx.insert_private_stream_item(NewPrivateStreamItem::new(
                     NewPrivateStreamItemDetails {
                         counterparty: counterparty.clone(),
-                        counterparty_receiver_id: receiver_id(),
+                        counterparty_receiver_path: receiver_path(),
                         receive_batch_id: 0,
                         raw_json: r#"{"version":1,"kind":"paykit.test"}"#.into(),
                         parsed_version: Some(1),
@@ -760,7 +762,7 @@ async fn test_peer_link_operation_lease_can_be_reclaimed_after_expiry() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
                 ))
@@ -775,7 +777,7 @@ async fn test_peer_link_operation_lease_can_be_reclaimed_after_expiry() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
                 ))
@@ -790,7 +792,7 @@ async fn test_peer_link_operation_lease_can_be_reclaimed_after_expiry() {
         storage
             .transaction({
                 let counterparty = counterparty.clone();
-                move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
+                move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_path()))
             })
             .await
             .unwrap(),
@@ -809,7 +811,7 @@ async fn test_peer_link_operation_stale_release_keeps_newer_lease() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
                 ))
@@ -824,7 +826,7 @@ async fn test_peer_link_operation_stale_release_keeps_newer_lease() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
                 ))
@@ -838,7 +840,7 @@ async fn test_peer_link_operation_stale_release_keeps_newer_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                tx.release_peer_link_operation(&counterparty, &receiver_id(), first.lease_id);
+                tx.release_peer_link_operation(&counterparty, &receiver_path(), first.lease_id);
                 Ok(())
             }
         })
@@ -849,7 +851,7 @@ async fn test_peer_link_operation_stale_release_keeps_newer_lease() {
         storage
             .transaction({
                 let counterparty = counterparty.clone();
-                move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_id()))
+                move |tx| Ok(tx.peer_link_operation_lease(&counterparty, &receiver_path()))
             })
             .await
             .unwrap(),
@@ -872,7 +874,7 @@ async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
                 let lease = tx
                     .claim_peer_link_operation(
                         &counterparty,
-                        &receiver_id(),
+                        &receiver_path(),
                         timestamp(),
                         timestamp() + chrono::Duration::seconds(10),
                     )
@@ -889,7 +891,7 @@ async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
                 Ok(tx
                     .claim_peer_link_operation(
                         &counterparty,
-                        &receiver_id(),
+                        &receiver_path(),
                         timestamp() + chrono::Duration::seconds(11),
                         timestamp() + chrono::Duration::seconds(71),
                     )
@@ -948,7 +950,7 @@ async fn test_transaction_rolls_back_on_error() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: Some(timestamp()),
                     last_private_receive_at: None,

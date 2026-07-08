@@ -31,12 +31,12 @@ or aggregated explicitly above the app-owned runtime model. That does not mean
 all apps silently share one private Paykit runtime, one Encrypted Link state
 machine, or one payment execution state.
 
-Each SDK runtime is configured with one local Paykit receiver id. That id
+Each SDK runtime is configured with one local Paykit receiver path. That path
 describes the local app/runtime folder only. Private and payment counterparty
-APIs must receive the counterparty's exact receiver id, because a Pubky key
+APIs must receive the counterparty's exact receiver path, because a Pubky key
 alone is not enough information to route private links, private streams,
 receipts, requests, recovery state, or public endpoint reads to one app/runtime
-folder. `paykit_receiver_ids` is a discovery helper; it does not make the SDK
+folder. `paykit_receiver_paths` is a discovery helper; it does not make the SDK
 guess which receiver to use.
 
 ## Design Principles
@@ -329,31 +329,31 @@ different Paykit apps can interoperate. This belongs in the SDK, not in
 
 The default public profile/contact namespace is receiver-scoped:
 
-- profile record: `/pub/paykit/v0/receivers/{receiver_id}/profile.json`
-- Paykit blobs: `/pub/paykit/v0/receivers/{receiver_id}/blobs/...`
-- public contact markers: `/pub/paykit/v0/receivers/{receiver_id}/contacts/...`
+- profile record: `/pub/paykit/v0/{receiver_path}/profile.json`
+- Paykit blobs: `/pub/paykit/v0/{receiver_path}/blobs/...`
+- public contact markers: `/pub/paykit/v0/{receiver_path}/contacts/...`
 
 Public Payment Endpoints for the same receiver are stored under
-`/pub/paykit/v0/receivers/{receiver_id}/endpoints/...`, so SDK profile paths do
+`/pub/paykit/v0/{receiver_path}/endpoints/...`, so SDK profile paths do
 not collide with Payment Endpoint Identifier files.
 
 Apps that already have a public product namespace can configure the SDK
 profile/contact namespace segment. For example, `profile_namespace =
 "bitkit.to"` makes Paykit Profile and contact marker helpers use
-`/pub/bitkit.to/receivers/{receiver_id}/profile.json`,
-`/pub/bitkit.to/receivers/{receiver_id}/blobs/...`, and
-`/pub/bitkit.to/receivers/{receiver_id}/contacts/...`. This does not change
+`/pub/bitkit.to/{receiver_path}/profile.json`,
+`/pub/bitkit.to/{receiver_path}/blobs/...`, and
+`/pub/bitkit.to/{receiver_path}/contacts/...`. This does not change
 core Paykit Protocol paths or receiver-scoped private runtime paths. The app
 should request the capability scope returned by
 `PaykitSdkConfig::required_session_capabilities()` and validate
 imported/completed sessions against that same scope. The default receiver
 namespace is covered by receiver-scoped public/private Paykit capabilities; a
 custom profile/contact namespace adds the matching
-`/pub/<namespace>/receivers/{receiver_id}/:rw` capability.
+`/pub/<namespace>/{receiver_path}/:rw` capability.
 
-Remote Paykit Profile fetches use the same configured profile namespace. Cross-app
-profile discovery therefore requires an agreed namespace or a future receiver
-locator that carries profile namespace metadata.
+Remote Paykit Profile fetches use the same configured profile namespace.
+Cross-app profile discovery therefore requires an agreed namespace or explicit
+metadata that describes which profile namespace a receiver path uses.
 
 `image_uri` may point at the configured blob prefix or another public image
 location. The SDK can publish/delete Paykit blobs under the configured blob
@@ -521,7 +521,7 @@ Tracks local Pubky identity state:
 One record per counterparty receiver/runtime in the current Rust SDK:
 
 - counterparty public key
-- counterparty receiver id
+- counterparty receiver path
 - relationship state: not linked, linking, linked, recovery required, blocked
 - in-progress handshake role: initiator or responder
 - last sync time
@@ -531,9 +531,9 @@ One record per counterparty receiver/runtime in the current Rust SDK:
 - policy overrides
 
 Private and payment state is scoped by counterparty Pubky key plus
-counterparty receiver id. APIs that operate on private links, private streams,
+counterparty receiver path. APIs that operate on private links, private streams,
 Private Payment Lists, Payment Requests, payment resolution, Receipt Access, and
-recovery markers require that exact receiver id instead of deriving it from the
+recovery markers require that exact receiver path instead of deriving it from the
 local runtime config.
 
 ### EncryptedLinkState
@@ -556,7 +556,7 @@ Append-only raw private stream item:
 
 - local identity
 - counterparty
-- counterparty receiver id
+- counterparty receiver path
 - stream sequence number assigned by the SDK
 - receive batch id
 - raw UTF-8 payload, or a retained invalid-frame marker when plaintext bytes
@@ -575,7 +575,7 @@ This is the source of truth for private protocol-derived state.
 Tracks Event Message idempotency:
 
 - counterparty
-- counterparty receiver id
+- counterparty receiver path
 - event id
 - event kind
 - payload hash of the exact stored payload
@@ -616,7 +616,7 @@ Tracks optional contact-scoped receiving details:
 
 - reservation id
 - counterparty public key
-- counterparty receiver id
+- counterparty receiver path
 - Payment Endpoint Identifier
 - payload hash
 - latest outbound message id used to queue the reservation for sharing
@@ -630,7 +630,7 @@ Derived record per Payment Request:
 
 - payment request id
 - proposer/payee counterparty
-- counterparty receiver id
+- counterparty receiver path
 - current local role: payer or payee
 - immutable terms
 - proposal event id
@@ -659,7 +659,7 @@ settlement finality unless the payment adapter confirms it.
 know every counterparty in advance:
 
 - optional counterparty
-- optional counterparty receiver id
+- optional counterparty receiver path
 - optional local role
 - optional lifecycle states, where an empty list means all states
 - optional recurring/one-time filter
@@ -670,7 +670,7 @@ know every counterparty in advance:
 Receipt issuance records:
 
 - counterparty that should receive Receipt Access
-- counterparty receiver id
+- counterparty receiver path
 - receipt id and Receipt Access Event ID
 - payment reference and optional Payment Request correlation fields
 - Encrypted Receipt JSON
@@ -682,7 +682,7 @@ Receipt Access records:
 - event id
 - receipt id
 - sender/issuer counterparty
-- sender/issuer receiver id
+- sender/issuer receiver path
 - Receipt Location path
 - Receipt Decryption Key
 - optional Payment Request ID
@@ -696,7 +696,7 @@ Receipt records:
 - optional Payment Request ID
 - optional Billing Period
 - issuer context
-- issuer receiver id
+- issuer receiver path
 - recipient public key
 - optional Payment Endpoint Identifier
 - optional Payment Amount
@@ -712,7 +712,7 @@ Durable outbound Private Application Message queue:
 
 - outbound id
 - counterparty
-- counterparty receiver id
+- counterparty receiver path
 - Private Message Kind
 - exact raw JSON payload, including Event ID when the message kind has one
 - send status
@@ -928,7 +928,7 @@ Payment Proofs, and any other Event Message kinds.
 Input:
 
 - counterparty public key
-- counterparty receiver id
+- counterparty receiver path
 - desired amount/asset, if known
 - payment adapter support policy
 - whether public Payment Endpoints should be included
@@ -1033,7 +1033,7 @@ settlement confirmation.
    acknowledgement.
 
 Receipt IDs are unique per issuer receiver because Receipt Location is derived
-from the issuer's receiver id and Receipt ID. `prepare_receipt_issuance` may
+from the issuer's receiver path and Receipt ID. `prepare_receipt_issuance` may
 generate a Receipt ID and return it to the caller; retries should then call
 `process_receipt_issuance` with that ID from the same SDK receiver runtime. The
 one-call `issue_receipt` helper requires the draft to already contain a
@@ -1058,7 +1058,7 @@ receipt after a partial failure.
 
 Backup should include SDK-managed state:
 
-- local receiver/runtime folder id
+- local receiver/runtime path
 - public identity/capability state
 - peer records
 - Encrypted Link snapshots
@@ -1095,8 +1095,8 @@ Backup should not include:
 
 Restore flow:
 
-1. Validate local identity and receiver id compatibility before replacing
-   storage state.
+1. Validate local identity and exact receiver path before replacing storage
+   state.
 2. Validate backup record shape plus every link snapshot recipient and receiver
    scope.
 3. Preserve valid active Encrypted Link snapshots and in-progress handshake

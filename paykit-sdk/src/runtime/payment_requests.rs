@@ -18,24 +18,24 @@ where
     pub async fn received_payment_requests_from(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PaymentRequestRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
-        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_id)
+        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
             .await?;
         let mut records = derive_received_payment_request_records(
             &self.storage,
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             self.clock.now(),
         )
         .await?;
         self.mark_recovery_required_payment_request_records(
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             &mut records,
         )
         .await?;
@@ -49,24 +49,24 @@ where
     pub async fn payment_requests_with(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PaymentRequestRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
-        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_id)
+        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
             .await?;
         let mut records = derive_payment_request_records(
             &self.storage,
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             self.clock.now(),
         )
         .await?;
         self.mark_recovery_required_payment_request_records(
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             &mut records,
         )
         .await?;
@@ -88,24 +88,24 @@ where
         }
         let now = self.clock.now();
 
-        let counterparties = if let (Some(counterparty), Some(receiver_id)) =
-            (&filter.counterparty, &filter.counterparty_receiver_id)
+        let counterparties = if let (Some(counterparty), Some(receiver_path)) =
+            (&filter.counterparty, &filter.counterparty_receiver_path)
         {
-            self.ensure_peer_not_blocked(counterparty, receiver_id)
+            self.ensure_peer_not_blocked(counterparty, receiver_path)
                 .await?;
-            vec![(counterparty.clone(), receiver_id.clone())]
+            vec![(counterparty.clone(), receiver_path.clone())]
         } else {
             self.payment_request_counterparties(filter.received_only)
                 .await?
         };
 
         let mut records = Vec::new();
-        for (counterparty, counterparty_receiver_id) in counterparties {
+        for (counterparty, counterparty_receiver_path) in counterparties {
             let mut peer_records = if filter.received_only {
                 derive_received_payment_request_records(
                     &self.storage,
                     &counterparty,
-                    &counterparty_receiver_id,
+                    &counterparty_receiver_path,
                     now,
                 )
                 .await?
@@ -113,14 +113,14 @@ where
                 derive_payment_request_records(
                     &self.storage,
                     &counterparty,
-                    &counterparty_receiver_id,
+                    &counterparty_receiver_path,
                     now,
                 )
                 .await?
             };
             self.mark_recovery_required_payment_request_records(
                 &counterparty,
-                &counterparty_receiver_id,
+                &counterparty_receiver_path,
                 &mut peer_records,
             )
             .await?;
@@ -167,30 +167,32 @@ where
     async fn payment_request_counterparties(
         &self,
         received_only: bool,
-    ) -> Result<Vec<(PubkyPublicKey, PaykitReceiverId)>> {
+    ) -> Result<Vec<(PubkyPublicKey, PaykitReceiverPath)>> {
         self.storage
             .transaction(move |tx| {
                 let snapshot = tx.export_storage_state();
                 let mut counterparties = HashSet::new();
                 for item in snapshot.private_stream_items {
                     if is_payment_request_kind(item.parsed_kind.as_deref()) {
-                        counterparties.insert((item.counterparty, item.counterparty_receiver_id));
+                        counterparties.insert((item.counterparty, item.counterparty_receiver_path));
                     }
                 }
                 if !received_only {
                     for outbound in snapshot.outbound_private_messages {
                         if is_payment_request_kind(Some(&outbound.kind)) {
-                            counterparties
-                                .insert((outbound.counterparty, outbound.counterparty_receiver_id));
+                            counterparties.insert((
+                                outbound.counterparty,
+                                outbound.counterparty_receiver_path,
+                            ));
                         }
                     }
                 }
                 let mut counterparties = counterparties
                     .into_iter()
-                    .filter(|(counterparty, receiver_id)| {
+                    .filter(|(counterparty, receiver_path)| {
                         !snapshot
                             .linked_peers
-                            .get(&(counterparty.clone(), receiver_id.clone()))
+                            .get(&(counterparty.clone(), receiver_path.clone()))
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
                     .collect::<Vec<_>>();
@@ -208,7 +210,7 @@ where
     pub(super) async fn ensure_private_outbound_ready(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
@@ -224,14 +226,14 @@ where
             });
         }
 
-        self.ensure_peer_allows_private_automation(counterparty, counterparty_receiver_id)
+        self.ensure_peer_allows_private_automation(counterparty, counterparty_receiver_path)
             .await?;
 
         let has_active_link = self
             .storage
             .transaction(|tx| {
                 Ok(tx
-                    .encrypted_link_state(counterparty, counterparty_receiver_id)
+                    .encrypted_link_state(counterparty, counterparty_receiver_path)
                     .and_then(|state| state.link_snapshot)
                     .is_some())
             })
@@ -252,20 +254,20 @@ where
     pub async fn propose_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         terms: PaymentRequestTerms,
     ) -> Result<PaymentRequestRecord> {
         let event = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
         let payment_request_id = event.payment_request_id.clone();
         self.enqueue_raw_payment_request(
             counterparty.clone(),
-            counterparty_receiver_id.clone(),
+            counterparty_receiver_path.clone(),
             &event,
         )
         .await?;
         self.load_payment_request_record(
             &counterparty,
-            &counterparty_receiver_id,
+            &counterparty_receiver_path,
             &payment_request_id,
         )
         .await
@@ -278,13 +280,13 @@ where
     pub async fn accept_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
         let record = self
             .load_payment_request_record(
                 &counterparty,
-                &counterparty_receiver_id,
+                &counterparty_receiver_path,
                 payment_request_id,
             )
             .await?;
@@ -297,13 +299,13 @@ where
         let event = PaymentRequestAcceptance::new(EventId::new_v4(), payment_request_id.clone());
         self.enqueue_raw_payment_request_acceptance(
             counterparty.clone(),
-            counterparty_receiver_id.clone(),
+            counterparty_receiver_path.clone(),
             &event,
         )
         .await?;
         self.load_payment_request_record(
             &counterparty,
-            &counterparty_receiver_id,
+            &counterparty_receiver_path,
             payment_request_id,
         )
         .await
@@ -316,14 +318,14 @@ where
     pub async fn reject_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
         reason: Option<String>,
     ) -> Result<PaymentRequestRecord> {
         let record = self
             .load_payment_request_record(
                 &counterparty,
-                &counterparty_receiver_id,
+                &counterparty_receiver_path,
                 payment_request_id,
             )
             .await?;
@@ -340,13 +342,13 @@ where
             PaymentRequestRejection::new(EventId::new_v4(), payment_request_id.clone(), reason);
         self.enqueue_raw_payment_request_rejection(
             counterparty.clone(),
-            counterparty_receiver_id.clone(),
+            counterparty_receiver_path.clone(),
             &event,
         )
         .await?;
         self.load_payment_request_record(
             &counterparty,
-            &counterparty_receiver_id,
+            &counterparty_receiver_path,
             payment_request_id,
         )
         .await
@@ -359,14 +361,14 @@ where
     pub async fn cancel_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
         reason: Option<String>,
     ) -> Result<PaymentRequestRecord> {
         let record = self
             .load_payment_request_record(
                 &counterparty,
-                &counterparty_receiver_id,
+                &counterparty_receiver_path,
                 payment_request_id,
             )
             .await?;
@@ -385,13 +387,13 @@ where
             PaymentRequestCancellation::new(EventId::new_v4(), payment_request_id.clone(), reason);
         self.enqueue_raw_payment_request_cancellation(
             counterparty.clone(),
-            counterparty_receiver_id.clone(),
+            counterparty_receiver_path.clone(),
             &event,
         )
         .await?;
         self.load_payment_request_record(
             &counterparty,
-            &counterparty_receiver_id,
+            &counterparty_receiver_path,
             payment_request_id,
         )
         .await
@@ -404,7 +406,7 @@ where
     pub async fn submit_payment_proof(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
         billing_period: Option<BillingPeriod>,
         payment_endpoint_identifier: PaymentEndpointIdentifier,
@@ -413,7 +415,7 @@ where
         let record = self
             .load_payment_request_record(
                 &counterparty,
-                &counterparty_receiver_id,
+                &counterparty_receiver_path,
                 payment_request_id,
             )
             .await?;
@@ -440,13 +442,13 @@ where
         event.validate_for_request(&request)?;
         self.enqueue_raw_payment_proof(
             counterparty.clone(),
-            counterparty_receiver_id.clone(),
+            counterparty_receiver_path.clone(),
             &event,
         )
         .await?;
         self.load_payment_request_record(
             &counterparty,
-            &counterparty_receiver_id,
+            &counterparty_receiver_path,
             payment_request_id,
         )
         .await
@@ -455,19 +457,19 @@ where
     async fn load_payment_request_record(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
         let mut records = derive_payment_request_records(
             &self.storage,
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             self.clock.now(),
         )
         .await?;
         self.mark_recovery_required_payment_request_records(
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             &mut records,
         )
         .await?;
@@ -485,14 +487,14 @@ where
     async fn mark_recovery_required_payment_request_records(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
         records: &mut [PaymentRequestRecord],
     ) -> Result<()> {
         let recovery_required = self
             .storage
             .transaction(|tx| {
                 Ok(tx
-                    .linked_peer(counterparty, counterparty_receiver_id)
+                    .linked_peer(counterparty, counterparty_receiver_path)
                     .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired))
             })
             .await?;
@@ -517,15 +519,15 @@ where
     pub(crate) async fn enqueue_raw_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         event: &PaymentRequest,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_id)
+        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
             .await?;
         enqueue_payment_request_message(
             &self.storage,
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             event,
             self.clock.now(),
         )
@@ -535,15 +537,15 @@ where
     pub(crate) async fn enqueue_raw_payment_request_acceptance(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         event: &PaymentRequestAcceptance,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_id)
+        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
             .await?;
         enqueue_payment_request_acceptance_message(
             &self.storage,
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             event,
             self.clock.now(),
         )
@@ -553,15 +555,15 @@ where
     pub(crate) async fn enqueue_raw_payment_request_rejection(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         event: &PaymentRequestRejection,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_id)
+        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
             .await?;
         enqueue_payment_request_rejection_message(
             &self.storage,
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             event,
             self.clock.now(),
         )
@@ -571,15 +573,15 @@ where
     pub(crate) async fn enqueue_raw_payment_request_cancellation(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         event: &PaymentRequestCancellation,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_id)
+        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
             .await?;
         enqueue_payment_request_cancellation_message(
             &self.storage,
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             event,
             self.clock.now(),
         )
@@ -589,15 +591,15 @@ where
     pub(crate) async fn enqueue_raw_payment_proof(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         event: &PaymentProof,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_id)
+        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
             .await?;
         enqueue_payment_proof_message(
             &self.storage,
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             event,
             self.clock.now(),
         )

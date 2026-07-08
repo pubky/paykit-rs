@@ -6,13 +6,13 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
-import com.synonym.paykit.FfiEncryptedLinkRecoveryMarkerPolicy
-import com.synonym.paykit.FfiEndpointManagementScope
-import com.synonym.paykit.FfiPaykitSdkConfig
-import com.synonym.paykit.PaykitFfiException
-import com.synonym.paykit.FfiPublicContactSharingPolicy
-import com.synonym.paykit.FfiPubkyAuthRequestKind
-import com.synonym.paykit.FfiPubkyClientConfig
+import com.synonym.paykit.EncryptedLinkRecoveryMarkerPolicy
+import com.synonym.paykit.EndpointManagementScope
+import com.synonym.paykit.PaykitSdkConfig
+import com.synonym.paykit.PaykitException
+import com.synonym.paykit.PublicContactSharingPolicy
+import com.synonym.paykit.PubkyAuthRequestKind
+import com.synonym.paykit.PubkyClientConfig
 import com.synonym.paykit.PaykitAndroid
 import com.synonym.paykit.defaultConfig
 import com.synonym.paykit.defaultPubkyClientConfig
@@ -48,19 +48,19 @@ class PaykitModule(private val reactContext: ReactApplicationContext) :
         )
     }
 
-    private fun errorArray(error: PaykitFfiException) = when (error) {
-        is PaykitFfiException.Storage -> errorArray("storage", error.code, error.context)
-        is PaykitFfiException.Identity -> errorArray("identity", error.code, error.context)
-        is PaykitFfiException.Transport -> errorArray("transport", error.code, error.context)
-        is PaykitFfiException.NotFound -> errorArray("not_found", error.code, error.context)
-        is PaykitFfiException.Protocol -> errorArray("protocol", error.code, error.context)
-        is PaykitFfiException.Policy -> errorArray("policy", error.code, error.context)
-        is PaykitFfiException.PaymentAdapter -> errorArray(
+    private fun errorArray(error: PaykitException) = when (error) {
+        is PaykitException.Storage -> errorArray("storage", error.code, error.context)
+        is PaykitException.Identity -> errorArray("identity", error.code, error.context)
+        is PaykitException.Transport -> errorArray("transport", error.code, error.context)
+        is PaykitException.NotFound -> errorArray("not_found", error.code, error.context)
+        is PaykitException.Protocol -> errorArray("protocol", error.code, error.context)
+        is PaykitException.Policy -> errorArray("policy", error.code, error.context)
+        is PaykitException.PaymentAdapter -> errorArray(
             "payment_adapter",
             error.code,
             error.context
         )
-        is PaykitFfiException.RecoveryRequired -> errorArray(
+        is PaykitException.RecoveryRequired -> errorArray(
             "recovery_required",
             error.code,
             error.context
@@ -81,7 +81,7 @@ class PaykitModule(private val reactContext: ReactApplicationContext) :
 
         try {
             promise.resolve(resultArray(block()))
-        } catch (error: PaykitFfiException) {
+        } catch (error: PaykitException) {
             promise.resolve(errorArray(error))
         } catch (error: IllegalArgumentException) {
             promise.resolve(
@@ -106,10 +106,10 @@ class PaykitModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun configFromJson(json: String): FfiPaykitSdkConfig {
+    private fun configFromJson(json: String): PaykitSdkConfig {
         val value = JSONObject(json)
-        return FfiPaykitSdkConfig(
-            receiverId = value.getString("receiver_id"),
+        return PaykitSdkConfig(
+            receiverPath = value.getString("receiver_path"),
             profileNamespace = value.getString("profile_namespace"),
             endpointManagementScope = endpointManagementScope(
                 value.getString("endpoint_management_scope")
@@ -143,9 +143,9 @@ class PaykitModule(private val reactContext: ReactApplicationContext) :
         return number.toULong()
     }
 
-    private fun configJson(config: FfiPaykitSdkConfig): String {
+    private fun configJson(config: PaykitSdkConfig): String {
         return JSONObject()
-            .put("receiver_id", config.receiverId)
+            .put("receiver_path", config.receiverPath)
             .put("profile_namespace", config.profileNamespace)
             .put(
                 "endpoint_management_scope",
@@ -174,73 +174,73 @@ class PaykitModule(private val reactContext: ReactApplicationContext) :
             .toString()
     }
 
-    private fun pubkyClientConfigJson(config: FfiPubkyClientConfig): String {
+    private fun pubkyClientConfigJson(config: PubkyClientConfig): String {
         return JSONObject()
             .put("request_timeout_secs", config.requestTimeoutSecs.toLong())
             .toString()
     }
 
-    private fun endpointManagementScope(value: String): FfiEndpointManagementScope {
+    private fun endpointManagementScope(value: String): EndpointManagementScope {
         return when (value) {
-            "managed_only" -> FfiEndpointManagementScope.MANAGED_ONLY
-            "full_paykit_namespace" -> FfiEndpointManagementScope.FULL_PAYKIT_NAMESPACE
+            "managed_only" -> EndpointManagementScope.MANAGED_ONLY
+            "full_paykit_namespace" -> EndpointManagementScope.FULL_PAYKIT_NAMESPACE
             else -> throw IllegalArgumentException("unsupported endpoint_management_scope value '$value'")
         }
     }
 
-    private fun endpointManagementScopeString(value: FfiEndpointManagementScope): String {
+    private fun endpointManagementScopeString(value: EndpointManagementScope): String {
         return when (value) {
-            FfiEndpointManagementScope.MANAGED_ONLY -> "managed_only"
-            FfiEndpointManagementScope.FULL_PAYKIT_NAMESPACE -> "full_paykit_namespace"
-            FfiEndpointManagementScope.UNKNOWN -> "unknown"
+            EndpointManagementScope.MANAGED_ONLY -> "managed_only"
+            EndpointManagementScope.FULL_PAYKIT_NAMESPACE -> "full_paykit_namespace"
+            EndpointManagementScope.UNKNOWN -> "unknown"
         }
     }
 
-    private fun recoveryMarkerPolicy(value: String): FfiEncryptedLinkRecoveryMarkerPolicy {
+    private fun recoveryMarkerPolicy(value: String): EncryptedLinkRecoveryMarkerPolicy {
         return when (value) {
-            "enabled" -> FfiEncryptedLinkRecoveryMarkerPolicy.ENABLED
-            "disabled" -> FfiEncryptedLinkRecoveryMarkerPolicy.DISABLED
+            "enabled" -> EncryptedLinkRecoveryMarkerPolicy.ENABLED
+            "disabled" -> EncryptedLinkRecoveryMarkerPolicy.DISABLED
             else -> throw IllegalArgumentException("unsupported encrypted_link_recovery_markers value '$value'")
         }
     }
 
-    private fun recoveryMarkerPolicyString(value: FfiEncryptedLinkRecoveryMarkerPolicy): String {
+    private fun recoveryMarkerPolicyString(value: EncryptedLinkRecoveryMarkerPolicy): String {
         return when (value) {
-            FfiEncryptedLinkRecoveryMarkerPolicy.ENABLED -> "enabled"
-            FfiEncryptedLinkRecoveryMarkerPolicy.DISABLED -> "disabled"
-            FfiEncryptedLinkRecoveryMarkerPolicy.UNKNOWN -> "unknown"
+            EncryptedLinkRecoveryMarkerPolicy.ENABLED -> "enabled"
+            EncryptedLinkRecoveryMarkerPolicy.DISABLED -> "disabled"
+            EncryptedLinkRecoveryMarkerPolicy.UNKNOWN -> "unknown"
         }
     }
 
-    private fun publicContactSharingPolicy(value: String): FfiPublicContactSharingPolicy {
+    private fun publicContactSharingPolicy(value: String): PublicContactSharingPolicy {
         return when (value) {
-            "local_only" -> FfiPublicContactSharingPolicy.LOCAL_ONLY
-            "configured_public_namespace" -> FfiPublicContactSharingPolicy.CONFIGURED_PUBLIC_NAMESPACE
+            "local_only" -> PublicContactSharingPolicy.LOCAL_ONLY
+            "configured_public_namespace" -> PublicContactSharingPolicy.CONFIGURED_PUBLIC_NAMESPACE
             else -> throw IllegalArgumentException("unsupported public_contact_sharing value '$value'")
         }
     }
 
-    private fun publicContactSharingPolicyString(value: FfiPublicContactSharingPolicy): String {
+    private fun publicContactSharingPolicyString(value: PublicContactSharingPolicy): String {
         return when (value) {
-            FfiPublicContactSharingPolicy.LOCAL_ONLY -> "local_only"
-            FfiPublicContactSharingPolicy.CONFIGURED_PUBLIC_NAMESPACE -> "configured_public_namespace"
-            FfiPublicContactSharingPolicy.UNKNOWN -> "unknown"
+            PublicContactSharingPolicy.LOCAL_ONLY -> "local_only"
+            PublicContactSharingPolicy.CONFIGURED_PUBLIC_NAMESPACE -> "configured_public_namespace"
+            PublicContactSharingPolicy.UNKNOWN -> "unknown"
         }
     }
 
-    private fun authRequestKindString(value: FfiPubkyAuthRequestKind): String {
+    private fun authRequestKindString(value: PubkyAuthRequestKind): String {
         return when (value) {
-            FfiPubkyAuthRequestKind.SIGN_IN -> "sign_in"
-            FfiPubkyAuthRequestKind.SIGN_UP -> "sign_up"
-            FfiPubkyAuthRequestKind.SECRET_EXPORT -> "secret_export"
-            FfiPubkyAuthRequestKind.UNKNOWN -> "unknown"
+            PubkyAuthRequestKind.SIGN_IN -> "sign_in"
+            PubkyAuthRequestKind.SIGN_UP -> "sign_up"
+            PubkyAuthRequestKind.SECRET_EXPORT -> "secret_export"
+            PubkyAuthRequestKind.UNKNOWN -> "unknown"
         }
     }
 
     @ReactMethod
-    fun sdkDefaultConfig(receiverId: String, promise: Promise) {
+    fun sdkDefaultConfig(receiverPath: String, promise: Promise) {
         resolveResult(promise) {
-            configJson(defaultConfig(receiverId))
+            configJson(defaultConfig(receiverPath))
         }
     }
 

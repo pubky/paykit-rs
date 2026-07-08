@@ -27,7 +27,7 @@ async fn test_contact_records_save_list_and_remove_locally() {
     let saved = sdk
         .save_contact(ContactUpdate {
             public_key: contact_public_key.clone(),
-            receiver_id: receiver_id(),
+            receiver_path: receiver_path(),
             label: Some("Alice".into()),
         })
         .await
@@ -36,19 +36,19 @@ async fn test_contact_records_save_list_and_remove_locally() {
     assert_eq!(saved.label.as_deref(), Some("Alice"));
     assert_eq!(sdk.contact_records().await.unwrap(), vec![saved.clone()]);
     assert_eq!(
-        sdk.contact_record(&contact_public_key, &receiver_id())
+        sdk.contact_record(&contact_public_key, &receiver_path())
             .await
             .unwrap(),
         Some(saved.clone())
     );
     assert_eq!(
-        sdk.remove_contact(&contact_public_key, &receiver_id())
+        sdk.remove_contact(&contact_public_key, &receiver_path())
             .await
             .unwrap(),
         Some(saved)
     );
     assert!(sdk
-        .contact_record(&contact_public_key, &receiver_id())
+        .contact_record(&contact_public_key, &receiver_path())
         .await
         .unwrap()
         .is_none());
@@ -80,7 +80,7 @@ async fn test_save_contact_empty_label_clears_existing_label() {
 
     sdk.save_contact(ContactUpdate {
         public_key: contact_public_key.clone(),
-        receiver_id: receiver_id(),
+        receiver_path: receiver_path(),
         label: Some("Alice".into()),
     })
     .await
@@ -88,7 +88,7 @@ async fn test_save_contact_empty_label_clears_existing_label() {
     let updated = sdk
         .save_contact(ContactUpdate {
             public_key: contact_public_key,
-            receiver_id: receiver_id(),
+            receiver_path: receiver_path(),
             label: Some(String::new()),
         })
         .await
@@ -167,7 +167,7 @@ async fn test_delete_paykit_blob_requires_initialized_session() {
     );
 
     let result = sdk
-        .delete_paykit_blob("/pub/paykit/v0/receivers/paykit/blobs/avatar.jpg")
+        .delete_paykit_blob("/pub/paykit/v0/paykit/wallet/blobs/avatar.jpg")
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -184,7 +184,7 @@ async fn test_fetch_pubky_file_requires_public_storage() {
     );
 
     let result = sdk
-        .fetch_pubky_file("pubky://invalid/pub/paykit/v0/receivers/paykit/blobs/avatar.jpg")
+        .fetch_pubky_file("pubky://invalid/pub/paykit/v0/paykit/wallet/blobs/avatar.jpg")
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -212,7 +212,7 @@ async fn test_remove_contact_blocks_when_public_marker_may_exist() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
-                    receiver_id: receiver_id(),
+                    receiver_path: receiver_path(),
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
@@ -237,7 +237,7 @@ async fn test_remove_contact_blocks_when_public_marker_may_exist() {
     );
 
     let result = sdk
-        .remove_contact(&contact_public_key, &receiver_id())
+        .remove_contact(&contact_public_key, &receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
@@ -265,7 +265,7 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
-                    receiver_id: receiver_id(),
+                    receiver_path: receiver_path(),
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
@@ -293,7 +293,7 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
     );
 
     let result = sdk
-        .publish_public_contact(contact_public_key.clone(), receiver_id())
+        .publish_public_contact(contact_public_key.clone(), receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -301,7 +301,7 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&(contact_public_key.clone(), receiver_id()))
+        .get(&(contact_public_key.clone(), receiver_path()))
         .unwrap()
         .clone();
     assert_eq!(
@@ -332,7 +332,7 @@ async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
-                    receiver_id: receiver_id(),
+                    receiver_path: receiver_path(),
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
@@ -357,7 +357,7 @@ async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
     );
 
     let result = sdk
-        .remove_public_contact(contact_public_key.clone(), receiver_id())
+        .remove_public_contact(contact_public_key.clone(), receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -365,7 +365,7 @@ async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&(contact_public_key.clone(), receiver_id()))
+        .get(&(contact_public_key.clone(), receiver_path()))
         .unwrap()
         .clone();
     assert_eq!(
@@ -399,7 +399,7 @@ async fn test_remove_public_contact_without_local_record_still_requires_session(
     );
 
     let result = sdk
-        .remove_public_contact(contact_public_key, receiver_id())
+        .remove_public_contact(contact_public_key, receiver_path())
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -454,7 +454,7 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
-                    receiver_id: receiver_id(),
+                    receiver_path: receiver_path(),
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
@@ -488,7 +488,7 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&(contact_public_key.clone(), receiver_id()))
+        .get(&(contact_public_key.clone(), receiver_path()))
         .unwrap()
         .clone();
     assert_eq!(
@@ -519,7 +519,7 @@ async fn test_sync_public_contact_markers_fails_pending_publication_when_sharing
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
-                    receiver_id: receiver_id(),
+                    receiver_path: receiver_path(),
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
@@ -550,7 +550,7 @@ async fn test_sync_public_contact_markers_fails_pending_publication_when_sharing
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&(contact_public_key.clone(), receiver_id()))
+        .get(&(contact_public_key.clone(), receiver_path()))
         .unwrap()
         .clone();
     assert_eq!(
@@ -579,7 +579,7 @@ async fn test_save_contact_requires_initialized_identity() {
     let result = sdk
         .save_contact(ContactUpdate {
             public_key: contact_public_key,
-            receiver_id: receiver_id(),
+            receiver_path: receiver_path(),
             label: None,
         })
         .await;

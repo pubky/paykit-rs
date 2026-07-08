@@ -24,14 +24,14 @@ async fn test_handshake_snapshot_serialize_roundtrip() {
         "recipient public key should survive serialize/deserialize"
     );
     assert_eq!(
-        restored_snapshot.local_receiver_id(),
-        snapshot.local_receiver_id(),
-        "local receiver id should survive serialize/deserialize"
+        restored_snapshot.local_receiver_path(),
+        snapshot.local_receiver_path(),
+        "local receiver path should survive serialize/deserialize"
     );
     assert_eq!(
-        restored_snapshot.remote_receiver_id(),
-        snapshot.remote_receiver_id(),
-        "remote receiver id should survive serialize/deserialize"
+        restored_snapshot.remote_receiver_path(),
+        snapshot.remote_receiver_path(),
+        "remote receiver path should survive serialize/deserialize"
     );
 
     let bytes2 = restored_snapshot.serialize();
@@ -303,14 +303,14 @@ async fn test_encrypted_link_snapshot_serialize_roundtrip() {
         "recipient public key should survive serialize/deserialize"
     );
     assert_eq!(
-        restored_snapshot.local_receiver_id(),
-        snapshot.local_receiver_id(),
-        "local receiver id should survive serialize/deserialize"
+        restored_snapshot.local_receiver_path(),
+        snapshot.local_receiver_path(),
+        "local receiver path should survive serialize/deserialize"
     );
     assert_eq!(
-        restored_snapshot.remote_receiver_id(),
-        snapshot.remote_receiver_id(),
-        "remote receiver id should survive serialize/deserialize"
+        restored_snapshot.remote_receiver_path(),
+        snapshot.remote_receiver_path(),
+        "remote receiver path should survive serialize/deserialize"
     );
 
     // Re-serialize and verify byte-level equality.
@@ -554,8 +554,14 @@ fn test_encrypted_link_snapshot_deserialize_accepts_max_usable_noise_nonce() {
     let restored = EncryptedLinkSnapshot::deserialize(&snapshot.serialize()).unwrap();
 
     assert_eq!(restored.recipient(), snapshot.recipient());
-    assert_eq!(restored.local_receiver_id(), snapshot.local_receiver_id());
-    assert_eq!(restored.remote_receiver_id(), snapshot.remote_receiver_id());
+    assert_eq!(
+        restored.local_receiver_path(),
+        snapshot.local_receiver_path()
+    );
+    assert_eq!(
+        restored.remote_receiver_path(),
+        snapshot.remote_receiver_path()
+    );
 }
 
 #[test]
@@ -579,8 +585,8 @@ fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
 fn scoped_snapshot_bytes(state: pubky_noise::serializer::PubkyNoiseSessionState) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "version": 1,
-        "local_receiver_id": "bitkit",
-        "remote_receiver_id": "tether",
+        "local_receiver_path": "bitkit/wallet",
+        "remote_receiver_path": "tether/wallet",
         "state": state.serialize(),
     }))
     .unwrap()

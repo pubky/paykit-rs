@@ -77,7 +77,7 @@ pub struct FfiRestoreRecoveryRequiredPeer {
     /// Counterparty app public key.
     pub counterparty: String,
     /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: String,
+    pub counterparty_receiver_path: String,
 }
 
 pub(crate) type FfiSdkRuntime =
@@ -295,7 +295,7 @@ impl From<RestoreReport> for FfiRestoreReport {
                 .into_iter()
                 .map(|peer| FfiRestoreRecoveryRequiredPeer {
                     counterparty: app_public_key(&peer.counterparty),
-                    counterparty_receiver_id: peer.counterparty_receiver_id.to_string(),
+                    counterparty_receiver_path: peer.counterparty_receiver_path.to_string(),
                 })
                 .collect(),
         }

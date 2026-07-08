@@ -64,7 +64,35 @@ export type PubkyAuthRequestKind =
   | 'unknown';
 
 export interface PaykitSdkConfig {
-  receiver_id: string;
+  receiverPath: string;
+  profileNamespace: string;
+  endpointManagementScope: EndpointManagementScope;
+  encryptedLinkRecoveryMarkers: EncryptedLinkRecoveryMarkerPolicy;
+  publicContactSharing: PublicContactSharingPolicy;
+  peerLinkOperationLeaseTimeoutSecs: number;
+  outboundPrivateSendLeaseTimeoutSecs: number;
+  outboundPrivateRetryBackoffSecs: number;
+}
+
+export interface PubkyClientConfig {
+  requestTimeoutSecs: number;
+}
+
+export interface PubkyAuthDetails {
+  kind: PubkyAuthRequestKind;
+  capabilities: string | null;
+  relayUrl: string | null;
+  homeserverPublicKey: string | null;
+}
+
+export interface PubkyResourceRef {
+  publicKey: string;
+  path: string;
+  transportUrl: string;
+}
+
+interface NativePaykitSdkConfig {
+  receiver_path: string;
   profile_namespace: string;
   endpoint_management_scope: EndpointManagementScope;
   encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy;
@@ -74,25 +102,25 @@ export interface PaykitSdkConfig {
   outbound_private_retry_backoff_secs: number;
 }
 
-export interface PubkyClientConfig {
+interface NativePubkyClientConfig {
   request_timeout_secs: number;
 }
 
-export interface PubkyAuthDetails {
+interface NativePubkyAuthDetails {
   kind: PubkyAuthRequestKind;
   capabilities: string | null;
   relay_url: string | null;
   homeserver_public_key: string | null;
 }
 
-export interface PubkyResourceRef {
+interface NativePubkyResourceRef {
   public_key: string;
   path: string;
   transport_url: string;
 }
 
 interface NativePaykit {
-  sdkDefaultConfig(receiverId: string): Promise<NativeResult>;
+  sdkDefaultConfig(receiverPath: string): Promise<NativeResult>;
   sdkDefaultPubkyClientConfig(): Promise<NativeResult>;
   sdkRequiredSessionCapabilities(configJson: string): Promise<NativeResult>;
   sdkPubkyPublicKeyFromBip39Seed(seedBase64: string): Promise<NativeResult>;
@@ -143,7 +171,7 @@ export function parsePaykitError(error: string): PaykitErrorInfo {
       return parsed as PaykitErrorInfo;
     }
   } catch {
-    // Fall through to the compatibility wrapper below.
+    // Fall through to the generic error wrapper below.
   }
   return {
     category: 'unknown',
@@ -152,11 +180,79 @@ export function parsePaykitError(error: string): PaykitErrorInfo {
   };
 }
 
+function paykitSdkConfigFromNative(
+  config: NativePaykitSdkConfig
+): PaykitSdkConfig {
+  return {
+    receiverPath: config.receiver_path,
+    profileNamespace: config.profile_namespace,
+    endpointManagementScope: config.endpoint_management_scope,
+    encryptedLinkRecoveryMarkers: config.encrypted_link_recovery_markers,
+    publicContactSharing: config.public_contact_sharing,
+    peerLinkOperationLeaseTimeoutSecs:
+      config.peer_link_operation_lease_timeout_secs,
+    outboundPrivateSendLeaseTimeoutSecs:
+      config.outbound_private_send_lease_timeout_secs,
+    outboundPrivateRetryBackoffSecs: config.outbound_private_retry_backoff_secs,
+  };
+}
+
+function paykitSdkConfigToNative(
+  config: PaykitSdkConfig
+): NativePaykitSdkConfig {
+  return {
+    receiver_path: config.receiverPath,
+    profile_namespace: config.profileNamespace,
+    endpoint_management_scope: config.endpointManagementScope,
+    encrypted_link_recovery_markers: config.encryptedLinkRecoveryMarkers,
+    public_contact_sharing: config.publicContactSharing,
+    peer_link_operation_lease_timeout_secs:
+      config.peerLinkOperationLeaseTimeoutSecs,
+    outbound_private_send_lease_timeout_secs:
+      config.outboundPrivateSendLeaseTimeoutSecs,
+    outbound_private_retry_backoff_secs: config.outboundPrivateRetryBackoffSecs,
+  };
+}
+
+function pubkyClientConfigFromNative(
+  config: NativePubkyClientConfig
+): PubkyClientConfig {
+  return {
+    requestTimeoutSecs: config.request_timeout_secs,
+  };
+}
+
+function pubkyAuthDetailsFromNative(
+  details: NativePubkyAuthDetails
+): PubkyAuthDetails {
+  return {
+    kind: details.kind,
+    capabilities: details.capabilities,
+    relayUrl: details.relay_url,
+    homeserverPublicKey: details.homeserver_public_key,
+  };
+}
+
+function pubkyResourceRefFromNative(
+  resource: NativePubkyResourceRef
+): PubkyResourceRef {
+  return {
+    publicKey: resource.public_key,
+    path: resource.path,
+    transportUrl: resource.transport_url,
+  };
+}
+
 export async function defaultConfig(
-  receiverId: string
+  receiverPath: string
 ): Promise<Result<PaykitSdkConfig>> {
   try {
-    return resultJson(await Native.sdkDefaultConfig(receiverId));
+    const result = resultJson<NativePaykitSdkConfig>(
+      await Native.sdkDefaultConfig(receiverPath)
+    );
+    return result.isErr()
+      ? err(result.error)
+      : ok(paykitSdkConfigFromNative(result.value));
   } catch (e) {
     return err(unknownErrorPayload(e));
   }
@@ -166,7 +262,12 @@ export async function defaultPubkyClientConfig(): Promise<
   Result<PubkyClientConfig>
 > {
   try {
-    return resultJson(await Native.sdkDefaultPubkyClientConfig());
+    const result = resultJson<NativePubkyClientConfig>(
+      await Native.sdkDefaultPubkyClientConfig()
+    );
+    return result.isErr()
+      ? err(result.error)
+      : ok(pubkyClientConfigFromNative(result.value));
   } catch (e) {
     return err(unknownErrorPayload(e));
   }
@@ -177,7 +278,9 @@ export async function requiredSessionCapabilities(
 ): Promise<Result<string>> {
   try {
     return resultValue(
-      await Native.sdkRequiredSessionCapabilities(JSON.stringify(config))
+      await Native.sdkRequiredSessionCapabilities(
+        JSON.stringify(paykitSdkConfigToNative(config))
+      )
     );
   } catch (e) {
     return err(unknownErrorPayload(e));
@@ -212,7 +315,12 @@ export async function parsePubkyAuthUrl(
   authUrl: string
 ): Promise<Result<PubkyAuthDetails>> {
   try {
-    return resultJson(await Native.sdkParsePubkyAuthUrl(authUrl));
+    const result = resultJson<NativePubkyAuthDetails>(
+      await Native.sdkParsePubkyAuthUrl(authUrl)
+    );
+    return result.isErr()
+      ? err(result.error)
+      : ok(pubkyAuthDetailsFromNative(result.value));
   } catch (e) {
     return err(unknownErrorPayload(e));
   }
@@ -230,7 +338,12 @@ export async function parsePubkyResource(
   uri: string
 ): Promise<Result<PubkyResourceRef>> {
   try {
-    return resultJson(await Native.sdkParsePubkyResource(uri));
+    const result = resultJson<NativePubkyResourceRef>(
+      await Native.sdkParsePubkyResource(uri)
+    );
+    return result.isErr()
+      ? err(result.error)
+      : ok(pubkyResourceRefFromNative(result.value));
   } catch (e) {
     return err(unknownErrorPayload(e));
   }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tracing::{debug, instrument};
 
-use crate::{error::map_error, pubky_routing, PaykitError, PaykitReceiverId, PublicKey, Result};
+use crate::{error::map_error, pubky_routing, PaykitError, PaykitReceiverPath, PublicKey, Result};
 
 /// Machine-readable identifier for a Payment Endpoint.
 ///
@@ -156,37 +156,37 @@ pub struct PaymentList {
 ///
 /// # Examples
 /// ```
-/// # use paykit_lib::{set_payment_endpoint, PaykitReceiverId, PaymentEndpointIdentifier, PaymentEndpointPayload};
+/// # use paykit_lib::{set_payment_endpoint, PaykitReceiverPath, PaymentEndpointIdentifier, PaymentEndpointPayload};
 /// # async fn demo(session: &pubky::PubkySession) -> paykit_lib::Result<()> {
-/// let receiver_id = PaykitReceiverId::new("bitkit")?;
+/// let receiver_path = PaykitReceiverPath::new("bitkit/wallet")?;
 /// let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
 /// let payload = PaymentEndpointPayload::new("ln...");
-/// set_payment_endpoint(session, &receiver_id, identifier, payload).await?;
+/// set_payment_endpoint(session, &receiver_path, identifier, payload).await?;
 /// # Ok(())
 /// # }
 /// ```
-#[instrument(skip(session, payload), fields(receiver = %receiver_id, identifier = %identifier))]
+#[instrument(skip(session, payload), fields(receiver = %receiver_path, identifier = %identifier))]
 pub async fn set_payment_endpoint(
     session: &pubky::PubkySession,
-    receiver_id: &PaykitReceiverId,
+    receiver_path: &PaykitReceiverPath,
     identifier: PaymentEndpointIdentifier,
     payload: PaymentEndpointPayload,
 ) -> Result<()> {
     debug!("storing payment endpoint");
-    pubky_routing::upsert_payment_endpoint(session, receiver_id, &identifier, &payload)
+    pubky_routing::upsert_payment_endpoint(session, receiver_path, &identifier, &payload)
         .await
         .map_err(|err| map_error("set_payment_endpoint", err))
 }
 
 /// Removes a public payment endpoint from the authenticated Pubky session.
-#[instrument(skip(session), fields(receiver = %receiver_id, identifier = %identifier))]
+#[instrument(skip(session), fields(receiver = %receiver_path, identifier = %identifier))]
 pub async fn remove_payment_endpoint(
     session: &pubky::PubkySession,
-    receiver_id: &PaykitReceiverId,
+    receiver_path: &PaykitReceiverPath,
     identifier: PaymentEndpointIdentifier,
 ) -> Result<()> {
     debug!("removing payment endpoint");
-    pubky_routing::delete_payment_endpoint(session, receiver_id, &identifier)
+    pubky_routing::delete_payment_endpoint(session, receiver_path, &identifier)
         .await
         .map_err(|err| map_error("remove_payment_endpoint", err))
 }
@@ -202,10 +202,10 @@ pub async fn remove_payment_endpoint(
 ///
 /// # Examples
 /// ```
-/// # use paykit_lib::{get_payment_list, PaykitReceiverId};
+/// # use paykit_lib::{get_payment_list, PaykitReceiverPath};
 /// # async fn demo(storage: &pubky::PublicStorage, pk: &paykit_lib::PublicKey) -> paykit_lib::Result<()> {
-/// let receiver_id = PaykitReceiverId::new("bitkit")?;
-/// let payments = get_payment_list(storage, pk, &receiver_id).await?;
+/// let receiver_path = PaykitReceiverPath::new("bitkit/wallet")?;
+/// let payments = get_payment_list(storage, pk, &receiver_path).await?;
 /// if payments.payment_endpoints.is_empty() {
 ///     println!("payee published no endpoints yet");
 /// } else {
@@ -220,14 +220,14 @@ pub async fn remove_payment_endpoint(
 /// # Ok(())
 /// # }
 /// ```
-#[instrument(skip(storage), fields(receiver = %receiver_id))]
+#[instrument(skip(storage), fields(receiver = %receiver_path))]
 pub async fn get_payment_list(
     storage: &pubky::PublicStorage,
     payee: &PublicKey,
-    receiver_id: &PaykitReceiverId,
+    receiver_path: &PaykitReceiverPath,
 ) -> Result<PaymentList> {
     debug!("fetching Payment List");
-    let result = pubky_routing::fetch_payment_list(storage, payee, receiver_id)
+    let result = pubky_routing::fetch_payment_list(storage, payee, receiver_path)
         .await
         .map_err(|err| map_error("get_payment_list", err))?;
     debug!(
@@ -237,22 +237,22 @@ pub async fn get_payment_list(
     Ok(result)
 }
 
-/// Lists public Paykit receiver ids for a Pubky identity.
+/// Lists public Paykit receiver paths for a Pubky identity.
 ///
 /// This is a discovery helper only. Payment flows should still use the exact
-/// receiver id selected by the app/user instead of guessing one.
+/// receiver path selected by the app/user instead of guessing one.
 #[instrument(skip(storage))]
-pub async fn list_paykit_receiver_ids(
+pub async fn list_paykit_receiver_paths(
     storage: &pubky::PublicStorage,
     owner: &PublicKey,
-) -> Result<Vec<PaykitReceiverId>> {
-    debug!("listing Paykit receiver ids");
-    pubky_routing::fetch_paykit_receiver_ids(storage, owner)
+) -> Result<Vec<PaykitReceiverPath>> {
+    debug!("listing Paykit receiver paths");
+    pubky_routing::fetch_paykit_receiver_paths(storage, owner)
         .await
-        .map_err(|err| map_error("list_paykit_receiver_ids", err))
+        .map_err(|err| map_error("list_paykit_receiver_paths", err))
 }
 
-/// Retrieves a specific Payment Endpoint for `payee`, `receiver_id`, and `identifier`.
+/// Retrieves a specific Payment Endpoint for `payee`, `receiver_path`, and `identifier`.
 ///
 /// # Semantics
 /// - Returns `Ok(None)` when the endpoint file is missing or empty.
@@ -261,11 +261,11 @@ pub async fn list_paykit_receiver_ids(
 ///
 /// # Examples
 /// ```
-/// # use paykit_lib::{get_payment_endpoint, PaykitReceiverId, PaymentEndpointIdentifier, PublicKey};
+/// # use paykit_lib::{get_payment_endpoint, PaykitReceiverPath, PaymentEndpointIdentifier, PublicKey};
 /// # async fn inspect(storage: &pubky::PublicStorage, pk: &PublicKey) -> paykit_lib::Result<()> {
-/// let receiver_id = PaykitReceiverId::new("bitkit")?;
+/// let receiver_path = PaykitReceiverPath::new("bitkit/wallet")?;
 /// let lightning = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
-/// if let Some(endpoint) = get_payment_endpoint(storage, pk, &receiver_id, &lightning).await? {
+/// if let Some(endpoint) = get_payment_endpoint(storage, pk, &receiver_path, &lightning).await? {
 ///     println!("lightning endpoint: {}", endpoint.as_str());
 /// } else {
 ///     println!("no lightning endpoint published");
@@ -273,15 +273,15 @@ pub async fn list_paykit_receiver_ids(
 /// # Ok(())
 /// # }
 /// ```
-#[instrument(skip(storage), fields(receiver = %receiver_id, identifier = %identifier))]
+#[instrument(skip(storage), fields(receiver = %receiver_path, identifier = %identifier))]
 pub async fn get_payment_endpoint(
     storage: &pubky::PublicStorage,
     payee: &PublicKey,
-    receiver_id: &PaykitReceiverId,
+    receiver_path: &PaykitReceiverPath,
     identifier: &PaymentEndpointIdentifier,
 ) -> Result<Option<PaymentEndpointPayload>> {
     debug!("fetching payment endpoint");
-    let result = pubky_routing::fetch_payment_endpoint(storage, payee, receiver_id, identifier)
+    let result = pubky_routing::fetch_payment_endpoint(storage, payee, receiver_path, identifier)
         .await
         .map_err(|err| map_error("get_payment_endpoint", err))?;
     debug!(found = result.is_some(), "payment endpoint lookup complete");

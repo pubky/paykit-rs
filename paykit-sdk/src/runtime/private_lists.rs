@@ -11,13 +11,13 @@ where
     pub async fn current_private_payment_list(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<crate::PrivatePaymentListView>> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
             return Ok(None);
         }
-        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_id)
+        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
             .await?;
         let required_capabilities = self.config.required_session_capabilities();
         if session_access
@@ -28,12 +28,12 @@ where
         {
             self.observe_remote_recovery_marker_for_cached_private_state(
                 counterparty,
-                counterparty_receiver_id,
+                counterparty_receiver_path,
                 session_access.as_ref(),
             )
             .await?;
         }
-        load_current_private_payment_list(&self.storage, counterparty, counterparty_receiver_id)
+        load_current_private_payment_list(&self.storage, counterparty, counterparty_receiver_path)
             .await
     }
 
@@ -41,14 +41,17 @@ where
     pub async fn enqueue_private_payment_list(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<OutboundPrivateMessageRecord> {
         let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
         let result = async {
-            self.ensure_private_list_queue_allowed(&counterparty, &lease.counterparty_receiver_id)
-                .await?;
+            self.ensure_private_list_queue_allowed(
+                &counterparty,
+                &lease.counterparty_receiver_path,
+            )
+            .await?;
             self.enqueue_private_payment_list_from_receiving_details_with_claim(
                 counterparty,
                 &lease,
@@ -63,15 +66,18 @@ where
     pub async fn enqueue_private_payment_list_with_receiving_details(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         receiving_details: Vec<ReceivingDetail>,
     ) -> Result<OutboundPrivateMessageRecord> {
         let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
         let result = async {
-            self.ensure_private_list_queue_allowed(&counterparty, &lease.counterparty_receiver_id)
-                .await?;
+            self.ensure_private_list_queue_allowed(
+                &counterparty,
+                &lease.counterparty_receiver_path,
+            )
+            .await?;
             enqueue_private_payment_list_message_with_link_lease(
                 &self.storage,
                 counterparty,
@@ -93,17 +99,17 @@ where
     pub async fn enqueue_private_payment_list_with_reservations(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
         reservations: Vec<PaymentEndpointReservation>,
     ) -> Result<OutboundPrivateMessageRecord> {
         let cancellations = reservations
             .iter()
             .map(|reservation| {
-                reservation_cancellation(&counterparty, &counterparty_receiver_id, reservation)
+                reservation_cancellation(&counterparty, &counterparty_receiver_path, reservation)
             })
             .collect::<Vec<_>>();
         let lease = match self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await
         {
             Ok(lease) => lease,
@@ -114,8 +120,11 @@ where
             }
         };
         let result = async {
-            self.ensure_private_list_queue_allowed(&counterparty, &lease.counterparty_receiver_id)
-                .await?;
+            self.ensure_private_list_queue_allowed(
+                &counterparty,
+                &lease.counterparty_receiver_path,
+            )
+            .await?;
             queue_private_payment_list_with_reservations_with_link_lease(
                 &self.storage,
                 &counterparty,
@@ -144,14 +153,17 @@ where
     pub async fn clear_private_payment_list(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<OutboundPrivateMessageRecord> {
         let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
         let result = async {
-            self.ensure_private_list_queue_allowed(&counterparty, &lease.counterparty_receiver_id)
-                .await?;
+            self.ensure_private_list_queue_allowed(
+                &counterparty,
+                &lease.counterparty_receiver_path,
+            )
+            .await?;
             enqueue_private_payment_list_message_with_link_lease(
                 &self.storage,
                 counterparty,
@@ -169,12 +181,12 @@ where
     pub async fn clear_private_payment_list_and_process_outbound(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<PrivatePaymentListDeliveryReport> {
         self.sync_private_payment_lists_with_reservations_and_process_outbound(
             vec![PrivatePaymentListReservationUpdate {
                 counterparty,
-                counterparty_receiver_id,
+                counterparty_receiver_path,
                 reservations: Vec::new(),
             }],
             false,
@@ -199,7 +211,7 @@ where
                 let mut contacts = tx
                     .contact_records()
                     .into_iter()
-                    .map(|record| (record.public_key, record.receiver_id))
+                    .map(|record| (record.public_key, record.receiver_path))
                     .collect::<Vec<_>>();
                 contacts.sort_by(|(left_key, left_receiver), (right_key, right_receiver)| {
                     left_key
@@ -231,43 +243,46 @@ where
         clear_counterparties.dedup();
 
         let mut report = PrivatePaymentListSyncReport::default();
-        for (counterparty, counterparty_receiver_id) in contacts.drain(..) {
+        for (counterparty, counterparty_receiver_path) in contacts.drain(..) {
             match self
                 .enqueue_private_payment_list(
                     counterparty.clone(),
-                    counterparty_receiver_id.clone(),
+                    counterparty_receiver_path.clone(),
                 )
                 .await
             {
                 Ok(record) => report.queued.push(PrivatePaymentListSyncChange {
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     outbound_message_id: Some(record.outbound_message_id),
                     error: None,
                 }),
                 Err(err) => report.failed.push(PrivatePaymentListSyncChange {
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     outbound_message_id: None,
                     error: Some(err.to_string()),
                 }),
             }
         }
 
-        for (counterparty, counterparty_receiver_id) in clear_counterparties {
+        for (counterparty, counterparty_receiver_path) in clear_counterparties {
             match self
-                .clear_private_payment_list(counterparty.clone(), counterparty_receiver_id.clone())
+                .clear_private_payment_list(
+                    counterparty.clone(),
+                    counterparty_receiver_path.clone(),
+                )
                 .await
             {
                 Ok(record) => report.cleared.push(PrivatePaymentListSyncChange {
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     outbound_message_id: Some(record.outbound_message_id),
                     error: None,
                 }),
                 Err(err) => report.failed.push(PrivatePaymentListSyncChange {
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     outbound_message_id: None,
                     error: Some(err.to_string()),
                 }),
@@ -293,7 +308,7 @@ where
                     .failed_to_deliver
                     .extend(delivery_failures_from_send_report(
                         counterparty_report.counterparty.clone(),
-                        counterparty_report.counterparty_receiver_id.clone(),
+                        counterparty_report.counterparty_receiver_path.clone(),
                         send_report,
                     ));
             }
@@ -302,7 +317,7 @@ where
                     .failed_to_deliver
                     .push(PrivatePaymentListDeliveryFailure {
                         counterparty: counterparty_report.counterparty,
-                        counterparty_receiver_id: counterparty_report.counterparty_receiver_id,
+                        counterparty_receiver_path: counterparty_report.counterparty_receiver_path,
                         outbound_message_id: None,
                         reservation_id: None,
                         error,
@@ -334,9 +349,9 @@ where
                 .as_str()
                 .cmp(right.counterparty.as_str())
                 .then_with(|| {
-                    left.counterparty_receiver_id
+                    left.counterparty_receiver_path
                         .as_str()
-                        .cmp(right.counterparty_receiver_id.as_str())
+                        .cmp(right.counterparty_receiver_path.as_str())
                 })
         });
         let mut update_counts = HashMap::new();
@@ -344,7 +359,7 @@ where
             *update_counts
                 .entry((
                     update.counterparty.clone(),
-                    update.counterparty_receiver_id.clone(),
+                    update.counterparty_receiver_path.clone(),
                 ))
                 .or_insert(0usize) += 1;
         }
@@ -369,10 +384,10 @@ where
 
         for update in updates {
             let counterparty = update.counterparty;
-            let counterparty_receiver_id = update.counterparty_receiver_id;
+            let counterparty_receiver_path = update.counterparty_receiver_path;
             let is_clear = update.reservations.is_empty();
             if update_counts
-                .get(&(counterparty.clone(), counterparty_receiver_id.clone()))
+                .get(&(counterparty.clone(), counterparty_receiver_path.clone()))
                 .copied()
                 .unwrap_or_default()
                 > 1
@@ -383,7 +398,7 @@ where
                     .map(|reservation| {
                         reservation_cancellation(
                             &counterparty,
-                            &counterparty_receiver_id,
+                            &counterparty_receiver_path,
                             reservation,
                         )
                     })
@@ -391,7 +406,7 @@ where
                 let error = format!(
                     "duplicate Private Payment List update for {}/{}",
                     counterparty.redacted_app_key(),
-                    counterparty_receiver_id
+                    counterparty_receiver_path
                 );
                 let error = match self
                     .cancel_reservations_after_queue_error(&cancellations, &counterparty)
@@ -404,7 +419,7 @@ where
                 };
                 report.failed_to_queue.push(PrivatePaymentListSyncChange {
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     outbound_message_id: None,
                     error: Some(error),
                 });
@@ -413,17 +428,17 @@ where
             match self
                 .enqueue_private_payment_list_with_reservations(
                     counterparty.clone(),
-                    counterparty_receiver_id.clone(),
+                    counterparty_receiver_path.clone(),
                     update.reservations,
                 )
                 .await
             {
                 Ok(record) => {
                     queued_counterparties
-                        .push((counterparty.clone(), counterparty_receiver_id.clone()));
+                        .push((counterparty.clone(), counterparty_receiver_path.clone()));
                     let change = PrivatePaymentListSyncChange {
                         counterparty,
-                        counterparty_receiver_id,
+                        counterparty_receiver_path,
                         outbound_message_id: Some(record.outbound_message_id),
                         error: None,
                     };
@@ -435,31 +450,34 @@ where
                 }
                 Err(err) => report.failed_to_queue.push(PrivatePaymentListSyncChange {
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     outbound_message_id: None,
                     error: Some(err.to_string()),
                 }),
             }
         }
 
-        for (counterparty, counterparty_receiver_id) in clear_counterparties {
+        for (counterparty, counterparty_receiver_path) in clear_counterparties {
             match self
-                .clear_private_payment_list(counterparty.clone(), counterparty_receiver_id.clone())
+                .clear_private_payment_list(
+                    counterparty.clone(),
+                    counterparty_receiver_path.clone(),
+                )
                 .await
             {
                 Ok(record) => {
                     queued_counterparties
-                        .push((counterparty.clone(), counterparty_receiver_id.clone()));
+                        .push((counterparty.clone(), counterparty_receiver_path.clone()));
                     report.cleared.push(PrivatePaymentListSyncChange {
                         counterparty,
-                        counterparty_receiver_id,
+                        counterparty_receiver_path,
                         outbound_message_id: Some(record.outbound_message_id),
                         error: None,
                     });
                 }
                 Err(err) => report.failed_to_queue.push(PrivatePaymentListSyncChange {
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     outbound_message_id: None,
                     error: Some(err.to_string()),
                 }),
@@ -473,9 +491,9 @@ where
                 .then_with(|| left_receiver.as_str().cmp(right_receiver.as_str()))
         });
         queued_counterparties.dedup();
-        for (counterparty, counterparty_receiver_id) in queued_counterparties {
+        for (counterparty, counterparty_receiver_path) in queued_counterparties {
             match self
-                .private_list_delivery_ready(&counterparty, &counterparty_receiver_id)
+                .private_list_delivery_ready(&counterparty, &counterparty_receiver_path)
                 .await
             {
                 Ok(true) => {}
@@ -485,7 +503,7 @@ where
                         .failed_to_deliver
                         .push(PrivatePaymentListDeliveryFailure {
                             counterparty,
-                            counterparty_receiver_id,
+                            counterparty_receiver_path,
                             outbound_message_id: None,
                             reservation_id: None,
                             error: err.to_string(),
@@ -496,7 +514,7 @@ where
             match self
                 .process_outbound_private_messages(
                     counterparty.clone(),
-                    counterparty_receiver_id.clone(),
+                    counterparty_receiver_path.clone(),
                 )
                 .await
             {
@@ -505,7 +523,7 @@ where
                         .failed_to_deliver
                         .extend(delivery_failures_from_send_report(
                             counterparty,
-                            counterparty_receiver_id,
+                            counterparty_receiver_path,
                             send_report,
                         ));
                 }
@@ -513,7 +531,7 @@ where
                     .failed_to_deliver
                     .push(PrivatePaymentListDeliveryFailure {
                         counterparty,
-                        counterparty_receiver_id,
+                        counterparty_receiver_path,
                         outbound_message_id: None,
                         reservation_id: None,
                         error: err.to_string(),
@@ -527,7 +545,7 @@ where
     async fn ensure_private_list_queue_allowed(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
@@ -542,7 +560,7 @@ where
                 source: None,
             });
         }
-        self.private_queue_readiness(counterparty, counterparty_receiver_id)
+        self.private_queue_readiness(counterparty, counterparty_receiver_path)
             .await
             .map(|_| ())
     }
@@ -550,17 +568,17 @@ where
     async fn private_list_delivery_ready(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<bool> {
-        self.private_queue_readiness(counterparty, counterparty_receiver_id)
+        self.private_queue_readiness(counterparty, counterparty_receiver_path)
             .await
             .map(|readiness| readiness == PrivateQueueReadiness::Ready)
     }
 
     async fn linked_private_counterparties_not_in(
         &self,
-        keep: &HashSet<(PubkyPublicKey, PaykitReceiverId)>,
-    ) -> Result<Vec<(PubkyPublicKey, PaykitReceiverId)>> {
+        keep: &HashSet<(PubkyPublicKey, PaykitReceiverPath)>,
+    ) -> Result<Vec<(PubkyPublicKey, PaykitReceiverPath)>> {
         self.storage
             .transaction({
                 let keep = keep.clone();
@@ -578,10 +596,10 @@ where
     pub(super) async fn enqueue_private_payment_list_from_receiving_details(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<OutboundPrivateMessageRecord> {
         let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
         let result = self
             .enqueue_private_payment_list_from_receiving_details_with_claim(counterparty, &lease)
@@ -596,7 +614,7 @@ where
     ) -> Result<OutboundPrivateMessageRecord> {
         if let Some(reservations) = self
             .payment
-            .reserve_receiving_details(&counterparty, &lease.counterparty_receiver_id)
+            .reserve_receiving_details(&counterparty, &lease.counterparty_receiver_path)
             .await?
         {
             let cancellations = reservations
@@ -604,7 +622,7 @@ where
                 .map(|reservation| {
                     reservation_cancellation(
                         &counterparty,
-                        &lease.counterparty_receiver_id,
+                        &lease.counterparty_receiver_path,
                         reservation,
                     )
                 })
@@ -634,7 +652,7 @@ where
             }
         } else {
             let receiving_details = self
-                .private_receiving_details(&counterparty, &lease.counterparty_receiver_id)
+                .private_receiving_details(&counterparty, &lease.counterparty_receiver_path)
                 .await?;
             enqueue_private_payment_list_message_with_link_lease(
                 &self.storage,
@@ -663,7 +681,7 @@ where
                         Ok(!tx
                             .payment_endpoint_reservation(
                                 &counterparty,
-                                &cancellation.counterparty_receiver_id,
+                                &cancellation.counterparty_receiver_path,
                                 &cancellation.reservation_id,
                             )
                             .is_some_and(|record| {
@@ -716,13 +734,13 @@ where
     pub(super) async fn cancel_unattempted_superseded_reservations(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
         lease: Option<&PeerLinkOperationLease>,
     ) -> Vec<ReservationCleanupFailure> {
         let cancellations = match unattempted_superseded_reservation_cancellations(
             &self.storage,
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
         )
         .await
         {
@@ -740,20 +758,20 @@ where
     pub(super) async fn cancel_terminal_private_list_reservations(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
         lease: Option<&PeerLinkOperationLease>,
     ) -> Vec<ReservationCleanupFailure> {
         let mut failures = self
             .cancel_unattempted_superseded_reservations(
                 counterparty,
-                counterparty_receiver_id,
+                counterparty_receiver_path,
                 lease,
             )
             .await;
         let cancellations = match invalid_private_list_reservation_cancellations(
             &self.storage,
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
         )
         .await
         {
@@ -812,7 +830,7 @@ where
                                 if tx
                                     .payment_endpoint_reservation(
                                         &cancellation.counterparty,
-                                        &cancellation.counterparty_receiver_id,
+                                        &cancellation.counterparty_receiver_path,
                                         &cancellation.reservation_id,
                                     )
                                     .is_some_and(|record| {
@@ -824,7 +842,7 @@ where
                                 {
                                     tx.remove_payment_endpoint_reservation(
                                         &cancellation.counterparty,
-                                        &cancellation.counterparty_receiver_id,
+                                        &cancellation.counterparty_receiver_path,
                                         &cancellation.reservation_id,
                                     );
                                 }
@@ -865,7 +883,7 @@ where
                     }
                     let Some(mut record) = tx.payment_endpoint_reservation(
                         &cancellation.counterparty,
-                        &cancellation.counterparty_receiver_id,
+                        &cancellation.counterparty_receiver_path,
                         &cancellation.reservation_id,
                     ) else {
                         return Ok(false);
@@ -887,12 +905,12 @@ where
     async fn private_receiving_details(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_id: &PaykitReceiverId,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceivingDetail>> {
         self.payment
             .current_receiving_details(ReceivingDetailScope::Private {
                 counterparty: counterparty.clone(),
-                counterparty_receiver_id: counterparty_receiver_id.clone(),
+                counterparty_receiver_path: counterparty_receiver_path.clone(),
             })
             .await
     }
@@ -900,13 +918,13 @@ where
 
 fn linked_private_counterparties_not_in_storage_state(
     snapshot: crate::storage::StorageState,
-    keep: &HashSet<(PubkyPublicKey, PaykitReceiverId)>,
-) -> Vec<(PubkyPublicKey, PaykitReceiverId)> {
+    keep: &HashSet<(PubkyPublicKey, PaykitReceiverPath)>,
+) -> Vec<(PubkyPublicKey, PaykitReceiverPath)> {
     let active_link_counterparties = snapshot
         .encrypted_link_states
         .iter()
         .filter(|(_, state)| state.link_snapshot.is_some())
-        .map(|((counterparty, receiver_id), _)| (counterparty.clone(), receiver_id.clone()))
+        .map(|((counterparty, receiver_path), _)| (counterparty.clone(), receiver_path.clone()))
         .collect::<HashSet<_>>();
 
     snapshot
@@ -915,25 +933,25 @@ fn linked_private_counterparties_not_in_storage_state(
         .filter(|peer| {
             let peer_key = (
                 peer.counterparty.clone(),
-                peer.counterparty_receiver_id.clone(),
+                peer.counterparty_receiver_path.clone(),
             );
             peer.state == LinkedPeerState::Linked
                 && !keep.contains(&peer_key)
                 && active_link_counterparties.contains(&peer_key)
         })
-        .map(|peer| (peer.counterparty, peer.counterparty_receiver_id))
+        .map(|peer| (peer.counterparty, peer.counterparty_receiver_path))
         .collect()
 }
 
 fn reservation_cancellation(
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     reservation: &PaymentEndpointReservation,
 ) -> PaymentEndpointReservationCancellation {
     PaymentEndpointReservationCancellation {
         reservation_id: reservation.reservation_id.clone(),
         counterparty: counterparty.clone(),
-        counterparty_receiver_id: counterparty_receiver_id.clone(),
+        counterparty_receiver_path: counterparty_receiver_path.clone(),
         identifier: reservation.receiving_detail.identifier.clone(),
         payload_hash: reservation_payload_hash(&reservation.receiving_detail.payload),
         attribution: reservation.attribution.clone(),
@@ -953,7 +971,7 @@ fn delivery_report_from_sync_report(
 
 fn delivery_failures_from_send_report(
     counterparty: PubkyPublicKey,
-    counterparty_receiver_id: PaykitReceiverId,
+    counterparty_receiver_path: PaykitReceiverPath,
     report: OutboundPrivateSendReport,
 ) -> Vec<PrivatePaymentListDeliveryFailure> {
     let mut failures = Vec::new();
@@ -961,7 +979,7 @@ fn delivery_failures_from_send_report(
     for failure in report.failed {
         failures.push(PrivatePaymentListDeliveryFailure {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: counterparty_receiver_id.clone(),
+            counterparty_receiver_path: counterparty_receiver_path.clone(),
             outbound_message_id: Some(failure.outbound_message_id),
             reservation_id: None,
             error: failure.error,
@@ -971,7 +989,7 @@ fn delivery_failures_from_send_report(
     for failure in report.reservation_cleanup_failures {
         failures.push(PrivatePaymentListDeliveryFailure {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: counterparty_receiver_id.clone(),
+            counterparty_receiver_path: counterparty_receiver_path.clone(),
             outbound_message_id: None,
             reservation_id: failure.reservation_id,
             error: failure.error,
@@ -981,7 +999,7 @@ fn delivery_failures_from_send_report(
     for failure in report.recovery_marker_failures {
         failures.push(PrivatePaymentListDeliveryFailure {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: counterparty_receiver_id.clone(),
+            counterparty_receiver_path: counterparty_receiver_path.clone(),
             outbound_message_id: failure.outbound_message_id,
             reservation_id: None,
             error: failure.error,

@@ -15,8 +15,8 @@ fn timestamp() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
 }
 
-fn receiver_id() -> paykit_lib::PaykitReceiverId {
-    paykit_lib::PaykitReceiverId::new("bitkit").unwrap()
+fn receiver_path() -> paykit_lib::PaykitReceiverPath {
+    paykit_lib::PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
 fn private_message(raw_json: &str) -> PrivateApplicationMessage {
@@ -46,7 +46,7 @@ fn receipt_access_raw(event_id: &str, receipt_id: &str, reference: &str) -> Stri
         event_id,
         receipt_id.as_str(),
         reference,
-        &paykit_lib::ReceiptAccess::location(&receiver_id(), &receipt_id),
+        &paykit_lib::ReceiptAccess::location(&receiver_path(), &receipt_id),
     )
 }
 
@@ -73,7 +73,7 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty,
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -91,7 +91,7 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
         .unwrap();
     let link_state = EncryptedLinkStateRecord {
         counterparty: counterparty.clone(),
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         link_snapshot: Some(vec![1, 2, 3]),
         handshake_snapshot: None,
         handshake_role: None,
@@ -106,7 +106,7 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
     let report = persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         messages,
         Some(link_state.clone()),
         timestamp(),
@@ -127,13 +127,13 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
         PrivateStreamParseStatus::Valid
     );
     assert_eq!(
-        snapshot.encrypted_link_states[&(counterparty.clone(), receiver_id())],
+        snapshot.encrypted_link_states[&(counterparty.clone(), receiver_path())],
         link_state
     );
     assert_eq!(snapshot.event_dedup_records.len(), 1);
     let peer = snapshot
         .linked_peers
-        .get(&(counterparty.clone(), receiver_id()))
+        .get(&(counterparty.clone(), receiver_path()))
         .unwrap();
     assert_eq!(peer.last_private_receive_at, Some(timestamp()));
     assert_eq!(peer.last_sync_at, Some(timestamp()));
@@ -149,7 +149,7 @@ async fn test_persist_private_stream_batch_empty_checkpoint_updates_sync_time() 
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty,
-                    counterparty_receiver_id: receiver_id(),
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -167,7 +167,7 @@ async fn test_persist_private_stream_batch_empty_checkpoint_updates_sync_time() 
         .unwrap();
     let link_state = EncryptedLinkStateRecord {
         counterparty: counterparty.clone(),
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         link_snapshot: Some(vec![1, 2, 3]),
         handshake_snapshot: None,
         handshake_role: None,
@@ -178,7 +178,7 @@ async fn test_persist_private_stream_batch_empty_checkpoint_updates_sync_time() 
     let report = persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         Vec::new(),
         Some(link_state),
         timestamp(),
@@ -189,7 +189,7 @@ async fn test_persist_private_stream_batch_empty_checkpoint_updates_sync_time() 
     let snapshot = storage.snapshot().unwrap();
     let peer = snapshot
         .linked_peers
-        .get(&(counterparty.clone(), receiver_id()))
+        .get(&(counterparty.clone(), receiver_path()))
         .unwrap();
     assert!(report.stream_item_ids.is_empty());
     assert_eq!(peer.last_private_receive_at, None);
@@ -207,7 +207,7 @@ async fn test_persist_private_stream_batch_indexes_receipt_access() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![private_message(&raw)],
         None,
         timestamp(),
@@ -216,7 +216,7 @@ async fn test_persist_private_stream_batch_indexes_receipt_access() {
     .unwrap();
 
     let records =
-        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_id())
+        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_path())
             .await
             .unwrap();
     assert_eq!(records.len(), 1);
@@ -235,7 +235,7 @@ async fn test_persist_private_stream_batch_indexes_receipt_access() {
     let indexed = crate::domain::receipts::receipt_access_record_by_receipt_id(
         &storage,
         &counterparty,
-        &receiver_id(),
+        &receiver_path(),
         receipt_id,
     )
     .await
@@ -260,7 +260,7 @@ async fn test_persist_private_stream_batch_dedupes_receipt_access_index() {
     let report = persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![
             private_message(&duplicate_raw),
             private_message(&duplicate_raw),
@@ -273,7 +273,7 @@ async fn test_persist_private_stream_batch_dedupes_receipt_access_index() {
     .unwrap();
 
     let records =
-        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_id())
+        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_path())
             .await
             .unwrap();
     assert_eq!(records.len(), 1);
@@ -284,7 +284,7 @@ async fn test_persist_private_stream_batch_dedupes_receipt_access_index() {
     let snapshot = storage.snapshot().unwrap();
     let dedupe = snapshot
         .event_dedup_records
-        .get(&(counterparty, receiver_id(), event_id.into()))
+        .get(&(counterparty, receiver_path(), event_id.into()))
         .unwrap();
     assert_eq!(dedupe.duplicate_stream_item_ids, vec![1]);
     assert_eq!(dedupe.conflicting_stream_item_ids, vec![2]);
@@ -298,13 +298,13 @@ async fn test_persist_private_stream_batch_skips_malformed_receipt_access_index(
         "650e8400-e29b-41d4-a716-446655440000",
         "550e8400-e29b-41d4-a716-446655440000",
         "invoice-2026-0001",
-        "/pub/paykit/v0/private/bitkit/receipts/not-the-receipt-id",
+        "/pub/paykit/v0/private/bitkit/wallet/receipts/not-the-receipt-id",
     );
 
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![private_message(&raw)],
         None,
         timestamp(),
@@ -318,7 +318,7 @@ async fn test_persist_private_stream_batch_skips_malformed_receipt_access_index(
         PrivateStreamParseStatus::MalformedRecognized
     );
     let records =
-        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_id())
+        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_path())
             .await
             .unwrap();
     assert!(records.is_empty());
@@ -329,13 +329,13 @@ async fn test_persist_private_stream_batch_skips_wrong_receiver_receipt_access_i
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
     let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
-    let wrong_receiver_id = paykit_lib::PaykitReceiverId::new("tether").unwrap();
+    let wrong_receiver_path = paykit_lib::PaykitReceiverPath::new("tether/wallet").unwrap();
     let raw = receipt_access_raw_with_location(
         "650e8400-e29b-41d4-a716-446655440000",
         receipt_id,
         "invoice-2026-0001",
         &paykit_lib::ReceiptAccess::location(
-            &wrong_receiver_id,
+            &wrong_receiver_path,
             &paykit_lib::ReceiptId::new(receipt_id).unwrap(),
         ),
     );
@@ -343,7 +343,7 @@ async fn test_persist_private_stream_batch_skips_wrong_receiver_receipt_access_i
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![private_message(&raw)],
         None,
         timestamp(),
@@ -358,10 +358,10 @@ async fn test_persist_private_stream_batch_skips_wrong_receiver_receipt_access_i
     );
     assert_eq!(
         snapshot.private_stream_items[0].parse_error.as_deref(),
-        Some("Receipt Access location does not match counterparty receiver bitkit")
+        Some("Receipt Access location does not match counterparty receiver bitkit/wallet")
     );
     let records =
-        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_id())
+        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_path())
             .await
             .unwrap();
     assert!(records.is_empty());
@@ -379,7 +379,7 @@ async fn test_persist_private_stream_batch_marks_event_id_conflicts() {
     let report = persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         messages,
         None,
         timestamp(),
@@ -392,7 +392,7 @@ async fn test_persist_private_stream_batch_marks_event_id_conflicts() {
         .event_dedup_records
         .get(&(
             counterparty,
-            receiver_id(),
+            receiver_path(),
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101".into(),
         ))
         .unwrap();
@@ -410,7 +410,7 @@ async fn test_persist_private_stream_batch_scopes_event_dedupe_by_counterparty()
     let first_report = persist_private_stream_batch(
         &storage,
         first_counterparty,
-        receiver_id(),
+        receiver_path(),
         vec![private_message(&payment_request_raw("invoice-2026-0001"))],
         None,
         timestamp(),
@@ -420,7 +420,7 @@ async fn test_persist_private_stream_batch_scopes_event_dedupe_by_counterparty()
     let second_report = persist_private_stream_batch(
         &storage,
         second_counterparty,
-        receiver_id(),
+        receiver_path(),
         vec![private_message(&payment_request_raw("invoice-2026-0002"))],
         None,
         timestamp(),
@@ -443,7 +443,7 @@ async fn test_persist_private_stream_batch_keeps_malformed_recognized_messages()
     persist_private_stream_batch(
         &storage,
         counterparty,
-        receiver_id(),
+        receiver_path(),
         vec![private_message(malformed)],
         None,
         timestamp(),
@@ -473,7 +473,7 @@ async fn test_persist_private_stream_batch_keeps_invalid_json_payloads() {
     let report = persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         vec![PrivateApplicationMessage {
             version: None,
             kind: None,
@@ -502,7 +502,7 @@ async fn test_persist_private_stream_batch_records_invalid_utf8_marker_error() {
     persist_private_stream_batch(
         &storage,
         counterparty,
-        receiver_id(),
+        receiver_path(),
         vec![PrivateApplicationMessage {
             version: None,
             kind: None,
@@ -533,7 +533,7 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
             move |tx| {
                 Ok(tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
                 ))
@@ -548,7 +548,7 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
             move |tx| {
                 tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_id(),
+                    &receiver_path(),
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
                 );
@@ -559,7 +559,7 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
         .unwrap();
     let link_state = EncryptedLinkStateRecord {
         counterparty: counterparty.clone(),
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         link_snapshot: Some(vec![1, 2, 3]),
         handshake_snapshot: None,
         handshake_role: None,
@@ -570,7 +570,7 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
     let result = persist_private_stream_batch_with_link_lease(
         &storage,
         counterparty,
-        receiver_id(),
+        receiver_path(),
         vec![private_message(r#"{"version":1,"kind":"paykit.unknown"}"#)],
         Some(link_state),
         Some(first_lease),

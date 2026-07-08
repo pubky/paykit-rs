@@ -9,7 +9,7 @@ async fn endpoint_round_trip_and_update() {
 
     set_payment_endpoint(
         &setup.session,
-        &receiver_id(),
+        &receiver_path(),
         method.clone(),
         endpoint.clone(),
     )
@@ -19,14 +19,14 @@ async fn endpoint_round_trip_and_update() {
     let fetched = get_payment_endpoint(
         &setup.public_storage,
         &setup.public_key,
-        &receiver_id(),
+        &receiver_path(),
         &method,
     )
     .await
     .unwrap();
     assert_eq!(fetched, Some(endpoint.clone()));
 
-    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_id())
+    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_path())
         .await
         .unwrap();
     assert_eq!(
@@ -42,7 +42,7 @@ async fn endpoint_round_trip_and_update() {
 
     set_payment_endpoint(
         &setup.session,
-        &receiver_id(),
+        &receiver_path(),
         method.clone(),
         new_endpoint.clone(),
     )
@@ -52,7 +52,7 @@ async fn endpoint_round_trip_and_update() {
     let updated = get_payment_endpoint(
         &setup.public_storage,
         &setup.public_key,
-        &receiver_id(),
+        &receiver_path(),
         &method,
     )
     .await
@@ -70,7 +70,7 @@ async fn missing_endpoint_returns_none() {
     let missing = get_payment_endpoint(
         &setup.public_storage,
         &setup.public_key,
-        &receiver_id(),
+        &receiver_path(),
         &method,
     )
     .await
@@ -91,7 +91,7 @@ async fn list_reflects_additions_and_removals() {
 
     set_payment_endpoint(
         &setup.session,
-        &receiver_id(),
+        &receiver_path(),
         onchain.clone(),
         onchain_data.clone(),
     )
@@ -99,14 +99,14 @@ async fn list_reflects_additions_and_removals() {
     .unwrap();
     set_payment_endpoint(
         &setup.session,
-        &receiver_id(),
+        &receiver_path(),
         lightning.clone(),
         lightning_data.clone(),
     )
     .await
     .unwrap();
 
-    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_id())
+    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_path())
         .await
         .unwrap();
     let mut expected = HashMap::new();
@@ -114,10 +114,10 @@ async fn list_reflects_additions_and_removals() {
     expected.insert(lightning.clone(), lightning_data.clone());
     assert_eq!(list.payment_endpoints, expected);
 
-    remove_payment_endpoint(&setup.session, &receiver_id(), onchain.clone())
+    remove_payment_endpoint(&setup.session, &receiver_path(), onchain.clone())
         .await
         .unwrap();
-    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_id())
+    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_path())
         .await
         .unwrap();
     assert_eq!(
@@ -127,10 +127,10 @@ async fn list_reflects_additions_and_removals() {
             .collect()
     );
 
-    remove_payment_endpoint(&setup.session, &receiver_id(), lightning.clone())
+    remove_payment_endpoint(&setup.session, &receiver_path(), lightning.clone())
         .await
         .unwrap();
-    let empty = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_id())
+    let empty = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_path())
         .await
         .unwrap();
     assert!(empty.payment_endpoints.is_empty());
@@ -148,7 +148,7 @@ async fn list_fetches_multiple_pages() {
         let payload = PaymentEndpointPayload::new(format!("payload-{index:03}"));
         set_payment_endpoint(
             &setup.session,
-            &receiver_id(),
+            &receiver_path(),
             identifier.clone(),
             payload.clone(),
         )
@@ -157,7 +157,7 @@ async fn list_fetches_multiple_pages() {
         expected.insert(identifier, payload);
     }
 
-    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_id())
+    let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_path())
         .await
         .unwrap();
     assert_eq!(list.payment_endpoints, expected);
@@ -170,7 +170,7 @@ async fn removing_missing_endpoint_is_idempotent() {
     let setup = TestSetup::new().await;
     let method = PaymentEndpointIdentifier::new("unused").unwrap();
 
-    remove_payment_endpoint(&setup.session, &receiver_id(), method)
+    remove_payment_endpoint(&setup.session, &receiver_path(), method)
         .await
         .expect("removing non-existent endpoint should be idempotent");
 

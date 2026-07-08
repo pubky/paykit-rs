@@ -72,13 +72,13 @@ fn test_session_capabilities_cover_required_paykit_scopes() {
         .as_slice()
         .to_vec();
     let bitkit_namespace = pubky::Capabilities::builder()
-        .read_write("/pub/paykit/v0/receivers/paykit/")
-        .read_write("/pub/paykit/v0/private/paykit/")
+        .read_write("/pub/paykit/v0/paykit/wallet/")
+        .read_write("/pub/paykit/v0/private/paykit/wallet/")
         .read_write("/pub/bitkit.to/")
         .finish()
         .as_slice()
         .to_vec();
-    let bitkit_required = "/pub/paykit/v0/receivers/paykit/:rw,/pub/paykit/v0/private/paykit/:rw,/pub/bitkit.to/receivers/paykit/:rw";
+    let bitkit_required = "/pub/paykit/v0/paykit/wallet/:rw,/pub/paykit/v0/private/paykit/wallet/:rw,/pub/bitkit.to/paykit/wallet/:rw";
     let read_only = pubky::Capabilities::builder()
         .read("/pub/paykit/")
         .finish()
@@ -88,7 +88,7 @@ fn test_session_capabilities_cover_required_paykit_scopes() {
     assert!(validate_session_capabilities(&root, "/pub/paykit/:rw").is_ok());
     assert!(validate_session_capabilities(
         &paykit_only,
-        "/pub/paykit/v0/receivers/paykit/:rw,/pub/paykit/v0/private/paykit/:rw"
+        "/pub/paykit/v0/paykit/wallet/:rw,/pub/paykit/v0/private/paykit/wallet/:rw"
     )
     .is_ok());
     assert!(validate_session_capabilities(&root, bitkit_required).is_ok());

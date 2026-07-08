@@ -38,7 +38,7 @@ messages are exchanged through `pubky-noise`.
 Public Payment Endpoint Payloads are stored as separate files under:
 
 ```text
-/pub/paykit/v0/receivers/{receiver_id}/endpoints/{payment_endpoint_identifier}
+/pub/paykit/v0/{receiver_path}/endpoints/{payment_endpoint_identifier}
 ```
 
 Public reads use `pubky::PublicStorage`; authenticated writes use
@@ -85,17 +85,17 @@ enforces structural path-safety validation.
 ### Public Payment Lists
 
 Public Payment Lists are discoverable by anyone who knows the payee's Pubky
-public key and Paykit receiver id.
+public key and Paykit receiver path.
 
 1. The payee creates one or more Payment Endpoints.
 2. The payee writes each Payment Endpoint Payload under its Payment Endpoint
    Identifier.
-3. The payee shares their Pubky public key and receiver id.
+3. The payee shares their Pubky public key and receiver path.
 4. A payer calls `get_payment_list` or `get_payment_endpoint` through the
    Paykit Library or a Language Binding.
 
 Public Payment Lists are observable by anyone with the payee public key and
-receiver id. Apps should avoid publishing reusable or correlation-sensitive
+receiver path. Apps should avoid publishing reusable or correlation-sensitive
 Payment Endpoint Payloads unless that matches the payee's privacy model.
 
 ### Private Payment Lists
@@ -155,7 +155,7 @@ handle.
 
 Paykit receipts are encrypted before storage. The plaintext Receipt is created
 and read locally; the payee stores only the Encrypted Receipt at the canonical
-homeserver path derived from the issuer receiver id and Receipt ID, then sends
+homeserver path derived from the issuer receiver path and Receipt ID, then sends
 Receipt Access to the counterparty over the Encrypted Link.
 
 Receipt Access uses Event Message semantics: every valid Receipt Access message
@@ -225,19 +225,19 @@ remain with the integrating application and its adapters.
 
 #### Discover Paykit Receivers
 
-`list_paykit_receiver_ids` lists receiver/runtime folders published by a Pubky
-identity so callers can choose the receiver id for scoped Payment List reads.
+`list_paykit_receiver_paths` lists receiver/runtime folders published by a Pubky
+identity so callers can choose the receiver path for scoped Payment List reads.
 
 #### Retrieve a public Payment List
 
 `get_payment_list` fetches all public Payment Endpoints published by a payee
-receiver id. The result is empty when that receiver has not published any
+receiver path. The result is empty when that receiver has not published any
 endpoints.
 
 #### Retrieve one public Payment Endpoint Payload
 
 `get_payment_endpoint` fetches one Payment Endpoint Payload for a payee,
-receiver id, and Payment Endpoint Identifier. Missing files are returned as
+receiver path, and Payment Endpoint Identifier. Missing files are returned as
 `None`.
 
 #### Store a public Payment Endpoint
@@ -301,7 +301,7 @@ already have a known Receipt Access JSON payload. `decrypt_receipt` decrypts an
 Encrypted Receipt fetched by the app from its Receipt Location into the local
 plaintext Receipt.
 Receipt Location is a path on the issuer's homeserver; SDK/runtime code pairs
-it with the issuer public key and issuer receiver id when retrieving the
+it with the issuer public key and issuer receiver path when retrieving the
 Encrypted Receipt.
 
 Private Application Messages share one ordered encrypted stream. The raw stream
@@ -323,15 +323,15 @@ Metadata.
 
 ### Public Payment Endpoints
 
-- `list_paykit_receiver_ids(storage, payee)`: list the payee's Paykit receiver
+- `list_paykit_receiver_paths(storage, payee)`: list the payee's Paykit receiver
   ids.
-- `set_payment_endpoint(session, receiver_id, identifier, payload)`: publish or
+- `set_payment_endpoint(session, receiver_path, identifier, payload)`: publish or
   update one public Payment Endpoint.
-- `remove_payment_endpoint(session, receiver_id, identifier)`: remove one public
+- `remove_payment_endpoint(session, receiver_path, identifier)`: remove one public
   Payment Endpoint.
-- `get_payment_list(storage, payee, receiver_id)`: fetch the payee receiver's
+- `get_payment_list(storage, payee, receiver_path)`: fetch the payee receiver's
   public Payment List.
-- `get_payment_endpoint(storage, payee, receiver_id, identifier)`: fetch one
+- `get_payment_endpoint(storage, payee, receiver_path, identifier)`: fetch one
   public Payment Endpoint Payload.
 
 ### Encrypted Links
@@ -376,7 +376,7 @@ Metadata.
 
 ### Receipts
 
-- `prepare_receipt(link, receiver_id, draft)`: build the plaintext Receipt,
+- `prepare_receipt(link, receiver_path, draft)`: build the plaintext Receipt,
   Encrypted Receipt, and Receipt Access descriptor without storing or sending.
   Receipt drafts may include optional `payment_request_id` and `billing_period`
   fields for Payment Request correlation.

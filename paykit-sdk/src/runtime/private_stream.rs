@@ -14,13 +14,13 @@ where
     pub async fn receive_private_messages(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_id: PaykitReceiverId,
+        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<PrivateStreamIntakeReport> {
         let (session_access, _) = self.private_link_session_access().await?;
-        self.ensure_peer_allows_private_automation(&counterparty, &counterparty_receiver_id)
+        self.ensure_peer_allows_private_automation(&counterparty, &counterparty_receiver_path)
             .await?;
         let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_id)
+            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
         let result = self
             .receive_private_messages_with_claim(counterparty, lease.clone(), session_access)
@@ -37,23 +37,23 @@ where
             .await?
             .into_iter()
             .filter(|record| record.state == LinkedPeerState::Linked)
-            .map(|record| (record.counterparty, record.counterparty_receiver_id))
+            .map(|record| (record.counterparty, record.counterparty_receiver_path))
             .collect::<Vec<_>>();
         let mut reports = Vec::with_capacity(counterparties.len());
-        for (counterparty, counterparty_receiver_id) in counterparties {
+        for (counterparty, counterparty_receiver_path) in counterparties {
             match self
-                .receive_private_messages(counterparty.clone(), counterparty_receiver_id.clone())
+                .receive_private_messages(counterparty.clone(), counterparty_receiver_path.clone())
                 .await
             {
                 Ok(report) => reports.push(PrivateStreamCounterpartyIntakeReport {
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     report: Some(report),
                     error: None,
                 }),
                 Err(err) => reports.push(PrivateStreamCounterpartyIntakeReport {
                     counterparty,
-                    counterparty_receiver_id,
+                    counterparty_receiver_path,
                     report: None,
                     error: Some(err.to_string()),
                 }),
@@ -81,7 +81,7 @@ where
         let stored_link_state = self
             .storage
             .transaction(|tx| {
-                Ok(tx.encrypted_link_state(&counterparty, &lease.counterparty_receiver_id))
+                Ok(tx.encrypted_link_state(&counterparty, &lease.counterparty_receiver_path))
             })
             .await?
             .ok_or_else(|| {
@@ -101,7 +101,7 @@ where
             let _ = self
                 .publish_local_recovery_marker_with_session(
                     &counterparty,
-                    &stored_link_state.counterparty_receiver_id,
+                    &stored_link_state.counterparty_receiver_path,
                     &session_access,
                     mark.new_episode,
                 )
@@ -124,7 +124,7 @@ where
                 let _ = self
                     .publish_local_recovery_marker_with_session(
                         &counterparty,
-                        &stored_link_state.counterparty_receiver_id,
+                        &stored_link_state.counterparty_receiver_path,
                         &session_access,
                         mark.new_episode,
                     )
@@ -137,8 +137,8 @@ where
             session_access.session.clone(),
             secret_key,
             &remote_public_key,
-            &self.config.receiver_id,
-            &stored_link_state.counterparty_receiver_id,
+            &self.config.receiver_path,
+            &stored_link_state.counterparty_receiver_path,
             session_access.outbox_client.clone(),
             snapshot,
         )
@@ -157,7 +157,7 @@ where
                 let _ = self
                     .publish_local_recovery_marker_with_session(
                         &counterparty,
-                        &stored_link_state.counterparty_receiver_id,
+                        &stored_link_state.counterparty_receiver_path,
                         &session_access,
                         mark.new_episode,
                     )
@@ -179,7 +179,7 @@ where
                 let _ = self
                     .publish_local_recovery_marker_with_session(
                         &counterparty,
-                        &stored_link_state.counterparty_receiver_id,
+                        &stored_link_state.counterparty_receiver_path,
                         &session_access,
                         mark.new_episode,
                     )
@@ -191,7 +191,7 @@ where
         let now = self.clock.now();
         let next_link_state = EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_id: stored_link_state.counterparty_receiver_id.clone(),
+            counterparty_receiver_path: stored_link_state.counterparty_receiver_path.clone(),
             link_snapshot: Some(link.serialize()),
             handshake_snapshot: None,
             handshake_role: None,
@@ -202,7 +202,7 @@ where
         persist_private_stream_batch_with_link_lease(
             &self.storage,
             counterparty,
-            stored_link_state.counterparty_receiver_id,
+            stored_link_state.counterparty_receiver_path,
             messages,
             Some(next_link_state),
             Some(lease),

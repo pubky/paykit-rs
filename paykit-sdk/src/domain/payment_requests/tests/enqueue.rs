@@ -15,13 +15,13 @@ async fn test_enqueue_payment_request_event_stores_canonical_payload() {
     let record = enqueue_payment_request_event(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &event,
         timestamp(),
     )
     .await
     .unwrap();
-    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_id())
+    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();
 
@@ -47,7 +47,7 @@ async fn test_enqueue_payment_request_acceptance_sets_kind() {
     let record = enqueue_payment_request_acceptance(
         &storage,
         counterparty,
-        receiver_id(),
+        receiver_path(),
         &event,
         timestamp(),
     )
@@ -75,13 +75,13 @@ async fn test_enqueue_payment_request_rejects_invalid_terms() {
     let err = enqueue_payment_request(
         &storage,
         counterparty.clone(),
-        receiver_id(),
+        receiver_path(),
         &event,
         timestamp(),
     )
     .await
     .unwrap_err();
-    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_id())
+    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();
 

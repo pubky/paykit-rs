@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::linked_peers::LinkedPeerState,
     storage::{LinkedPeerRecord, StorageAdapter},
-    PaykitReceiverId, PubkyPublicKey, Result,
+    PaykitReceiverPath, PubkyPublicKey, Result,
 };
 
 /// Public recovery marker state tracked for one Linked Peer.
@@ -15,7 +15,7 @@ pub struct EncryptedLinkRecoveryMarkerReport {
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
     /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_id: PaykitReceiverId,
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Current Linked Peer state.
     pub state: LinkedPeerState,
     /// Locally published recovery attempt id.
@@ -36,7 +36,7 @@ impl EncryptedLinkRecoveryMarkerReport {
     pub(crate) fn from_peer(peer: &LinkedPeerRecord, remote_marker_changed: bool) -> Self {
         Self {
             counterparty: peer.counterparty.clone(),
-            counterparty_receiver_id: peer.counterparty_receiver_id.clone(),
+            counterparty_receiver_path: peer.counterparty_receiver_path.clone(),
             state: peer.state.clone(),
             local_attempt_id: peer.local_recovery_attempt_id.clone(),
             local_marker_created_at: peer.local_recovery_marker_created_at,
@@ -51,7 +51,7 @@ impl EncryptedLinkRecoveryMarkerReport {
 pub(crate) async fn recovery_marker_report<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Result<Option<EncryptedLinkRecoveryMarkerReport>>
 where
     S: StorageAdapter,
@@ -59,7 +59,7 @@ where
     storage
         .transaction(|tx| {
             Ok(tx
-                .linked_peer(counterparty, counterparty_receiver_id)
+                .linked_peer(counterparty, counterparty_receiver_path)
                 .as_ref()
                 .map(|peer| EncryptedLinkRecoveryMarkerReport::from_peer(peer, false)))
         })

@@ -7,7 +7,7 @@ use crate::{
     domain::linked_peers::LinkedPeerHandshakeReport,
     domain::outbound_private::OutboundPrivateSendReport,
     domain::private_stream::PrivateStreamIntakeReport, domain::publication::PublicationStatus,
-    PaykitReceiverId, PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate,
+    PaykitReceiverPath, PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate,
     PaymentTarget, PubkyPublicKey, Result,
 };
 
@@ -332,7 +332,7 @@ pub struct ContactUpdate {
     /// Contact public key.
     pub public_key: PubkyPublicKey,
     /// Contact receiver/runtime folder used for Paykit private workflows.
-    pub receiver_id: PaykitReceiverId,
+    pub receiver_path: PaykitReceiverPath,
     /// Optional local display label.
     pub label: Option<String>,
 }
@@ -341,7 +341,7 @@ impl fmt::Debug for ContactUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ContactUpdate")
             .field("public_key", &"<redacted>")
-            .field("receiver_id", &self.receiver_id)
+            .field("receiver_path", &self.receiver_path)
             .field("label", &self.label.as_ref().map(|_| "<redacted>"))
             .finish()
     }
@@ -368,7 +368,7 @@ pub struct ContactRecord {
     /// Contact public key.
     pub public_key: PubkyPublicKey,
     /// Contact receiver/runtime folder used for Paykit private workflows.
-    pub receiver_id: PaykitReceiverId,
+    pub receiver_path: PaykitReceiverPath,
     /// Optional local display label.
     pub label: Option<String>,
     /// Cached public profile, when fetched.
@@ -393,7 +393,7 @@ impl fmt::Debug for ContactRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ContactRecord")
             .field("public_key", &"<redacted>")
-            .field("receiver_id", &self.receiver_id)
+            .field("receiver_path", &self.receiver_path)
             .field("label", &self.label.as_ref().map(|_| "<redacted>"))
             .field("profile", &self.profile.as_ref().map(|_| "<redacted>"))
             .field("profile_fetched_at", &self.profile_fetched_at)
@@ -428,14 +428,14 @@ impl ContactRecord {
         let label = normalize_label(update.label);
         match existing {
             Some(mut existing) => {
-                existing.receiver_id = update.receiver_id;
+                existing.receiver_path = update.receiver_path;
                 existing.label = label;
                 existing.updated_at = now;
                 existing
             }
             None => Self {
                 public_key: update.public_key,
-                receiver_id: update.receiver_id,
+                receiver_path: update.receiver_path,
                 label,
                 profile: None,
                 profile_fetched_at: None,
@@ -546,7 +546,7 @@ struct PublicContactDocument {
     version: u32,
     kind: String,
     public_key: PubkyPublicKey,
-    receiver_id: PaykitReceiverId,
+    receiver_path: PaykitReceiverPath,
 }
 
 pub(crate) fn profile_json(profile: &PaykitProfile) -> Result<String> {
@@ -675,13 +675,13 @@ fn direct_pubky_follow_key(path: &str) -> Option<&str> {
 
 pub(crate) fn public_contact_json(
     public_key: &PubkyPublicKey,
-    receiver_id: &PaykitReceiverId,
+    receiver_path: &PaykitReceiverPath,
 ) -> Result<String> {
     serde_json::to_string(&PublicContactDocument {
         version: PUBLIC_CONTACT_VERSION,
         kind: PUBLIC_CONTACT_KIND.into(),
         public_key: public_key.clone(),
-        receiver_id: receiver_id.clone(),
+        receiver_path: receiver_path.clone(),
     })
     .map_err(|err| {
         PaykitSdkError::Protocol(format!("failed to serialize Paykit public contact: {err}"))
@@ -720,7 +720,7 @@ pub struct ContactPaymentResolutionRequest {
     /// Counterparty to pay.
     pub counterparty: PubkyPublicKey,
     /// Counterparty receiver/runtime folder to query.
-    pub counterparty_receiver_id: PaykitReceiverId,
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Optional amount context used by the payment adapter.
     pub amount: Option<PaymentAmountContext>,
     /// Include public Payment Endpoints after private candidates.

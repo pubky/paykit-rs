@@ -101,7 +101,7 @@ use crate::{
         outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
         OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
-    PaykitReceiverId, PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate,
+    PaykitReceiverPath, PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate,
     PaymentEndpointReservation, PaymentEndpointReservationCancellation,
     PaymentEndpointSelectionRequest, PaymentEndpointSource, PrivatePaymentListView, PubkyPublicKey,
     PubkySessionAccess, PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, Result,

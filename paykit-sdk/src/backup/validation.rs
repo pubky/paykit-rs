@@ -31,7 +31,7 @@ where
         |record| {
             (
                 record.counterparty().clone(),
-                record.counterparty_receiver_id().clone(),
+                record.counterparty_receiver_path().clone(),
             )
         },
         label,
@@ -40,7 +40,7 @@ where
 
 pub(super) trait HasPeerStorageKey {
     fn counterparty(&self) -> &PubkyPublicKey;
-    fn counterparty_receiver_id(&self) -> &PaykitReceiverId;
+    fn counterparty_receiver_path(&self) -> &PaykitReceiverPath;
 }
 
 impl HasPeerStorageKey for LinkedPeerRecord {
@@ -48,8 +48,8 @@ impl HasPeerStorageKey for LinkedPeerRecord {
         &self.counterparty
     }
 
-    fn counterparty_receiver_id(&self) -> &PaykitReceiverId {
-        &self.counterparty_receiver_id
+    fn counterparty_receiver_path(&self) -> &PaykitReceiverPath {
+        &self.counterparty_receiver_path
     }
 }
 
@@ -58,8 +58,8 @@ impl HasPeerStorageKey for EncryptedLinkStateRecord {
         &self.counterparty
     }
 
-    fn counterparty_receiver_id(&self) -> &PaykitReceiverId {
-        &self.counterparty_receiver_id
+    fn counterparty_receiver_path(&self) -> &PaykitReceiverPath {
+        &self.counterparty_receiver_path
     }
 }
 
@@ -153,7 +153,7 @@ pub(super) fn reconcile_restored_linked_peers(
     outbound_private_messages: &[OutboundPrivateMessageRecord],
 ) -> Vec<PeerStorageKey> {
     for (peer_key, link_state) in encrypted_link_states {
-        let (counterparty, counterparty_receiver_id) = peer_key;
+        let (counterparty, counterparty_receiver_path) = peer_key;
         let restored_state = restored_peer_state_from_link_state(link_state);
         let checkpointed_at = link_state.checkpointed_at;
         linked_peers
@@ -186,7 +186,7 @@ pub(super) fn reconcile_restored_linked_peers(
             .or_insert_with(|| {
                 restored_peer_record(
                     counterparty.clone(),
-                    counterparty_receiver_id.clone(),
+                    counterparty_receiver_path.clone(),
                     restored_state.unwrap_or(LinkedPeerState::RecoveryRequired),
                     checkpointed_at,
                 )
@@ -212,7 +212,7 @@ pub(super) fn reconcile_restored_linked_peers(
     for message in outbound_private_messages {
         let peer_key = (
             message.counterparty.clone(),
-            message.counterparty_receiver_id.clone(),
+            message.counterparty_receiver_path.clone(),
         );
         if outbound_status_requires_link(&message.status)
             && !active_link_counterparties.contains(&peer_key)
@@ -227,7 +227,7 @@ pub(super) fn reconcile_restored_linked_peers(
                 .or_insert_with(|| {
                     restored_peer_record(
                         message.counterparty.clone(),
-                        message.counterparty_receiver_id.clone(),
+                        message.counterparty_receiver_path.clone(),
                         LinkedPeerState::RecoveryRequired,
                         message.updated_at,
                     )
@@ -240,7 +240,7 @@ pub(super) fn reconcile_restored_linked_peers(
         if record.state == LinkedPeerState::RecoveryRequired {
             peers.push((
                 record.counterparty.clone(),
-                record.counterparty_receiver_id.clone(),
+                record.counterparty_receiver_path.clone(),
             ));
         }
     }
@@ -267,13 +267,13 @@ fn restored_peer_state_from_link_state(
 
 fn restored_peer_record(
     counterparty: PubkyPublicKey,
-    counterparty_receiver_id: PaykitReceiverId,
+    counterparty_receiver_path: PaykitReceiverPath,
     state: LinkedPeerState,
     last_sync_at: DateTime<Utc>,
 ) -> LinkedPeerRecord {
     LinkedPeerRecord {
         counterparty,
-        counterparty_receiver_id,
+        counterparty_receiver_path,
         state,
         last_sync_at: Some(last_sync_at),
         last_private_receive_at: None,
@@ -326,7 +326,7 @@ pub(super) fn mark_restored_sending_outbound_recovery_required(
     for record in records.iter_mut() {
         let peer_key = (
             record.counterparty.clone(),
-            record.counterparty_receiver_id.clone(),
+            record.counterparty_receiver_path.clone(),
         );
         if record.status == OutboundPrivateMessageStatus::Sending
             && recovery_required_peers.contains(&peer_key)
@@ -343,9 +343,9 @@ pub(super) fn mark_restored_sending_outbound_recovery_required(
 
 pub(super) fn validate_encrypted_link_snapshots(
     records: &HashMap<PeerStorageKey, EncryptedLinkStateRecord>,
-    local_receiver_id: &PaykitReceiverId,
+    local_receiver_path: &PaykitReceiverPath,
 ) -> Result<()> {
-    for ((counterparty, counterparty_receiver_id), record) in records {
+    for ((counterparty, counterparty_receiver_path), record) in records {
         let expected_recipient = counterparty.to_public_key()?;
         if let Some(snapshot_bytes) = record.link_snapshot.as_ref() {
             let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes)
@@ -355,11 +355,11 @@ pub(super) fn validate_encrypted_link_snapshots(
                     "Encrypted Link snapshot recipient does not match counterparty {counterparty}"
                 )));
             }
-            if snapshot.local_receiver_id() != local_receiver_id
-                || snapshot.remote_receiver_id() != counterparty_receiver_id
+            if snapshot.local_receiver_path() != local_receiver_path
+                || snapshot.remote_receiver_path() != counterparty_receiver_path
             {
                 return Err(PaykitSdkError::Protocol(format!(
-                    "Encrypted Link snapshot receiver ids do not match peer {counterparty}/{counterparty_receiver_id}"
+                    "Encrypted Link snapshot receiver paths do not match peer {counterparty}/{counterparty_receiver_path}"
                 )));
             }
         }
@@ -371,11 +371,11 @@ pub(super) fn validate_encrypted_link_snapshots(
                     "Encrypted Link Handshake snapshot recipient does not match counterparty {counterparty}"
                 )));
             }
-            if snapshot.local_receiver_id() != local_receiver_id
-                || snapshot.remote_receiver_id() != counterparty_receiver_id
+            if snapshot.local_receiver_path() != local_receiver_path
+                || snapshot.remote_receiver_path() != counterparty_receiver_path
             {
                 return Err(PaykitSdkError::Protocol(format!(
-                    "Encrypted Link Handshake snapshot receiver ids do not match peer {counterparty}/{counterparty_receiver_id}"
+                    "Encrypted Link Handshake snapshot receiver paths do not match peer {counterparty}/{counterparty_receiver_path}"
                 )));
             }
         }
@@ -494,7 +494,7 @@ pub(super) fn validate_contact_records(
         if let Some(label) = record.label.as_deref() {
             crate::ContactUpdate {
                 public_key: record.public_key.clone(),
-                receiver_id: record.receiver_id.clone(),
+                receiver_path: record.receiver_path.clone(),
                 label: Some(label.to_owned()),
             }
             .validate()?;
@@ -550,7 +550,10 @@ fn validate_contact_marker_state(record: &ContactRecord) -> Result<()> {
 }
 
 pub(super) fn validate_payment_endpoint_reservations(
-    records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), PaymentEndpointReservationRecord>,
+    records: &HashMap<
+        (PubkyPublicKey, PaykitReceiverPath, String),
+        PaymentEndpointReservationRecord,
+    >,
     outbound_private_messages: &[OutboundPrivateMessageRecord],
 ) -> Result<()> {
     let outbound_by_id = outbound_private_messages
@@ -570,7 +573,7 @@ pub(super) fn validate_payment_endpoint_reservations(
                 ))
             })?;
         if outbound.counterparty != record.counterparty
-            || outbound.counterparty_receiver_id != record.counterparty_receiver_id
+            || outbound.counterparty_receiver_path != record.counterparty_receiver_path
         {
             return Err(PaykitSdkError::Protocol(format!(
                 "Payment Endpoint Reservation '{}' peer does not match outbound message {}",
@@ -604,7 +607,7 @@ pub(super) fn validate_payment_endpoint_reservations(
 
 pub(super) fn validate_outbound_private_messages(
     records: &[OutboundPrivateMessageRecord],
-    local_receiver_id: &PaykitReceiverId,
+    local_receiver_path: &PaykitReceiverPath,
 ) -> Result<()> {
     for record in records {
         validate_outbound_private_status(record)?;
@@ -619,10 +622,10 @@ pub(super) fn validate_outbound_private_messages(
         if kind == PrivateMessageKind::ReceiptAccess.as_str() {
             let access = paykit_lib::parse_receipt_access_json(&record.raw_json)
                 .map_err(|err| PaykitSdkError::Protocol(err.to_string()))?;
-            if !access.has_location_for_receiver(local_receiver_id) {
+            if !access.has_location_for_receiver(local_receiver_path) {
                 return Err(PaykitSdkError::Protocol(format!(
                     "outbound Receipt Access message {} location does not match local receiver {}",
-                    record.outbound_message_id, local_receiver_id
+                    record.outbound_message_id, local_receiver_path
                 )));
             }
         }
@@ -683,7 +686,7 @@ pub(super) fn validate_private_stream_items(records: &[PrivateStreamItemRecord])
             ));
         enforce_receipt_access_receiver_scope(
             &mut classification,
-            &record.counterparty_receiver_id,
+            &record.counterparty_receiver_path,
         );
         if record.parsed_version != parsed_version {
             return Err(PaykitSdkError::Protocol(format!(
@@ -729,7 +732,7 @@ pub(super) fn validate_private_stream_items(records: &[PrivateStreamItemRecord])
 }
 
 pub(super) fn validate_event_dedup_records(
-    records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), EventDedupRecord>,
+    records: &HashMap<(PubkyPublicKey, PaykitReceiverPath, String), EventDedupRecord>,
     stream_items: &[PrivateStreamItemRecord],
 ) -> Result<()> {
     let stream_by_id = stream_items
@@ -745,7 +748,7 @@ pub(super) fn validate_event_dedup_records(
             )));
         };
         if first.counterparty != record.counterparty
-            || first.counterparty_receiver_id != record.counterparty_receiver_id
+            || first.counterparty_receiver_path != record.counterparty_receiver_path
         {
             return Err(PaykitSdkError::Protocol(format!(
                 "Event dedupe record '{}' peer does not match first stream item",
@@ -817,7 +820,7 @@ fn validate_event_dedup_stream_item(
             record.event_id, item.stream_item_id
         )));
     }
-    if item.counterparty_receiver_id != record.counterparty_receiver_id {
+    if item.counterparty_receiver_path != record.counterparty_receiver_path {
         return Err(PaykitSdkError::Protocol(format!(
             "Event dedupe record '{}' counterparty receiver does not match stream item {}",
             record.event_id, item.stream_item_id
@@ -830,7 +833,7 @@ fn validate_event_dedup_stream_item(
             item.parsed_version,
             item.parsed_kind.clone(),
         ));
-    enforce_receipt_access_receiver_scope(&mut classification, &item.counterparty_receiver_id);
+    enforce_receipt_access_receiver_scope(&mut classification, &item.counterparty_receiver_path);
     let Some(event) = classification.event else {
         return Err(PaykitSdkError::Protocol(format!(
             "Event dedupe record '{}' references non-event stream item {}",
@@ -874,7 +877,7 @@ fn validate_event_dedup_stream_item(
 }
 
 pub(super) fn validate_receipt_access_records(
-    records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), ReceiptAccessRecord>,
+    records: &HashMap<(PubkyPublicKey, PaykitReceiverPath, String), ReceiptAccessRecord>,
     stream_items: &[PrivateStreamItemRecord],
 ) -> Result<()> {
     let stream_by_id = stream_items
@@ -890,7 +893,7 @@ pub(super) fn validate_receipt_access_records(
             )));
         };
         if item.counterparty != record.counterparty
-            || item.counterparty_receiver_id != record.counterparty_receiver_id
+            || item.counterparty_receiver_path != record.counterparty_receiver_path
             || item.receive_batch_id != record.receive_batch_id
             || item.known_paykit_kind.as_deref() != Some(PrivateMessageKind::ReceiptAccess.as_str())
         {
@@ -936,10 +939,10 @@ pub(super) fn validate_receipt_access_records(
                 record.event_id
             )));
         }
-        if !access.has_location_for_receiver(&record.counterparty_receiver_id) {
+        if !access.has_location_for_receiver(&record.counterparty_receiver_path) {
             return Err(PaykitSdkError::Protocol(format!(
                 "Receipt Access record '{}' location does not match counterparty receiver {}",
-                record.event_id, record.counterparty_receiver_id
+                record.event_id, record.counterparty_receiver_path
             )));
         }
     }
@@ -987,9 +990,9 @@ fn validate_receipt_access_retrieval_status(record: &ReceiptAccessRecord) -> Res
 
 pub(super) fn validate_required_private_stream_indexes(
     stream_items: &[PrivateStreamItemRecord],
-    event_dedup_records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), EventDedupRecord>,
+    event_dedup_records: &HashMap<(PubkyPublicKey, PaykitReceiverPath, String), EventDedupRecord>,
     receipt_access_records: &HashMap<
-        (PubkyPublicKey, PaykitReceiverId, String),
+        (PubkyPublicKey, PaykitReceiverPath, String),
         ReceiptAccessRecord,
     >,
 ) -> Result<()> {
@@ -1000,13 +1003,16 @@ pub(super) fn validate_required_private_stream_indexes(
                 item.parsed_version,
                 item.parsed_kind.clone(),
             ));
-        enforce_receipt_access_receiver_scope(&mut classification, &item.counterparty_receiver_id);
+        enforce_receipt_access_receiver_scope(
+            &mut classification,
+            &item.counterparty_receiver_path,
+        );
         let Some(event) = classification.event else {
             continue;
         };
         let key = (
             item.counterparty.clone(),
-            item.counterparty_receiver_id.clone(),
+            item.counterparty_receiver_path.clone(),
             event.event_id.clone(),
         );
         let Some(dedupe) = event_dedup_records.get(&key) else {
@@ -1059,8 +1065,8 @@ fn event_dedup_record_contains_stream_event(
 }
 
 pub(super) fn validate_receipt_records(
-    records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), ReceiptRecord>,
-    access_records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), ReceiptAccessRecord>,
+    records: &HashMap<(PubkyPublicKey, PaykitReceiverPath, String), ReceiptRecord>,
+    access_records: &HashMap<(PubkyPublicKey, PaykitReceiverPath, String), ReceiptAccessRecord>,
     expected_recipient: Option<&PubkyPublicKey>,
 ) -> Result<()> {
     for record in records.values() {
@@ -1078,7 +1084,7 @@ pub(super) fn validate_receipt_records(
         }
         let access_key = (
             record.issuer.clone(),
-            record.issuer_receiver_id.clone(),
+            record.issuer_receiver_path.clone(),
             record.receipt_access_event_id.clone(),
         );
         let Some(access) = access_records.get(&access_key) else {
@@ -1104,9 +1110,9 @@ pub(super) fn validate_receipt_records(
 }
 
 pub(super) fn validate_receipt_issuance_records(
-    records: &HashMap<(PubkyPublicKey, PaykitReceiverId, String), ReceiptIssuanceRecord>,
+    records: &HashMap<(PubkyPublicKey, PaykitReceiverPath, String), ReceiptIssuanceRecord>,
     outbound_private_messages: &[OutboundPrivateMessageRecord],
-    local_receiver_id: &PaykitReceiverId,
+    local_receiver_path: &PaykitReceiverPath,
 ) -> Result<()> {
     let outbound_by_id = outbound_private_messages
         .iter()
@@ -1149,10 +1155,10 @@ pub(super) fn validate_receipt_issuance_records(
                 record.receipt_id
             )));
         }
-        if !access.has_location_for_receiver(local_receiver_id) {
+        if !access.has_location_for_receiver(local_receiver_path) {
             return Err(PaykitSdkError::Protocol(format!(
                 "Receipt issuance record '{}' location does not match local receiver {}",
-                record.receipt_id, local_receiver_id
+                record.receipt_id, local_receiver_path
             )));
         }
 
@@ -1194,7 +1200,7 @@ pub(super) fn validate_receipt_issuance_records(
                 )));
             };
             if outbound.counterparty != record.counterparty
-                || outbound.counterparty_receiver_id != record.counterparty_receiver_id
+                || outbound.counterparty_receiver_path != record.counterparty_receiver_path
                 || outbound.kind != PrivateMessageKind::ReceiptAccess.as_str()
                 || outbound.raw_json != record.access_json
             {
@@ -1305,10 +1311,10 @@ fn validate_valid_private_stream_body(
                     record.stream_item_id
                 )));
             };
-            if !access.has_location_for_receiver(&record.counterparty_receiver_id) {
+            if !access.has_location_for_receiver(&record.counterparty_receiver_path) {
                 return Err(PaykitSdkError::Protocol(format!(
                     "private stream item {} Receipt Access location does not match counterparty receiver {}",
-                    record.stream_item_id, record.counterparty_receiver_id
+                    record.stream_item_id, record.counterparty_receiver_path
                 )));
             }
         }

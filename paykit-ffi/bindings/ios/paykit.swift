@@ -529,12 +529,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Start an Encrypted Link Handshake as the responder.
      */
-    func acceptLinkWithPeer(counterparty: String, counterpartyReceiverId: String) async throws  -> LinkedPeerHandshakeReport
+    func acceptLinkWithPeer(counterparty: String, counterpartyReceiverPath: String) async throws  -> LinkedPeerHandshakeReport
 
     /**
      * Queue acceptance for a received Payment Request and return local derived state.
      */
-    func acceptPaymentRequest(counterparty: String, counterpartyReceiverId: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
+    func acceptPaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
 
     /**
      * Return received Payment Requests that need a local payer response.
@@ -549,27 +549,27 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Advance the stored Encrypted Link Handshake for one counterparty.
      */
-    func advanceLinkHandshake(counterparty: String, counterpartyReceiverId: String) async throws  -> LinkedPeerHandshakeReport
+    func advanceLinkHandshake(counterparty: String, counterpartyReceiverPath: String) async throws  -> LinkedPeerHandshakeReport
 
     /**
      * Block a counterparty for local Paykit private workflows.
      */
-    func blockPeer(counterparty: String, counterpartyReceiverId: String) async throws  -> LinkedPeerRecord
+    func blockPeer(counterparty: String, counterpartyReceiverPath: String) async throws  -> LinkedPeerRecord
 
     /**
      * Queue cancellation for a known non-terminal Payment Request.
      */
-    func cancelPaymentRequest(counterparty: String, counterpartyReceiverId: String, paymentRequestId: String, reason: String?) async throws  -> PaymentRequestRecord
+    func cancelPaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, reason: String?) async throws  -> PaymentRequestRecord
 
     /**
      * Queue an empty Private Payment List for one counterparty receiver.
      */
-    func clearPrivatePaymentList(counterparty: String, counterpartyReceiverId: String) async throws  -> QueuedPrivateMessage
+    func clearPrivatePaymentList(counterparty: String, counterpartyReceiverPath: String) async throws  -> QueuedPrivateMessage
 
     /**
      * Queue an empty Private Payment List and process that counterparty's queue.
      */
-    func clearPrivatePaymentListAndProcessOutbound(counterparty: String, counterpartyReceiverId: String) async throws  -> PrivatePaymentListDeliveryReport
+    func clearPrivatePaymentListAndProcessOutbound(counterparty: String, counterpartyReceiverPath: String) async throws  -> PrivatePaymentListDeliveryReport
 
     /**
      * Return this runtime's configuration.
@@ -579,7 +579,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Return one local Contact Record.
      */
-    func contactRecord(publicKey: String, receiverId: String) async throws  -> ContactRecord?
+    func contactRecord(publicKey: String, receiverPath: String) async throws  -> ContactRecord?
 
     /**
      * Return all local Contact Records.
@@ -589,7 +589,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Return the latest valid Private Payment List view for a counterparty.
      */
-    func currentPrivatePaymentList(counterparty: String, counterpartyReceiverId: String) async throws  -> PrivatePaymentListView?
+    func currentPrivatePaymentList(counterparty: String, counterpartyReceiverPath: String) async throws  -> PrivatePaymentListView?
 
     /**
      * Resolve this identity's public profile.
@@ -609,22 +609,22 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Return tracked Encrypted Link recovery marker state for a counterparty.
      */
-    func encryptedLinkRecoveryMarkerStatus(counterparty: String, counterpartyReceiverId: String) async throws  -> EncryptedLinkRecoveryMarkerReport?
+    func encryptedLinkRecoveryMarkerStatus(counterparty: String, counterpartyReceiverPath: String) async throws  -> EncryptedLinkRecoveryMarkerReport?
 
     /**
      * Queue the current complete Private Payment List for one counterparty receiver.
      */
-    func enqueuePrivatePaymentList(counterparty: String, counterpartyReceiverId: String) async throws  -> QueuedPrivateMessage
+    func enqueuePrivatePaymentList(counterparty: String, counterpartyReceiverPath: String) async throws  -> QueuedPrivateMessage
 
     /**
      * Queue an explicit complete Private Payment List for one counterparty receiver.
      */
-    func enqueuePrivatePaymentListWithReceivingDetails(counterparty: String, counterpartyReceiverId: String, receivingDetails: [ReceivingDetail]) async throws  -> QueuedPrivateMessage
+    func enqueuePrivatePaymentListWithReceivingDetails(counterparty: String, counterpartyReceiverPath: String, receivingDetails: [ReceivingDetail]) async throws  -> QueuedPrivateMessage
 
     /**
      * Start or advance an Encrypted Link Handshake for one counterparty.
      */
-    func ensureLinkWithPeer(counterparty: String, counterpartyReceiverId: String, maxAdvanceSteps: UInt32) async throws  -> LinkedPeerHandshakeReport
+    func ensureLinkWithPeer(counterparty: String, counterpartyReceiverPath: String, maxAdvanceSteps: UInt32) async throws  -> LinkedPeerHandshakeReport
 
     /**
      * Export SDK-managed backup state as an opaque blob.
@@ -639,7 +639,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Fetch a public Paykit Profile.
      */
-    func fetchPaykitProfile(publicKey: String, receiverId: String) async throws  -> PaykitProfileRecord?
+    func fetchPaykitProfile(publicKey: String, receiverPath: String) async throws  -> PaykitProfileRecord?
 
     /**
      * Fetch public Pubky file bytes.
@@ -674,12 +674,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Start an Encrypted Link Handshake as the initiator.
      */
-    func initiateLinkWithPeer(counterparty: String, counterpartyReceiverId: String) async throws  -> LinkedPeerHandshakeReport
+    func initiateLinkWithPeer(counterparty: String, counterpartyReceiverPath: String) async throws  -> LinkedPeerHandshakeReport
 
     /**
      * Prepare, store, and queue Receipt Access for private delivery.
      */
-    func issueReceipt(counterparty: String, counterpartyReceiverId: String, draft: ReceiptDraft) async throws  -> ReceiptIssuanceView
+    func issueReceipt(counterparty: String, counterpartyReceiverPath: String, draft: ReceiptDraft) async throws  -> ReceiptIssuanceView
 
     /**
      * List issued receipts across non-blocked counterparties, newest first.
@@ -689,7 +689,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * List issued receipts for one counterparty, newest first.
      */
-    func issuedReceiptsTo(counterparty: String, counterpartyReceiverId: String) async throws  -> [ReceiptIssuanceView]
+    func issuedReceiptsTo(counterparty: String, counterpartyReceiverPath: String) async throws  -> [ReceiptIssuanceView]
 
     /**
      * List locally tracked Linked Peer records.
@@ -704,12 +704,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Observe a counterparty's public recovery marker.
      */
-    func observeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverId: String) async throws  -> EncryptedLinkRecoveryMarkerReport
+    func observeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverPath: String) async throws  -> EncryptedLinkRecoveryMarkerReport
 
     /**
-     * List public Paykit receiver folder ids for a Pubky identity.
+     * List public Paykit receiver paths for a Pubky identity.
      */
-    func paykitReceiverIds(publicKey: String) async throws  -> [String]
+    func paykitReceiverPaths(publicKey: String) async throws  -> [String]
 
     /**
      * Return all Payment Requests across non-blocked counterparties.
@@ -719,7 +719,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Return Payment Requests involving one counterparty.
      */
-    func paymentRequestsWith(counterparty: String, counterpartyReceiverId: String) async throws  -> [PaymentRequestRecord]
+    func paymentRequestsWith(counterparty: String, counterpartyReceiverPath: String) async throws  -> [PaymentRequestRecord]
 
     /**
      * List counterparties with queued private messages ready for retry.
@@ -734,17 +734,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * send/receive work for the peer, then resolves endpoints private-first.
      * Public endpoints are included only when requested.
      */
-    func prepareAndResolveContactPayment(counterparty: String, counterpartyReceiverId: String, amount: PaymentAmountContext?, includePublicEndpoints: Bool, maxAdvanceSteps: UInt32) async throws  -> PreparedContactPayment
+    func prepareAndResolveContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?, includePublicEndpoints: Bool, maxAdvanceSteps: UInt32) async throws  -> PreparedContactPayment
 
     /**
      * Prepare a receipt issuance and persist it before network side effects.
      */
-    func prepareReceiptIssuance(counterparty: String, counterpartyReceiverId: String, draft: ReceiptDraft) async throws  -> ReceiptIssuanceView
+    func prepareReceiptIssuance(counterparty: String, counterpartyReceiverPath: String, draft: ReceiptDraft) async throws  -> ReceiptIssuanceView
 
     /**
      * Send queued outbound private messages for one counterparty in order.
      */
-    func processOutboundPrivateMessages(counterparty: String, counterpartyReceiverId: String) async throws  -> OutboundPrivateSendReport
+    func processOutboundPrivateMessages(counterparty: String, counterpartyReceiverPath: String) async throws  -> OutboundPrivateSendReport
 
     /**
      * Process queued outbound private messages for every pending counterparty.
@@ -754,17 +754,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Continue storage and Receipt Access queueing for a prepared issuance.
      */
-    func processReceiptIssuance(counterparty: String, counterpartyReceiverId: String, receiptId: String) async throws  -> ReceiptIssuanceView
+    func processReceiptIssuance(counterparty: String, counterpartyReceiverPath: String, receiptId: String) async throws  -> ReceiptIssuanceView
 
     /**
      * Queue a new Payment Request proposal and return local derived state.
      */
-    func proposePaymentRequest(counterparty: String, counterpartyReceiverId: String, terms: PaymentRequestTerms) async throws  -> PaymentRequestRecord
+    func proposePaymentRequest(counterparty: String, counterpartyReceiverPath: String, terms: PaymentRequestTerms) async throws  -> PaymentRequestRecord
 
     /**
      * Publish a minimal local recovery marker for a counterparty.
      */
-    func publishEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverId: String) async throws  -> EncryptedLinkRecoveryMarkerReport
+    func publishEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverPath: String) async throws  -> EncryptedLinkRecoveryMarkerReport
 
     /**
      * Publish a blob under this identity's Paykit profile namespace.
@@ -779,7 +779,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Publish a public Contact Marker for a local Contact Record.
      */
-    func publishPublicContact(publicKey: String, receiverId: String) async throws  -> ContactRecord
+    func publishPublicContact(publicKey: String, receiverPath: String) async throws  -> ContactRecord
 
     /**
      * List Receipt Access across non-blocked counterparties, newest first.
@@ -789,22 +789,22 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * List Receipt Access received from one counterparty.
      */
-    func receiptAccessFrom(counterparty: String, counterpartyReceiverId: String) async throws  -> [ReceiptAccessView]
+    func receiptAccessFrom(counterparty: String, counterpartyReceiverPath: String) async throws  -> [ReceiptAccessView]
 
     /**
      * List indexed Receipt Access records for one counterparty.
      */
-    func receiptAccessRecords(counterparty: String, counterpartyReceiverId: String) async throws  -> [ReceiptAccessView]
+    func receiptAccessRecords(counterparty: String, counterpartyReceiverPath: String) async throws  -> [ReceiptAccessView]
 
     /**
      * List local receipt issuance records for one counterparty.
      */
-    func receiptIssuanceRecords(counterparty: String, counterpartyReceiverId: String) async throws  -> [ReceiptIssuanceView]
+    func receiptIssuanceRecords(counterparty: String, counterpartyReceiverPath: String) async throws  -> [ReceiptIssuanceView]
 
     /**
      * List decrypted Receipt records for one issuer, newest first.
      */
-    func receiptRecords(issuer: String, issuerReceiverId: String) async throws  -> [ReceiptRecord]
+    func receiptRecords(issuer: String, issuerReceiverPath: String) async throws  -> [ReceiptRecord]
 
     /**
      * List decrypted receipts across non-blocked issuers, newest first.
@@ -814,12 +814,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * List decrypted receipts from one issuer, newest first.
      */
-    func receiptsFrom(issuer: String, issuerReceiverId: String) async throws  -> [ReceiptRecord]
+    func receiptsFrom(issuer: String, issuerReceiverPath: String) async throws  -> [ReceiptRecord]
 
     /**
      * Receive and durably persist available private messages.
      */
-    func receivePrivateMessages(counterparty: String, counterpartyReceiverId: String) async throws  -> PrivateStreamIntakeReport
+    func receivePrivateMessages(counterparty: String, counterpartyReceiverPath: String) async throws  -> PrivateStreamIntakeReport
 
     /**
      * Receive private messages from every locally linked counterparty.
@@ -829,32 +829,32 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Return inbound Payment Requests received from one counterparty.
      */
-    func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiverId: String) async throws  -> [PaymentRequestRecord]
+    func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiverPath: String) async throws  -> [PaymentRequestRecord]
 
     /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
-    func refreshContactPaykitProfile(publicKey: String, receiverId: String) async throws  -> ContactRecord?
+    func refreshContactPaykitProfile(publicKey: String, receiverPath: String) async throws  -> ContactRecord?
 
     /**
      * Queue rejection for a received Payment Request and return local derived state.
      */
-    func rejectPaymentRequest(counterparty: String, counterpartyReceiverId: String, paymentRequestId: String, reason: String?) async throws  -> PaymentRequestRecord
+    func rejectPaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, reason: String?) async throws  -> PaymentRequestRecord
 
     /**
      * Remove a local Contact Record when it has no public marker to clean up.
      */
-    func removeContact(publicKey: String, receiverId: String) async throws  -> ContactRecord?
+    func removeContact(publicKey: String, receiverPath: String) async throws  -> ContactRecord?
 
     /**
      * Remove the local public recovery marker for a counterparty.
      */
-    func removeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverId: String) async throws  -> EncryptedLinkRecoveryMarkerReport
+    func removeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverPath: String) async throws  -> EncryptedLinkRecoveryMarkerReport
 
     /**
      * Remove a public Contact Marker.
      */
-    func removePublicContact(publicKey: String, receiverId: String) async throws  -> ContactRecord?
+    func removePublicContact(publicKey: String, receiverPath: String) async throws  -> ContactRecord?
 
     /**
      * Resolve payable endpoints for one counterparty.
@@ -864,22 +864,22 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Resolve display metadata for a contact.
      */
-    func resolveContactProfile(publicKey: String, receiverId: String, allowPubkyProfileFallback: Bool) async throws  -> ContactProfileResolution?
+    func resolveContactProfile(publicKey: String, receiverPath: String, allowPubkyProfileFallback: Bool) async throws  -> ContactProfileResolution?
 
     /**
      * Resolve payable private endpoints for one counterparty.
      */
-    func resolvePrivateContactPayment(counterparty: String, counterpartyReceiverId: String, amount: PaymentAmountContext?) async throws  -> ContactPaymentResolution
+    func resolvePrivateContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?) async throws  -> ContactPaymentResolution
 
     /**
      * Resolve public profile metadata, preferring Paykit Profile.
      */
-    func resolveProfile(publicKey: String, receiverId: String, allowPubkyProfileFallback: Bool) async throws  -> ContactProfileResolution?
+    func resolveProfile(publicKey: String, receiverPath: String, allowPubkyProfileFallback: Bool) async throws  -> ContactProfileResolution?
 
     /**
      * Resolve payable public endpoints for one counterparty.
      */
-    func resolvePublicContactPayment(counterparty: String, counterpartyReceiverId: String, amount: PaymentAmountContext?) async throws  -> ContactPaymentResolution
+    func resolvePublicContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?) async throws  -> ContactPaymentResolution
 
     /**
      * Restore SDK-managed backup state from an opaque blob.
@@ -894,7 +894,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
      */
-    func retrieveReceipt(counterparty: String, counterpartyReceiverId: String, receiptId: String) async throws  -> ReceiptRecord
+    func retrieveReceipt(counterparty: String, counterpartyReceiverPath: String, receiptId: String) async throws  -> ReceiptRecord
 
     /**
      * Save or update a local Contact Record.
@@ -914,7 +914,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Queue a Payment Proof for an accepted Payment Request.
      */
-    func submitPaymentProof(counterparty: String, counterpartyReceiverId: String, paymentRequestId: String, proof: PaymentProofSubmission) async throws  -> PaymentRequestRecord
+    func submitPaymentProof(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, proof: PaymentProofSubmission) async throws  -> PaymentRequestRecord
 
     /**
      * Queue Private Payment List updates for saved local contacts.
@@ -949,7 +949,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Remove a local peer block and return the peer to NotLinked.
      */
-    func unblockPeer(counterparty: String, counterpartyReceiverId: String) async throws  -> LinkedPeerRecord
+    func unblockPeer(counterparty: String, counterpartyReceiverPath: String) async throws  -> LinkedPeerRecord
 
     /**
      * Upload profile avatar bytes and return the published blob record.
@@ -1071,13 +1071,13 @@ public static func withPubkyClientConfig(stateStore: SdkStateBlobStore, sessionP
     /**
      * Start an Encrypted Link Handshake as the responder.
      */
-open func acceptLinkWithPeer(counterparty: String, counterpartyReceiverId: String)async throws  -> LinkedPeerHandshakeReport  {
+open func acceptLinkWithPeer(counterparty: String, counterpartyReceiverPath: String)async throws  -> LinkedPeerHandshakeReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_accept_link_with_peer(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1091,13 +1091,13 @@ open func acceptLinkWithPeer(counterparty: String, counterpartyReceiverId: Strin
     /**
      * Queue acceptance for a received Payment Request and return local derived state.
      */
-open func acceptPaymentRequest(counterparty: String, counterpartyReceiverId: String, paymentRequestId: String)async throws  -> PaymentRequestRecord  {
+open func acceptPaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String)async throws  -> PaymentRequestRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_accept_payment_request(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterString.lower(paymentRequestId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(paymentRequestId)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1151,13 +1151,13 @@ open func activeRecurringPaymentRequests()async throws  -> [PaymentRequestRecord
     /**
      * Advance the stored Encrypted Link Handshake for one counterparty.
      */
-open func advanceLinkHandshake(counterparty: String, counterpartyReceiverId: String)async throws  -> LinkedPeerHandshakeReport  {
+open func advanceLinkHandshake(counterparty: String, counterpartyReceiverPath: String)async throws  -> LinkedPeerHandshakeReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_advance_link_handshake(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1171,13 +1171,13 @@ open func advanceLinkHandshake(counterparty: String, counterpartyReceiverId: Str
     /**
      * Block a counterparty for local Paykit private workflows.
      */
-open func blockPeer(counterparty: String, counterpartyReceiverId: String)async throws  -> LinkedPeerRecord  {
+open func blockPeer(counterparty: String, counterpartyReceiverPath: String)async throws  -> LinkedPeerRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_block_peer(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1191,13 +1191,13 @@ open func blockPeer(counterparty: String, counterpartyReceiverId: String)async t
     /**
      * Queue cancellation for a known non-terminal Payment Request.
      */
-open func cancelPaymentRequest(counterparty: String, counterpartyReceiverId: String, paymentRequestId: String, reason: String?)async throws  -> PaymentRequestRecord  {
+open func cancelPaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, reason: String?)async throws  -> PaymentRequestRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_cancel_payment_request(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterString.lower(paymentRequestId),FfiConverterOptionString.lower(reason)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(paymentRequestId),FfiConverterOptionString.lower(reason)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1211,13 +1211,13 @@ open func cancelPaymentRequest(counterparty: String, counterpartyReceiverId: Str
     /**
      * Queue an empty Private Payment List for one counterparty receiver.
      */
-open func clearPrivatePaymentList(counterparty: String, counterpartyReceiverId: String)async throws  -> QueuedPrivateMessage  {
+open func clearPrivatePaymentList(counterparty: String, counterpartyReceiverPath: String)async throws  -> QueuedPrivateMessage  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_clear_private_payment_list(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1231,13 +1231,13 @@ open func clearPrivatePaymentList(counterparty: String, counterpartyReceiverId: 
     /**
      * Queue an empty Private Payment List and process that counterparty's queue.
      */
-open func clearPrivatePaymentListAndProcessOutbound(counterparty: String, counterpartyReceiverId: String)async throws  -> PrivatePaymentListDeliveryReport  {
+open func clearPrivatePaymentListAndProcessOutbound(counterparty: String, counterpartyReceiverPath: String)async throws  -> PrivatePaymentListDeliveryReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1261,13 +1261,13 @@ open func config() -> PaykitSdkConfig  {
     /**
      * Return one local Contact Record.
      */
-open func contactRecord(publicKey: String, receiverId: String)async throws  -> ContactRecord?  {
+open func contactRecord(publicKey: String, receiverPath: String)async throws  -> ContactRecord?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_contact_record(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1301,13 +1301,13 @@ open func contactRecords()async throws  -> [ContactRecord]  {
     /**
      * Return the latest valid Private Payment List view for a counterparty.
      */
-open func currentPrivatePaymentList(counterparty: String, counterpartyReceiverId: String)async throws  -> PrivatePaymentListView?  {
+open func currentPrivatePaymentList(counterparty: String, counterpartyReceiverPath: String)async throws  -> PrivatePaymentListView?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_current_private_payment_list(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1381,13 +1381,13 @@ open func deletePaykitProfile()async throws   {
     /**
      * Return tracked Encrypted Link recovery marker state for a counterparty.
      */
-open func encryptedLinkRecoveryMarkerStatus(counterparty: String, counterpartyReceiverId: String)async throws  -> EncryptedLinkRecoveryMarkerReport?  {
+open func encryptedLinkRecoveryMarkerStatus(counterparty: String, counterpartyReceiverPath: String)async throws  -> EncryptedLinkRecoveryMarkerReport?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_encrypted_link_recovery_marker_status(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1401,13 +1401,13 @@ open func encryptedLinkRecoveryMarkerStatus(counterparty: String, counterpartyRe
     /**
      * Queue the current complete Private Payment List for one counterparty receiver.
      */
-open func enqueuePrivatePaymentList(counterparty: String, counterpartyReceiverId: String)async throws  -> QueuedPrivateMessage  {
+open func enqueuePrivatePaymentList(counterparty: String, counterpartyReceiverPath: String)async throws  -> QueuedPrivateMessage  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_enqueue_private_payment_list(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1421,13 +1421,13 @@ open func enqueuePrivatePaymentList(counterparty: String, counterpartyReceiverId
     /**
      * Queue an explicit complete Private Payment List for one counterparty receiver.
      */
-open func enqueuePrivatePaymentListWithReceivingDetails(counterparty: String, counterpartyReceiverId: String, receivingDetails: [ReceivingDetail])async throws  -> QueuedPrivateMessage  {
+open func enqueuePrivatePaymentListWithReceivingDetails(counterparty: String, counterpartyReceiverPath: String, receivingDetails: [ReceivingDetail])async throws  -> QueuedPrivateMessage  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_enqueue_private_payment_list_with_receiving_details(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterSequenceTypeReceivingDetail.lower(receivingDetails)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterSequenceTypeReceivingDetail.lower(receivingDetails)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1441,13 +1441,13 @@ open func enqueuePrivatePaymentListWithReceivingDetails(counterparty: String, co
     /**
      * Start or advance an Encrypted Link Handshake for one counterparty.
      */
-open func ensureLinkWithPeer(counterparty: String, counterpartyReceiverId: String, maxAdvanceSteps: UInt32)async throws  -> LinkedPeerHandshakeReport  {
+open func ensureLinkWithPeer(counterparty: String, counterpartyReceiverPath: String, maxAdvanceSteps: UInt32)async throws  -> LinkedPeerHandshakeReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_ensure_link_with_peer(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterUInt32.lower(maxAdvanceSteps)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterUInt32.lower(maxAdvanceSteps)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1501,13 +1501,13 @@ open func exportBackupString()async throws  -> String  {
     /**
      * Fetch a public Paykit Profile.
      */
-open func fetchPaykitProfile(publicKey: String, receiverId: String)async throws  -> PaykitProfileRecord?  {
+open func fetchPaykitProfile(publicKey: String, receiverPath: String)async throws  -> PaykitProfileRecord?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_fetch_paykit_profile(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1641,13 +1641,13 @@ open func initialize()async throws  -> InitializationReport  {
     /**
      * Start an Encrypted Link Handshake as the initiator.
      */
-open func initiateLinkWithPeer(counterparty: String, counterpartyReceiverId: String)async throws  -> LinkedPeerHandshakeReport  {
+open func initiateLinkWithPeer(counterparty: String, counterpartyReceiverPath: String)async throws  -> LinkedPeerHandshakeReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_initiate_link_with_peer(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1661,13 +1661,13 @@ open func initiateLinkWithPeer(counterparty: String, counterpartyReceiverId: Str
     /**
      * Prepare, store, and queue Receipt Access for private delivery.
      */
-open func issueReceipt(counterparty: String, counterpartyReceiverId: String, draft: ReceiptDraft)async throws  -> ReceiptIssuanceView  {
+open func issueReceipt(counterparty: String, counterpartyReceiverPath: String, draft: ReceiptDraft)async throws  -> ReceiptIssuanceView  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_issue_receipt(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterTypeReceiptDraft_lower(draft)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterTypeReceiptDraft_lower(draft)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1701,13 +1701,13 @@ open func issuedReceipts()async throws  -> [ReceiptIssuanceView]  {
     /**
      * List issued receipts for one counterparty, newest first.
      */
-open func issuedReceiptsTo(counterparty: String, counterpartyReceiverId: String)async throws  -> [ReceiptIssuanceView]  {
+open func issuedReceiptsTo(counterparty: String, counterpartyReceiverPath: String)async throws  -> [ReceiptIssuanceView]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_issued_receipts_to(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1761,13 +1761,13 @@ open func listPaymentRequests(filter: PaymentRequestFilter)async throws  -> [Pay
     /**
      * Observe a counterparty's public recovery marker.
      */
-open func observeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverId: String)async throws  -> EncryptedLinkRecoveryMarkerReport  {
+open func observeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverPath: String)async throws  -> EncryptedLinkRecoveryMarkerReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_observe_encrypted_link_recovery_marker(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1779,13 +1779,13 @@ open func observeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyR
 }
 
     /**
-     * List public Paykit receiver folder ids for a Pubky identity.
+     * List public Paykit receiver paths for a Pubky identity.
      */
-open func paykitReceiverIds(publicKey: String)async throws  -> [String]  {
+open func paykitReceiverPaths(publicKey: String)async throws  -> [String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_paykit_fn_method_ffipaykitsdk_paykit_receiver_ids(
+                uniffi_paykit_fn_method_ffipaykitsdk_paykit_receiver_paths(
                     self.uniffiClonePointer(),
                     FfiConverterString.lower(publicKey)
                 )
@@ -1821,13 +1821,13 @@ open func paymentRequests()async throws  -> [PaymentRequestRecord]  {
     /**
      * Return Payment Requests involving one counterparty.
      */
-open func paymentRequestsWith(counterparty: String, counterpartyReceiverId: String)async throws  -> [PaymentRequestRecord]  {
+open func paymentRequestsWith(counterparty: String, counterpartyReceiverPath: String)async throws  -> [PaymentRequestRecord]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_payment_requests_with(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1866,13 +1866,13 @@ open func pendingOutboundPrivateCounterparties()async throws  -> [CounterpartyRe
      * send/receive work for the peer, then resolves endpoints private-first.
      * Public endpoints are included only when requested.
      */
-open func prepareAndResolveContactPayment(counterparty: String, counterpartyReceiverId: String, amount: PaymentAmountContext?, includePublicEndpoints: Bool, maxAdvanceSteps: UInt32)async throws  -> PreparedContactPayment  {
+open func prepareAndResolveContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?, includePublicEndpoints: Bool, maxAdvanceSteps: UInt32)async throws  -> PreparedContactPayment  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_prepare_and_resolve_contact_payment(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterOptionTypePaymentAmountContext.lower(amount),FfiConverterBool.lower(includePublicEndpoints),FfiConverterUInt32.lower(maxAdvanceSteps)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterOptionTypePaymentAmountContext.lower(amount),FfiConverterBool.lower(includePublicEndpoints),FfiConverterUInt32.lower(maxAdvanceSteps)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1886,13 +1886,13 @@ open func prepareAndResolveContactPayment(counterparty: String, counterpartyRece
     /**
      * Prepare a receipt issuance and persist it before network side effects.
      */
-open func prepareReceiptIssuance(counterparty: String, counterpartyReceiverId: String, draft: ReceiptDraft)async throws  -> ReceiptIssuanceView  {
+open func prepareReceiptIssuance(counterparty: String, counterpartyReceiverPath: String, draft: ReceiptDraft)async throws  -> ReceiptIssuanceView  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_prepare_receipt_issuance(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterTypeReceiptDraft_lower(draft)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterTypeReceiptDraft_lower(draft)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1906,13 +1906,13 @@ open func prepareReceiptIssuance(counterparty: String, counterpartyReceiverId: S
     /**
      * Send queued outbound private messages for one counterparty in order.
      */
-open func processOutboundPrivateMessages(counterparty: String, counterpartyReceiverId: String)async throws  -> OutboundPrivateSendReport  {
+open func processOutboundPrivateMessages(counterparty: String, counterpartyReceiverPath: String)async throws  -> OutboundPrivateSendReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_process_outbound_private_messages(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1946,13 +1946,13 @@ open func processPendingPrivateMessages()async throws  -> [OutboundPrivateCounte
     /**
      * Continue storage and Receipt Access queueing for a prepared issuance.
      */
-open func processReceiptIssuance(counterparty: String, counterpartyReceiverId: String, receiptId: String)async throws  -> ReceiptIssuanceView  {
+open func processReceiptIssuance(counterparty: String, counterpartyReceiverPath: String, receiptId: String)async throws  -> ReceiptIssuanceView  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_process_receipt_issuance(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterString.lower(receiptId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(receiptId)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1966,13 +1966,13 @@ open func processReceiptIssuance(counterparty: String, counterpartyReceiverId: S
     /**
      * Queue a new Payment Request proposal and return local derived state.
      */
-open func proposePaymentRequest(counterparty: String, counterpartyReceiverId: String, terms: PaymentRequestTerms)async throws  -> PaymentRequestRecord  {
+open func proposePaymentRequest(counterparty: String, counterpartyReceiverPath: String, terms: PaymentRequestTerms)async throws  -> PaymentRequestRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_propose_payment_request(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterTypePaymentRequestTerms_lower(terms)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterTypePaymentRequestTerms_lower(terms)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1986,13 +1986,13 @@ open func proposePaymentRequest(counterparty: String, counterpartyReceiverId: St
     /**
      * Publish a minimal local recovery marker for a counterparty.
      */
-open func publishEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverId: String)async throws  -> EncryptedLinkRecoveryMarkerReport  {
+open func publishEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverPath: String)async throws  -> EncryptedLinkRecoveryMarkerReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_publish_encrypted_link_recovery_marker(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2046,13 +2046,13 @@ open func publishPaykitProfile(profile: PaykitProfile)async throws  -> PaykitPro
     /**
      * Publish a public Contact Marker for a local Contact Record.
      */
-open func publishPublicContact(publicKey: String, receiverId: String)async throws  -> ContactRecord  {
+open func publishPublicContact(publicKey: String, receiverPath: String)async throws  -> ContactRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_publish_public_contact(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2086,13 +2086,13 @@ open func receiptAccess()async throws  -> [ReceiptAccessView]  {
     /**
      * List Receipt Access received from one counterparty.
      */
-open func receiptAccessFrom(counterparty: String, counterpartyReceiverId: String)async throws  -> [ReceiptAccessView]  {
+open func receiptAccessFrom(counterparty: String, counterpartyReceiverPath: String)async throws  -> [ReceiptAccessView]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_receipt_access_from(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2106,13 +2106,13 @@ open func receiptAccessFrom(counterparty: String, counterpartyReceiverId: String
     /**
      * List indexed Receipt Access records for one counterparty.
      */
-open func receiptAccessRecords(counterparty: String, counterpartyReceiverId: String)async throws  -> [ReceiptAccessView]  {
+open func receiptAccessRecords(counterparty: String, counterpartyReceiverPath: String)async throws  -> [ReceiptAccessView]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_receipt_access_records(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2126,13 +2126,13 @@ open func receiptAccessRecords(counterparty: String, counterpartyReceiverId: Str
     /**
      * List local receipt issuance records for one counterparty.
      */
-open func receiptIssuanceRecords(counterparty: String, counterpartyReceiverId: String)async throws  -> [ReceiptIssuanceView]  {
+open func receiptIssuanceRecords(counterparty: String, counterpartyReceiverPath: String)async throws  -> [ReceiptIssuanceView]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_receipt_issuance_records(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2146,13 +2146,13 @@ open func receiptIssuanceRecords(counterparty: String, counterpartyReceiverId: S
     /**
      * List decrypted Receipt records for one issuer, newest first.
      */
-open func receiptRecords(issuer: String, issuerReceiverId: String)async throws  -> [ReceiptRecord]  {
+open func receiptRecords(issuer: String, issuerReceiverPath: String)async throws  -> [ReceiptRecord]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_receipt_records(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(issuer),FfiConverterString.lower(issuerReceiverId)
+                    FfiConverterString.lower(issuer),FfiConverterString.lower(issuerReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2186,13 +2186,13 @@ open func receipts()async throws  -> [ReceiptRecord]  {
     /**
      * List decrypted receipts from one issuer, newest first.
      */
-open func receiptsFrom(issuer: String, issuerReceiverId: String)async throws  -> [ReceiptRecord]  {
+open func receiptsFrom(issuer: String, issuerReceiverPath: String)async throws  -> [ReceiptRecord]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_receipts_from(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(issuer),FfiConverterString.lower(issuerReceiverId)
+                    FfiConverterString.lower(issuer),FfiConverterString.lower(issuerReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2206,13 +2206,13 @@ open func receiptsFrom(issuer: String, issuerReceiverId: String)async throws  ->
     /**
      * Receive and durably persist available private messages.
      */
-open func receivePrivateMessages(counterparty: String, counterpartyReceiverId: String)async throws  -> PrivateStreamIntakeReport  {
+open func receivePrivateMessages(counterparty: String, counterpartyReceiverPath: String)async throws  -> PrivateStreamIntakeReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_receive_private_messages(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2246,13 +2246,13 @@ open func receivePrivateMessagesFromLinkedPeers()async throws  -> [PrivateStream
     /**
      * Return inbound Payment Requests received from one counterparty.
      */
-open func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiverId: String)async throws  -> [PaymentRequestRecord]  {
+open func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiverPath: String)async throws  -> [PaymentRequestRecord]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_received_payment_requests_from(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2266,13 +2266,13 @@ open func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiver
     /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
-open func refreshContactPaykitProfile(publicKey: String, receiverId: String)async throws  -> ContactRecord?  {
+open func refreshContactPaykitProfile(publicKey: String, receiverPath: String)async throws  -> ContactRecord?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_refresh_contact_paykit_profile(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2286,13 +2286,13 @@ open func refreshContactPaykitProfile(publicKey: String, receiverId: String)asyn
     /**
      * Queue rejection for a received Payment Request and return local derived state.
      */
-open func rejectPaymentRequest(counterparty: String, counterpartyReceiverId: String, paymentRequestId: String, reason: String?)async throws  -> PaymentRequestRecord  {
+open func rejectPaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, reason: String?)async throws  -> PaymentRequestRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_reject_payment_request(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterString.lower(paymentRequestId),FfiConverterOptionString.lower(reason)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(paymentRequestId),FfiConverterOptionString.lower(reason)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2306,13 +2306,13 @@ open func rejectPaymentRequest(counterparty: String, counterpartyReceiverId: Str
     /**
      * Remove a local Contact Record when it has no public marker to clean up.
      */
-open func removeContact(publicKey: String, receiverId: String)async throws  -> ContactRecord?  {
+open func removeContact(publicKey: String, receiverPath: String)async throws  -> ContactRecord?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_remove_contact(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2326,13 +2326,13 @@ open func removeContact(publicKey: String, receiverId: String)async throws  -> C
     /**
      * Remove the local public recovery marker for a counterparty.
      */
-open func removeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverId: String)async throws  -> EncryptedLinkRecoveryMarkerReport  {
+open func removeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverPath: String)async throws  -> EncryptedLinkRecoveryMarkerReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_remove_encrypted_link_recovery_marker(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2346,13 +2346,13 @@ open func removeEncryptedLinkRecoveryMarker(counterparty: String, counterpartyRe
     /**
      * Remove a public Contact Marker.
      */
-open func removePublicContact(publicKey: String, receiverId: String)async throws  -> ContactRecord?  {
+open func removePublicContact(publicKey: String, receiverPath: String)async throws  -> ContactRecord?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_remove_public_contact(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2386,13 +2386,13 @@ open func resolveContactPayment(request: ContactPaymentResolutionRequest)async t
     /**
      * Resolve display metadata for a contact.
      */
-open func resolveContactProfile(publicKey: String, receiverId: String, allowPubkyProfileFallback: Bool)async throws  -> ContactProfileResolution?  {
+open func resolveContactProfile(publicKey: String, receiverPath: String, allowPubkyProfileFallback: Bool)async throws  -> ContactProfileResolution?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_resolve_contact_profile(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId),FfiConverterBool.lower(allowPubkyProfileFallback)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath),FfiConverterBool.lower(allowPubkyProfileFallback)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2406,13 +2406,13 @@ open func resolveContactProfile(publicKey: String, receiverId: String, allowPubk
     /**
      * Resolve payable private endpoints for one counterparty.
      */
-open func resolvePrivateContactPayment(counterparty: String, counterpartyReceiverId: String, amount: PaymentAmountContext?)async throws  -> ContactPaymentResolution  {
+open func resolvePrivateContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?)async throws  -> ContactPaymentResolution  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_resolve_private_contact_payment(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterOptionTypePaymentAmountContext.lower(amount)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterOptionTypePaymentAmountContext.lower(amount)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2426,13 +2426,13 @@ open func resolvePrivateContactPayment(counterparty: String, counterpartyReceive
     /**
      * Resolve public profile metadata, preferring Paykit Profile.
      */
-open func resolveProfile(publicKey: String, receiverId: String, allowPubkyProfileFallback: Bool)async throws  -> ContactProfileResolution?  {
+open func resolveProfile(publicKey: String, receiverPath: String, allowPubkyProfileFallback: Bool)async throws  -> ContactProfileResolution?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_resolve_profile(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverId),FfiConverterBool.lower(allowPubkyProfileFallback)
+                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath),FfiConverterBool.lower(allowPubkyProfileFallback)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2446,13 +2446,13 @@ open func resolveProfile(publicKey: String, receiverId: String, allowPubkyProfil
     /**
      * Resolve payable public endpoints for one counterparty.
      */
-open func resolvePublicContactPayment(counterparty: String, counterpartyReceiverId: String, amount: PaymentAmountContext?)async throws  -> ContactPaymentResolution  {
+open func resolvePublicContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?)async throws  -> ContactPaymentResolution  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_resolve_public_contact_payment(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterOptionTypePaymentAmountContext.lower(amount)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterOptionTypePaymentAmountContext.lower(amount)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2506,13 +2506,13 @@ open func restoreBackupString(backup: String)async throws  -> RestoreReport  {
     /**
      * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
      */
-open func retrieveReceipt(counterparty: String, counterpartyReceiverId: String, receiptId: String)async throws  -> ReceiptRecord  {
+open func retrieveReceipt(counterparty: String, counterpartyReceiverPath: String, receiptId: String)async throws  -> ReceiptRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_retrieve_receipt(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterString.lower(receiptId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(receiptId)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2576,13 +2576,13 @@ open func stateRevision()throws  -> String?  {
     /**
      * Queue a Payment Proof for an accepted Payment Request.
      */
-open func submitPaymentProof(counterparty: String, counterpartyReceiverId: String, paymentRequestId: String, proof: PaymentProofSubmission)async throws  -> PaymentRequestRecord  {
+open func submitPaymentProof(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, proof: PaymentProofSubmission)async throws  -> PaymentRequestRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_submit_payment_proof(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId),FfiConverterString.lower(paymentRequestId),FfiConverterTypePaymentProofSubmission_lower(proof)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(paymentRequestId),FfiConverterTypePaymentProofSubmission_lower(proof)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2716,13 +2716,13 @@ open func syncPublicEndpointsWithReceivingDetails(receivingDetails: [ReceivingDe
     /**
      * Remove a local peer block and return the peer to NotLinked.
      */
-open func unblockPeer(counterparty: String, counterpartyReceiverId: String)async throws  -> LinkedPeerRecord  {
+open func unblockPeer(counterparty: String, counterpartyReceiverPath: String)async throws  -> LinkedPeerRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_unblock_peer(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -4494,7 +4494,7 @@ public protocol SdkPaymentAdapter: AnyObject, Sendable {
     /**
      * Reserve receiving details for a counterparty's Private Payment List.
      */
-    func reserveReceivingDetails(counterparty: String, counterpartyReceiverId: String) throws  -> ReceivingDetailReservationResponse
+    func reserveReceivingDetails(counterparty: String, counterpartyReceiverPath: String) throws  -> ReceivingDetailReservationResponse
 
     /**
      * Cancel a previously reserved receiving detail.
@@ -4581,11 +4581,11 @@ open func currentReceivingDetails(scope: ReceivingDetailScope)throws  -> [Receiv
     /**
      * Reserve receiving details for a counterparty's Private Payment List.
      */
-open func reserveReceivingDetails(counterparty: String, counterpartyReceiverId: String)throws  -> ReceivingDetailReservationResponse  {
+open func reserveReceivingDetails(counterparty: String, counterpartyReceiverPath: String)throws  -> ReceivingDetailReservationResponse  {
     return try  FfiConverterTypeReceivingDetailReservationResponse_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
     uniffi_paykit_fn_method_ffisdkpaymentadapter_reserve_receiving_details(self.uniffiClonePointer(),
         FfiConverterString.lower(counterparty),
-        FfiConverterString.lower(counterpartyReceiverId),$0
+        FfiConverterString.lower(counterpartyReceiverPath),$0
     )
 })
 }
@@ -4663,7 +4663,7 @@ fileprivate struct UniffiCallbackInterfaceFfiSdkPaymentAdapter {
         reserveReceivingDetails: { (
             uniffiHandle: UInt64,
             counterparty: RustBuffer,
-            counterpartyReceiverId: RustBuffer,
+            counterpartyReceiverPath: RustBuffer,
             uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -4674,7 +4674,7 @@ fileprivate struct UniffiCallbackInterfaceFfiSdkPaymentAdapter {
                 }
                 return try uniffiObj.reserveReceivingDetails(
                      counterparty: try FfiConverterString.lift(counterparty),
-                     counterpartyReceiverId: try FfiConverterString.lift(counterpartyReceiverId)
+                     counterpartyReceiverPath: try FfiConverterString.lift(counterpartyReceiverPath)
                 )
             }
 
@@ -5643,9 +5643,9 @@ public struct ContactPaymentResolutionRequest {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Optional amount context used by the payment adapter.
      */
@@ -5662,8 +5662,8 @@ public struct ContactPaymentResolutionRequest {
          * Counterparty to pay.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Optional amount context used by the payment adapter.
          */amount: PaymentAmountContext?,
@@ -5671,7 +5671,7 @@ public struct ContactPaymentResolutionRequest {
          * Include public Payment Endpoints after private candidates.
          */includePublicEndpoints: Bool) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.amount = amount
         self.includePublicEndpoints = includePublicEndpoints
     }
@@ -5687,7 +5687,7 @@ extension ContactPaymentResolutionRequest: Equatable, Hashable {
         if lhs.counterparty != rhs.counterparty {
             return false
         }
-        if lhs.counterpartyReceiverId != rhs.counterpartyReceiverId {
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
             return false
         }
         if lhs.amount != rhs.amount {
@@ -5701,7 +5701,7 @@ extension ContactPaymentResolutionRequest: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(counterparty)
-        hasher.combine(counterpartyReceiverId)
+        hasher.combine(counterpartyReceiverPath)
         hasher.combine(amount)
         hasher.combine(includePublicEndpoints)
     }
@@ -5719,7 +5719,7 @@ public struct FfiConverterTypeContactPaymentResolutionRequest: FfiConverterRustB
         return
             try ContactPaymentResolutionRequest(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 amount: FfiConverterOptionTypePaymentAmountContext.read(from: &buf),
                 includePublicEndpoints: FfiConverterBool.read(from: &buf)
         )
@@ -5727,7 +5727,7 @@ public struct FfiConverterTypeContactPaymentResolutionRequest: FfiConverterRustB
 
     public static func write(_ value: ContactPaymentResolutionRequest, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterOptionTypePaymentAmountContext.write(value.amount, into: &buf)
         FfiConverterBool.write(value.includePublicEndpoints, into: &buf)
     }
@@ -5915,9 +5915,9 @@ public struct ContactRecord {
      */
     public var publicKey: String
     /**
-     * Contact Paykit receiver folder id.
+     * Contact Paykit receiver path.
      */
-    public var receiverId: String
+    public var receiverPath: String
     /**
      * Optional local display label.
      */
@@ -5962,8 +5962,8 @@ public struct ContactRecord {
          * Contact public key.
          */publicKey: String,
         /**
-         * Contact Paykit receiver folder id.
-         */receiverId: String,
+         * Contact Paykit receiver path.
+         */receiverPath: String,
         /**
          * Optional local display label.
          */label: String?,
@@ -5992,7 +5992,7 @@ public struct ContactRecord {
          * Last public contact marker publication/removal error.
          */publicContactLastError: String?) {
         self.publicKey = publicKey
-        self.receiverId = receiverId
+        self.receiverPath = receiverPath
         self.label = label
         self.profile = profile
         self.profileFetchedAt = profileFetchedAt
@@ -6015,7 +6015,7 @@ extension ContactRecord: Equatable, Hashable {
         if lhs.publicKey != rhs.publicKey {
             return false
         }
-        if lhs.receiverId != rhs.receiverId {
+        if lhs.receiverPath != rhs.receiverPath {
             return false
         }
         if lhs.label != rhs.label {
@@ -6050,7 +6050,7 @@ extension ContactRecord: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(publicKey)
-        hasher.combine(receiverId)
+        hasher.combine(receiverPath)
         hasher.combine(label)
         hasher.combine(profile)
         hasher.combine(profileFetchedAt)
@@ -6075,7 +6075,7 @@ public struct FfiConverterTypeContactRecord: FfiConverterRustBuffer {
         return
             try ContactRecord(
                 publicKey: FfiConverterString.read(from: &buf),
-                receiverId: FfiConverterString.read(from: &buf),
+                receiverPath: FfiConverterString.read(from: &buf),
                 label: FfiConverterOptionString.read(from: &buf),
                 profile: FfiConverterOptionTypePaykitProfile.read(from: &buf),
                 profileFetchedAt: FfiConverterOptionString.read(from: &buf),
@@ -6090,7 +6090,7 @@ public struct FfiConverterTypeContactRecord: FfiConverterRustBuffer {
 
     public static func write(_ value: ContactRecord, into buf: inout [UInt8]) {
         FfiConverterString.write(value.publicKey, into: &buf)
-        FfiConverterString.write(value.receiverId, into: &buf)
+        FfiConverterString.write(value.receiverPath, into: &buf)
         FfiConverterOptionString.write(value.label, into: &buf)
         FfiConverterOptionTypePaykitProfile.write(value.profile, into: &buf)
         FfiConverterOptionString.write(value.profileFetchedAt, into: &buf)
@@ -6128,9 +6128,9 @@ public struct ContactUpdate {
      */
     public var publicKey: String
     /**
-     * Contact Paykit receiver folder id.
+     * Contact Paykit receiver path.
      */
-    public var receiverId: String
+    public var receiverPath: String
     /**
      * Optional local display label.
      */
@@ -6143,13 +6143,13 @@ public struct ContactUpdate {
          * Contact public key.
          */publicKey: String,
         /**
-         * Contact Paykit receiver folder id.
-         */receiverId: String,
+         * Contact Paykit receiver path.
+         */receiverPath: String,
         /**
          * Optional local display label.
          */label: String?) {
         self.publicKey = publicKey
-        self.receiverId = receiverId
+        self.receiverPath = receiverPath
         self.label = label
     }
 }
@@ -6164,7 +6164,7 @@ extension ContactUpdate: Equatable, Hashable {
         if lhs.publicKey != rhs.publicKey {
             return false
         }
-        if lhs.receiverId != rhs.receiverId {
+        if lhs.receiverPath != rhs.receiverPath {
             return false
         }
         if lhs.label != rhs.label {
@@ -6175,7 +6175,7 @@ extension ContactUpdate: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(publicKey)
-        hasher.combine(receiverId)
+        hasher.combine(receiverPath)
         hasher.combine(label)
     }
 }
@@ -6192,14 +6192,14 @@ public struct FfiConverterTypeContactUpdate: FfiConverterRustBuffer {
         return
             try ContactUpdate(
                 publicKey: FfiConverterString.read(from: &buf),
-                receiverId: FfiConverterString.read(from: &buf),
+                receiverPath: FfiConverterString.read(from: &buf),
                 label: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: ContactUpdate, into buf: inout [UInt8]) {
         FfiConverterString.write(value.publicKey, into: &buf)
-        FfiConverterString.write(value.receiverId, into: &buf)
+        FfiConverterString.write(value.receiverPath, into: &buf)
         FfiConverterOptionString.write(value.label, into: &buf)
     }
 }
@@ -6221,7 +6221,7 @@ public func FfiConverterTypeContactUpdate_lower(_ value: ContactUpdate) -> RustB
 
 
 /**
- * Counterparty plus the Paykit receiver folder used for private workflows.
+ * Counterparty plus the Paykit receiver path used for private workflows.
  */
 public struct CounterpartyReceiver {
     /**
@@ -6229,9 +6229,9 @@ public struct CounterpartyReceiver {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -6240,10 +6240,10 @@ public struct CounterpartyReceiver {
          * Counterparty public key.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String) {
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
     }
 }
 
@@ -6257,7 +6257,7 @@ extension CounterpartyReceiver: Equatable, Hashable {
         if lhs.counterparty != rhs.counterparty {
             return false
         }
-        if lhs.counterpartyReceiverId != rhs.counterpartyReceiverId {
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
             return false
         }
         return true
@@ -6265,7 +6265,7 @@ extension CounterpartyReceiver: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(counterparty)
-        hasher.combine(counterpartyReceiverId)
+        hasher.combine(counterpartyReceiverPath)
     }
 }
 
@@ -6281,13 +6281,13 @@ public struct FfiConverterTypeCounterpartyReceiver: FfiConverterRustBuffer {
         return
             try CounterpartyReceiver(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf)
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: CounterpartyReceiver, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
     }
 }
 
@@ -6316,9 +6316,9 @@ public struct EncryptedLinkRecoveryMarkerReport {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Current Linked Peer state.
      */
@@ -6355,8 +6355,8 @@ public struct EncryptedLinkRecoveryMarkerReport {
          * Counterparty public key.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Current Linked Peer state.
          */state: LinkedPeerState,
@@ -6379,7 +6379,7 @@ public struct EncryptedLinkRecoveryMarkerReport {
          * Whether this operation observed a new counterparty marker.
          */remoteMarkerChanged: Bool) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.state = state
         self.localAttemptId = localAttemptId
         self.localMarkerCreatedAt = localMarkerCreatedAt
@@ -6404,7 +6404,7 @@ public struct FfiConverterTypeEncryptedLinkRecoveryMarkerReport: FfiConverterRus
         return
             try EncryptedLinkRecoveryMarkerReport(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 state: FfiConverterTypeLinkedPeerState.read(from: &buf),
                 localAttemptId: FfiConverterOptionString.read(from: &buf),
                 localMarkerCreatedAt: FfiConverterOptionString.read(from: &buf),
@@ -6417,7 +6417,7 @@ public struct FfiConverterTypeEncryptedLinkRecoveryMarkerReport: FfiConverterRus
 
     public static func write(_ value: EncryptedLinkRecoveryMarkerReport, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterTypeLinkedPeerState.write(value.state, into: &buf)
         FfiConverterOptionString.write(value.localAttemptId, into: &buf)
         FfiConverterOptionString.write(value.localMarkerCreatedAt, into: &buf)
@@ -6958,9 +6958,9 @@ public struct LinkedPeerHandshakeReport {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Current Linked Peer state after the operation.
      */
@@ -6981,8 +6981,8 @@ public struct LinkedPeerHandshakeReport {
          * Counterparty public key.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Current Linked Peer state after the operation.
          */state: LinkedPeerState,
@@ -6993,7 +6993,7 @@ public struct LinkedPeerHandshakeReport {
          * In-progress handshake role, when a handshake remains pending.
          */handshakeRole: EncryptedLinkHandshakeRole?) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.state = state
         self.generation = generation
         self.handshakeRole = handshakeRole
@@ -7010,7 +7010,7 @@ extension LinkedPeerHandshakeReport: Equatable, Hashable {
         if lhs.counterparty != rhs.counterparty {
             return false
         }
-        if lhs.counterpartyReceiverId != rhs.counterpartyReceiverId {
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
             return false
         }
         if lhs.state != rhs.state {
@@ -7027,7 +7027,7 @@ extension LinkedPeerHandshakeReport: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(counterparty)
-        hasher.combine(counterpartyReceiverId)
+        hasher.combine(counterpartyReceiverPath)
         hasher.combine(state)
         hasher.combine(generation)
         hasher.combine(handshakeRole)
@@ -7046,7 +7046,7 @@ public struct FfiConverterTypeLinkedPeerHandshakeReport: FfiConverterRustBuffer 
         return
             try LinkedPeerHandshakeReport(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 state: FfiConverterTypeLinkedPeerState.read(from: &buf),
                 generation: FfiConverterUInt64.read(from: &buf),
                 handshakeRole: FfiConverterOptionTypeEncryptedLinkHandshakeRole.read(from: &buf)
@@ -7055,7 +7055,7 @@ public struct FfiConverterTypeLinkedPeerHandshakeReport: FfiConverterRustBuffer 
 
     public static func write(_ value: LinkedPeerHandshakeReport, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterTypeLinkedPeerState.write(value.state, into: &buf)
         FfiConverterUInt64.write(value.generation, into: &buf)
         FfiConverterOptionTypeEncryptedLinkHandshakeRole.write(value.handshakeRole, into: &buf)
@@ -7087,9 +7087,9 @@ public struct LinkedPeerRecord {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Current local relationship/link state.
      */
@@ -7134,8 +7134,8 @@ public struct LinkedPeerRecord {
          * Counterparty public key.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Current local relationship/link state.
          */state: LinkedPeerState,
@@ -7164,7 +7164,7 @@ public struct LinkedPeerRecord {
          * Time the counterparty recovery marker was observed as RFC3339 text.
          */remoteRecoveryMarkerObservedAt: String?) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.state = state
         self.lastSyncAt = lastSyncAt
         self.lastPrivateReceiveAt = lastPrivateReceiveAt
@@ -7191,7 +7191,7 @@ public struct FfiConverterTypeLinkedPeerRecord: FfiConverterRustBuffer {
         return
             try LinkedPeerRecord(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 state: FfiConverterTypeLinkedPeerState.read(from: &buf),
                 lastSyncAt: FfiConverterOptionString.read(from: &buf),
                 lastPrivateReceiveAt: FfiConverterOptionString.read(from: &buf),
@@ -7206,7 +7206,7 @@ public struct FfiConverterTypeLinkedPeerRecord: FfiConverterRustBuffer {
 
     public static func write(_ value: LinkedPeerRecord, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterTypeLinkedPeerState.write(value.state, into: &buf)
         FfiConverterOptionString.write(value.lastSyncAt, into: &buf)
         FfiConverterOptionString.write(value.lastPrivateReceiveAt, into: &buf)
@@ -7244,9 +7244,9 @@ public struct OutboundPrivateCounterpartySendReport {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Successful send report, when processing completed.
      */
@@ -7263,8 +7263,8 @@ public struct OutboundPrivateCounterpartySendReport {
          * Counterparty whose queue was processed.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Successful send report, when processing completed.
          */report: OutboundPrivateSendReport?,
@@ -7272,7 +7272,7 @@ public struct OutboundPrivateCounterpartySendReport {
          * Error text, when processing failed for this counterparty.
          */error: PrivateOperationError?) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.report = report
         self.error = error
     }
@@ -7292,7 +7292,7 @@ public struct FfiConverterTypeOutboundPrivateCounterpartySendReport: FfiConverte
         return
             try OutboundPrivateCounterpartySendReport(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 report: FfiConverterOptionTypeOutboundPrivateSendReport.read(from: &buf),
                 error: FfiConverterOptionTypePrivateOperationError.read(from: &buf)
         )
@@ -7300,7 +7300,7 @@ public struct FfiConverterTypeOutboundPrivateCounterpartySendReport: FfiConverte
 
     public static func write(_ value: OutboundPrivateCounterpartySendReport, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterOptionTypeOutboundPrivateSendReport.write(value.report, into: &buf)
         FfiConverterOptionTypePrivateOperationError.write(value.error, into: &buf)
     }
@@ -7836,9 +7836,9 @@ public func FfiConverterTypePaykitProfileRecord_lower(_ value: PaykitProfileReco
  */
 public struct PaykitSdkConfig {
     /**
-     * Receiver folder for this app/runtime under `/pub/paykit/v0/receivers`.
+     * Receiver folder for this app/runtime under `/pub/paykit/v0/{app}/{wallet|server}`.
      */
-    public var receiverId: String
+    public var receiverPath: String
     /**
      * Namespace segment for SDK profile/contact public data under `/pub/`.
      */
@@ -7872,8 +7872,8 @@ public struct PaykitSdkConfig {
     // declare one manually.
     public init(
         /**
-         * Receiver folder for this app/runtime under `/pub/paykit/v0/receivers`.
-         */receiverId: String,
+         * Receiver folder for this app/runtime under `/pub/paykit/v0/{app}/{wallet|server}`.
+         */receiverPath: String,
         /**
          * Namespace segment for SDK profile/contact public data under `/pub/`.
          */profileNamespace: String,
@@ -7895,7 +7895,7 @@ public struct PaykitSdkConfig {
         /**
          * Minimum delay before retrying a failed outbound private send in seconds.
          */outboundPrivateRetryBackoffSecs: UInt64) {
-        self.receiverId = receiverId
+        self.receiverPath = receiverPath
         self.profileNamespace = profileNamespace
         self.endpointManagementScope = endpointManagementScope
         self.encryptedLinkRecoveryMarkers = encryptedLinkRecoveryMarkers
@@ -7913,7 +7913,7 @@ extension PaykitSdkConfig: Sendable {}
 
 extension PaykitSdkConfig: Equatable, Hashable {
     public static func ==(lhs: PaykitSdkConfig, rhs: PaykitSdkConfig) -> Bool {
-        if lhs.receiverId != rhs.receiverId {
+        if lhs.receiverPath != rhs.receiverPath {
             return false
         }
         if lhs.profileNamespace != rhs.profileNamespace {
@@ -7941,7 +7941,7 @@ extension PaykitSdkConfig: Equatable, Hashable {
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(receiverId)
+        hasher.combine(receiverPath)
         hasher.combine(profileNamespace)
         hasher.combine(endpointManagementScope)
         hasher.combine(encryptedLinkRecoveryMarkers)
@@ -7963,7 +7963,7 @@ public struct FfiConverterTypePaykitSdkConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaykitSdkConfig {
         return
             try PaykitSdkConfig(
-                receiverId: FfiConverterString.read(from: &buf),
+                receiverPath: FfiConverterString.read(from: &buf),
                 profileNamespace: FfiConverterString.read(from: &buf),
                 endpointManagementScope: FfiConverterTypeEndpointManagementScope.read(from: &buf),
                 encryptedLinkRecoveryMarkers: FfiConverterTypeEncryptedLinkRecoveryMarkerPolicy.read(from: &buf),
@@ -7975,7 +7975,7 @@ public struct FfiConverterTypePaykitSdkConfig: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: PaykitSdkConfig, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.receiverId, into: &buf)
+        FfiConverterString.write(value.receiverPath, into: &buf)
         FfiConverterString.write(value.profileNamespace, into: &buf)
         FfiConverterTypeEndpointManagementScope.write(value.endpointManagementScope, into: &buf)
         FfiConverterTypeEncryptedLinkRecoveryMarkerPolicy.write(value.encryptedLinkRecoveryMarkers, into: &buf)
@@ -8102,9 +8102,9 @@ public struct PaymentEndpointCandidate {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Where the endpoint was discovered.
      */
@@ -8128,8 +8128,8 @@ public struct PaymentEndpointCandidate {
          * Counterparty that published the endpoint.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Where the endpoint was discovered.
          */source: PaymentEndpointSource,
@@ -8141,7 +8141,7 @@ public struct PaymentEndpointCandidate {
          */payload: PaymentPayload) {
         self.candidateId = candidateId
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.source = source
         self.identifier = identifier
         self.payload = payload
@@ -8163,7 +8163,7 @@ public struct FfiConverterTypePaymentEndpointCandidate: FfiConverterRustBuffer {
             try PaymentEndpointCandidate(
                 candidateId: FfiConverterString.read(from: &buf),
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 source: FfiConverterTypePaymentEndpointSource.read(from: &buf),
                 identifier: FfiConverterString.read(from: &buf),
                 payload: FfiConverterTypePaymentPayload.read(from: &buf)
@@ -8173,7 +8173,7 @@ public struct FfiConverterTypePaymentEndpointCandidate: FfiConverterRustBuffer {
     public static func write(_ value: PaymentEndpointCandidate, into buf: inout [UInt8]) {
         FfiConverterString.write(value.candidateId, into: &buf)
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterTypePaymentEndpointSource.write(value.source, into: &buf)
         FfiConverterString.write(value.identifier, into: &buf)
         FfiConverterTypePaymentPayload.write(value.payload, into: &buf)
@@ -8296,9 +8296,9 @@ public struct PaymentEndpointReservationCancellation {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Payment Endpoint Identifier.
      */
@@ -8322,8 +8322,8 @@ public struct PaymentEndpointReservationCancellation {
          * Counterparty the reservation was intended for.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Payment Endpoint Identifier.
          */identifier: String,
@@ -8335,7 +8335,7 @@ public struct PaymentEndpointReservationCancellation {
          */attribution: ReservationAttribution) {
         self.reservationId = reservationId
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.identifier = identifier
         self.payloadHash = payloadHash
         self.attribution = attribution
@@ -8357,7 +8357,7 @@ public struct FfiConverterTypePaymentEndpointReservationCancellation: FfiConvert
             try PaymentEndpointReservationCancellation(
                 reservationId: FfiConverterString.read(from: &buf),
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 identifier: FfiConverterString.read(from: &buf),
                 payloadHash: FfiConverterString.read(from: &buf),
                 attribution: FfiConverterTypeReservationAttribution.read(from: &buf)
@@ -8367,7 +8367,7 @@ public struct FfiConverterTypePaymentEndpointReservationCancellation: FfiConvert
     public static func write(_ value: PaymentEndpointReservationCancellation, into buf: inout [UInt8]) {
         FfiConverterString.write(value.reservationId, into: &buf)
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterString.write(value.identifier, into: &buf)
         FfiConverterString.write(value.payloadHash, into: &buf)
         FfiConverterTypeReservationAttribution.write(value.attribution, into: &buf)
@@ -8528,9 +8528,9 @@ public struct PaymentEndpointSelectionRequest {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Optional amount context.
      */
@@ -8547,8 +8547,8 @@ public struct PaymentEndpointSelectionRequest {
          * Counterparty being paid.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Optional amount context.
          */amount: PaymentAmountContext?,
@@ -8556,7 +8556,7 @@ public struct PaymentEndpointSelectionRequest {
          * Candidate endpoints in SDK preference order.
          */candidates: [PaymentEndpointCandidate]) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.amount = amount
         self.candidates = candidates
     }
@@ -8576,7 +8576,7 @@ public struct FfiConverterTypePaymentEndpointSelectionRequest: FfiConverterRustB
         return
             try PaymentEndpointSelectionRequest(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 amount: FfiConverterOptionTypePaymentAmountContext.read(from: &buf),
                 candidates: FfiConverterSequenceTypePaymentEndpointCandidate.read(from: &buf)
         )
@@ -8584,7 +8584,7 @@ public struct FfiConverterTypePaymentEndpointSelectionRequest: FfiConverterRustB
 
     public static func write(_ value: PaymentEndpointSelectionRequest, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterOptionTypePaymentAmountContext.write(value.amount, into: &buf)
         FfiConverterSequenceTypePaymentEndpointCandidate.write(value.candidates, into: &buf)
     }
@@ -8918,7 +8918,7 @@ public struct PaymentRequestFilter {
     /**
      * Restrict results to one counterparty receiver/runtime folder.
      */
-    public var counterpartyReceiverId: String?
+    public var counterpartyReceiverPath: String?
     /**
      * Restrict results to one local role.
      */
@@ -8944,7 +8944,7 @@ public struct PaymentRequestFilter {
          */counterparty: String?,
         /**
          * Restrict results to one counterparty receiver/runtime folder.
-         */counterpartyReceiverId: String?,
+         */counterpartyReceiverPath: String?,
         /**
          * Restrict results to one local role.
          */localRole: PaymentRequestLocalRole?,
@@ -8958,7 +8958,7 @@ public struct PaymentRequestFilter {
          * Include only inbound Payment Requests received from counterparties.
          */receivedOnly: Bool) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.localRole = localRole
         self.states = states
         self.recurring = recurring
@@ -8976,7 +8976,7 @@ extension PaymentRequestFilter: Equatable, Hashable {
         if lhs.counterparty != rhs.counterparty {
             return false
         }
-        if lhs.counterpartyReceiverId != rhs.counterpartyReceiverId {
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
             return false
         }
         if lhs.localRole != rhs.localRole {
@@ -8996,7 +8996,7 @@ extension PaymentRequestFilter: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(counterparty)
-        hasher.combine(counterpartyReceiverId)
+        hasher.combine(counterpartyReceiverPath)
         hasher.combine(localRole)
         hasher.combine(states)
         hasher.combine(recurring)
@@ -9016,7 +9016,7 @@ public struct FfiConverterTypePaymentRequestFilter: FfiConverterRustBuffer {
         return
             try PaymentRequestFilter(
                 counterparty: FfiConverterOptionString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterOptionString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterOptionString.read(from: &buf),
                 localRole: FfiConverterOptionTypePaymentRequestLocalRole.read(from: &buf),
                 states: FfiConverterSequenceTypePaymentRequestLifecycleState.read(from: &buf),
                 recurring: FfiConverterOptionBool.read(from: &buf),
@@ -9026,7 +9026,7 @@ public struct FfiConverterTypePaymentRequestFilter: FfiConverterRustBuffer {
 
     public static func write(_ value: PaymentRequestFilter, into buf: inout [UInt8]) {
         FfiConverterOptionString.write(value.counterparty, into: &buf)
-        FfiConverterOptionString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterOptionString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterOptionTypePaymentRequestLocalRole.write(value.localRole, into: &buf)
         FfiConverterSequenceTypePaymentRequestLifecycleState.write(value.states, into: &buf)
         FfiConverterOptionBool.write(value.recurring, into: &buf)
@@ -9061,7 +9061,7 @@ public struct PaymentRequestRecord {
     /**
      * Counterparty receiver/runtime folder associated with the private stream.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Stable Payment Request ID.
      */
@@ -9151,7 +9151,7 @@ public struct PaymentRequestRecord {
          */counterparty: String,
         /**
          * Counterparty receiver/runtime folder associated with the private stream.
-         */counterpartyReceiverId: String,
+         */counterpartyReceiverPath: String,
         /**
          * Stable Payment Request ID.
          */paymentRequestId: String,
@@ -9213,7 +9213,7 @@ public struct PaymentRequestRecord {
          * Invalid state reason, when available.
          */invalidReason: String?) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.paymentRequestId = paymentRequestId
         self.localRole = localRole
         self.state = state
@@ -9251,7 +9251,7 @@ public struct FfiConverterTypePaymentRequestRecord: FfiConverterRustBuffer {
         return
             try PaymentRequestRecord(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 paymentRequestId: FfiConverterString.read(from: &buf),
                 localRole: FfiConverterOptionTypePaymentRequestLocalRole.read(from: &buf),
                 state: FfiConverterTypePaymentRequestLifecycleState.read(from: &buf),
@@ -9277,7 +9277,7 @@ public struct FfiConverterTypePaymentRequestRecord: FfiConverterRustBuffer {
 
     public static func write(_ value: PaymentRequestRecord, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterString.write(value.paymentRequestId, into: &buf)
         FfiConverterOptionTypePaymentRequestLocalRole.write(value.localRole, into: &buf)
         FfiConverterTypePaymentRequestLifecycleState.write(value.state, into: &buf)
@@ -9716,9 +9716,9 @@ public struct PrivatePaymentListDeliveryFailure {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Outbound message id, when the failure is tied to one message.
      */
@@ -9739,8 +9739,8 @@ public struct PrivatePaymentListDeliveryFailure {
          * Counterparty whose outbound delivery failed.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Outbound message id, when the failure is tied to one message.
          */outboundMessageId: UInt64?,
@@ -9751,7 +9751,7 @@ public struct PrivatePaymentListDeliveryFailure {
          * Delivery or cleanup error.
          */error: PrivateOperationError) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.outboundMessageId = outboundMessageId
         self.reservationId = reservationId
         self.error = error
@@ -9772,7 +9772,7 @@ public struct FfiConverterTypePrivatePaymentListDeliveryFailure: FfiConverterRus
         return
             try PrivatePaymentListDeliveryFailure(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 outboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
                 reservationId: FfiConverterOptionString.read(from: &buf),
                 error: FfiConverterTypePrivateOperationError.read(from: &buf)
@@ -9781,7 +9781,7 @@ public struct FfiConverterTypePrivatePaymentListDeliveryFailure: FfiConverterRus
 
     public static func write(_ value: PrivatePaymentListDeliveryFailure, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterOptionUInt64.write(value.outboundMessageId, into: &buf)
         FfiConverterOptionString.write(value.reservationId, into: &buf)
         FfiConverterTypePrivateOperationError.write(value.error, into: &buf)
@@ -9967,9 +9967,9 @@ public struct PrivatePaymentListReservationUpdateInput {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Complete reserved receiving details to share with this counterparty.
      *
@@ -9984,15 +9984,15 @@ public struct PrivatePaymentListReservationUpdateInput {
          * Counterparty that should receive the Private Payment List.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Complete reserved receiving details to share with this counterparty.
          *
          * An empty list queues an empty Private Payment List for this counterparty.
          */reservations: [PaymentEndpointReservationInput]) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.reservations = reservations
     }
 }
@@ -10007,7 +10007,7 @@ extension PrivatePaymentListReservationUpdateInput: Equatable, Hashable {
         if lhs.counterparty != rhs.counterparty {
             return false
         }
-        if lhs.counterpartyReceiverId != rhs.counterpartyReceiverId {
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
             return false
         }
         if lhs.reservations != rhs.reservations {
@@ -10018,7 +10018,7 @@ extension PrivatePaymentListReservationUpdateInput: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(counterparty)
-        hasher.combine(counterpartyReceiverId)
+        hasher.combine(counterpartyReceiverPath)
         hasher.combine(reservations)
     }
 }
@@ -10035,14 +10035,14 @@ public struct FfiConverterTypePrivatePaymentListReservationUpdateInput: FfiConve
         return
             try PrivatePaymentListReservationUpdateInput(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 reservations: FfiConverterSequenceTypePaymentEndpointReservationInput.read(from: &buf)
         )
     }
 
     public static func write(_ value: PrivatePaymentListReservationUpdateInput, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterSequenceTypePaymentEndpointReservationInput.write(value.reservations, into: &buf)
     }
 }
@@ -10072,9 +10072,9 @@ public struct PrivatePaymentListSyncChange {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Queued outbound message id, when queueing succeeded.
      */
@@ -10091,8 +10091,8 @@ public struct PrivatePaymentListSyncChange {
          * Counterparty affected by the sync.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Queued outbound message id, when queueing succeeded.
          */outboundMessageId: UInt64?,
@@ -10100,7 +10100,7 @@ public struct PrivatePaymentListSyncChange {
          * Error text, when queueing failed.
          */error: String?) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.outboundMessageId = outboundMessageId
         self.error = error
     }
@@ -10116,7 +10116,7 @@ extension PrivatePaymentListSyncChange: Equatable, Hashable {
         if lhs.counterparty != rhs.counterparty {
             return false
         }
-        if lhs.counterpartyReceiverId != rhs.counterpartyReceiverId {
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
             return false
         }
         if lhs.outboundMessageId != rhs.outboundMessageId {
@@ -10130,7 +10130,7 @@ extension PrivatePaymentListSyncChange: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(counterparty)
-        hasher.combine(counterpartyReceiverId)
+        hasher.combine(counterpartyReceiverPath)
         hasher.combine(outboundMessageId)
         hasher.combine(error)
     }
@@ -10148,7 +10148,7 @@ public struct FfiConverterTypePrivatePaymentListSyncChange: FfiConverterRustBuff
         return
             try PrivatePaymentListSyncChange(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 outboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
                 error: FfiConverterOptionString.read(from: &buf)
         )
@@ -10156,7 +10156,7 @@ public struct FfiConverterTypePrivatePaymentListSyncChange: FfiConverterRustBuff
 
     public static func write(_ value: PrivatePaymentListSyncChange, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterOptionUInt64.write(value.outboundMessageId, into: &buf)
         FfiConverterOptionString.write(value.error, into: &buf)
     }
@@ -10365,9 +10365,9 @@ public struct PrivateStreamCounterpartyIntakeReport {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Successful intake report, when receive completed.
      */
@@ -10384,8 +10384,8 @@ public struct PrivateStreamCounterpartyIntakeReport {
          * Counterparty whose private stream was received.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Successful intake report, when receive completed.
          */report: PrivateStreamIntakeReport?,
@@ -10393,7 +10393,7 @@ public struct PrivateStreamCounterpartyIntakeReport {
          * Error text, when receive failed for this counterparty.
          */error: PrivateOperationError?) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.report = report
         self.error = error
     }
@@ -10413,7 +10413,7 @@ public struct FfiConverterTypePrivateStreamCounterpartyIntakeReport: FfiConverte
         return
             try PrivateStreamCounterpartyIntakeReport(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 report: FfiConverterOptionTypePrivateStreamIntakeReport.read(from: &buf),
                 error: FfiConverterOptionTypePrivateOperationError.read(from: &buf)
         )
@@ -10421,7 +10421,7 @@ public struct FfiConverterTypePrivateStreamCounterpartyIntakeReport: FfiConverte
 
     public static func write(_ value: PrivateStreamCounterpartyIntakeReport, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterOptionTypePrivateStreamIntakeReport.write(value.report, into: &buf)
         FfiConverterOptionTypePrivateOperationError.write(value.error, into: &buf)
     }
@@ -11254,9 +11254,9 @@ public struct QueuedPrivateMessage {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Private Message Kind string.
      */
@@ -11300,8 +11300,8 @@ public struct QueuedPrivateMessage {
          * Counterparty public key.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Private Message Kind string.
          */kind: String,
@@ -11328,7 +11328,7 @@ public struct QueuedPrivateMessage {
          */lastError: PrivateOperationError?) {
         self.outboundMessageId = outboundMessageId
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.kind = kind
         self.status = status
         self.attemptCount = attemptCount
@@ -11355,7 +11355,7 @@ public struct FfiConverterTypeQueuedPrivateMessage: FfiConverterRustBuffer {
             try QueuedPrivateMessage(
                 outboundMessageId: FfiConverterUInt64.read(from: &buf),
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 kind: FfiConverterString.read(from: &buf),
                 status: FfiConverterTypeOutboundPrivateMessageStatus.read(from: &buf),
                 attemptCount: FfiConverterUInt32.read(from: &buf),
@@ -11370,7 +11370,7 @@ public struct FfiConverterTypeQueuedPrivateMessage: FfiConverterRustBuffer {
     public static func write(_ value: QueuedPrivateMessage, into buf: inout [UInt8]) {
         FfiConverterUInt64.write(value.outboundMessageId, into: &buf)
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterString.write(value.kind, into: &buf)
         FfiConverterTypeOutboundPrivateMessageStatus.write(value.status, into: &buf)
         FfiConverterUInt32.write(value.attemptCount, into: &buf)
@@ -11407,9 +11407,9 @@ public struct ReceiptAccessView {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Receipt Access Event ID.
      */
@@ -11454,8 +11454,8 @@ public struct ReceiptAccessView {
          * Counterparty that sent the Receipt Access event.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Receipt Access Event ID.
          */eventId: String,
@@ -11484,7 +11484,7 @@ public struct ReceiptAccessView {
          * Receive time of the indexed stream item as RFC3339 text.
          */receivedAt: String) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.eventId = eventId
         self.receiptId = receiptId
         self.paymentReference = paymentReference
@@ -11511,7 +11511,7 @@ public struct FfiConverterTypeReceiptAccessView: FfiConverterRustBuffer {
         return
             try ReceiptAccessView(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 eventId: FfiConverterString.read(from: &buf),
                 receiptId: FfiConverterString.read(from: &buf),
                 paymentReference: FfiConverterTypePaymentReference.read(from: &buf),
@@ -11526,7 +11526,7 @@ public struct FfiConverterTypeReceiptAccessView: FfiConverterRustBuffer {
 
     public static func write(_ value: ReceiptAccessView, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterString.write(value.eventId, into: &buf)
         FfiConverterString.write(value.receiptId, into: &buf)
         FfiConverterTypePaymentReference.write(value.paymentReference, into: &buf)
@@ -11768,9 +11768,9 @@ public struct ReceiptIssuanceView {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Receipt ID.
      */
@@ -11831,8 +11831,8 @@ public struct ReceiptIssuanceView {
          * Counterparty that should receive Receipt Access.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Receipt ID.
          */receiptId: String,
@@ -11873,7 +11873,7 @@ public struct ReceiptIssuanceView {
          * Time Receipt Access was queued for private delivery as RFC3339 text.
          */accessQueuedAt: String?) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.receiptId = receiptId
         self.receiptAccessEventId = receiptAccessEventId
         self.paymentReference = paymentReference
@@ -11904,7 +11904,7 @@ public struct FfiConverterTypeReceiptIssuanceView: FfiConverterRustBuffer {
         return
             try ReceiptIssuanceView(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 receiptId: FfiConverterString.read(from: &buf),
                 receiptAccessEventId: FfiConverterString.read(from: &buf),
                 paymentReference: FfiConverterTypePaymentReference.read(from: &buf),
@@ -11923,7 +11923,7 @@ public struct FfiConverterTypeReceiptIssuanceView: FfiConverterRustBuffer {
 
     public static func write(_ value: ReceiptIssuanceView, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterString.write(value.receiptId, into: &buf)
         FfiConverterString.write(value.receiptAccessEventId, into: &buf)
         FfiConverterTypePaymentReference.write(value.paymentReference, into: &buf)
@@ -11965,9 +11965,9 @@ public struct ReceiptRecord {
      */
     public var issuer: String
     /**
-     * Issuer Paykit receiver folder id.
+     * Issuer Paykit receiver path.
      */
-    public var issuerReceiverId: String
+    public var issuerReceiverPath: String
     /**
      * Receipt Access Event ID used for retrieval.
      */
@@ -12016,8 +12016,8 @@ public struct ReceiptRecord {
          * Counterparty that issued the Receipt Access event.
          */issuer: String,
         /**
-         * Issuer Paykit receiver folder id.
-         */issuerReceiverId: String,
+         * Issuer Paykit receiver path.
+         */issuerReceiverPath: String,
         /**
          * Receipt Access Event ID used for retrieval.
          */receiptAccessEventId: String,
@@ -12049,7 +12049,7 @@ public struct ReceiptRecord {
          * Successful retrieval/decryption time as RFC3339 text.
          */retrievedAt: String) {
         self.issuer = issuer
-        self.issuerReceiverId = issuerReceiverId
+        self.issuerReceiverPath = issuerReceiverPath
         self.receiptAccessEventId = receiptAccessEventId
         self.receiptId = receiptId
         self.paymentReference = paymentReference
@@ -12077,7 +12077,7 @@ public struct FfiConverterTypeReceiptRecord: FfiConverterRustBuffer {
         return
             try ReceiptRecord(
                 issuer: FfiConverterString.read(from: &buf),
-                issuerReceiverId: FfiConverterString.read(from: &buf),
+                issuerReceiverPath: FfiConverterString.read(from: &buf),
                 receiptAccessEventId: FfiConverterString.read(from: &buf),
                 receiptId: FfiConverterString.read(from: &buf),
                 paymentReference: FfiConverterTypePaymentReference.read(from: &buf),
@@ -12093,7 +12093,7 @@ public struct FfiConverterTypeReceiptRecord: FfiConverterRustBuffer {
 
     public static func write(_ value: ReceiptRecord, into buf: inout [UInt8]) {
         FfiConverterString.write(value.issuer, into: &buf)
-        FfiConverterString.write(value.issuerReceiverId, into: &buf)
+        FfiConverterString.write(value.issuerReceiverPath, into: &buf)
         FfiConverterString.write(value.receiptAccessEventId, into: &buf)
         FfiConverterString.write(value.receiptId, into: &buf)
         FfiConverterTypePaymentReference.write(value.paymentReference, into: &buf)
@@ -12270,9 +12270,9 @@ public struct ReceivingDetailScope {
      */
     public var counterparty: String?
     /**
-     * Counterparty Paykit receiver folder id for private scopes.
+     * Counterparty Paykit receiver path for private scopes.
      */
-    public var counterpartyReceiverId: String?
+    public var counterpartyReceiverPath: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -12284,11 +12284,11 @@ public struct ReceivingDetailScope {
          * Counterparty public key for private scopes.
          */counterparty: String?,
         /**
-         * Counterparty Paykit receiver folder id for private scopes.
-         */counterpartyReceiverId: String?) {
+         * Counterparty Paykit receiver path for private scopes.
+         */counterpartyReceiverPath: String?) {
         self.kind = kind
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
     }
 }
 
@@ -12305,7 +12305,7 @@ extension ReceivingDetailScope: Equatable, Hashable {
         if lhs.counterparty != rhs.counterparty {
             return false
         }
-        if lhs.counterpartyReceiverId != rhs.counterpartyReceiverId {
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
             return false
         }
         return true
@@ -12314,7 +12314,7 @@ extension ReceivingDetailScope: Equatable, Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(kind)
         hasher.combine(counterparty)
-        hasher.combine(counterpartyReceiverId)
+        hasher.combine(counterpartyReceiverPath)
     }
 }
 
@@ -12331,14 +12331,14 @@ public struct FfiConverterTypeReceivingDetailScope: FfiConverterRustBuffer {
             try ReceivingDetailScope(
                 kind: FfiConverterTypeReceivingDetailScopeKind.read(from: &buf),
                 counterparty: FfiConverterOptionString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterOptionString.read(from: &buf)
+                counterpartyReceiverPath: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: ReceivingDetailScope, into buf: inout [UInt8]) {
         FfiConverterTypeReceivingDetailScopeKind.write(value.kind, into: &buf)
         FfiConverterOptionString.write(value.counterparty, into: &buf)
-        FfiConverterOptionString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterOptionString.write(value.counterpartyReceiverPath, into: &buf)
     }
 }
 
@@ -12501,9 +12501,9 @@ public struct ResolvedPaymentEndpoint {
      */
     public var counterparty: String
     /**
-     * Counterparty Paykit receiver folder id.
+     * Counterparty Paykit receiver path.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
     /**
      * Where the endpoint was discovered.
      */
@@ -12528,8 +12528,8 @@ public struct ResolvedPaymentEndpoint {
          * Counterparty that published the endpoint.
          */counterparty: String,
         /**
-         * Counterparty Paykit receiver folder id.
-         */counterpartyReceiverId: String,
+         * Counterparty Paykit receiver path.
+         */counterpartyReceiverPath: String,
         /**
          * Where the endpoint was discovered.
          */source: PaymentEndpointSource,
@@ -12543,7 +12543,7 @@ public struct ResolvedPaymentEndpoint {
          * Adapter-built target for executing payment through this endpoint.
          */target: PaymentTarget) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
         self.source = source
         self.identifier = identifier
         self.payload = payload
@@ -12565,7 +12565,7 @@ public struct FfiConverterTypeResolvedPaymentEndpoint: FfiConverterRustBuffer {
         return
             try ResolvedPaymentEndpoint(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
                 source: FfiConverterTypePaymentEndpointSource.read(from: &buf),
                 identifier: FfiConverterString.read(from: &buf),
                 payload: FfiConverterTypePaymentPayload.read(from: &buf),
@@ -12575,7 +12575,7 @@ public struct FfiConverterTypeResolvedPaymentEndpoint: FfiConverterRustBuffer {
 
     public static func write(_ value: ResolvedPaymentEndpoint, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
         FfiConverterTypePaymentEndpointSource.write(value.source, into: &buf)
         FfiConverterString.write(value.identifier, into: &buf)
         FfiConverterTypePaymentPayload.write(value.payload, into: &buf)
@@ -12610,7 +12610,7 @@ public struct RestoreRecoveryRequiredPeer {
     /**
      * Counterparty receiver/runtime folder.
      */
-    public var counterpartyReceiverId: String
+    public var counterpartyReceiverPath: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -12620,9 +12620,9 @@ public struct RestoreRecoveryRequiredPeer {
          */counterparty: String,
         /**
          * Counterparty receiver/runtime folder.
-         */counterpartyReceiverId: String) {
+         */counterpartyReceiverPath: String) {
         self.counterparty = counterparty
-        self.counterpartyReceiverId = counterpartyReceiverId
+        self.counterpartyReceiverPath = counterpartyReceiverPath
     }
 }
 
@@ -12636,7 +12636,7 @@ extension RestoreRecoveryRequiredPeer: Equatable, Hashable {
         if lhs.counterparty != rhs.counterparty {
             return false
         }
-        if lhs.counterpartyReceiverId != rhs.counterpartyReceiverId {
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
             return false
         }
         return true
@@ -12644,7 +12644,7 @@ extension RestoreRecoveryRequiredPeer: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(counterparty)
-        hasher.combine(counterpartyReceiverId)
+        hasher.combine(counterpartyReceiverPath)
     }
 }
 
@@ -12660,13 +12660,13 @@ public struct FfiConverterTypeRestoreRecoveryRequiredPeer: FfiConverterRustBuffe
         return
             try RestoreRecoveryRequiredPeer(
                 counterparty: FfiConverterString.read(from: &buf),
-                counterpartyReceiverId: FfiConverterString.read(from: &buf)
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: RestoreRecoveryRequiredPeer, into buf: inout [UInt8]) {
         FfiConverterString.write(value.counterparty, into: &buf)
-        FfiConverterString.write(value.counterpartyReceiverId, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
     }
 }
 
@@ -16686,12 +16686,12 @@ public func decodeSdkStateBlobSnapshot(bytes: Data)throws  -> SdkStateBlobSnapsh
 })
 }
 /**
- * Return the default SDK policy for an explicit Paykit receiver id.
+ * Return the default SDK policy for an explicit Paykit receiver path.
  */
-public func defaultConfig(receiverId: String)throws  -> PaykitSdkConfig  {
+public func defaultConfig(receiverPath: String)throws  -> PaykitSdkConfig  {
     return try  FfiConverterTypePaykitSdkConfig_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
     uniffi_paykit_fn_func_default_config(
-        FfiConverterString.lower(receiverId),$0
+        FfiConverterString.lower(receiverPath),$0
     )
 })
 }
@@ -16842,7 +16842,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_decode_sdk_state_blob_snapshot() != 4823) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_default_config() != 50082) {
+    if (uniffi_paykit_checksum_func_default_config() != 58310) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_default_pubky_client_config() != 12841) {
@@ -16884,10 +16884,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_resolve_pubky_url() != 12085) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 59763) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 24950) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 1500) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 859) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests() != 10342) {
@@ -16896,31 +16896,31 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_active_recurring_payment_requests() != 2902) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 56495) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 21645) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 46737) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 26542) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 40440) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 8092) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list() != 1600) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list() != 47172) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 8651) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 23510) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_contact_record() != 1054) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_contact_record() != 40090) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_contact_records() != 49216) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_current_private_payment_list() != 50131) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_current_private_payment_list() != 42695) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_current_profile() != 37415) {
@@ -16932,16 +16932,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_profile() != 14091) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 1997) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 64910) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list() != 15052) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list() != 16764) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list_with_receiving_details() != 25653) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list_with_receiving_details() != 41166) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_ensure_link_with_peer() != 23224) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_ensure_link_with_peer() != 15662) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_state() != 29122) {
@@ -16950,7 +16950,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_string() != 15207) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_paykit_profile() != 23428) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_paykit_profile() != 36027) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file() != 313) {
@@ -16971,16 +16971,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_initialize() != 60774) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_initiate_link_with_peer() != 49875) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_initiate_link_with_peer() != 39251) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_issue_receipt() != 31587) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_issue_receipt() != 65469) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_issued_receipts() != 50665) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_issued_receipts_to() != 6453) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_issued_receipts_to() != 9366) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 57246) {
@@ -16989,40 +16989,40 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 33838) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 54332) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_receiver_ids() != 26181) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_receiver_paths() != 12509) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests() != 9060) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests_with() != 24481) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests_with() != 35782) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 32211) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_contact_payment() != 37055) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_contact_payment() != 32129) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 61305) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 38644) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_process_outbound_private_messages() != 33643) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_process_outbound_private_messages() != 37957) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_process_pending_private_messages() != 56244) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_process_receipt_issuance() != 18485) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_process_receipt_issuance() != 18672) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 59554) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 35762) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 50691) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 60401) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_blob() != 48358) {
@@ -17031,67 +17031,67 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_profile() != 19918) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 26958) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 54711) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access() != 27958) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access_from() != 62023) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access_from() != 62798) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access_records() != 17928) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access_records() != 13671) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_issuance_records() != 62780) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_issuance_records() != 3870) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_records() != 17208) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_records() != 2833) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receipts() != 46308) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipts_from() != 41520) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receipts_from() != 56234) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages() != 26004) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages() != 554) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers() != 15229) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 24630) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 14) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 29275) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 26474) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request() != 47319) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request() != 14619) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 17479) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 63465) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 59502) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 54279) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact() != 44685) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact() != 4060) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_payment() != 23408) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 34976) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 57380) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 9742) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 33888) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_profile() != 46041) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_profile() != 46263) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_contact_payment() != 3156) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_contact_payment() != 50360) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 30409) {
@@ -17100,7 +17100,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_string() != 23617) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 5888) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 4261) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 7511) {
@@ -17112,7 +17112,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 21336) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 43353) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 13468) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_contact_private_payment_lists() != 14363) {
@@ -17133,7 +17133,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints_with_receiving_details() != 8506) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 54874) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 6518) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_upload_profile_avatar() != 49965) {
@@ -17205,7 +17205,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_receiving_details() != 10401) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_reserve_receiving_details() != 12363) {
+    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_reserve_receiving_details() != 11416) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_cancel_receiving_detail_reservation() != 52453) {

@@ -10,8 +10,8 @@ fn public_key() -> paykit_lib::PublicKey {
     pubky::Keypair::random().public_key()
 }
 
-fn receiver_id() -> paykit_lib::PaykitReceiverId {
-    paykit_lib::PaykitReceiverId::new("bitkit").unwrap()
+fn receiver_path() -> paykit_lib::PaykitReceiverPath {
+    paykit_lib::PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
 fn receipt_access_record(
@@ -21,7 +21,7 @@ fn receipt_access_record(
 ) -> ReceiptAccessRecord {
     ReceiptAccessRecord {
         counterparty: PubkyPublicKey::from_public_key(&public_key()),
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         stream_item_id: 0,
         receive_batch_id: 0,
         event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
@@ -29,7 +29,7 @@ fn receipt_access_record(
         payment_reference: payment_reference.into(),
         payment_request_id: None,
         billing_period: None,
-        location: paykit_lib::ReceiptAccess::location(&receiver_id(), receipt_id),
+        location: paykit_lib::ReceiptAccess::location(&receiver_path(), receipt_id),
         key: key.as_str().into(),
         retrieval_status: ReceiptRetrievalStatus::Pending,
         retrieval_attempted_at: None,
@@ -128,7 +128,7 @@ fn test_receipt_issuance_record_redacts_sensitive_fields() {
     let counterparty = PubkyPublicKey::from_public_key(&counterparty_key);
     let prepared = paykit_lib::prepare_receipt_for_recipient(
         counterparty_key,
-        &receiver_id(),
+        &receiver_path(),
         paykit_lib::ReceiptDraft {
             receipt_id: Some(
                 paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
@@ -148,7 +148,7 @@ fn test_receipt_issuance_record_redacts_sensitive_fields() {
     let encrypted_receipt = prepared.encrypted_receipt.clone();
     let access_json = paykit_lib::serialize_receipt_access_json(&prepared.access).unwrap();
     let record =
-        ReceiptIssuanceRecord::from_prepared(counterparty, receiver_id(), prepared, timestamp())
+        ReceiptIssuanceRecord::from_prepared(counterparty, receiver_path(), prepared, timestamp())
             .unwrap();
 
     let debug = format!("{record:?}");
@@ -170,7 +170,7 @@ fn test_decrypt_receipt_record_from_access_validates_and_redacts() {
         "invoice-2026-0001",
         recipient_public_key,
     );
-    let encrypted = receipt.encrypt(&receiver_id(), &key).unwrap();
+    let encrypted = receipt.encrypt(&receiver_path(), &key).unwrap();
     let access = receipt_access_record(&receipt_id, &key, "invoice-2026-0001");
 
     let record =
@@ -201,7 +201,7 @@ fn test_receipt_record_matches_access_requires_decrypting_key() {
         "invoice-2026-0001",
         recipient_public_key,
     );
-    let encrypted = receipt.encrypt(&receiver_id(), &key).unwrap();
+    let encrypted = receipt.encrypt(&receiver_path(), &key).unwrap();
     let access = receipt_access_record(&receipt_id, &key, "invoice-2026-0001");
     let record =
         decrypt_receipt_record_from_access(&access, &encrypted, timestamp(), &expected_recipient)
@@ -220,7 +220,7 @@ fn test_receipt_access_record_deserializes_pending_retrieval_defaults() {
     let counterparty = PubkyPublicKey::from_public_key(&public_key());
     let value = serde_json::json!({
         "counterparty": counterparty.as_str(),
-        "counterparty_receiver_id": receiver_id().as_str(),
+        "counterparty_receiver_path": receiver_path().as_str(),
         "stream_item_id": 0,
         "receive_batch_id": 0,
         "event_id": "650e8400-e29b-41d4-a716-446655440000",
@@ -228,7 +228,7 @@ fn test_receipt_access_record_deserializes_pending_retrieval_defaults() {
         "payment_reference": "invoice-2026-0001",
         "payment_request_id": null,
         "billing_period": null,
-        "location": "/pub/paykit/v0/private/bitkit/receipts/550e8400-e29b-41d4-a716-446655440000",
+        "location": "/pub/paykit/v0/private/bitkit/wallet/receipts/550e8400-e29b-41d4-a716-446655440000",
         "key": "receipt-secret",
         "received_at": timestamp(),
     });
@@ -290,7 +290,7 @@ fn test_decrypt_receipt_record_from_access_rejects_mismatch() {
         "invoice-2026-0002",
         recipient_public_key,
     );
-    let encrypted = receipt.encrypt(&receiver_id(), &key).unwrap();
+    let encrypted = receipt.encrypt(&receiver_path(), &key).unwrap();
     let access = receipt_access_record(&receipt_id, &key, "invoice-2026-0001");
 
     let err =
@@ -307,7 +307,7 @@ fn test_decrypt_receipt_record_from_access_rejects_wrong_recipient() {
     let receipt_id = paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
     let key = ReceiptDecryptionKey::generate();
     let receipt = receipt(receipt_id.clone(), "invoice-2026-0001", public_key());
-    let encrypted = receipt.encrypt(&receiver_id(), &key).unwrap();
+    let encrypted = receipt.encrypt(&receiver_path(), &key).unwrap();
     let access = receipt_access_record(&receipt_id, &key, "invoice-2026-0001");
     let expected_recipient = PubkyPublicKey::from_public_key(&public_key());
 

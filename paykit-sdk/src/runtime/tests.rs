@@ -176,7 +176,7 @@ impl PaymentAdapter for ReservedPrivateListPaymentAdapter {
     async fn reserve_receiving_details(
         &self,
         counterparty: &PubkyPublicKey,
-        _counterparty_receiver_id: &PaykitReceiverId,
+        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         assert!(!counterparty.as_str().is_empty());
         Ok(Some(vec![PaymentEndpointReservation {
@@ -230,7 +230,7 @@ impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
     async fn reserve_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_id: &PaykitReceiverId,
+        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         Ok(Some(vec![
             PaymentEndpointReservation {
@@ -296,7 +296,7 @@ impl PaymentAdapter for FailingCancellationPaymentAdapter {
     async fn reserve_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_id: &PaykitReceiverId,
+        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         Ok(None)
     }
@@ -346,7 +346,7 @@ impl PaymentAdapter for LeaseChangingCancellationPaymentAdapter {
     async fn reserve_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_id: &PaykitReceiverId,
+        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         Ok(None)
     }
@@ -361,7 +361,7 @@ impl PaymentAdapter for LeaseChangingCancellationPaymentAdapter {
                 move |tx| {
                     let _ = tx.claim_peer_link_operation(
                         &counterparty,
-                        &receiver_id(),
+                        &receiver_path(),
                         FixedClock.now() + ChronoDuration::seconds(11),
                         FixedClock.now() + ChronoDuration::seconds(71),
                     );
@@ -411,7 +411,7 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
     async fn reserve_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_id: &PaykitReceiverId,
+        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         self.storage
             .transaction({
@@ -419,7 +419,7 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
                 move |tx| {
                     let _ = tx.claim_peer_link_operation(
                         &counterparty,
-                        &receiver_id(),
+                        &receiver_path(),
                         FixedClock.now() + ChronoDuration::seconds(61),
                         FixedClock.now() + ChronoDuration::seconds(121),
                     );
@@ -493,7 +493,7 @@ impl PaymentAdapter for MixedExistingReservedPrivateListPaymentAdapter {
     async fn reserve_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_id: &PaykitReceiverId,
+        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
         Ok(Some(vec![
             PaymentEndpointReservation {
@@ -562,7 +562,7 @@ fn private_list_json() -> String {
 fn receipt_access_record(counterparty: PubkyPublicKey, receipt_id: &str) -> ReceiptAccessRecord {
     ReceiptAccessRecord {
         counterparty,
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         stream_item_id: 1,
         receive_batch_id: 1,
         event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
@@ -570,7 +570,7 @@ fn receipt_access_record(counterparty: PubkyPublicKey, receipt_id: &str) -> Rece
         payment_reference: "invoice-2026-0001".into(),
         payment_request_id: None,
         billing_period: None,
-        location: format!("/pub/paykit/v0/private/bitkit/receipts/{receipt_id}"),
+        location: format!("/pub/paykit/v0/private/bitkit/wallet/receipts/{receipt_id}"),
         key: "receipt-secret-key".into(),
         retrieval_status: ReceiptRetrievalStatus::Pending,
         retrieval_attempted_at: None,
@@ -587,7 +587,7 @@ fn receipt_record(
 ) -> ReceiptRecord {
     ReceiptRecord {
         issuer,
-        issuer_receiver_id: receiver_id(),
+        issuer_receiver_path: receiver_path(),
         receipt_access_event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
         receipt_access_key_hash: "receipt-access-key-hash".into(),
         receipt_id: receipt_id.into(),
@@ -598,7 +598,7 @@ fn receipt_record(
         payment_endpoint_identifier: None,
         amount: None,
         metadata: JsonMap::new(),
-        location: format!("/pub/paykit/v0/private/bitkit/receipts/{receipt_id}"),
+        location: format!("/pub/paykit/v0/private/bitkit/wallet/receipts/{receipt_id}"),
         retrieved_at: FixedClock.now(),
     }
 }
@@ -606,7 +606,7 @@ fn receipt_record(
 fn conflicted_event_dedup_record(access: &ReceiptAccessRecord) -> EventDedupRecord {
     EventDedupRecord {
         counterparty: access.counterparty.clone(),
-        counterparty_receiver_id: access.counterparty_receiver_id.clone(),
+        counterparty_receiver_path: access.counterparty_receiver_path.clone(),
         event_id: access.event_id.clone(),
         event_kind: "paykit.receipt_access".into(),
         payload_hash: "sha256:first".into(),
@@ -619,7 +619,7 @@ fn conflicted_event_dedup_record(access: &ReceiptAccessRecord) -> EventDedupReco
 fn endpoint_candidate(payload: &str) -> PaymentEndpointCandidate {
     PaymentEndpointCandidate {
         counterparty: PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
-        counterparty_receiver_id: receiver_id(),
+        counterparty_receiver_path: receiver_path(),
         source: PaymentEndpointSource::PrivatePaymentList,
         identifier: "btc-lightning-bolt11".into(),
         payload: payload.into(),
@@ -643,12 +643,12 @@ fn payment_request_message(
     }
 }
 
-fn receiver_id() -> PaykitReceiverId {
-    PaykitReceiverId::new("bitkit").unwrap()
+fn receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
-fn other_receiver_id() -> PaykitReceiverId {
-    PaykitReceiverId::new("tether").unwrap()
+fn other_receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("tether/wallet").unwrap()
 }
 
 async fn seed_private_capable_identity_and_link(
@@ -671,7 +671,7 @@ async fn seed_private_capable_identity_and_link(
         .transaction(move |tx| {
             tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                 counterparty,
-                counterparty_receiver_id: receiver_id(),
+                counterparty_receiver_path: receiver_path(),
                 link_snapshot: Some(vec![1, 2, 3]),
                 handshake_snapshot: None,
                 handshake_role: None,
@@ -704,7 +704,7 @@ async fn seed_private_capable_identity_and_handshake(
         .transaction(move |tx| {
             tx.save_linked_peer(LinkedPeerRecord {
                 counterparty: counterparty.clone(),
-                counterparty_receiver_id: receiver_id(),
+                counterparty_receiver_path: receiver_path(),
                 state: LinkedPeerState::Linking,
                 last_sync_at: Some(FixedClock.now()),
                 last_private_receive_at: None,
@@ -717,7 +717,7 @@ async fn seed_private_capable_identity_and_handshake(
             });
             tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                 counterparty,
-                counterparty_receiver_id: receiver_id(),
+                counterparty_receiver_path: receiver_path(),
                 link_snapshot: None,
                 handshake_snapshot: Some(vec![1, 2, 3]),
                 handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),

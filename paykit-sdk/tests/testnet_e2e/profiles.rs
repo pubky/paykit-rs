@@ -24,7 +24,7 @@ async fn test_paykit_profile_publish_and_fetch_roundtrip() {
         .sdk
         .fetch_paykit_profile(
             pair.alice.public_key.clone(),
-            pair.alice.receiver_id.clone(),
+            pair.alice.receiver_path.clone(),
         )
         .await
         .expect("fetching the profile should succeed")
@@ -36,7 +36,7 @@ async fn test_paykit_profile_publish_and_fetch_roundtrip() {
     let missing = pair
         .bob
         .sdk
-        .fetch_paykit_profile(pair.bob.public_key.clone(), pair.bob.receiver_id.clone())
+        .fetch_paykit_profile(pair.bob.public_key.clone(), pair.bob.receiver_path.clone())
         .await
         .expect("fetching an absent profile should not error");
     assert!(missing.is_none());

@@ -3,7 +3,7 @@
 
 @interface RCT_EXTERN_MODULE(Paykit, RCTEventEmitter)
 
-RCT_EXTERN_METHOD(sdkDefaultConfig:(NSString *)receiverId
+RCT_EXTERN_METHOD(sdkDefaultConfig:(NSString *)receiverPath
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 

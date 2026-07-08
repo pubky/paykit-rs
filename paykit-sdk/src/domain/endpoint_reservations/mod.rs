@@ -15,7 +15,7 @@ use crate::{
         require_peer_link_operation_lease, NewOutboundPrivateMessage, OutboundPrivateMessageRecord,
         PaymentEndpointReservationRecord, PeerLinkOperationLease, StorageAdapter,
     },
-    PaykitReceiverId, PaykitSdkError, PubkyPublicKey, Result,
+    PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
 use paykit_lib::{serialize_private_payment_list_json, PrivateMessageKind, PrivatePaymentList};
 
@@ -33,14 +33,14 @@ pub(crate) struct PaymentEndpointReservationCancellationRecord {
 pub(crate) async fn payment_endpoint_reservations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Result<Vec<PaymentEndpointReservationRecord>>
 where
     S: StorageAdapter,
 {
     storage
         .transaction(|tx| {
-            Ok(tx.payment_endpoint_reservations(counterparty, counterparty_receiver_id))
+            Ok(tx.payment_endpoint_reservations(counterparty, counterparty_receiver_path))
         })
         .await
 }
@@ -52,14 +52,14 @@ where
 pub(crate) async fn unattempted_superseded_reservation_cancellations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Result<Vec<PaymentEndpointReservationCancellationRecord>>
 where
     S: StorageAdapter,
 {
     storage
         .transaction(|tx| {
-            let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_id);
+            let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_path);
             let superseded_unattempted = outbound
                 .iter()
                 .filter(|message| {
@@ -71,7 +71,7 @@ where
                 .collect::<std::collections::HashSet<_>>();
 
             let cancellations = tx
-                .payment_endpoint_reservations(counterparty, counterparty_receiver_id)
+                .payment_endpoint_reservations(counterparty, counterparty_receiver_path)
                 .into_iter()
                 .filter(|record| superseded_unattempted.contains(&record.outbound_message_id))
                 .map(cancellation_record_from_reservation_record)
@@ -86,14 +86,14 @@ where
 pub(crate) async fn invalid_private_list_reservation_cancellations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Result<Vec<PaymentEndpointReservationCancellationRecord>>
 where
     S: StorageAdapter,
 {
     storage
         .transaction(|tx| {
-            let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_id);
+            let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_path);
             let invalid_private_lists = outbound
                 .iter()
                 .filter(|message| {
@@ -104,7 +104,7 @@ where
                 .collect::<std::collections::HashSet<_>>();
 
             let cancellations = tx
-                .payment_endpoint_reservations(counterparty, counterparty_receiver_id)
+                .payment_endpoint_reservations(counterparty, counterparty_receiver_path)
                 .into_iter()
                 .filter(|record| invalid_private_lists.contains(&record.outbound_message_id))
                 .map(cancellation_record_from_reservation_record)
@@ -119,7 +119,7 @@ where
 pub(crate) async fn expired_outbound_reservation_cancellations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     outbound_message_id: u64,
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentEndpointReservationCancellationRecord>>
@@ -129,7 +129,7 @@ where
     storage
         .transaction(|tx| {
             let records = tx
-                .payment_endpoint_reservations(counterparty, counterparty_receiver_id)
+                .payment_endpoint_reservations(counterparty, counterparty_receiver_path)
                 .into_iter()
                 .filter(|record| record.outbound_message_id == outbound_message_id)
                 .collect::<Vec<_>>();
@@ -159,7 +159,7 @@ fn cancellation_record_from_reservation_record(
         cancellation: PaymentEndpointReservationCancellation {
             reservation_id: record.reservation_id,
             counterparty: record.counterparty,
-            counterparty_receiver_id: record.counterparty_receiver_id,
+            counterparty_receiver_path: record.counterparty_receiver_path,
             identifier: record.identifier,
             payload_hash: record.payload_hash,
             attribution: record.attribution,
@@ -172,7 +172,7 @@ fn cancellation_record_from_reservation_record(
 pub(crate) async fn queue_private_payment_list_with_reservations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     reservations: Vec<PaymentEndpointReservation>,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -182,7 +182,7 @@ where
     queue_private_payment_list_with_reservations_inner(
         storage,
         counterparty,
-        counterparty_receiver_id,
+        counterparty_receiver_path,
         reservations,
         now,
         None,
@@ -205,7 +205,7 @@ where
     queue_private_payment_list_with_reservations_inner(
         storage,
         counterparty,
-        &lease.counterparty_receiver_id,
+        &lease.counterparty_receiver_path,
         reservations,
         now,
         Some(lease.clone()),
@@ -216,7 +216,7 @@ where
 async fn queue_private_payment_list_with_reservations_inner<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     reservations: Vec<PaymentEndpointReservation>,
     now: DateTime<Utc>,
     lease: Option<PeerLinkOperationLease>,
@@ -225,13 +225,13 @@ where
     S: StorageAdapter,
 {
     let (receiving_details, drafts) =
-        build_reservation_records(counterparty, counterparty_receiver_id, reservations, now)?;
+        build_reservation_records(counterparty, counterparty_receiver_path, reservations, now)?;
     let payment_endpoints = normalize_receiving_details(receiving_details)?;
     let list = PrivatePaymentList::new(payment_endpoints);
     let raw_json = serialize_private_payment_list_json(&list)?;
     let kind = validate_outbound_private_message(&raw_json)?;
     let counterparty = counterparty.clone();
-    let counterparty_receiver_id = counterparty_receiver_id.clone();
+    let counterparty_receiver_path = counterparty_receiver_path.clone();
 
     storage
         .transaction(move |tx| {
@@ -242,7 +242,7 @@ where
             for draft in drafts {
                 let existing = tx.payment_endpoint_reservation(
                     &draft.counterparty,
-                    &draft.counterparty_receiver_id,
+                    &draft.counterparty_receiver_path,
                     &draft.reservation_id,
                 );
                 if let Some(existing) = existing.as_ref() {
@@ -264,7 +264,7 @@ where
 
             let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 counterparty,
-                counterparty_receiver_id,
+                counterparty_receiver_path,
                 kind,
                 raw_json,
                 now,
@@ -282,7 +282,7 @@ where
 struct PaymentEndpointReservationRecordDraft {
     reservation_id: String,
     counterparty: PubkyPublicKey,
-    counterparty_receiver_id: PaykitReceiverId,
+    counterparty_receiver_path: PaykitReceiverPath,
     identifier: String,
     payload_hash: String,
     attribution: HashMap<String, String>,
@@ -293,7 +293,7 @@ struct PaymentEndpointReservationRecordDraft {
 impl PaymentEndpointReservationRecordDraft {
     fn matches_existing(&self, existing: &PaymentEndpointReservationRecord) -> bool {
         existing.counterparty == self.counterparty
-            && existing.counterparty_receiver_id == self.counterparty_receiver_id
+            && existing.counterparty_receiver_path == self.counterparty_receiver_path
             && existing.identifier == self.identifier
             && existing.payload_hash == self.payload_hash
     }
@@ -309,7 +309,7 @@ impl PaymentEndpointReservationRecordDraft {
         PaymentEndpointReservationRecord {
             reservation_id: self.reservation_id,
             counterparty: self.counterparty,
-            counterparty_receiver_id: self.counterparty_receiver_id,
+            counterparty_receiver_path: self.counterparty_receiver_path,
             identifier: self.identifier,
             payload_hash: self.payload_hash,
             outbound_message_id,
@@ -323,7 +323,7 @@ impl PaymentEndpointReservationRecordDraft {
 
 fn build_reservation_records(
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     reservations: Vec<PaymentEndpointReservation>,
     now: DateTime<Utc>,
 ) -> Result<(
@@ -348,7 +348,7 @@ fn build_reservation_records(
         receiving_details.push(reservation.receiving_detail.clone());
         records.push(record_from_reservation(
             counterparty,
-            counterparty_receiver_id,
+            counterparty_receiver_path,
             reservation,
             now,
         ));
@@ -379,7 +379,7 @@ pub(crate) fn validate_reservation_id(reservation_id: &str) -> Result<()> {
 
 fn record_from_reservation(
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_id: &PaykitReceiverId,
+    counterparty_receiver_path: &PaykitReceiverPath,
     reservation: PaymentEndpointReservation,
     now: DateTime<Utc>,
 ) -> PaymentEndpointReservationRecordDraft {
@@ -387,7 +387,7 @@ fn record_from_reservation(
     PaymentEndpointReservationRecordDraft {
         reservation_id: reservation.reservation_id,
         counterparty: counterparty.clone(),
-        counterparty_receiver_id: counterparty_receiver_id.clone(),
+        counterparty_receiver_path: counterparty_receiver_path.clone(),
         identifier: reservation.receiving_detail.identifier,
         payload_hash,
         attribution: reservation.attribution,
@@ -406,7 +406,10 @@ impl fmt::Debug for PaymentEndpointReservationRecord {
         f.debug_struct("PaymentEndpointReservationRecord")
             .field("reservation_id", &self.reservation_id)
             .field("counterparty", &self.counterparty)
-            .field("counterparty_receiver_id", &self.counterparty_receiver_id)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("identifier", &self.identifier)
             .field("payload_hash", &self.payload_hash)
             .field("outbound_message_id", &self.outbound_message_id)
