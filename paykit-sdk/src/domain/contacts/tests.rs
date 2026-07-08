@@ -228,7 +228,7 @@ fn test_contact_profile_resolution_debug_redacts_display_data() {
 fn test_contact_update_allows_empty_label_to_clear_display_text() {
     let update = ContactUpdate {
         public_key: public_key(),
-        receiver_path: receiver_path(),
+        receiver_paths: vec![receiver_path()],
         label: Some(String::new()),
     };
 
@@ -239,7 +239,7 @@ fn test_contact_update_allows_empty_label_to_clear_display_text() {
 fn test_contact_update_rejects_control_characters() {
     let update = ContactUpdate {
         public_key: public_key(),
-        receiver_path: receiver_path(),
+        receiver_paths: vec![receiver_path()],
         label: Some("Alice\tLocal".into()),
     };
 
@@ -255,7 +255,7 @@ fn test_contact_update_debug_redacts_label() {
     let public_key_text = public_key.to_string();
     let update = ContactUpdate {
         public_key,
-        receiver_path: receiver_path(),
+        receiver_paths: vec![receiver_path()],
         label: Some("Alice Local".into()),
     };
     let debug = format!("{update:?}");
@@ -271,7 +271,7 @@ fn test_contact_record_normalizes_whitespace_labels() {
     let labeled = ContactRecord::from_update(
         ContactUpdate {
             public_key: public_key.clone(),
-            receiver_path: receiver_path(),
+            receiver_paths: vec![receiver_path()],
             label: Some("  Alice  ".into()),
         },
         None,
@@ -280,7 +280,7 @@ fn test_contact_record_normalizes_whitespace_labels() {
     let cleared = ContactRecord::from_update(
         ContactUpdate {
             public_key,
-            receiver_path: receiver_path(),
+            receiver_paths: vec![receiver_path()],
             label: Some("   ".into()),
         },
         Some(labeled.clone()),
@@ -296,13 +296,13 @@ fn test_pending_public_contact_marker_may_exist_remotely() {
     let record = ContactRecord::from_update(
         ContactUpdate {
             public_key: public_key(),
-            receiver_path: receiver_path(),
+            receiver_paths: vec![receiver_path()],
             label: None,
         },
         None,
         chrono::Utc::now(),
     )
-    .mark_public_contact_publication_pending(chrono::Utc::now());
+    .mark_public_contact_publication_pending(receiver_path(), chrono::Utc::now());
 
     assert!(record.may_have_public_marker());
 }

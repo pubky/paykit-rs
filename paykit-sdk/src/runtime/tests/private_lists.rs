@@ -68,7 +68,7 @@ async fn test_sync_contact_private_payment_lists_reports_contact_and_clear_failu
     );
     sdk.save_contact(ContactUpdate {
         public_key: contact.clone(),
-        receiver_path: receiver_path(),
+        receiver_paths: vec![receiver_path(), other_receiver_path()],
         label: None,
     })
     .await
@@ -81,9 +81,21 @@ async fn test_sync_contact_private_payment_lists_reports_contact_and_clear_failu
     let failed = report
         .failed
         .iter()
-        .map(|change| change.counterparty.clone())
+        .map(|change| {
+            (
+                change.counterparty.clone(),
+                change.counterparty_receiver_path.clone(),
+            )
+        })
         .collect::<HashSet<_>>();
-    assert_eq!(failed, HashSet::from([contact, unlisted]));
+    assert_eq!(
+        failed,
+        HashSet::from([
+            (contact.clone(), receiver_path()),
+            (contact, other_receiver_path()),
+            (unlisted, receiver_path())
+        ])
+    );
 }
 
 #[tokio::test]

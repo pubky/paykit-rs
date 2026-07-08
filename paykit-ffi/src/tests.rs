@@ -102,10 +102,10 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     let receiver_path = paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap();
 
     state.contact_records = HashMap::from([(
-        (counterparty.clone(), receiver_path.clone()),
+        counterparty.clone(),
         ContactRecord {
             public_key: counterparty.clone(),
-            receiver_path: receiver_path.clone(),
+            receiver_paths: vec![receiver_path.clone()],
             label: None,
             profile: Some(PaykitProfile {
                 display_name: Some("Bob".into()),
@@ -116,6 +116,7 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
             created_at: now,
             updated_at: now,
             public_contact_marker_status: PublicationStatus::NotPublished,
+            public_contact_marker_receiver_path: None,
             public_contact_published_at: None,
             public_contact_removed_at: None,
             public_contact_last_error: None,

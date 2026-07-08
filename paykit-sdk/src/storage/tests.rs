@@ -185,7 +185,7 @@ fn test_sensitive_storage_debug_is_redacted() {
     let contact_public_key = counterparty();
     let contact = ContactRecord {
         public_key: contact_public_key.clone(),
-        receiver_path: receiver_path(),
+        receiver_paths: vec![receiver_path()],
         label: Some("contact-secret".into()),
         profile: Some(crate::PaykitProfile {
             display_name: Some("profile-secret".into()),
@@ -196,15 +196,13 @@ fn test_sensitive_storage_debug_is_redacted() {
         created_at: timestamp(),
         updated_at: timestamp(),
         public_contact_marker_status: crate::PublicationStatus::Published,
+        public_contact_marker_receiver_path: Some(receiver_path()),
         public_contact_published_at: Some(timestamp()),
         public_contact_removed_at: None,
         public_contact_last_error: Some("marker-secret".into()),
     };
     let storage_state = StorageState {
-        contact_records: HashMap::from([(
-            (contact_public_key.clone(), receiver_path()),
-            contact.clone(),
-        )]),
+        contact_records: HashMap::from([(contact_public_key.clone(), contact.clone())]),
         public_endpoint_records: HashMap::from([(
             public_endpoint.identifier.clone(),
             public_endpoint.clone(),

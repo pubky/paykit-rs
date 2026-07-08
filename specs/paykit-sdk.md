@@ -389,6 +389,8 @@ Contacts need more care because they can reveal a social/payment graph. The SDK
 keeps saved contacts in local/private SDK storage by default. Public contact
 markers under the configured contact marker prefix are opt-in through SDK policy
 and explicit runtime calls.
+One Contact Record represents one Pubky identity and stores the Paykit receiver
+paths that app wants to keep linked for that identity.
 
 Profile JSON may ignore unknown fields so the public profile schema can grow
 without breaking older SDKs. Private Paykit protocol messages remain

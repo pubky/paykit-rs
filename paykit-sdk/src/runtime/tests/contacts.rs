@@ -27,7 +27,7 @@ async fn test_contact_records_save_list_and_remove_locally() {
     let saved = sdk
         .save_contact(ContactUpdate {
             public_key: contact_public_key.clone(),
-            receiver_path: receiver_path(),
+            receiver_paths: vec![receiver_path()],
             label: Some("Alice".into()),
         })
         .await
@@ -36,19 +36,15 @@ async fn test_contact_records_save_list_and_remove_locally() {
     assert_eq!(saved.label.as_deref(), Some("Alice"));
     assert_eq!(sdk.contact_records().await.unwrap(), vec![saved.clone()]);
     assert_eq!(
-        sdk.contact_record(&contact_public_key, &receiver_path())
-            .await
-            .unwrap(),
+        sdk.contact_record(&contact_public_key).await.unwrap(),
         Some(saved.clone())
     );
     assert_eq!(
-        sdk.remove_contact(&contact_public_key, &receiver_path())
-            .await
-            .unwrap(),
+        sdk.remove_contact(&contact_public_key).await.unwrap(),
         Some(saved)
     );
     assert!(sdk
-        .contact_record(&contact_public_key, &receiver_path())
+        .contact_record(&contact_public_key)
         .await
         .unwrap()
         .is_none());
@@ -80,7 +76,7 @@ async fn test_save_contact_empty_label_clears_existing_label() {
 
     sdk.save_contact(ContactUpdate {
         public_key: contact_public_key.clone(),
-        receiver_path: receiver_path(),
+        receiver_paths: vec![receiver_path()],
         label: Some("Alice".into()),
     })
     .await
@@ -88,7 +84,7 @@ async fn test_save_contact_empty_label_clears_existing_label() {
     let updated = sdk
         .save_contact(ContactUpdate {
             public_key: contact_public_key,
-            receiver_path: receiver_path(),
+            receiver_paths: vec![receiver_path()],
             label: Some(String::new()),
         })
         .await
@@ -212,13 +208,14 @@ async fn test_remove_contact_blocks_when_public_marker_may_exist() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
-                    receiver_path: receiver_path(),
+                    receiver_paths: vec![receiver_path()],
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
                     public_contact_marker_status: crate::PublicationStatus::Published,
+                    public_contact_marker_receiver_path: Some(receiver_path()),
                     public_contact_published_at: Some(FixedClock.now()),
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -236,9 +233,7 @@ async fn test_remove_contact_blocks_when_public_marker_may_exist() {
         FixedClock,
     );
 
-    let result = sdk
-        .remove_contact(&contact_public_key, &receiver_path())
-        .await;
+    let result = sdk.remove_contact(&contact_public_key).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
 }
@@ -265,13 +260,14 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
-                    receiver_path: receiver_path(),
+                    receiver_paths: vec![receiver_path()],
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
                     public_contact_marker_status: crate::PublicationStatus::NotPublished,
+                    public_contact_marker_receiver_path: None,
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -301,7 +297,7 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&(contact_public_key.clone(), receiver_path()))
+        .get(&contact_public_key)
         .unwrap()
         .clone();
     assert_eq!(
@@ -332,13 +328,14 @@ async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
-                    receiver_path: receiver_path(),
+                    receiver_paths: vec![receiver_path()],
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
                     public_contact_marker_status: crate::PublicationStatus::Published,
+                    public_contact_marker_receiver_path: Some(receiver_path()),
                     public_contact_published_at: Some(FixedClock.now()),
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -365,7 +362,7 @@ async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&(contact_public_key.clone(), receiver_path()))
+        .get(&contact_public_key)
         .unwrap()
         .clone();
     assert_eq!(
@@ -454,13 +451,14 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
-                    receiver_path: receiver_path(),
+                    receiver_paths: vec![receiver_path()],
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
                     public_contact_marker_status: crate::PublicationStatus::PendingPublication,
+                    public_contact_marker_receiver_path: Some(receiver_path()),
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -488,7 +486,7 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&(contact_public_key.clone(), receiver_path()))
+        .get(&contact_public_key)
         .unwrap()
         .clone();
     assert_eq!(
@@ -519,13 +517,14 @@ async fn test_sync_public_contact_markers_fails_pending_publication_when_sharing
             move |tx| {
                 tx.save_contact_record(ContactRecord {
                     public_key: contact_public_key,
-                    receiver_path: receiver_path(),
+                    receiver_paths: vec![receiver_path()],
                     label: None,
                     profile: None,
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
                     public_contact_marker_status: crate::PublicationStatus::PendingPublication,
+                    public_contact_marker_receiver_path: Some(receiver_path()),
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -550,7 +549,7 @@ async fn test_sync_public_contact_markers_fails_pending_publication_when_sharing
         .snapshot()
         .unwrap()
         .contact_records
-        .get(&(contact_public_key.clone(), receiver_path()))
+        .get(&contact_public_key)
         .unwrap()
         .clone();
     assert_eq!(
@@ -579,7 +578,7 @@ async fn test_save_contact_requires_initialized_identity() {
     let result = sdk
         .save_contact(ContactUpdate {
             public_key: contact_public_key,
-            receiver_path: receiver_path(),
+            receiver_paths: vec![receiver_path()],
             label: None,
         })
         .await;

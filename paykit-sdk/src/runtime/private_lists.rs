@@ -208,11 +208,15 @@ where
         let (mut contacts, mut clear_counterparties) = self
             .storage
             .transaction(|tx| {
-                let mut contacts = tx
-                    .contact_records()
-                    .into_iter()
-                    .map(|record| (record.public_key, record.receiver_path))
-                    .collect::<Vec<_>>();
+                let mut contacts =
+                    tx.contact_records()
+                        .into_iter()
+                        .flat_map(|record| {
+                            record.receiver_paths.into_iter().map(move |receiver_path| {
+                                (record.public_key.clone(), receiver_path)
+                            })
+                        })
+                        .collect::<Vec<_>>();
                 contacts.sort_by(|(left_key, left_receiver), (right_key, right_receiver)| {
                     left_key
                         .as_str()

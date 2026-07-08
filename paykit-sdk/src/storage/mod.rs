@@ -151,21 +151,13 @@ pub trait StorageTransaction {
     fn contact_records(&self) -> Vec<ContactRecord>;
 
     /// Load one local contact record.
-    fn contact_record(
-        &self,
-        public_key: &PubkyPublicKey,
-        receiver_path: &PaykitReceiverPath,
-    ) -> Option<ContactRecord>;
+    fn contact_record(&self, public_key: &PubkyPublicKey) -> Option<ContactRecord>;
 
     /// Save one local contact record.
     fn save_contact_record(&mut self, record: ContactRecord);
 
     /// Remove one local contact record.
-    fn remove_contact_record(
-        &mut self,
-        public_key: &PubkyPublicKey,
-        receiver_path: &PaykitReceiverPath,
-    ) -> Option<ContactRecord>;
+    fn remove_contact_record(&mut self, public_key: &PubkyPublicKey) -> Option<ContactRecord>;
 
     /// List SDK-managed public Payment Endpoint records.
     fn public_endpoint_records(&self) -> Vec<PublicEndpointRecord>;

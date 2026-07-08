@@ -176,7 +176,8 @@ object.
   `deletePaykitBlob`, `fetchPubkyFile`, and `fetchPubkyText` — publish profile
   blobs and read public Pubky resources.
 - `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
-  `removeContact` — manage local Contact Records.
+  `removeContact` — manage local Contact Records. Each contact is one Pubky
+  identity with one or more Paykit receiver paths.
 - `PaykitSdk.fetchPubkyProfile`, `fetchPubkyFollows`, and
   `resolveContactProfile` — read Pubky app profile/follow data and resolve
   contact display metadata.

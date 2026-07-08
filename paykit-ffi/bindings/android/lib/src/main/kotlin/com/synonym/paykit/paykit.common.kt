@@ -173,7 +173,7 @@ public interface PaykitSdkInterface {
      * Return one local Contact Record.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `contactRecord`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): ContactRecord?
+    public suspend fun `contactRecord`(`publicKey`: kotlin.String): ContactRecord?
 
     /**
      * Return all local Contact Records.
@@ -490,7 +490,7 @@ public interface PaykitSdkInterface {
      * Remove a local Contact Record when it has no public marker to clean up.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `removeContact`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): ContactRecord?
+    public suspend fun `removeContact`(`publicKey`: kotlin.String): ContactRecord?
 
     /**
      * Remove the local public recovery marker for a counterparty.
@@ -1091,9 +1091,9 @@ public data class ContactRecord (
      */
     val `publicKey`: kotlin.String,
     /**
-     * Contact Paykit receiver path.
+     * Contact Paykit receiver paths.
      */
-    val `receiverPath`: kotlin.String,
+    val `receiverPaths`: List<kotlin.String>,
     /**
      * Optional local display label.
      */
@@ -1118,6 +1118,10 @@ public data class ContactRecord (
      * Public Contact Marker publication state.
      */
     val `publicContactMarkerStatus`: PublicationStatus,
+    /**
+     * Receiver path for the current public contact marker state.
+     */
+    val `publicContactMarkerReceiverPath`: kotlin.String?,
     /**
      * Time the contact was last published publicly as RFC3339 text.
      */
@@ -1146,9 +1150,9 @@ public data class ContactUpdate (
      */
     val `publicKey`: kotlin.String,
     /**
-     * Contact Paykit receiver path.
+     * Contact Paykit receiver paths.
      */
-    val `receiverPath`: kotlin.String,
+    val `receiverPaths`: List<kotlin.String>,
     /**
      * Optional local display label.
      */

@@ -162,7 +162,7 @@ async fn test_backup_state_round_trips_contact_records() {
 
     assert_eq!(report.contact_records, 1);
     assert_eq!(
-        restored.contact_records[&peer_key(&contact_public_key)]
+        restored.contact_records[&contact_public_key]
             .label
             .as_deref(),
         Some("Alice")
@@ -321,7 +321,7 @@ async fn test_restore_backup_state_accepts_pending_contact_marker_removal() {
     let contact_public_key = public_key();
     let contact = contact_record(contact_public_key)
         .mark_public_contact_published(timestamp())
-        .mark_public_contact_removal_pending(timestamp());
+        .mark_public_contact_removal_pending(receiver_path(), timestamp());
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),

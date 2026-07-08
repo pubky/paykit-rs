@@ -61,13 +61,14 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
                 });
                 tx.save_contact_record(ContactRecord {
                     public_key: counterparty.clone(),
-                    receiver_path: receiver_path(),
+                    receiver_paths: vec![receiver_path()],
                     label: Some("Alice".into()),
                     profile: None,
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
                     public_contact_marker_status: crate::PublicationStatus::NotPublished,
+                    public_contact_marker_receiver_path: None,
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -180,13 +181,14 @@ async fn test_sign_out_clears_identity_scoped_state() {
                 });
                 tx.save_contact_record(ContactRecord {
                     public_key: counterparty.clone(),
-                    receiver_path: receiver_path(),
+                    receiver_paths: vec![receiver_path()],
                     label: Some("Alice".into()),
                     profile: None,
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
                     public_contact_marker_status: crate::PublicationStatus::NotPublished,
+                    public_contact_marker_receiver_path: None,
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
@@ -261,13 +263,14 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
                 });
                 tx.save_contact_record(ContactRecord {
                     public_key: counterparty,
-                    receiver_path: receiver_path(),
+                    receiver_paths: vec![receiver_path()],
                     label: Some("Alice".into()),
                     profile: None,
                     profile_fetched_at: None,
                     created_at: FixedClock.now(),
                     updated_at: FixedClock.now(),
                     public_contact_marker_status: crate::PublicationStatus::NotPublished,
+                    public_contact_marker_receiver_path: None,
                     public_contact_published_at: None,
                     public_contact_removed_at: None,
                     public_contact_last_error: None,

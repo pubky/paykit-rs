@@ -19,7 +19,24 @@ where
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
-                let existing = tx.contact_record(&update.public_key, &update.receiver_path);
+                let existing = tx.contact_record(&update.public_key);
+                if let Some(existing) = existing.as_ref() {
+                    if let Some(marker_receiver_path) =
+                        existing.public_contact_marker_receiver_path.as_ref()
+                    {
+                        if existing.may_have_public_marker()
+                            && !update
+                                .receiver_paths
+                                .iter()
+                                .any(|receiver_path| receiver_path == marker_receiver_path)
+                        {
+                            return Err(PaykitSdkError::Policy(format!(
+                                "remove public contact marker before removing contact receiver {}/{}",
+                                existing.public_key, marker_receiver_path
+                            )));
+                        }
+                    }
+                }
                 let record = ContactRecord::from_update(update, existing, now);
                 tx.save_contact_record(record.clone());
                 Ok(record)
@@ -31,11 +48,10 @@ where
     pub async fn contact_record(
         &self,
         public_key: &PubkyPublicKey,
-        receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<ContactRecord>> {
         self.require_initialized_identity("load contact").await?;
         self.storage
-            .transaction(|tx| Ok(tx.contact_record(public_key, receiver_path)))
+            .transaction(|tx| Ok(tx.contact_record(public_key)))
             .await
     }
 
@@ -51,12 +67,11 @@ where
     pub async fn remove_contact(
         &self,
         public_key: &PubkyPublicKey,
-        receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<ContactRecord>> {
         self.require_initialized_identity("remove contact").await?;
         self.storage
             .transaction(|tx| {
-                let Some(existing) = tx.contact_record(public_key, receiver_path) else {
+                let Some(existing) = tx.contact_record(public_key) else {
                     return Ok(None);
                 };
                 if !existing.can_remove_locally() {
@@ -64,7 +79,7 @@ where
                         "remove public contact marker before deleting contact {public_key}"
                     )));
                 }
-                Ok(tx.remove_contact_record(public_key, receiver_path))
+                Ok(tx.remove_contact_record(public_key))
             })
             .await
     }
@@ -83,7 +98,10 @@ where
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
-                let Some(existing) = tx.contact_record(&public_key, &receiver_path) else {
+                let Some(existing) = tx.contact_record(&public_key) else {
+                    return Ok(None);
+                };
+                if !existing.contains_receiver_path(&receiver_path) {
                     return Ok(None);
                 };
                 let record = existing.with_profile(fetched.map(|record| record.profile), now);
@@ -115,13 +133,19 @@ where
         let pending_at = self.clock.now();
         self.storage
             .transaction(|tx| {
-                let Some(existing) = tx.contact_record(&public_key, &receiver_path) else {
+                let Some(existing) = tx.contact_record(&public_key) else {
                     return Err(PaykitSdkError::Protocol(format!(
                         "cannot publish unsaved contact {public_key}"
                     )));
                 };
+                if !existing.contains_receiver_path(&receiver_path) {
+                    return Err(PaykitSdkError::Protocol(format!(
+                        "cannot publish unsaved contact receiver {public_key}/{receiver_path}"
+                    )));
+                }
                 tx.save_contact_record(
-                    existing.mark_public_contact_publication_pending(pending_at),
+                    existing
+                        .mark_public_contact_publication_pending(receiver_path.clone(), pending_at),
                 );
                 Ok(())
             })
@@ -144,7 +168,7 @@ where
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
-                let Some(existing) = tx.contact_record(&public_key, &receiver_path) else {
+                let Some(existing) = tx.contact_record(&public_key) else {
                     return Err(PaykitSdkError::Protocol(format!(
                         "contact {public_key} disappeared before public publication was recorded"
                     )));
@@ -169,24 +193,31 @@ where
     ) -> Result<Option<ContactRecord>> {
         let existing_record = self
             .storage
-            .transaction(|tx| Ok(tx.contact_record(&public_key, &receiver_path)))
+            .transaction(|tx| Ok(tx.contact_record(&public_key)))
             .await?;
         let session_access = self
             .load_session_access_for_initialized_identity("remove public contact")
             .await?;
         let had_local_record = existing_record.is_some();
-        if existing_record
+        if let Some(existing_record) = existing_record
             .as_ref()
-            .is_some_and(ContactRecord::may_have_public_marker)
+            .filter(|record| ContactRecord::may_have_public_marker(record))
         {
+            let marker_receiver_path = marker_receiver_path(existing_record)?;
+            if marker_receiver_path != receiver_path {
+                return Err(PaykitSdkError::Policy(format!(
+                    "public contact marker for {public_key} is tracked under {marker_receiver_path}"
+                )));
+            }
             let pending_at = self.clock.now();
             self.storage
                 .transaction(|tx| {
-                    let Some(existing) = tx.contact_record(&public_key, &receiver_path) else {
+                    let Some(existing) = tx.contact_record(&public_key) else {
                         return Ok(());
                     };
                     tx.save_contact_record(
-                        existing.mark_public_contact_removal_pending(pending_at),
+                        existing
+                            .mark_public_contact_removal_pending(receiver_path.clone(), pending_at),
                     );
                     Ok(())
                 })
@@ -208,7 +239,7 @@ where
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
-                let Some(existing) = tx.contact_record(&public_key, &receiver_path) else {
+                let Some(existing) = tx.contact_record(&public_key) else {
                     return Ok(None);
                 };
                 let record = existing.mark_public_contact_removed(now);
@@ -259,22 +290,25 @@ where
                     if self.config.public_contact_sharing
                         == PublicContactSharingPolicy::ConfiguredPublicNamespace
                     {
+                        let receiver_path = marker_receiver_path(&record)?;
                         synced.push(
-                            self.publish_public_contact(record.public_key, record.receiver_path)
+                            self.publish_public_contact(record.public_key, receiver_path)
                                 .await?,
                         );
                     } else {
+                        let receiver_path = marker_receiver_path(&record)?;
                         self.mark_public_contact_failed(
                             &record.public_key,
-                            &record.receiver_path,
+                            &receiver_path,
                             "public contact sharing is disabled".into(),
                         )
                         .await?;
                     }
                 }
                 PublicationStatus::PendingRemoval => {
+                    let receiver_path = marker_receiver_path(&record)?;
                     if let Some(record) = self
-                        .remove_public_contact(record.public_key, record.receiver_path)
+                        .remove_public_contact(record.public_key, receiver_path)
                         .await?
                     {
                         synced.push(record);
@@ -289,13 +323,13 @@ where
     async fn mark_public_contact_failed(
         &self,
         public_key: &PubkyPublicKey,
-        receiver_path: &PaykitReceiverPath,
+        _receiver_path: &PaykitReceiverPath,
         error: String,
     ) -> Result<()> {
         let failed_at = self.clock.now();
         self.storage
             .transaction(|tx| {
-                let Some(existing) = tx.contact_record(public_key, receiver_path) else {
+                let Some(existing) = tx.contact_record(public_key) else {
                     return Ok(());
                 };
                 tx.save_contact_record(existing.mark_public_contact_failed(error, failed_at));
@@ -303,4 +337,16 @@ where
             })
             .await
     }
+}
+
+fn marker_receiver_path(record: &ContactRecord) -> Result<PaykitReceiverPath> {
+    record
+        .public_contact_marker_receiver_path
+        .clone()
+        .ok_or_else(|| {
+            PaykitSdkError::Protocol(format!(
+                "contact {} has no receiver path for public contact marker",
+                record.public_key
+            ))
+        })
 }

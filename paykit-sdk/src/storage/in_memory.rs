@@ -131,32 +131,18 @@ impl StorageTransaction for StorageStateTransaction {
         records
     }
 
-    fn contact_record(
-        &self,
-        public_key: &PubkyPublicKey,
-        receiver_path: &PaykitReceiverPath,
-    ) -> Option<ContactRecord> {
-        self.state
-            .contact_records
-            .get(&(public_key.clone(), receiver_path.clone()))
-            .cloned()
+    fn contact_record(&self, public_key: &PubkyPublicKey) -> Option<ContactRecord> {
+        self.state.contact_records.get(public_key).cloned()
     }
 
     fn save_contact_record(&mut self, record: ContactRecord) {
-        self.state.contact_records.insert(
-            (record.public_key.clone(), record.receiver_path.clone()),
-            record,
-        );
-    }
-
-    fn remove_contact_record(
-        &mut self,
-        public_key: &PubkyPublicKey,
-        receiver_path: &PaykitReceiverPath,
-    ) -> Option<ContactRecord> {
         self.state
             .contact_records
-            .remove(&(public_key.clone(), receiver_path.clone()))
+            .insert(record.public_key.clone(), record);
+    }
+
+    fn remove_contact_record(&mut self, public_key: &PubkyPublicKey) -> Option<ContactRecord> {
+        self.state.contact_records.remove(public_key)
     }
 
     fn public_endpoint_records(&self) -> Vec<PublicEndpointRecord> {

@@ -57,13 +57,14 @@ fn signed_out_identity(sign_out_generation: u64) -> IdentityState {
 fn contact_record(public_key: PubkyPublicKey) -> ContactRecord {
     ContactRecord {
         public_key,
-        receiver_path: receiver_path(),
+        receiver_paths: vec![receiver_path()],
         label: Some("Alice".into()),
         profile: None,
         profile_fetched_at: None,
         created_at: timestamp(),
         updated_at: timestamp(),
         public_contact_marker_status: crate::PublicationStatus::NotPublished,
+        public_contact_marker_receiver_path: None,
         public_contact_published_at: None,
         public_contact_removed_at: None,
         public_contact_last_error: None,

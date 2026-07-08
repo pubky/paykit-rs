@@ -528,8 +528,8 @@ pub struct StorageState {
     pub identity_state: Option<IdentityState>,
     /// Linked Peer records by counterparty and receiver path.
     pub linked_peers: HashMap<(PubkyPublicKey, PaykitReceiverPath), LinkedPeerRecord>,
-    /// Local contact records by public key and receiver path.
-    pub contact_records: HashMap<(PubkyPublicKey, PaykitReceiverPath), ContactRecord>,
+    /// Local contact records by public key.
+    pub contact_records: HashMap<PubkyPublicKey, ContactRecord>,
     /// SDK-managed public endpoint records by identifier.
     pub public_endpoint_records: HashMap<String, PublicEndpointRecord>,
     /// SDK-managed Payment Endpoint Reservation records by counterparty, receiver path, and reservation id.

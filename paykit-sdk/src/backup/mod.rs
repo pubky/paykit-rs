@@ -274,16 +274,8 @@ impl SdkBackupState {
         });
 
         let mut contact_records = state.contact_records.into_values().collect::<Vec<_>>();
-        contact_records.sort_by(|left, right| {
-            left.public_key
-                .as_str()
-                .cmp(right.public_key.as_str())
-                .then(
-                    left.receiver_path
-                        .as_str()
-                        .cmp(right.receiver_path.as_str()),
-                )
-        });
+        contact_records
+            .sort_by(|left, right| left.public_key.as_str().cmp(right.public_key.as_str()));
 
         let mut public_endpoint_records = state
             .public_endpoint_records
@@ -415,7 +407,7 @@ impl SdkBackupState {
         validate_linked_peer_records(&linked_peers)?;
         let contact_records = keyed_by_tuple(
             self.contact_records,
-            |record| (record.public_key.clone(), record.receiver_path.clone()),
+            |record| record.public_key.clone(),
             "local contact",
         )?;
         validate_contact_records(&contact_records)?;

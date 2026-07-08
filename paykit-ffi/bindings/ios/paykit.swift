@@ -579,7 +579,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Return one local Contact Record.
      */
-    func contactRecord(publicKey: String, receiverPath: String) async throws  -> ContactRecord?
+    func contactRecord(publicKey: String) async throws  -> ContactRecord?
 
     /**
      * Return all local Contact Records.
@@ -844,7 +844,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Remove a local Contact Record when it has no public marker to clean up.
      */
-    func removeContact(publicKey: String, receiverPath: String) async throws  -> ContactRecord?
+    func removeContact(publicKey: String) async throws  -> ContactRecord?
 
     /**
      * Remove the local public recovery marker for a counterparty.
@@ -1261,13 +1261,13 @@ open func config() -> PaykitSdkConfig  {
     /**
      * Return one local Contact Record.
      */
-open func contactRecord(publicKey: String, receiverPath: String)async throws  -> ContactRecord?  {
+open func contactRecord(publicKey: String)async throws  -> ContactRecord?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_contact_record(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath)
+                    FfiConverterString.lower(publicKey)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2306,13 +2306,13 @@ open func rejectPaymentRequest(counterparty: String, counterpartyReceiverPath: S
     /**
      * Remove a local Contact Record when it has no public marker to clean up.
      */
-open func removeContact(publicKey: String, receiverPath: String)async throws  -> ContactRecord?  {
+open func removeContact(publicKey: String)async throws  -> ContactRecord?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_remove_contact(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey),FfiConverterString.lower(receiverPath)
+                    FfiConverterString.lower(publicKey)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -5939,9 +5939,9 @@ public struct ContactRecord {
      */
     public var publicKey: String
     /**
-     * Contact Paykit receiver path.
+     * Contact Paykit receiver paths.
      */
-    public var receiverPath: String
+    public var receiverPaths: [String]
     /**
      * Optional local display label.
      */
@@ -5967,6 +5967,10 @@ public struct ContactRecord {
      */
     public var publicContactMarkerStatus: PublicationStatus
     /**
+     * Receiver path for the current public contact marker state.
+     */
+    public var publicContactMarkerReceiverPath: String?
+    /**
      * Time the contact was last published publicly as RFC3339 text.
      */
     public var publicContactPublishedAt: String?
@@ -5986,8 +5990,8 @@ public struct ContactRecord {
          * Contact public key.
          */publicKey: String,
         /**
-         * Contact Paykit receiver path.
-         */receiverPath: String,
+         * Contact Paykit receiver paths.
+         */receiverPaths: [String],
         /**
          * Optional local display label.
          */label: String?,
@@ -6007,6 +6011,9 @@ public struct ContactRecord {
          * Public Contact Marker publication state.
          */publicContactMarkerStatus: PublicationStatus,
         /**
+         * Receiver path for the current public contact marker state.
+         */publicContactMarkerReceiverPath: String?,
+        /**
          * Time the contact was last published publicly as RFC3339 text.
          */publicContactPublishedAt: String?,
         /**
@@ -6016,13 +6023,14 @@ public struct ContactRecord {
          * Last public contact marker publication/removal error.
          */publicContactLastError: String?) {
         self.publicKey = publicKey
-        self.receiverPath = receiverPath
+        self.receiverPaths = receiverPaths
         self.label = label
         self.profile = profile
         self.profileFetchedAt = profileFetchedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.publicContactMarkerStatus = publicContactMarkerStatus
+        self.publicContactMarkerReceiverPath = publicContactMarkerReceiverPath
         self.publicContactPublishedAt = publicContactPublishedAt
         self.publicContactRemovedAt = publicContactRemovedAt
         self.publicContactLastError = publicContactLastError
@@ -6039,7 +6047,7 @@ extension ContactRecord: Equatable, Hashable {
         if lhs.publicKey != rhs.publicKey {
             return false
         }
-        if lhs.receiverPath != rhs.receiverPath {
+        if lhs.receiverPaths != rhs.receiverPaths {
             return false
         }
         if lhs.label != rhs.label {
@@ -6060,6 +6068,9 @@ extension ContactRecord: Equatable, Hashable {
         if lhs.publicContactMarkerStatus != rhs.publicContactMarkerStatus {
             return false
         }
+        if lhs.publicContactMarkerReceiverPath != rhs.publicContactMarkerReceiverPath {
+            return false
+        }
         if lhs.publicContactPublishedAt != rhs.publicContactPublishedAt {
             return false
         }
@@ -6074,13 +6085,14 @@ extension ContactRecord: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(publicKey)
-        hasher.combine(receiverPath)
+        hasher.combine(receiverPaths)
         hasher.combine(label)
         hasher.combine(profile)
         hasher.combine(profileFetchedAt)
         hasher.combine(createdAt)
         hasher.combine(updatedAt)
         hasher.combine(publicContactMarkerStatus)
+        hasher.combine(publicContactMarkerReceiverPath)
         hasher.combine(publicContactPublishedAt)
         hasher.combine(publicContactRemovedAt)
         hasher.combine(publicContactLastError)
@@ -6099,13 +6111,14 @@ public struct FfiConverterTypeContactRecord: FfiConverterRustBuffer {
         return
             try ContactRecord(
                 publicKey: FfiConverterString.read(from: &buf),
-                receiverPath: FfiConverterString.read(from: &buf),
+                receiverPaths: FfiConverterSequenceString.read(from: &buf),
                 label: FfiConverterOptionString.read(from: &buf),
                 profile: FfiConverterOptionTypePaykitProfile.read(from: &buf),
                 profileFetchedAt: FfiConverterOptionString.read(from: &buf),
                 createdAt: FfiConverterString.read(from: &buf),
                 updatedAt: FfiConverterString.read(from: &buf),
                 publicContactMarkerStatus: FfiConverterTypePublicationStatus.read(from: &buf),
+                publicContactMarkerReceiverPath: FfiConverterOptionString.read(from: &buf),
                 publicContactPublishedAt: FfiConverterOptionString.read(from: &buf),
                 publicContactRemovedAt: FfiConverterOptionString.read(from: &buf),
                 publicContactLastError: FfiConverterOptionString.read(from: &buf)
@@ -6114,13 +6127,14 @@ public struct FfiConverterTypeContactRecord: FfiConverterRustBuffer {
 
     public static func write(_ value: ContactRecord, into buf: inout [UInt8]) {
         FfiConverterString.write(value.publicKey, into: &buf)
-        FfiConverterString.write(value.receiverPath, into: &buf)
+        FfiConverterSequenceString.write(value.receiverPaths, into: &buf)
         FfiConverterOptionString.write(value.label, into: &buf)
         FfiConverterOptionTypePaykitProfile.write(value.profile, into: &buf)
         FfiConverterOptionString.write(value.profileFetchedAt, into: &buf)
         FfiConverterString.write(value.createdAt, into: &buf)
         FfiConverterString.write(value.updatedAt, into: &buf)
         FfiConverterTypePublicationStatus.write(value.publicContactMarkerStatus, into: &buf)
+        FfiConverterOptionString.write(value.publicContactMarkerReceiverPath, into: &buf)
         FfiConverterOptionString.write(value.publicContactPublishedAt, into: &buf)
         FfiConverterOptionString.write(value.publicContactRemovedAt, into: &buf)
         FfiConverterOptionString.write(value.publicContactLastError, into: &buf)
@@ -6152,9 +6166,9 @@ public struct ContactUpdate {
      */
     public var publicKey: String
     /**
-     * Contact Paykit receiver path.
+     * Contact Paykit receiver paths.
      */
-    public var receiverPath: String
+    public var receiverPaths: [String]
     /**
      * Optional local display label.
      */
@@ -6167,13 +6181,13 @@ public struct ContactUpdate {
          * Contact public key.
          */publicKey: String,
         /**
-         * Contact Paykit receiver path.
-         */receiverPath: String,
+         * Contact Paykit receiver paths.
+         */receiverPaths: [String],
         /**
          * Optional local display label.
          */label: String?) {
         self.publicKey = publicKey
-        self.receiverPath = receiverPath
+        self.receiverPaths = receiverPaths
         self.label = label
     }
 }
@@ -6188,7 +6202,7 @@ extension ContactUpdate: Equatable, Hashable {
         if lhs.publicKey != rhs.publicKey {
             return false
         }
-        if lhs.receiverPath != rhs.receiverPath {
+        if lhs.receiverPaths != rhs.receiverPaths {
             return false
         }
         if lhs.label != rhs.label {
@@ -6199,7 +6213,7 @@ extension ContactUpdate: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(publicKey)
-        hasher.combine(receiverPath)
+        hasher.combine(receiverPaths)
         hasher.combine(label)
     }
 }
@@ -6216,14 +6230,14 @@ public struct FfiConverterTypeContactUpdate: FfiConverterRustBuffer {
         return
             try ContactUpdate(
                 publicKey: FfiConverterString.read(from: &buf),
-                receiverPath: FfiConverterString.read(from: &buf),
+                receiverPaths: FfiConverterSequenceString.read(from: &buf),
                 label: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: ContactUpdate, into buf: inout [UInt8]) {
         FfiConverterString.write(value.publicKey, into: &buf)
-        FfiConverterString.write(value.receiverPath, into: &buf)
+        FfiConverterSequenceString.write(value.receiverPaths, into: &buf)
         FfiConverterOptionString.write(value.label, into: &buf)
     }
 }
@@ -16938,7 +16952,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_contact_record() != 40090) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_contact_record() != 48991) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_contact_records() != 49216) {
@@ -17094,7 +17108,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request() != 14619) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 63465) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 19304) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 54279) {

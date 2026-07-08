@@ -141,8 +141,8 @@ pub struct FfiPaykitBlobRecord {
 pub struct FfiContactUpdate {
     /// Contact public key.
     pub public_key: String,
-    /// Contact Paykit receiver path.
-    pub receiver_path: String,
+    /// Contact Paykit receiver paths.
+    pub receiver_paths: Vec<String>,
     /// Optional local display label.
     pub label: Option<String>,
 }
@@ -152,8 +152,8 @@ pub struct FfiContactUpdate {
 pub struct FfiContactRecord {
     /// Contact public key.
     pub public_key: String,
-    /// Contact Paykit receiver path.
-    pub receiver_path: String,
+    /// Contact Paykit receiver paths.
+    pub receiver_paths: Vec<String>,
     /// Optional local display label.
     pub label: Option<String>,
     /// Cached public profile, when fetched.
@@ -166,6 +166,8 @@ pub struct FfiContactRecord {
     pub updated_at: String,
     /// Public Contact Marker publication state.
     pub public_contact_marker_status: FfiPublicationStatus,
+    /// Receiver path for the current public contact marker state.
+    pub public_contact_marker_receiver_path: Option<String>,
     /// Time the contact was last published publicly as RFC3339 text.
     pub public_contact_published_at: Option<String>,
     /// Time the public contact marker was last removed as RFC3339 text.
@@ -350,13 +352,9 @@ impl FfiPaykitSdk {
     pub async fn contact_record(
         &self,
         public_key: String,
-        receiver_path: String,
     ) -> Result<Option<FfiContactRecord>, PaykitFfiError> {
         self.runtime
-            .contact_record(
-                &parse_public_key(public_key)?,
-                &parse_receiver_path(receiver_path)?,
-            )
+            .contact_record(&parse_public_key(public_key)?)
             .await
             .map(|record| record.map(Into::into))
             .map_err(Into::into)
@@ -375,13 +373,9 @@ impl FfiPaykitSdk {
     pub async fn remove_contact(
         &self,
         public_key: String,
-        receiver_path: String,
     ) -> Result<Option<FfiContactRecord>, PaykitFfiError> {
         self.runtime
-            .remove_contact(
-                &parse_public_key(public_key)?,
-                &parse_receiver_path(receiver_path)?,
-            )
+            .remove_contact(&parse_public_key(public_key)?)
             .await
             .map(|record| record.map(Into::into))
             .map_err(Into::into)
@@ -556,7 +550,11 @@ impl TryFrom<FfiContactUpdate> for ContactUpdate {
     fn try_from(value: FfiContactUpdate) -> Result<Self, Self::Error> {
         Ok(Self {
             public_key: parse_public_key(value.public_key)?,
-            receiver_path: parse_receiver_path(value.receiver_path)?,
+            receiver_paths: value
+                .receiver_paths
+                .into_iter()
+                .map(parse_receiver_path)
+                .collect::<Result<Vec<_>, _>>()?,
             label: value.label,
         })
     }
@@ -566,13 +564,20 @@ impl From<ContactRecord> for FfiContactRecord {
     fn from(value: ContactRecord) -> Self {
         Self {
             public_key: app_public_key(&value.public_key),
-            receiver_path: value.receiver_path.to_string(),
+            receiver_paths: value
+                .receiver_paths
+                .into_iter()
+                .map(|receiver_path| receiver_path.to_string())
+                .collect(),
             label: value.label,
             profile: value.profile.map(Into::into),
             profile_fetched_at: value.profile_fetched_at.map(|time| time.to_rfc3339()),
             created_at: value.created_at.to_rfc3339(),
             updated_at: value.updated_at.to_rfc3339(),
             public_contact_marker_status: value.public_contact_marker_status.into(),
+            public_contact_marker_receiver_path: value
+                .public_contact_marker_receiver_path
+                .map(|receiver_path| receiver_path.to_string()),
             public_contact_published_at: value
                 .public_contact_published_at
                 .map(|time| time.to_rfc3339()),

@@ -485,7 +485,7 @@ pub(super) fn validate_public_endpoint_records(
 }
 
 pub(super) fn validate_contact_records(
-    records: &HashMap<PeerStorageKey, ContactRecord>,
+    records: &HashMap<PubkyPublicKey, ContactRecord>,
 ) -> Result<()> {
     for record in records.values() {
         if let Some(profile) = record.profile.as_ref() {
@@ -494,8 +494,15 @@ pub(super) fn validate_contact_records(
         if let Some(label) = record.label.as_deref() {
             crate::ContactUpdate {
                 public_key: record.public_key.clone(),
-                receiver_path: record.receiver_path.clone(),
+                receiver_paths: record.receiver_paths.clone(),
                 label: Some(label.to_owned()),
+            }
+            .validate()?;
+        } else {
+            crate::ContactUpdate {
+                public_key: record.public_key.clone(),
+                receiver_paths: record.receiver_paths.clone(),
+                label: None,
             }
             .validate()?;
         }
@@ -516,29 +523,38 @@ fn validate_contact_marker_state(record: &ContactRecord) -> Result<()> {
         )));
     }
 
+    let active_marker_receiver = record
+        .public_contact_marker_receiver_path
+        .as_ref()
+        .is_some_and(|receiver_path| record.contains_receiver_path(receiver_path));
+
     let invalid = match record.public_contact_marker_status {
         NotPublished => {
             record.public_contact_published_at.is_some()
                 || record.public_contact_removed_at.is_some()
                 || record.public_contact_last_error.is_some()
+                || record.public_contact_marker_receiver_path.is_some()
         }
-        PendingPublication => record.public_contact_last_error.is_some(),
+        PendingPublication => record.public_contact_last_error.is_some() || !active_marker_receiver,
         Published => {
             record.public_contact_published_at.is_none()
                 || record.public_contact_removed_at.is_some()
                 || record.public_contact_last_error.is_some()
+                || !active_marker_receiver
         }
         PendingRemoval => {
             record.public_contact_published_at.is_none()
                 || record.public_contact_removed_at.is_some()
                 || record.public_contact_last_error.is_some()
+                || !active_marker_receiver
         }
         Removed => {
             record.public_contact_published_at.is_some()
                 || record.public_contact_removed_at.is_none()
                 || record.public_contact_last_error.is_some()
+                || record.public_contact_marker_receiver_path.is_some()
         }
-        Failed => record.public_contact_last_error.is_none(),
+        Failed => record.public_contact_last_error.is_none() || !active_marker_receiver,
     };
     if invalid {
         return Err(PaykitSdkError::Protocol(format!(

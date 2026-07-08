@@ -434,7 +434,7 @@ RustBuffer uniffi_paykit_fn_method_ffipaykitsdk_config(void*_Nonnull ptr, RustCa
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_METHOD_FFIPAYKITSDK_CONTACT_RECORD
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_METHOD_FFIPAYKITSDK_CONTACT_RECORD
-uint64_t uniffi_paykit_fn_method_ffipaykitsdk_contact_record(void*_Nonnull ptr, RustBuffer public_key, RustBuffer receiver_path
+uint64_t uniffi_paykit_fn_method_ffipaykitsdk_contact_record(void*_Nonnull ptr, RustBuffer public_key
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_METHOD_FFIPAYKITSDK_CONTACT_RECORDS
@@ -694,7 +694,7 @@ uint64_t uniffi_paykit_fn_method_ffipaykitsdk_reject_payment_request(void*_Nonnu
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_METHOD_FFIPAYKITSDK_REMOVE_CONTACT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_METHOD_FFIPAYKITSDK_REMOVE_CONTACT
-uint64_t uniffi_paykit_fn_method_ffipaykitsdk_remove_contact(void*_Nonnull ptr, RustBuffer public_key, RustBuffer receiver_path
+uint64_t uniffi_paykit_fn_method_ffipaykitsdk_remove_contact(void*_Nonnull ptr, RustBuffer public_key
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_METHOD_FFIPAYKITSDK_REMOVE_ENCRYPTED_LINK_RECOVERY_MARKER

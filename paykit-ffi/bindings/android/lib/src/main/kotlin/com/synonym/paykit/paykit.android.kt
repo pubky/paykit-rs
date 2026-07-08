@@ -1560,7 +1560,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_contact_record() != 40090.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_contact_record() != 48991.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_contact_records() != 49216.toShort()) {
@@ -1716,7 +1716,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request() != 14619.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 63465.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 19304.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 54279.toShort()) {
@@ -2490,7 +2490,6 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_contact_record(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
-        `receiverPath`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_contact_records(
@@ -2776,7 +2775,6 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_remove_contact(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
-        `receiverPath`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_remove_encrypted_link_recovery_marker(
@@ -4193,13 +4191,12 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
      * Return one local Contact Record.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `contactRecord`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): ContactRecord? {
+    public override suspend fun `contactRecord`(`publicKey`: kotlin.String): ContactRecord? {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_contact_record(
                     thisPtr,
                     FfiConverterString.lower(`publicKey`),
-                    FfiConverterString.lower(`receiverPath`),
                 )
             },
             { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -5422,13 +5419,12 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
      * Remove a local Contact Record when it has no public marker to clean up.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `removeContact`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): ContactRecord? {
+    public override suspend fun `removeContact`(`publicKey`: kotlin.String): ContactRecord? {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_remove_contact(
                     thisPtr,
                     FfiConverterString.lower(`publicKey`),
-                    FfiConverterString.lower(`receiverPath`),
                 )
             },
             { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -9015,7 +9011,7 @@ public object FfiConverterTypeContactRecord: FfiConverterRustBuffer<ContactRecor
     override fun read(buf: ByteBuffer): ContactRecord {
         return ContactRecord(
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalTypeFfiPaykitProfile.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -9025,18 +9021,20 @@ public object FfiConverterTypeContactRecord: FfiConverterRustBuffer<ContactRecor
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: ContactRecord): ULong = (
             FfiConverterString.allocationSize(value.`publicKey`) +
-            FfiConverterString.allocationSize(value.`receiverPath`) +
+            FfiConverterSequenceString.allocationSize(value.`receiverPaths`) +
             FfiConverterOptionalString.allocationSize(value.`label`) +
             FfiConverterOptionalTypeFfiPaykitProfile.allocationSize(value.`profile`) +
             FfiConverterOptionalString.allocationSize(value.`profileFetchedAt`) +
             FfiConverterString.allocationSize(value.`createdAt`) +
             FfiConverterString.allocationSize(value.`updatedAt`) +
             FfiConverterTypePublicationStatus.allocationSize(value.`publicContactMarkerStatus`) +
+            FfiConverterOptionalString.allocationSize(value.`publicContactMarkerReceiverPath`) +
             FfiConverterOptionalString.allocationSize(value.`publicContactPublishedAt`) +
             FfiConverterOptionalString.allocationSize(value.`publicContactRemovedAt`) +
             FfiConverterOptionalString.allocationSize(value.`publicContactLastError`)
@@ -9044,13 +9042,14 @@ public object FfiConverterTypeContactRecord: FfiConverterRustBuffer<ContactRecor
 
     override fun write(value: ContactRecord, buf: ByteBuffer) {
         FfiConverterString.write(value.`publicKey`, buf)
-        FfiConverterString.write(value.`receiverPath`, buf)
+        FfiConverterSequenceString.write(value.`receiverPaths`, buf)
         FfiConverterOptionalString.write(value.`label`, buf)
         FfiConverterOptionalTypeFfiPaykitProfile.write(value.`profile`, buf)
         FfiConverterOptionalString.write(value.`profileFetchedAt`, buf)
         FfiConverterString.write(value.`createdAt`, buf)
         FfiConverterString.write(value.`updatedAt`, buf)
         FfiConverterTypePublicationStatus.write(value.`publicContactMarkerStatus`, buf)
+        FfiConverterOptionalString.write(value.`publicContactMarkerReceiverPath`, buf)
         FfiConverterOptionalString.write(value.`publicContactPublishedAt`, buf)
         FfiConverterOptionalString.write(value.`publicContactRemovedAt`, buf)
         FfiConverterOptionalString.write(value.`publicContactLastError`, buf)
@@ -9064,20 +9063,20 @@ public object FfiConverterTypeContactUpdate: FfiConverterRustBuffer<ContactUpdat
     override fun read(buf: ByteBuffer): ContactUpdate {
         return ContactUpdate(
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: ContactUpdate): ULong = (
             FfiConverterString.allocationSize(value.`publicKey`) +
-            FfiConverterString.allocationSize(value.`receiverPath`) +
+            FfiConverterSequenceString.allocationSize(value.`receiverPaths`) +
             FfiConverterOptionalString.allocationSize(value.`label`)
     )
 
     override fun write(value: ContactUpdate, buf: ByteBuffer) {
         FfiConverterString.write(value.`publicKey`, buf)
-        FfiConverterString.write(value.`receiverPath`, buf)
+        FfiConverterSequenceString.write(value.`receiverPaths`, buf)
         FfiConverterOptionalString.write(value.`label`, buf)
     }
 }
