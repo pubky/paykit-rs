@@ -368,9 +368,6 @@ import com.synonym.paykit.PaykitAndroid
 check(PaykitAndroid.initialize(applicationContext))
 ```
 
-React Native initializes this from the native module and returns a platform
-error if initialization fails.
-
 ## Project Structure
 
 ```text
