@@ -130,6 +130,53 @@ async fn receiver_marker_round_trip_and_discovery() {
 }
 
 #[tokio::test]
+async fn invalid_receiver_marker_does_not_block_sibling_discovery() {
+    let setup = TestSetup::new().await;
+    let method = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+    let endpoint = PaymentEndpointPayload::new("lnbc...");
+
+    set_payment_endpoint(
+        &setup.session,
+        &receiver_path(),
+        method.clone(),
+        endpoint.clone(),
+    )
+    .await
+    .unwrap();
+    setup
+        .session
+        .storage()
+        .put(
+            format!(
+                "{PAYKIT_PATH_PREFIX}/{}/receiver.json",
+                server_receiver_path()
+            ),
+            "not-json".to_string(),
+        )
+        .await
+        .unwrap();
+
+    let direct_marker = get_paykit_receiver_marker(
+        &setup.public_storage,
+        &setup.public_key,
+        &server_receiver_path(),
+    )
+    .await;
+    let receiver_paths = list_paykit_receiver_paths(&setup.public_storage, &setup.public_key)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        direct_marker,
+        Err(PaykitError::InvalidData { .. })
+    ));
+    assert!(receiver_paths.contains(&receiver_path()));
+    assert!(!receiver_paths.contains(&server_receiver_path()));
+
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
 async fn missing_endpoint_returns_none() {
     let setup = TestSetup::new().await;
     let method = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();

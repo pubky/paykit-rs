@@ -213,11 +213,17 @@ async fn receiver_is_publicly_advertised(
     owner: &PublicKey,
     receiver_path: &PaykitReceiverPath,
 ) -> Result<bool> {
-    if fetch_paykit_receiver_marker(storage, owner, receiver_path)
-        .await?
-        .is_some()
-    {
-        return Ok(true);
+    match fetch_paykit_receiver_marker(storage, owner, receiver_path).await {
+        Ok(Some(_)) => return Ok(true),
+        Ok(None) => {}
+        Err(PaykitError::InvalidData { context, .. }) => {
+            debug!(
+                receiver = %receiver_path,
+                error = %context,
+                "ignoring invalid Paykit receiver marker during discovery"
+            );
+        }
+        Err(err) => return Err(err),
     }
 
     let endpoint_addr = format!("{owner}{}", payment_endpoint_path_prefix(receiver_path));

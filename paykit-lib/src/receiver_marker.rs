@@ -261,4 +261,26 @@ mod tests {
             Err(PaykitError::InvalidData { .. })
         ));
     }
+
+    #[test]
+    fn test_receiver_marker_rejects_unknown_top_level_fields() {
+        let raw = json!({
+            "version": 1,
+            "kind": "paykit.receiver",
+            "receiver_path": "bitkit/server",
+            "capabilities": {
+                "private_payments": true,
+                "payment_requests": true,
+                "receipts": true,
+                "outgoing_payments": false
+            },
+            "extra": true
+        })
+        .to_string();
+
+        assert!(matches!(
+            parse_paykit_receiver_marker_json(&raw, &receiver_path()),
+            Err(PaykitError::InvalidData { .. })
+        ));
+    }
 }
