@@ -343,6 +343,9 @@ Public Payment Endpoints for the same receiver are stored under
 not collide with Payment Endpoint Identifier files. Public receiver discovery
 markers are stored at `/pub/paykit/v0/{receiver_path}/receiver.json`; they
 advertise only the receiver path and coarse capabilities, not payment details.
+Marker parsing is strict. Future marker wire changes should use a new version;
+older clients ignore unsupported marker data during receiver-path discovery
+unless the receiver also publishes public Payment Endpoints.
 
 Apps that already have a public product namespace can configure the SDK
 profile/contact namespace segment. For example, `profile_namespace =

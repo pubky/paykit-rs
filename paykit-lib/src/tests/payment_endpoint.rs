@@ -126,6 +126,10 @@ async fn receiver_marker_round_trip_and_discovery() {
     assert!(removed.is_none());
     assert!(!receiver_paths.contains(&server_receiver_path()));
 
+    remove_paykit_receiver_marker(&setup.session, &server_receiver_path())
+        .await
+        .unwrap();
+
     setup.raw_session.signout().await.unwrap();
 }
 
@@ -171,6 +175,42 @@ async fn invalid_receiver_marker_does_not_block_sibling_discovery() {
         Err(PaykitError::InvalidData { .. })
     ));
     assert!(receiver_paths.contains(&receiver_path()));
+    assert!(!receiver_paths.contains(&server_receiver_path()));
+
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn empty_receiver_marker_is_invalid_and_does_not_advertise_receiver() {
+    let setup = TestSetup::new().await;
+
+    setup
+        .session
+        .storage()
+        .put(
+            format!(
+                "{PAYKIT_PATH_PREFIX}/{}/receiver.json",
+                server_receiver_path()
+            ),
+            String::new(),
+        )
+        .await
+        .unwrap();
+
+    let direct_marker = get_paykit_receiver_marker(
+        &setup.public_storage,
+        &setup.public_key,
+        &server_receiver_path(),
+    )
+    .await;
+    let receiver_paths = list_paykit_receiver_paths(&setup.public_storage, &setup.public_key)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        direct_marker,
+        Err(PaykitError::InvalidData { .. })
+    ));
     assert!(!receiver_paths.contains(&server_receiver_path()));
 
     setup.raw_session.signout().await.unwrap();
