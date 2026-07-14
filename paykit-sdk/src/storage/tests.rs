@@ -188,25 +188,37 @@ fn test_sensitive_storage_debug_is_redacted() {
         outbound_private_message(stream_counterparty.clone()),
     );
     outbound.last_error = Some("outbound-secret".into());
-    let stream = PrivateStreamItemRecord::from_new(
-        0,
-        NewPrivateStreamItem::new(NewPrivateStreamItemDetails {
-            counterparty: stream_counterparty,
-            counterparty_receiver_path: receiver_path(),
-            receive_batch_id: 0,
-            raw_json: r#"{"key":"secret"}"#.into(),
-            parsed_version: Some(1),
-            parsed_kind: Some("paykit.receipt_access".into()),
-            known_paykit_kind: Some("paykit.receipt_access".into()),
-            parse_status: PrivateStreamParseStatus::Valid,
-            parse_error: None,
-            received_at: timestamp(),
-        }),
-    );
+    let new_stream = NewPrivateStreamItem::new(NewPrivateStreamItemDetails {
+        counterparty: stream_counterparty.clone(),
+        counterparty_receiver_path: receiver_path(),
+        receive_batch_id: 0,
+        raw_json: r#"{"key":"secret"}"#.into(),
+        parsed_version: Some(1),
+        parsed_kind: Some("paykit.receipt_access".into()),
+        known_paykit_kind: Some("paykit.receipt_access".into()),
+        parse_status: PrivateStreamParseStatus::Valid,
+        parse_error: Some("parse-error-secret".into()),
+        received_at: timestamp(),
+    });
+    let stream = PrivateStreamItemRecord::from_new(0, new_stream.clone());
     let receipt_access = receipt_access_record(stream.counterparty.clone());
     let receipt = receipt_record(receipt_access.counterparty.clone());
     let reservation = payment_endpoint_reservation_record(receipt_access.counterparty.clone());
-    let public_endpoint = public_endpoint_record("btc-lightning-bolt11");
+    let mut public_endpoint = public_endpoint_record("btc-lightning-bolt11");
+    public_endpoint.last_error = Some("endpoint-error-secret".into());
+    let linked_peer = LinkedPeerRecord {
+        counterparty: stream_counterparty.clone(),
+        counterparty_receiver_path: receiver_path(),
+        state: LinkedPeerState::Linked,
+        last_sync_at: Some(timestamp()),
+        last_private_receive_at: Some(timestamp()),
+        failure_count: 0,
+        local_recovery_attempt_id: None,
+        local_recovery_marker_created_at: None,
+        local_recovery_marker_last_error: Some("linked-peer-error-secret".into()),
+        remote_recovery_attempt_id: None,
+        remote_recovery_marker_observed_at: None,
+    };
     let contact_public_key = counterparty();
     let contact = ContactRecord {
         public_key: contact_public_key.clone(),
@@ -236,7 +248,7 @@ fn test_sensitive_storage_debug_is_redacted() {
     };
 
     let debug = format!(
-            "{link_state:?} {outbound:?} {stream:?} {receipt_access:?} {receipt:?} {reservation:?} {public_endpoint:?} {contact:?} {storage_state:?}"
+            "{link_state:?} {outbound:?} {new_stream:?} {stream:?} {linked_peer:?} {receipt_access:?} {receipt:?} {reservation:?} {public_endpoint:?} {contact:?} {storage_state:?}"
         );
     assert!(debug.contains("<redacted:"));
     assert!(!debug.contains("secret"));
@@ -245,6 +257,9 @@ fn test_sensitive_storage_debug_is_redacted() {
     assert!(!debug.contains("alice"));
     assert!(!debug.contains(contact_public_key.as_str()));
     assert!(!debug.contains("[1, 2, 3]"));
+    assert!(!debug.contains("endpoint-error-secret"));
+    assert!(!debug.contains("linked-peer-error-secret"));
+    assert!(!debug.contains("parse-error-secret"));
 }
 
 #[tokio::test]
