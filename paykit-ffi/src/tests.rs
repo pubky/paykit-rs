@@ -53,6 +53,80 @@ fn test_required_capabilities_validate_config() {
     );
 }
 
+#[tokio::test]
+async fn test_pubky_auth_companion_claim_reports_invalid_auth_url() {
+    let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
+    let error = bootstrap
+        .approve_auth_with_companion_claim(
+            "https://example.com/not-pubky-auth".into(),
+            "/pub/example/account/:rw".into(),
+            Arc::new(FfiPubkyLocalSecretKey::new(vec![7; 32])),
+            FfiPubkyAuthCompanionClaim {
+                query_parameter: "x-example-claim".into(),
+                claim_type: "account-export-v1".into(),
+                unsigned_payload: vec![1, 2, 3],
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FfiPubkyAuthCompanionClaimApprovalError::InvalidAuthUrl { .. }
+    ));
+}
+
+#[tokio::test]
+async fn test_pubky_auth_companion_claim_reports_invalid_claim() {
+    let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
+    let error = bootstrap
+        .approve_auth_with_companion_claim(
+            "pubkyauth://signin".into(),
+            "/pub/example/account/:rw".into(),
+            Arc::new(FfiPubkyLocalSecretKey::new(vec![7; 32])),
+            FfiPubkyAuthCompanionClaim {
+                query_parameter: "x-example|claim".into(),
+                claim_type: "account-export-v1".into(),
+                unsigned_payload: vec![],
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FfiPubkyAuthCompanionClaimApprovalError::InvalidClaim { .. }
+    ));
+}
+
+#[test]
+fn test_pubky_auth_companion_claim_debug_redacts_unsigned_payload() {
+    let claim = FfiPubkyAuthCompanionClaim {
+        query_parameter: "x-example-claim".into(),
+        claim_type: "account-export-v1".into(),
+        unsigned_payload: vec![222, 173, 190, 239],
+    };
+
+    let debug = format!("{claim:?}");
+
+    assert!(debug.contains("x-example-claim"));
+    assert!(debug.contains("account-export-v1"));
+    assert!(debug.contains("<redacted:4 bytes>"));
+    assert!(!debug.contains("[222, 173, 190, 239]"));
+}
+
+#[test]
+fn test_pubky_auth_companion_claim_unexpected_error_is_delivery_neutral() {
+    let error = FfiPubkyAuthCompanionClaimApprovalError::Unexpected {
+        reason: "unrecognized SDK companion claim approval failure".into(),
+    };
+
+    let display = error.to_string();
+
+    assert!(display.contains("unexpected"));
+    assert!(!display.contains("after companion delivery"));
+}
+
 #[test]
 fn test_storage_state_blob_round_trips() {
     let state = StorageState::default();

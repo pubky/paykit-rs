@@ -1,5 +1,9 @@
 //! Pubky account, session, and auth-flow helpers.
 
+mod companion_claim;
+
+pub use companion_claim::{PubkyAuthCompanionClaim, PubkyAuthCompanionClaimApprovalError};
+
 use std::{fmt, str::FromStr};
 
 use pubky::{

@@ -3986,6 +3986,14 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     func approveAuth(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey) async throws
 
     /**
+     * Deliver a signed application-defined claim, then approve Pubky Auth.
+     *
+     * This high-level operation owns validation, request-bound signing,
+     * channel derivation, encryption, relay delivery, and approval ordering.
+     */
+    func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey, claim: PubkyAuthCompanionClaim) async throws
+
+    /**
      * Import an exported Pubky session secret.
      */
     func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
@@ -4109,6 +4117,29 @@ open func approveAuth(authUrl: String, expectedCapabilities: String, localSecret
             freeFunc: ffi_paykit_rust_future_free_void,
             liftFunc: { $0 },
             errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Deliver a signed application-defined claim, then approve Pubky Auth.
+     *
+     * This high-level operation owns validation, request-bound signing,
+     * channel derivation, encryption, relay delivery, and approval ordering.
+     */
+open func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey, claim: PubkyAuthCompanionClaim)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(authUrl),FfiConverterString.lower(expectedCapabilities),FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterTypePubkyAuthCompanionClaim_lower(claim)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypePubkyAuthCompanionClaimApprovalError_lift
         )
 }
 
@@ -10860,6 +10891,114 @@ public func FfiConverterTypePrivateStreamIntakeReport_lower(_ value: PrivateStre
 
 
 /**
+ * Application-defined input for a Pubky Auth companion claim.
+ *
+ * The application serializes its protocol-specific unsigned payload. Paykit
+ * validates the identifiers, creates the request-bound identity signature,
+ * encrypts the signed payload, and delivers it before normal Pubky Auth.
+ *
+ * Generated platform record descriptions may include the raw payload. Apps
+ * must not log, interpolate, or otherwise stringify this record.
+ */
+public struct PubkyAuthCompanionClaim {
+    /**
+     * Auth URL query parameter that announces the claim.
+     */
+    public var queryParameter: String
+    /**
+     * Protocol-specific claim type used for URL validation and relay derivation.
+     */
+    public var claimType: String
+    /**
+     * Protocol-specific unsigned binary payload. Do not log this value.
+     */
+    public var unsignedPayload: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Auth URL query parameter that announces the claim.
+         */queryParameter: String,
+        /**
+         * Protocol-specific claim type used for URL validation and relay derivation.
+         */claimType: String,
+        /**
+         * Protocol-specific unsigned binary payload. Do not log this value.
+         */unsignedPayload: Data) {
+        self.queryParameter = queryParameter
+        self.claimType = claimType
+        self.unsignedPayload = unsignedPayload
+    }
+}
+
+#if compiler(>=6)
+extension PubkyAuthCompanionClaim: Sendable {}
+#endif
+
+
+extension PubkyAuthCompanionClaim: Equatable, Hashable {
+    public static func ==(lhs: PubkyAuthCompanionClaim, rhs: PubkyAuthCompanionClaim) -> Bool {
+        if lhs.queryParameter != rhs.queryParameter {
+            return false
+        }
+        if lhs.claimType != rhs.claimType {
+            return false
+        }
+        if lhs.unsignedPayload != rhs.unsignedPayload {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(queryParameter)
+        hasher.combine(claimType)
+        hasher.combine(unsignedPayload)
+    }
+}
+
+extension PubkyAuthCompanionClaim: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyAuthCompanionClaim: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyAuthCompanionClaim {
+        return
+            try PubkyAuthCompanionClaim(
+                queryParameter: FfiConverterString.read(from: &buf),
+                claimType: FfiConverterString.read(from: &buf),
+                unsignedPayload: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PubkyAuthCompanionClaim, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.queryParameter, into: &buf)
+        FfiConverterString.write(value.claimType, into: &buf)
+        FfiConverterData.write(value.unsignedPayload, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyAuthCompanionClaim_lift(_ buf: RustBuffer) throws -> PubkyAuthCompanionClaim {
+    return try FfiConverterTypePubkyAuthCompanionClaim.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyAuthCompanionClaim_lower(_ value: PubkyAuthCompanionClaim) -> RustBuffer {
+    return FfiConverterTypePubkyAuthCompanionClaim.lower(value)
+}
+
+
+/**
  * Public details parsed from a Pubky auth deep link.
  */
 public struct PubkyAuthDetails {
@@ -14503,6 +14642,168 @@ extension PaymentRequestLocalRole: Codable {}
 
 
 
+
+/**
+ * Failure returned while approving Pubky Auth with a companion claim.
+ */
+public enum PubkyAuthCompanionClaimApprovalError: Swift.Error {
+
+
+
+    /**
+     * The URL, claim type, secret, relay, or capability request is invalid.
+     */
+    case InvalidAuthUrl(reason: String
+    )
+    /**
+     * The companion claim description is invalid.
+     */
+    case InvalidClaim(reason: String
+    )
+    /**
+     * The supplied local Pubky identity key is invalid.
+     */
+    case InvalidLocalSecretKey(reason: String
+    )
+    /**
+     * XSalsa20-Poly1305 encryption failed before relay delivery.
+     */
+    case EncryptionFailure(reason: String
+    )
+    /**
+     * The encrypted companion claim could not be delivered to its relay channel.
+     */
+    case RelayDeliveryFailure(reason: String
+    )
+    /**
+     * Normal Pubky Auth approval failed after companion delivery succeeded.
+     */
+    case AuthorizationFailure(reason: String
+    )
+    /**
+     * An unknown SDK failure occurred; no claim-delivery state is implied.
+     */
+    case Unexpected(reason: String
+    )
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyAuthCompanionClaimApprovalError: FfiConverterRustBuffer {
+    typealias SwiftType = PubkyAuthCompanionClaimApprovalError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyAuthCompanionClaimApprovalError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .InvalidAuthUrl(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 2: return .InvalidClaim(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 3: return .InvalidLocalSecretKey(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 4: return .EncryptionFailure(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 5: return .RelayDeliveryFailure(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 6: return .AuthorizationFailure(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 7: return .Unexpected(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PubkyAuthCompanionClaimApprovalError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case let .InvalidAuthUrl(reason):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .InvalidClaim(reason):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .InvalidLocalSecretKey(reason):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .EncryptionFailure(reason):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .RelayDeliveryFailure(reason):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .AuthorizationFailure(reason):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .Unexpected(reason):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(reason, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyAuthCompanionClaimApprovalError_lift(_ buf: RustBuffer) throws -> PubkyAuthCompanionClaimApprovalError {
+    return try FfiConverterTypePubkyAuthCompanionClaimApprovalError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyAuthCompanionClaimApprovalError_lower(_ value: PubkyAuthCompanionClaimApprovalError) -> RustBuffer {
+    return FfiConverterTypePubkyAuthCompanionClaimApprovalError.lower(value)
+}
+
+
+extension PubkyAuthCompanionClaimApprovalError: Equatable, Hashable {}
+
+extension PubkyAuthCompanionClaimApprovalError: Codable {}
+
+
+
+
+extension PubkyAuthCompanionClaimApprovalError: Foundation.LocalizedError {
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+}
+
+
+
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
@@ -17524,6 +17825,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 21644) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 6650) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 19676) {

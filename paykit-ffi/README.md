@@ -168,7 +168,54 @@ object.
   a BIP39 English mnemonic phrase.
 - `pubkyPublicKeyFromSecret(localSecretKey)` — derive a Pubky public key.
 - `parsePubkyAuthUrl(authUrl)` — inspect a Pubky auth URL.
+- `PubkySessionBootstrap.approveAuthWithCompanionClaim(...)` — sign, encrypt,
+  and relay an application-defined companion claim before approving the normal
+  Pubky Auth token.
+- `PubkyAuthCompanionClaim` — integrator-owned query parameter, claim type, and
+  unsigned payload; no channel, signature, nonce, or secretbox primitives cross
+  FFI.
 - `resolvePubkyUrl(uri)` and `parsePubkyResource(uri)` — Pubky URI helpers.
+
+The companion approval method throws
+`PubkyAuthCompanionClaimApprovalError`, whose cases distinguish invalid auth
+URLs, invalid claims or local keys, encryption failure, relay delivery failure,
+and normal authorization failure. Relay delivery completes before normal Auth
+approval begins, so a relay or encryption failure does not authorize the
+requesting server. The integrating application owns its payload serialization
+and semantic validation; Paykit owns the common cryptographic transport and
+approval ordering.
+
+Swift integration shape:
+
+```swift
+let claim = PubkyAuthCompanionClaim(
+    queryParameter: "x-bitkit-claim",
+    claimType: "watch-only-account-v1",
+    unsignedPayload: bitkitUnsignedClaim
+)
+try await bootstrap.approveAuthWithCompanionClaim(
+    authUrl: authUrl,
+    expectedCapabilities: "/pub/paykit/v0/bitkit/server/:rw",
+    localSecretKey: identityKey,
+    claim: claim
+)
+```
+
+Kotlin integration shape:
+
+```kotlin
+val claim = PubkyAuthCompanionClaim(
+    queryParameter = "x-bitkit-claim",
+    claimType = "watch-only-account-v1",
+    unsignedPayload = bitkitUnsignedClaim,
+)
+bootstrap.approveAuthWithCompanionClaim(
+    authUrl = authUrl,
+    expectedCapabilities = "/pub/paykit/v0/bitkit/server/:rw",
+    localSecretKey = identityKey,
+    claim = claim,
+)
+```
 
 ### Profiles and Contacts
 

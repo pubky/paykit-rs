@@ -1452,6 +1452,8 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1837,6 +1839,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 21644.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 6650.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 19676.toShort()) {
@@ -2288,6 +2293,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session(
@@ -3121,6 +3129,14 @@ internal object UniffiLib : Library {
         `authUrl`: RustBufferByValue,
         `expectedCapabilities`: RustBufferByValue,
         `localSecretKey`: Pointer?,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim(
+        `ptr`: Pointer?,
+        `authUrl`: RustBufferByValue,
+        `expectedCapabilities`: RustBufferByValue,
+        `localSecretKey`: Pointer?,
+        `claim`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipubkysessionbootstrap_import_session(
@@ -7464,6 +7480,36 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     }
 
     /**
+     * Deliver a signed application-defined claim, then approve Pubky Auth.
+     *
+     * This high-level operation owns validation, request-bound signing,
+     * channel derivation, encryption, relay delivery, and approval ordering.
+     */
+    @Throws(PubkyAuthCompanionClaimApprovalException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: PubkyAuthCompanionClaim) {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim(
+                    thisPtr,
+                    FfiConverterString.lower(`authUrl`),
+                    FfiConverterString.lower(`expectedCapabilities`),
+                    FfiConverterTypePubkyLocalSecretKey.lower(`localSecretKey`),
+                    FfiConverterTypePubkyAuthCompanionClaim.lower(`claim`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_void(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_void(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_void(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
+            // lift function
+            { Unit },
+
+            // Error FFI converter
+            PubkyAuthCompanionClaimApprovalExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Import an exported Pubky session secret.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -10453,6 +10499,31 @@ public object FfiConverterTypePrivateStreamIntakeReport: FfiConverterRustBuffer<
 
 
 
+public object FfiConverterTypePubkyAuthCompanionClaim: FfiConverterRustBuffer<PubkyAuthCompanionClaim> {
+    override fun read(buf: ByteBuffer): PubkyAuthCompanionClaim {
+        return PubkyAuthCompanionClaim(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PubkyAuthCompanionClaim): ULong = (
+            FfiConverterString.allocationSize(value.`queryParameter`) +
+            FfiConverterString.allocationSize(value.`claimType`) +
+            FfiConverterByteArray.allocationSize(value.`unsignedPayload`)
+    )
+
+    override fun write(value: PubkyAuthCompanionClaim, buf: ByteBuffer) {
+        FfiConverterString.write(value.`queryParameter`, buf)
+        FfiConverterString.write(value.`claimType`, buf)
+        FfiConverterByteArray.write(value.`unsignedPayload`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypePubkyAuthDetails: FfiConverterRustBuffer<PubkyAuthDetails> {
     override fun read(buf: ByteBuffer): PubkyAuthDetails {
         return PubkyAuthDetails(
@@ -11342,6 +11413,122 @@ public object FfiConverterTypePaymentRequestLocalRole: FfiConverterRustBuffer<Pa
 
     override fun write(value: PaymentRequestLocalRole, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+public object PubkyAuthCompanionClaimApprovalExceptionErrorHandler : UniffiRustCallStatusErrorHandler<PubkyAuthCompanionClaimApprovalException> {
+    override fun lift(errorBuf: RustBufferByValue): PubkyAuthCompanionClaimApprovalException = FfiConverterTypePubkyAuthCompanionClaimApprovalError.lift(errorBuf)
+}
+
+public object FfiConverterTypePubkyAuthCompanionClaimApprovalError : FfiConverterRustBuffer<PubkyAuthCompanionClaimApprovalException> {
+    override fun read(buf: ByteBuffer): PubkyAuthCompanionClaimApprovalException {
+        return when (buf.getInt()) {
+            1 -> PubkyAuthCompanionClaimApprovalException.InvalidAuthUrl(
+                FfiConverterString.read(buf),
+                )
+            2 -> PubkyAuthCompanionClaimApprovalException.InvalidClaim(
+                FfiConverterString.read(buf),
+                )
+            3 -> PubkyAuthCompanionClaimApprovalException.InvalidLocalSecretKey(
+                FfiConverterString.read(buf),
+                )
+            4 -> PubkyAuthCompanionClaimApprovalException.EncryptionFailure(
+                FfiConverterString.read(buf),
+                )
+            5 -> PubkyAuthCompanionClaimApprovalException.RelayDeliveryFailure(
+                FfiConverterString.read(buf),
+                )
+            6 -> PubkyAuthCompanionClaimApprovalException.AuthorizationFailure(
+                FfiConverterString.read(buf),
+                )
+            7 -> PubkyAuthCompanionClaimApprovalException.Unexpected(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: PubkyAuthCompanionClaimApprovalException): ULong {
+        return when (value) {
+            is PubkyAuthCompanionClaimApprovalException.InvalidAuthUrl -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is PubkyAuthCompanionClaimApprovalException.InvalidClaim -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is PubkyAuthCompanionClaimApprovalException.InvalidLocalSecretKey -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is PubkyAuthCompanionClaimApprovalException.EncryptionFailure -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is PubkyAuthCompanionClaimApprovalException.RelayDeliveryFailure -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is PubkyAuthCompanionClaimApprovalException.AuthorizationFailure -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is PubkyAuthCompanionClaimApprovalException.Unexpected -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+        }
+    }
+
+    override fun write(value: PubkyAuthCompanionClaimApprovalException, buf: ByteBuffer) {
+        when (value) {
+            is PubkyAuthCompanionClaimApprovalException.InvalidAuthUrl -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is PubkyAuthCompanionClaimApprovalException.InvalidClaim -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is PubkyAuthCompanionClaimApprovalException.InvalidLocalSecretKey -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is PubkyAuthCompanionClaimApprovalException.EncryptionFailure -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is PubkyAuthCompanionClaimApprovalException.RelayDeliveryFailure -> {
+                buf.putInt(5)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is PubkyAuthCompanionClaimApprovalException.AuthorizationFailure -> {
+                buf.putInt(6)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is PubkyAuthCompanionClaimApprovalException.Unexpected -> {
+                buf.putInt(7)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 

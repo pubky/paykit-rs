@@ -799,6 +799,15 @@ public interface PubkySessionBootstrapInterface {
     public suspend fun `approveAuth`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey)
 
     /**
+     * Deliver a signed application-defined claim, then approve Pubky Auth.
+     *
+     * This high-level operation owns validation, request-bound signing,
+     * channel derivation, encryption, relay delivery, and approval ordering.
+     */
+    @Throws(PubkyAuthCompanionClaimApprovalException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: PubkyAuthCompanionClaim)
+
+    /**
      * Import an exported Pubky session secret.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -2625,6 +2634,53 @@ public data class PrivateStreamIntakeReport (
 
 
 /**
+ * Application-defined input for a Pubky Auth companion claim.
+ *
+ * The application serializes its protocol-specific unsigned payload. Paykit
+ * validates the identifiers, creates the request-bound identity signature,
+ * encrypts the signed payload, and delivers it before normal Pubky Auth.
+ *
+ * Generated platform record descriptions may include the raw payload. Apps
+ * must not log, interpolate, or otherwise stringify this record.
+ */
+@kotlinx.serialization.Serializable
+public data class PubkyAuthCompanionClaim (
+    /**
+     * Auth URL query parameter that announces the claim.
+     */
+    val `queryParameter`: kotlin.String,
+    /**
+     * Protocol-specific claim type used for URL validation and relay derivation.
+     */
+    val `claimType`: kotlin.String,
+    /**
+     * Protocol-specific unsigned binary payload. Do not log this value.
+     */
+    val `unsignedPayload`: kotlin.ByteArray
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other == null || this::class != other::class) return false
+
+        other as PubkyAuthCompanionClaim
+        if (`queryParameter` != other.`queryParameter`) return false
+        if (`claimType` != other.`claimType`) return false
+        if (!`unsignedPayload`.contentEquals(other.`unsignedPayload`)) return false
+
+        return true
+    }
+    override fun hashCode(): Int {
+        var result = `queryParameter`.hashCode()
+        result = 31 * result + `claimType`.hashCode()
+        result = 31 * result + `unsignedPayload`.contentHashCode()
+        return result
+    }
+    public companion object
+}
+
+
+
+/**
  * Public details parsed from a Pubky auth deep link.
  */
 @kotlinx.serialization.Serializable
@@ -3815,6 +3871,87 @@ public enum class PaymentRequestLocalRole {
 }
 
 
+
+
+
+
+
+/**
+ * Failure returned while approving Pubky Auth with a companion claim.
+ */
+public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception() {
+
+    /**
+     * The URL, claim type, secret, relay, or capability request is invalid.
+     */
+    public class InvalidAuthUrl(
+        public val `reason`: kotlin.String,
+    ) : PubkyAuthCompanionClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * The companion claim description is invalid.
+     */
+    public class InvalidClaim(
+        public val `reason`: kotlin.String,
+    ) : PubkyAuthCompanionClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * The supplied local Pubky identity key is invalid.
+     */
+    public class InvalidLocalSecretKey(
+        public val `reason`: kotlin.String,
+    ) : PubkyAuthCompanionClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * XSalsa20-Poly1305 encryption failed before relay delivery.
+     */
+    public class EncryptionFailure(
+        public val `reason`: kotlin.String,
+    ) : PubkyAuthCompanionClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * The encrypted companion claim could not be delivered to its relay channel.
+     */
+    public class RelayDeliveryFailure(
+        public val `reason`: kotlin.String,
+    ) : PubkyAuthCompanionClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * Normal Pubky Auth approval failed after companion delivery succeeded.
+     */
+    public class AuthorizationFailure(
+        public val `reason`: kotlin.String,
+    ) : PubkyAuthCompanionClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * An unknown SDK failure occurred; no claim-delivery state is implied.
+     */
+    public class Unexpected(
+        public val `reason`: kotlin.String,
+    ) : PubkyAuthCompanionClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+}
 
 
 

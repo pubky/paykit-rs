@@ -326,6 +326,16 @@ stored or displayed only for their intended short-lived flow.
 Bindings should wrap these helpers so mobile apps do not need a second Pubky
 SDK dependency for ordinary Paykit onboarding.
 
+Applications can attach an app-defined companion claim to a Pubky Auth
+approval. The integrator supplies the claim query parameter, claim type,
+expected capability, and serialized unsigned payload. The SDK owns request
+validation, request-bound identity signing, companion channel derivation,
+XSalsa20-Poly1305 transport, relay delivery, and normal authorization. The
+companion message must be accepted by the relay before normal Pubky Auth is
+approved. Bitkit's watch-only account claim is one application of this generic
+operation. The shared protocol is specified in
+[`pubky-auth-companion-claims.md`](pubky-auth-companion-claims.md).
+
 ### Paykit Profile And Contact Namespace
 
 The SDK provides default Pubky-backed Paykit-facing profile metadata so

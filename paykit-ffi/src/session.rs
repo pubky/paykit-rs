@@ -2,7 +2,8 @@ use std::{fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    PaykitReceiverPath, PaykitSdkError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
+    PaykitReceiverPath, PaykitSdkError, PubkyAuthCompanionClaim,
+    PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
     PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
     PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionProvider,
 };
@@ -128,6 +129,63 @@ pub struct FfiPubkyAuthDetails {
     pub relay_url: Option<String>,
     /// Homeserver requested by a signup flow.
     pub homeserver_public_key: Option<String>,
+}
+
+/// Application-defined input for a Pubky Auth companion claim.
+///
+/// The application serializes its protocol-specific unsigned payload. Paykit
+/// validates the identifiers, creates the request-bound identity signature,
+/// encrypts the signed payload, and delivers it before normal Pubky Auth.
+///
+/// Generated platform record descriptions may include the raw payload. Apps
+/// must not log, interpolate, or otherwise stringify this record.
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+pub struct FfiPubkyAuthCompanionClaim {
+    /// Auth URL query parameter that announces the claim.
+    pub query_parameter: String,
+    /// Protocol-specific claim type used for URL validation and relay derivation.
+    pub claim_type: String,
+    /// Protocol-specific unsigned binary payload. Do not log this value.
+    pub unsigned_payload: Vec<u8>,
+}
+
+impl fmt::Debug for FfiPubkyAuthCompanionClaim {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FfiPubkyAuthCompanionClaim")
+            .field("query_parameter", &self.query_parameter)
+            .field("claim_type", &self.claim_type)
+            .field(
+                "unsigned_payload",
+                &format_args!("<redacted:{} bytes>", self.unsigned_payload.len()),
+            )
+            .finish()
+    }
+}
+
+/// Failure returned while approving Pubky Auth with a companion claim.
+#[derive(uniffi::Error, Clone, Debug, thiserror::Error)]
+pub enum FfiPubkyAuthCompanionClaimApprovalError {
+    /// The URL, claim type, secret, relay, or capability request is invalid.
+    #[error("invalid Pubky Auth companion request: {reason}")]
+    InvalidAuthUrl { reason: String },
+    /// The companion claim description is invalid.
+    #[error("invalid Pubky Auth companion claim: {reason}")]
+    InvalidClaim { reason: String },
+    /// The supplied local Pubky identity key is invalid.
+    #[error("invalid local Pubky secret key: {reason}")]
+    InvalidLocalSecretKey { reason: String },
+    /// XSalsa20-Poly1305 encryption failed before relay delivery.
+    #[error("companion claim encryption failed: {reason}")]
+    EncryptionFailure { reason: String },
+    /// The encrypted companion claim could not be delivered to its relay channel.
+    #[error("companion claim relay delivery failed: {reason}")]
+    RelayDeliveryFailure { reason: String },
+    /// Normal Pubky Auth approval failed after companion delivery succeeded.
+    #[error("Pubky Auth approval failed after companion delivery: {reason}")]
+    AuthorizationFailure { reason: String },
+    /// An unknown SDK failure occurred; no claim-delivery state is implied.
+    #[error("unexpected Pubky Auth companion claim approval failure: {reason}")]
+    Unexpected { reason: String },
 }
 
 /// Parsed Pubky resource with a normalized owner and path.
@@ -343,6 +401,34 @@ impl FfiPubkySessionBootstrap {
             .await
             .map_err(Into::into)
     }
+
+    /// Deliver a signed application-defined claim, then approve Pubky Auth.
+    ///
+    /// This high-level operation owns validation, request-bound signing,
+    /// channel derivation, encryption, relay delivery, and approval ordering.
+    pub async fn approve_auth_with_companion_claim(
+        &self,
+        auth_url: String,
+        expected_capabilities: String,
+        local_secret_key: Arc<FfiPubkyLocalSecretKey>,
+        claim: FfiPubkyAuthCompanionClaim,
+    ) -> Result<(), FfiPubkyAuthCompanionClaimApprovalError> {
+        let secret = local_secret_from_bytes(local_secret_key.export_bytes()).map_err(|err| {
+            FfiPubkyAuthCompanionClaimApprovalError::InvalidLocalSecretKey {
+                reason: err.to_string(),
+            }
+        })?;
+        let claim = PubkyAuthCompanionClaim::new(
+            claim.query_parameter,
+            claim.claim_type,
+            claim.unsigned_payload,
+        )
+        .map_err(FfiPubkyAuthCompanionClaimApprovalError::from)?;
+        self.inner
+            .approve_auth_with_companion_claim(&auth_url, &expected_capabilities, &secret, &claim)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 /// Pending Pubky auth request.
@@ -531,6 +617,31 @@ impl From<PubkyAuthDetails> for FfiPubkyAuthDetails {
             capabilities: value.capabilities,
             relay_url: value.relay_url,
             homeserver_public_key: value.homeserver_public_key.map(|key| key.to_app_key()),
+        }
+    }
+}
+
+impl From<PubkyAuthCompanionClaimApprovalError> for FfiPubkyAuthCompanionClaimApprovalError {
+    fn from(value: PubkyAuthCompanionClaimApprovalError) -> Self {
+        match value {
+            PubkyAuthCompanionClaimApprovalError::InvalidAuthUrl { reason } => {
+                Self::InvalidAuthUrl { reason }
+            }
+            PubkyAuthCompanionClaimApprovalError::InvalidClaim { reason } => {
+                Self::InvalidClaim { reason }
+            }
+            PubkyAuthCompanionClaimApprovalError::EncryptionFailure { reason } => {
+                Self::EncryptionFailure { reason }
+            }
+            PubkyAuthCompanionClaimApprovalError::RelayDeliveryFailure { reason } => {
+                Self::RelayDeliveryFailure { reason }
+            }
+            PubkyAuthCompanionClaimApprovalError::AuthorizationFailure { reason } => {
+                Self::AuthorizationFailure { reason }
+            }
+            _ => Self::Unexpected {
+                reason: "unrecognized SDK companion claim approval failure".into(),
+            },
         }
     }
 }
