@@ -26,6 +26,18 @@ reservations, recovery state, and backup data. Multiple apps can be linked or
 aggregated explicitly, but they do not share one private Paykit runtime by
 default.
 
+Each runtime is configured with one local Paykit receiver path, but that path
+only describes this app/runtime's folder. Private and payment counterparty APIs take
+the counterparty's exact receiver path separately. A Pubky key alone is not enough
+information to route private Paykit state to a specific app/runtime folder.
+Apps can call `paykit_receiver_paths` as a discovery helper, but they still choose
+the receiver path explicitly. Discovery returns receiver paths that publish a
+valid Receiver Marker or at least one public Payment Endpoint. A receiver with
+no public Payment Endpoints can publish a lightweight Receiver Marker so it is
+still discoverable from the Pubky identity. Marker publication is explicit
+because it makes the receiver publicly discoverable; SDK setup, auth, and
+profile helpers do not publish it automatically.
+
 ## Current Scope
 
 Implemented in this Rust SDK crate:
@@ -68,7 +80,7 @@ SDK.
 Typical startup:
 
 ```rust,no_run
-use paykit_sdk::{PaykitSdk, PaykitSdkConfig};
+use paykit_sdk::{PaykitReceiverPath, PaykitSdk, PaykitSdkConfig};
 
 # async fn example<S, K, P>(storage: S, pubky: K, payment: P) -> paykit_sdk::Result<()>
 # where
@@ -76,7 +88,8 @@ use paykit_sdk::{PaykitSdk, PaykitSdkConfig};
 #     K: paykit_sdk::PubkySessionProvider,
 #     P: paykit_sdk::PaymentAdapter,
 # {
-let sdk = PaykitSdk::try_new(storage, pubky, payment, PaykitSdkConfig::default())?;
+let config = PaykitSdkConfig::new(PaykitReceiverPath::new("bitkit/wallet")?);
+let sdk = PaykitSdk::try_new(storage, pubky, payment, config)?;
 let report = sdk.initialize().await?;
 
 if report.identity.private_link_capable {
@@ -94,7 +107,8 @@ Common workflows:
 - request and validate `config.required_session_capabilities()` for full SDK
   auth/session handoff
 - set `profile_namespace` to a namespace segment such as `bitkit.to` when
-  profile/contact helpers should publish under `/pub/bitkit.to/...`
+  profile/contact helpers should publish under
+  `/pub/bitkit.to/{receiver_path}/...`
 - use `publish_paykit_profile` / `fetch_paykit_profile` for configured
   Paykit Profile metadata, including app-specific public fields in `extra`
 - use `publish_paykit_blob` / `delete_paykit_blob` for files under the
@@ -139,18 +153,26 @@ Common workflows:
 
 ## Profile And Contact Namespace
 
-The SDK profile/contact namespace is SDK-level Paykit app data, not a core
-Paykit Protocol route. By default the SDK uses:
+The SDK profile/contact namespace is SDK-level Paykit app data. By default the
+SDK uses receiver-scoped Paykit paths:
 
-- `/pub/paykit/profile.json` for Paykit Profile
-- `/pub/paykit/blobs/...` for Paykit Profile blobs
-- `/pub/paykit/contacts/...` for optional Public Contact Markers
+- `/pub/paykit/v0/{receiver_path}/profile.json` for Paykit Profile
+- `/pub/paykit/v0/{receiver_path}/blobs/...` for Paykit Profile blobs
+- `/pub/paykit/v0/{receiver_path}/contacts/...` for optional Public Contact Markers
+- `/pub/paykit/v0/{receiver_path}/receiver.json` for optional public receiver discovery
 
 Apps can set `profile_namespace` to use their own public app namespace, such as
-`bitkit.to`. That changes only these SDK profile/contact helper paths. Public
-Payment Endpoints stay under `/pub/paykit/v0/`, and Encrypted Link/private
-runtime state is still owned by this SDK runtime. `profile_namespace` is not a
-shared-runtime selector or app-specific core Paykit path prefix.
+`bitkit.to`. Those helper paths still stay receiver-scoped, for example
+`/pub/bitkit.to/{receiver_path}/profile.json`,
+`/pub/bitkit.to/{receiver_path}/blobs/...`, and
+`/pub/bitkit.to/{receiver_path}/contacts/...`. Public Payment
+Endpoints and Encrypted Link/private runtime state stay under the configured
+receiver path. `profile_namespace` is not a shared-runtime selector or
+app-specific core Paykit path prefix.
+
+Remote profile fetches use the same configured profile namespace. Cross-app
+profile discovery therefore needs an agreed namespace or explicit metadata that
+describes which profile namespace a receiver path uses.
 
 The SDK rejects `pubky.app` as a configured profile namespace only as a local
 guardrail against accidental writes through Paykit helpers. It is not a

@@ -12,6 +12,10 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
+fn receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("bitkit/wallet").unwrap()
+}
+
 fn reservation(id: &str, payload: &str) -> PaymentEndpointReservation {
     PaymentEndpointReservation {
         reservation_id: id.into(),
@@ -31,6 +35,7 @@ async fn test_queue_private_payment_list_with_reservations_stores_linked_records
     let outbound = queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-1", "ln-secret")],
         timestamp(),
     )
@@ -38,7 +43,7 @@ async fn test_queue_private_payment_list_with_reservations_stores_linked_records
     .unwrap();
 
     let list = paykit_lib::parse_private_payment_list_json(&outbound.raw_json).unwrap();
-    let records = payment_endpoint_reservations(&storage, &counterparty)
+    let records = payment_endpoint_reservations(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();
 
@@ -66,6 +71,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_stale_lease()
                 Ok(tx
                     .claim_peer_link_operation(
                         &counterparty,
+                        &receiver_path(),
                         timestamp(),
                         timestamp() + ChronoDuration::seconds(10),
                     )
@@ -80,6 +86,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_stale_lease()
             move |tx| {
                 let _ = tx.claim_peer_link_operation(
                     &counterparty,
+                    &receiver_path(),
                     timestamp() + ChronoDuration::seconds(11),
                     timestamp() + ChronoDuration::seconds(71),
                 );
@@ -111,6 +118,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_duplicate_ide
     let result = queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-1", "one"), reservation("res-2", "two")],
         timestamp(),
     )
@@ -134,6 +142,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_invalid_ids()
         let result = queue_private_payment_list_with_reservations(
             &storage,
             &counterparty,
+            &receiver_path(),
             vec![reservation(reservation_id, "one")],
             timestamp(),
         )
@@ -155,6 +164,7 @@ async fn test_queue_private_payment_list_with_reservations_preserves_existing_me
     queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -164,6 +174,7 @@ async fn test_queue_private_payment_list_with_reservations_preserves_existing_me
     let outbound = queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![PaymentEndpointReservation {
             reservation_id: "res-1".into(),
             receiving_detail: ReceivingDetail {
@@ -183,14 +194,14 @@ async fn test_queue_private_payment_list_with_reservations_preserves_existing_me
     assert_eq!(
         snapshot
             .payment_endpoint_reservations
-            .get(&(counterparty.clone(), "res-1".into()))
+            .get(&(counterparty.clone(), receiver_path(), "res-1".into()))
             .unwrap()
             .outbound_message_id,
         outbound.outbound_message_id
     );
     let record = snapshot
         .payment_endpoint_reservations
-        .get(&(counterparty.clone(), "res-1".into()))
+        .get(&(counterparty.clone(), receiver_path(), "res-1".into()))
         .unwrap();
     assert_eq!(record.attribution.get("contact").unwrap(), "alice");
     assert_eq!(record.expires_at, None);
@@ -204,6 +215,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_cancellation_
     queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -214,7 +226,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_cancellation_
             let counterparty = counterparty.clone();
             move |tx| {
                 let mut record = tx
-                    .payment_endpoint_reservation(&counterparty, "res-1")
+                    .payment_endpoint_reservation(&counterparty, &receiver_path(), "res-1")
                     .unwrap();
                 record.cancellation_started_at = Some(timestamp());
                 tx.save_payment_endpoint_reservation(record);
@@ -227,6 +239,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_cancellation_
     let result = queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -242,6 +255,7 @@ async fn test_unattempted_superseded_reservation_cancellations() {
     queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -250,6 +264,7 @@ async fn test_unattempted_superseded_reservation_cancellations() {
     queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-2", "two")],
         timestamp(),
     )
@@ -258,6 +273,7 @@ async fn test_unattempted_superseded_reservation_cancellations() {
     crate::domain::outbound_private::claim_next_outbound_private_message(
         &storage,
         &counterparty,
+        &receiver_path(),
         timestamp(),
         timestamp() - chrono::Duration::seconds(1),
         timestamp() - chrono::Duration::seconds(1),
@@ -265,9 +281,10 @@ async fn test_unattempted_superseded_reservation_cancellations() {
     .await
     .unwrap();
 
-    let cancellations = unattempted_superseded_reservation_cancellations(&storage, &counterparty)
-        .await
-        .unwrap();
+    let cancellations =
+        unattempted_superseded_reservation_cancellations(&storage, &counterparty, &receiver_path())
+            .await
+            .unwrap();
 
     assert_eq!(cancellations.len(), 1);
     assert_eq!(cancellations[0].cancellation.reservation_id, "res-1");
@@ -280,6 +297,7 @@ async fn test_unattempted_superseded_reservation_cancellations_skip_attempted_li
     let first = queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -288,6 +306,7 @@ async fn test_unattempted_superseded_reservation_cancellations_skip_attempted_li
     queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-2", "two")],
         timestamp(),
     )
@@ -298,7 +317,7 @@ async fn test_unattempted_superseded_reservation_cancellations_skip_attempted_li
             let counterparty = counterparty.clone();
             move |tx| {
                 let mut attempted = tx
-                    .outbound_private_messages(&counterparty)
+                    .outbound_private_messages(&counterparty, &receiver_path())
                     .into_iter()
                     .find(|message| message.outbound_message_id == first.outbound_message_id)
                     .unwrap();
@@ -313,6 +332,7 @@ async fn test_unattempted_superseded_reservation_cancellations_skip_attempted_li
     crate::domain::outbound_private::claim_next_outbound_private_message(
         &storage,
         &counterparty,
+        &receiver_path(),
         timestamp(),
         timestamp() - chrono::Duration::seconds(1),
         timestamp() - chrono::Duration::seconds(1),
@@ -320,9 +340,10 @@ async fn test_unattempted_superseded_reservation_cancellations_skip_attempted_li
     .await
     .unwrap();
 
-    let cancellations = unattempted_superseded_reservation_cancellations(&storage, &counterparty)
-        .await
-        .unwrap();
+    let cancellations =
+        unattempted_superseded_reservation_cancellations(&storage, &counterparty, &receiver_path())
+            .await
+            .unwrap();
 
     assert!(cancellations.is_empty());
     let snapshot = storage.snapshot().unwrap();
@@ -336,6 +357,7 @@ async fn test_expired_outbound_reservation_cancellations() {
     let outbound = queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![PaymentEndpointReservation {
             reservation_id: "res-1".into(),
             receiving_detail: ReceivingDetail {
@@ -353,6 +375,7 @@ async fn test_expired_outbound_reservation_cancellations() {
     assert!(expired_outbound_reservation_cancellations(
         &storage,
         &counterparty,
+        &receiver_path(),
         outbound.outbound_message_id,
         timestamp()
     )
@@ -362,6 +385,7 @@ async fn test_expired_outbound_reservation_cancellations() {
     let cancellations = expired_outbound_reservation_cancellations(
         &storage,
         &counterparty,
+        &receiver_path(),
         outbound.outbound_message_id,
         timestamp() + chrono::Duration::seconds(6),
     )
@@ -379,6 +403,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_conflicting_e
     queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -388,6 +413,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_conflicting_e
     let result = queue_private_payment_list_with_reservations(
         &storage,
         &counterparty,
+        &receiver_path(),
         vec![reservation("res-1", "two")],
         timestamp(),
     )
@@ -405,6 +431,7 @@ async fn test_queue_private_payment_list_with_reservations_scopes_ids_by_counter
     queue_private_payment_list_with_reservations(
         &storage,
         &first,
+        &receiver_path(),
         vec![reservation("res-1", "one")],
         timestamp(),
     )
@@ -413,6 +440,7 @@ async fn test_queue_private_payment_list_with_reservations_scopes_ids_by_counter
     queue_private_payment_list_with_reservations(
         &storage,
         &second,
+        &receiver_path(),
         vec![reservation("res-1", "two")],
         timestamp(),
     )

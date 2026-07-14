@@ -41,6 +41,7 @@ where
     pub async fn fetch_paykit_profile(
         &self,
         public_key: PubkyPublicKey,
+        receiver_path: PaykitReceiverPath,
     ) -> Result<Option<PaykitProfileRecord>> {
         let public_storage =
             self.pubky
@@ -50,7 +51,7 @@ where
                     context: "no Pubky public storage available for profile lookup".into(),
                     source: None,
                 })?;
-        let path = self.config.paykit_profile_path();
+        let path = self.config.paykit_profile_path_for_receiver(&receiver_path);
         let Some(raw_json) =
             fetch_public_text(&public_storage, &public_key, &path, "fetch profile").await?
         else {
@@ -241,9 +242,13 @@ where
     pub async fn resolve_contact_profile(
         &self,
         public_key: PubkyPublicKey,
+        receiver_path: PaykitReceiverPath,
         allow_pubky_profile_fallback: bool,
     ) -> Result<Option<ContactProfileResolution>> {
-        if let Some(record) = self.fetch_paykit_profile(public_key.clone()).await? {
+        if let Some(record) = self
+            .fetch_paykit_profile(public_key.clone(), receiver_path)
+            .await?
+        {
             return Ok(Some(ContactProfileResolution::from_paykit(record)));
         }
         if allow_pubky_profile_fallback {
@@ -259,9 +264,10 @@ where
     pub async fn resolve_profile(
         &self,
         public_key: PubkyPublicKey,
+        receiver_path: PaykitReceiverPath,
         allow_pubky_profile_fallback: bool,
     ) -> Result<Option<ContactProfileResolution>> {
-        self.resolve_contact_profile(public_key, allow_pubky_profile_fallback)
+        self.resolve_contact_profile(public_key, receiver_path, allow_pubky_profile_fallback)
             .await
     }
 
@@ -273,8 +279,12 @@ where
         let public_key = self
             .require_initialized_identity("resolve current profile")
             .await?;
-        self.resolve_profile(public_key, allow_pubky_profile_fallback)
-            .await
+        self.resolve_profile(
+            public_key,
+            self.config.receiver_path.clone(),
+            allow_pubky_profile_fallback,
+        )
+        .await
     }
 }
 

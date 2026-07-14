@@ -229,6 +229,8 @@ async fn test_parallel_writer_reader_happy_path() {
             w_session.clone(),
             writer_keypair.secret_key(),
             &w_reader_pubkey,
+            &receiver_path(),
+            &receiver_path(),
             writer_sdk,
         )
         .unwrap();
@@ -260,6 +262,8 @@ async fn test_parallel_writer_reader_happy_path() {
             r_session.clone(),
             reader_keypair.secret_key(),
             &r_writer_pubkey,
+            &receiver_path(),
+            &receiver_path(),
             reader_sdk,
         )
         .unwrap();

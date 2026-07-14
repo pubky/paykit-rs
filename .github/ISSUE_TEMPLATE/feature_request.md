@@ -26,7 +26,7 @@ Write "None" if there is no protocol impact.
 
 <!--
 Would this change exposed structs, enums, or capability strings consumed by the
-Swift / React Native / Kotlin bindings? Write "None" if not applicable.
+Swift / Kotlin bindings? Write "None" if not applicable.
 -->
 
 ## Alternatives considered

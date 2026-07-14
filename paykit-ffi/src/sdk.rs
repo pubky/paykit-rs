@@ -67,8 +67,17 @@ pub struct FfiRestoreReport {
     pub receipt_records: u64,
     /// Number of restored local receipt issuance records.
     pub receipt_issuance_records: u64,
-    /// Counterparties restored as recovery-required.
-    pub recovery_required_peers: Vec<String>,
+    /// Receiver-scoped peers restored as recovery-required.
+    pub recovery_required_peers: Vec<FfiRestoreRecoveryRequiredPeer>,
+}
+
+/// Receiver-scoped peer restored as recovery-required.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiRestoreRecoveryRequiredPeer {
+    /// Counterparty app public key.
+    pub counterparty: String,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_path: String,
 }
 
 pub(crate) type FfiSdkRuntime =
@@ -284,7 +293,10 @@ impl From<RestoreReport> for FfiRestoreReport {
             recovery_required_peers: value
                 .recovery_required_peers
                 .into_iter()
-                .map(|key| app_public_key(&key))
+                .map(|peer| FfiRestoreRecoveryRequiredPeer {
+                    counterparty: app_public_key(&peer.counterparty),
+                    counterparty_receiver_path: peer.counterparty_receiver_path.to_string(),
+                })
                 .collect(),
         }
     }

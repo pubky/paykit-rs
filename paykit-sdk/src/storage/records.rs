@@ -11,6 +11,7 @@ use crate::{
     domain::publication::PublicationStatus,
     domain::receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
     identity::{IdentityState, PubkyPublicKey},
+    PaykitReceiverPath,
 };
 
 /// Durable Linked Peer state.
@@ -18,6 +19,8 @@ use crate::{
 pub struct LinkedPeerRecord {
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Current local relationship/link state.
     pub state: LinkedPeerState,
     /// Last successful sync time.
@@ -79,6 +82,8 @@ pub struct PaymentEndpointReservationRecord {
     pub reservation_id: String,
     /// Counterparty the reserved endpoint is intended for.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Payment Endpoint Identifier.
     pub identifier: String,
     /// Hash of the reserved endpoint payload.
@@ -104,6 +109,8 @@ pub struct PaymentEndpointReservationRecord {
 pub struct EncryptedLinkStateRecord {
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Serialized active link snapshot.
     pub link_snapshot: Option<Vec<u8>>,
     /// Serialized in-progress handshake snapshot.
@@ -146,6 +153,8 @@ impl fmt::Debug for EncryptedLinkStateRecord {
 pub struct PeerLinkOperationLease {
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Assigned lease id.
     pub lease_id: u64,
     /// Claim time.
@@ -160,6 +169,7 @@ pub struct PeerLinkOperationLease {
 #[derive(Clone, PartialEq, Eq)]
 pub struct NewOutboundPrivateMessage {
     counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
     kind: String,
     raw_json: String,
     created_at: DateTime<Utc>,
@@ -168,12 +178,14 @@ pub struct NewOutboundPrivateMessage {
 impl NewOutboundPrivateMessage {
     pub(crate) fn new(
         counterparty: PubkyPublicKey,
+        counterparty_receiver_path: PaykitReceiverPath,
         kind: String,
         raw_json: String,
         created_at: DateTime<Utc>,
     ) -> Self {
         Self {
             counterparty,
+            counterparty_receiver_path,
             kind,
             raw_json,
             created_at,
@@ -183,6 +195,11 @@ impl NewOutboundPrivateMessage {
     /// Counterparty public key.
     pub fn counterparty(&self) -> &PubkyPublicKey {
         &self.counterparty
+    }
+
+    /// Counterparty receiver/runtime folder.
+    pub fn counterparty_receiver_path(&self) -> &PaykitReceiverPath {
+        &self.counterparty_receiver_path
     }
 
     /// Private Message Kind string.
@@ -205,6 +222,10 @@ impl fmt::Debug for NewOutboundPrivateMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NewOutboundPrivateMessage")
             .field("counterparty", &self.counterparty)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("kind", &self.kind)
             .field(
                 "raw_json",
@@ -222,6 +243,8 @@ pub struct OutboundPrivateMessageRecord {
     pub outbound_message_id: u64,
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Private Message Kind string.
     pub kind: String,
     /// Exact outbound JSON payload to send.
@@ -272,6 +295,7 @@ impl OutboundPrivateMessageRecord {
         Self {
             outbound_message_id,
             counterparty: message.counterparty,
+            counterparty_receiver_path: message.counterparty_receiver_path,
             kind: message.kind,
             raw_json: message.raw_json,
             status: OutboundPrivateMessageStatus::Pending,
@@ -291,6 +315,7 @@ impl OutboundPrivateMessageRecord {
 #[derive(Clone, PartialEq, Eq)]
 pub struct NewPrivateStreamItem {
     counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
     receive_batch_id: u64,
     raw_json: String,
     parsed_version: Option<u32>,
@@ -305,6 +330,7 @@ impl NewPrivateStreamItem {
     pub(crate) fn new(details: NewPrivateStreamItemDetails) -> Self {
         Self {
             counterparty: details.counterparty,
+            counterparty_receiver_path: details.counterparty_receiver_path,
             receive_batch_id: details.receive_batch_id,
             raw_json: details.raw_json,
             parsed_version: details.parsed_version,
@@ -319,6 +345,11 @@ impl NewPrivateStreamItem {
     /// Counterparty public key.
     pub fn counterparty(&self) -> &PubkyPublicKey {
         &self.counterparty
+    }
+
+    /// Counterparty receiver/runtime folder.
+    pub fn counterparty_receiver_path(&self) -> &PaykitReceiverPath {
+        &self.counterparty_receiver_path
     }
 
     /// Receive batch id assigned by the SDK runtime.
@@ -364,6 +395,7 @@ impl NewPrivateStreamItem {
 
 pub(crate) struct NewPrivateStreamItemDetails {
     pub(crate) counterparty: PubkyPublicKey,
+    pub(crate) counterparty_receiver_path: PaykitReceiverPath,
     pub(crate) receive_batch_id: u64,
     pub(crate) raw_json: String,
     pub(crate) parsed_version: Option<u32>,
@@ -378,6 +410,10 @@ impl fmt::Debug for NewPrivateStreamItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NewPrivateStreamItem")
             .field("counterparty", &self.counterparty)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("receive_batch_id", &self.receive_batch_id)
             .field(
                 "raw_json",
@@ -402,6 +438,8 @@ pub struct PrivateStreamItemRecord {
     pub stream_item_id: u64,
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Receive batch id assigned by the SDK runtime.
     pub receive_batch_id: u64,
     /// Raw plaintext payload.
@@ -425,6 +463,10 @@ impl fmt::Debug for PrivateStreamItemRecord {
         f.debug_struct("PrivateStreamItemRecord")
             .field("stream_item_id", &self.stream_item_id)
             .field("counterparty", &self.counterparty)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("receive_batch_id", &self.receive_batch_id)
             .field(
                 "raw_json",
@@ -445,6 +487,7 @@ impl PrivateStreamItemRecord {
         Self {
             stream_item_id,
             counterparty: item.counterparty,
+            counterparty_receiver_path: item.counterparty_receiver_path,
             receive_batch_id: item.receive_batch_id,
             raw_json: item.raw_json,
             parsed_version: item.parsed_version,
@@ -462,6 +505,8 @@ impl PrivateStreamItemRecord {
 pub struct EventDedupRecord {
     /// Counterparty that sent the event.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder.
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Event ID.
     pub event_id: String,
     /// Event kind.
@@ -481,19 +526,21 @@ pub struct EventDedupRecord {
 pub struct StorageState {
     /// Current identity state.
     pub identity_state: Option<IdentityState>,
-    /// Linked Peer records by counterparty.
-    pub linked_peers: HashMap<PubkyPublicKey, LinkedPeerRecord>,
+    /// Linked Peer records by counterparty and receiver path.
+    pub linked_peers: HashMap<(PubkyPublicKey, PaykitReceiverPath), LinkedPeerRecord>,
     /// Local contact records by public key.
     pub contact_records: HashMap<PubkyPublicKey, ContactRecord>,
     /// SDK-managed public endpoint records by identifier.
     pub public_endpoint_records: HashMap<String, PublicEndpointRecord>,
-    /// SDK-managed Payment Endpoint Reservation records by counterparty and reservation id.
+    /// SDK-managed Payment Endpoint Reservation records by counterparty, receiver path, and reservation id.
     pub payment_endpoint_reservations:
-        HashMap<(PubkyPublicKey, String), PaymentEndpointReservationRecord>,
-    /// Encrypted Link state records by counterparty.
-    pub encrypted_link_states: HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
-    /// Active peer link operation leases by counterparty.
-    pub peer_link_operation_leases: HashMap<PubkyPublicKey, PeerLinkOperationLease>,
+        HashMap<(PubkyPublicKey, PaykitReceiverPath, String), PaymentEndpointReservationRecord>,
+    /// Encrypted Link state records by counterparty and receiver path.
+    pub encrypted_link_states:
+        HashMap<(PubkyPublicKey, PaykitReceiverPath), EncryptedLinkStateRecord>,
+    /// Active peer link operation leases by counterparty and receiver path.
+    pub peer_link_operation_leases:
+        HashMap<(PubkyPublicKey, PaykitReceiverPath), PeerLinkOperationLease>,
     /// Next peer link operation lease id.
     pub next_peer_link_operation_lease_id: u64,
     /// Append-only outbound private message records.
@@ -506,14 +553,17 @@ pub struct StorageState {
     pub next_receive_batch_id: u64,
     /// Next private stream item id.
     pub next_private_stream_item_id: u64,
-    /// Event dedupe records by counterparty and Event ID.
-    pub event_dedup_records: HashMap<(PubkyPublicKey, String), EventDedupRecord>,
-    /// Receipt Access records by counterparty and Event ID.
-    pub receipt_access_records: HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
-    /// Decrypted Receipt records by issuer and Receipt ID.
-    pub receipt_records: HashMap<(PubkyPublicKey, String), ReceiptRecord>,
-    /// Local receipt issuance records by counterparty and Receipt ID.
-    pub receipt_issuance_records: HashMap<(PubkyPublicKey, String), ReceiptIssuanceRecord>,
+    /// Event dedupe records by counterparty, receiver path, and Event ID.
+    pub event_dedup_records:
+        HashMap<(PubkyPublicKey, PaykitReceiverPath, String), EventDedupRecord>,
+    /// Receipt Access records by counterparty, receiver path, and Event ID.
+    pub receipt_access_records:
+        HashMap<(PubkyPublicKey, PaykitReceiverPath, String), ReceiptAccessRecord>,
+    /// Decrypted Receipt records by issuer, receiver path, and Receipt ID.
+    pub receipt_records: HashMap<(PubkyPublicKey, PaykitReceiverPath, String), ReceiptRecord>,
+    /// Local receipt issuance records by counterparty, receiver path, and Receipt ID.
+    pub receipt_issuance_records:
+        HashMap<(PubkyPublicKey, PaykitReceiverPath, String), ReceiptIssuanceRecord>,
 }
 
 impl fmt::Debug for StorageState {

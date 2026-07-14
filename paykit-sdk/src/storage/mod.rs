@@ -22,7 +22,7 @@ use crate::{
     domain::contacts::ContactRecord,
     domain::receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
     identity::{IdentityState, PubkyPublicKey},
-    PaykitSdkError, Result,
+    PaykitReceiverPath, PaykitSdkError, Result,
 };
 
 /// Erased storage transaction callback for boxed storage adapters.
@@ -138,7 +138,11 @@ pub trait StorageTransaction {
     fn clear_private_identity_scoped_state(&mut self);
 
     /// Load one Linked Peer record.
-    fn linked_peer(&self, counterparty: &PubkyPublicKey) -> Option<LinkedPeerRecord>;
+    fn linked_peer(
+        &self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Option<LinkedPeerRecord>;
 
     /// Save one Linked Peer record.
     fn save_linked_peer(&mut self, record: LinkedPeerRecord);
@@ -165,12 +169,14 @@ pub trait StorageTransaction {
     fn payment_endpoint_reservations(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Vec<PaymentEndpointReservationRecord>;
 
     /// Load one Payment Endpoint Reservation record.
     fn payment_endpoint_reservation(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
         reservation_id: &str,
     ) -> Option<PaymentEndpointReservationRecord>;
 
@@ -181,6 +187,7 @@ pub trait StorageTransaction {
     fn remove_payment_endpoint_reservation(
         &mut self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
         reservation_id: &str,
     ) -> Option<PaymentEndpointReservationRecord>;
 
@@ -188,6 +195,7 @@ pub trait StorageTransaction {
     fn encrypted_link_state(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Option<EncryptedLinkStateRecord>;
 
     /// Save one Encrypted Link state record.
@@ -197,6 +205,7 @@ pub trait StorageTransaction {
     fn claim_peer_link_operation(
         &mut self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
         now: DateTime<Utc>,
         expires_at: DateTime<Utc>,
     ) -> Option<PeerLinkOperationLease>;
@@ -205,10 +214,16 @@ pub trait StorageTransaction {
     fn peer_link_operation_lease(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Option<PeerLinkOperationLease>;
 
     /// Release a previously claimed peer link operation.
-    fn release_peer_link_operation(&mut self, counterparty: &PubkyPublicKey, lease_id: u64);
+    fn release_peer_link_operation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+        lease_id: u64,
+    );
 
     /// Insert one outbound private message and return its assigned record.
     fn insert_outbound_private_message(
@@ -220,12 +235,14 @@ pub trait StorageTransaction {
     fn queued_outbound_private_messages(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Vec<OutboundPrivateMessageRecord>;
 
     /// List all outbound private messages for one counterparty.
     fn outbound_private_messages(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Vec<OutboundPrivateMessageRecord>;
 
     /// Claim the next retryable outbound private message for sending.
@@ -239,6 +256,7 @@ pub trait StorageTransaction {
     fn claim_next_outbound_private_message(
         &mut self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
         failed_retry_after: DateTime<Utc>,
@@ -255,12 +273,17 @@ pub trait StorageTransaction {
     fn insert_private_stream_item(&mut self, item: NewPrivateStreamItem) -> u64;
 
     /// List private stream items for a counterparty.
-    fn private_stream_items(&self, counterparty: &PubkyPublicKey) -> Vec<PrivateStreamItemRecord>;
+    fn private_stream_items(
+        &self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Vec<PrivateStreamItemRecord>;
 
     /// Load an Event Message dedupe record.
     fn event_dedup_record(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
         event_id: &str,
     ) -> Option<EventDedupRecord>;
 
@@ -271,12 +294,17 @@ pub trait StorageTransaction {
     fn save_receipt_access_record(&mut self, record: ReceiptAccessRecord);
 
     /// List indexed Receipt Access records for one counterparty.
-    fn receipt_access_records(&self, counterparty: &PubkyPublicKey) -> Vec<ReceiptAccessRecord>;
+    fn receipt_access_records(
+        &self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Vec<ReceiptAccessRecord>;
 
     /// Load the latest indexed Receipt Access record for a receipt.
     fn receipt_access_record_by_receipt_id(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
         receipt_id: &str,
     ) -> Option<ReceiptAccessRecord>;
 
@@ -284,19 +312,28 @@ pub trait StorageTransaction {
     fn save_receipt_record(&mut self, record: ReceiptRecord);
 
     /// Load one decrypted Receipt record.
-    fn receipt_record(&self, issuer: &PubkyPublicKey, receipt_id: &str) -> Option<ReceiptRecord>;
+    fn receipt_record(
+        &self,
+        issuer: &PubkyPublicKey,
+        issuer_receiver_path: &PaykitReceiverPath,
+        receipt_id: &str,
+    ) -> Option<ReceiptRecord>;
 
     /// Save one local receipt issuance record.
     fn save_receipt_issuance_record(&mut self, record: ReceiptIssuanceRecord);
 
     /// List receipt issuance records for one counterparty.
-    fn receipt_issuance_records(&self, counterparty: &PubkyPublicKey)
-        -> Vec<ReceiptIssuanceRecord>;
+    fn receipt_issuance_records(
+        &self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Vec<ReceiptIssuanceRecord>;
 
     /// Load one receipt issuance record.
     fn receipt_issuance_record(
         &self,
         counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
         receipt_id: &str,
     ) -> Option<ReceiptIssuanceRecord>;
 
@@ -311,7 +348,7 @@ pub(crate) fn require_peer_link_operation_lease(
     tx: &dyn StorageTransaction,
     lease: &PeerLinkOperationLease,
 ) -> Result<()> {
-    match tx.peer_link_operation_lease(&lease.counterparty) {
+    match tx.peer_link_operation_lease(&lease.counterparty, &lease.counterparty_receiver_path) {
         Some(active) if active.lease_id == lease.lease_id => Ok(()),
         _ => Err(PaykitSdkError::Policy(format!(
             "peer link operation lease {} is no longer active for counterparty {}",

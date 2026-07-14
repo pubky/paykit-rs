@@ -344,7 +344,7 @@ async fn payment_request_events_share_ordered_stream_with_other_private_lanes() 
         payment_reference: PaymentReference::new("receipt-reference").unwrap(),
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location_for(&receipt_id),
+        location: ReceiptAccess::location(&receiver_path(), &receipt_id),
         key: ReceiptDecryptionKey::generate(),
     };
     let request = payment_request();

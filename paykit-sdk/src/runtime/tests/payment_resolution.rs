@@ -139,6 +139,7 @@ async fn test_resolve_candidate_batch_preserves_private_state() {
     let result = sdk
         .resolve_candidate_batch(
             endpoint.counterparty.clone(),
+            receiver_path(),
             None,
             vec![endpoint],
             ContactPaymentResolutionPrivateState::RecoveryPending,
@@ -172,6 +173,7 @@ async fn test_resolve_candidate_batch_returns_ordered_payable_endpoints() {
     let result = sdk
         .resolve_candidate_batch(
             private.counterparty.clone(),
+            receiver_path(),
             Some(crate::PaymentAmountContext {
                 value: "10.00".into(),
                 asset: "usd".into(),
@@ -201,6 +203,7 @@ async fn test_resolve_contact_payment_hides_cached_private_list_without_identity
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
+        receiver_path(),
         vec![private_list_message("ln-private")],
         None,
         FixedClock.now(),
@@ -219,6 +222,7 @@ async fn test_resolve_contact_payment_hides_cached_private_list_without_identity
     let result = sdk
         .resolve_contact_payment(ContactPaymentResolutionRequest {
             counterparty: counterparty.clone(),
+            counterparty_receiver_path: receiver_path(),
             amount: Some(crate::PaymentAmountContext {
                 value: "10.00".into(),
                 asset: "usd".into(),
@@ -235,7 +239,7 @@ async fn test_resolve_contact_payment_hides_cached_private_list_without_identity
     );
     assert!(result.payable_endpoints.is_empty());
     assert!(sdk
-        .current_private_payment_list(&counterparty)
+        .current_private_payment_list(&counterparty, &receiver_path())
         .await
         .unwrap()
         .is_none());
@@ -263,6 +267,7 @@ async fn test_resolve_contact_payment_uses_cached_private_list_for_public_only_i
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
+        receiver_path(),
         vec![private_list_message("ln-private")],
         None,
         FixedClock.now(),
@@ -280,6 +285,7 @@ async fn test_resolve_contact_payment_uses_cached_private_list_for_public_only_i
     let result = sdk
         .resolve_contact_payment(ContactPaymentResolutionRequest {
             counterparty,
+            counterparty_receiver_path: receiver_path(),
             amount: Some(crate::PaymentAmountContext {
                 value: "10.00".into(),
                 asset: "usd".into(),
@@ -322,6 +328,7 @@ async fn test_resolve_private_contact_payment_uses_private_candidates_only() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
+        receiver_path(),
         vec![private_list_message("ln-private")],
         None,
         FixedClock.now(),
@@ -337,7 +344,7 @@ async fn test_resolve_private_contact_payment_uses_private_candidates_only() {
     );
 
     let result = sdk
-        .resolve_private_contact_payment(counterparty, None)
+        .resolve_private_contact_payment(counterparty, receiver_path(), None)
         .await
         .unwrap();
 
@@ -367,6 +374,7 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty,
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linking,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -385,6 +393,7 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
+        receiver_path(),
         vec![private_list_message("ln-private")],
         None,
         FixedClock.now(),
@@ -402,6 +411,7 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
     let result = sdk
         .resolve_contact_payment(ContactPaymentResolutionRequest {
             counterparty,
+            counterparty_receiver_path: receiver_path(),
             amount: Some(crate::PaymentAmountContext {
                 value: "10.00".into(),
                 asset: "usd".into(),
@@ -438,6 +448,7 @@ async fn test_recover_private_candidates_reports_pending_for_linking_peer() {
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty,
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linking,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -462,7 +473,7 @@ async fn test_recover_private_candidates_reports_pending_for_linking_peer() {
     );
 
     let outcome = sdk
-        .recover_private_candidates_for_resolution(&counterparty)
+        .recover_private_candidates_for_resolution(&counterparty, &receiver_path())
         .await
         .unwrap();
 

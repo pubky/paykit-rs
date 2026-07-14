@@ -27,6 +27,7 @@ async fn test_prepare_receipt_issuance_persists_pending_record() {
     let record = sdk
         .prepare_receipt_issuance(
             counterparty.clone(),
+            receiver_path(),
             receipt_draft("550e8400-e29b-41d4-a716-446655440000"),
         )
         .await
@@ -41,7 +42,7 @@ async fn test_prepare_receipt_issuance_persists_pending_record() {
         .transaction({
             let counterparty = counterparty.clone();
             let receipt_id = record.receipt_id.clone();
-            move |tx| Ok(tx.receipt_issuance_record(&counterparty, &receipt_id))
+            move |tx| Ok(tx.receipt_issuance_record(&counterparty, &receiver_path(), &receipt_id))
         })
         .await
         .unwrap()
@@ -56,7 +57,10 @@ async fn test_prepare_receipt_issuance_persists_pending_record() {
         counterparty_keypair.public_key()
     );
 
-    let records = sdk.receipt_issuance_records(&counterparty).await.unwrap();
+    let records = sdk
+        .receipt_issuance_records(&counterparty, &receiver_path())
+        .await
+        .unwrap();
     assert_eq!(records, vec![record]);
 }
 
@@ -100,33 +104,50 @@ async fn test_receipt_listing_helpers_match_record_views() {
     );
 
     assert_eq!(
-        sdk.receipt_access_from(&counterparty).await.unwrap(),
-        sdk.receipt_access_records(&counterparty).await.unwrap()
+        sdk.receipt_access_from(&counterparty, &receiver_path())
+            .await
+            .unwrap(),
+        sdk.receipt_access_records(&counterparty, &receiver_path())
+            .await
+            .unwrap()
     );
     assert_eq!(
         sdk.receipt_access().await.unwrap(),
-        sdk.receipt_access_from(&counterparty).await.unwrap()
+        sdk.receipt_access_from(&counterparty, &receiver_path())
+            .await
+            .unwrap()
     );
     assert_eq!(
-        sdk.receipts_from(&counterparty).await.unwrap(),
-        sdk.receipt_records(&counterparty).await.unwrap()
+        sdk.receipts_from(&counterparty, &receiver_path())
+            .await
+            .unwrap(),
+        sdk.receipt_records(&counterparty, &receiver_path())
+            .await
+            .unwrap()
     );
     assert_eq!(
         sdk.receipts().await.unwrap(),
-        sdk.receipts_from(&counterparty).await.unwrap()
+        sdk.receipts_from(&counterparty, &receiver_path())
+            .await
+            .unwrap()
     );
 
     let issuance = sdk
         .prepare_receipt_issuance(
             counterparty.clone(),
+            receiver_path(),
             receipt_draft("650e8400-e29b-41d4-a716-446655440001"),
         )
         .await
         .unwrap();
 
     assert_eq!(
-        sdk.issued_receipts_to(&counterparty).await.unwrap(),
-        sdk.receipt_issuance_records(&counterparty).await.unwrap()
+        sdk.issued_receipts_to(&counterparty, &receiver_path())
+            .await
+            .unwrap(),
+        sdk.receipt_issuance_records(&counterparty, &receiver_path())
+            .await
+            .unwrap()
     );
     assert_eq!(sdk.issued_receipts().await.unwrap(), vec![issuance]);
 }
@@ -155,18 +176,26 @@ async fn test_prepare_receipt_issuance_rejects_conflicting_reused_receipt_id() {
     );
     let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     let first = sdk
-        .prepare_receipt_issuance(counterparty.clone(), receipt_draft(receipt_id))
+        .prepare_receipt_issuance(
+            counterparty.clone(),
+            receiver_path(),
+            receipt_draft(receipt_id),
+        )
         .await
         .unwrap();
     let second = sdk
-        .prepare_receipt_issuance(counterparty.clone(), receipt_draft(receipt_id))
+        .prepare_receipt_issuance(
+            counterparty.clone(),
+            receiver_path(),
+            receipt_draft(receipt_id),
+        )
         .await
         .unwrap();
     let mut conflicting = receipt_draft(receipt_id);
     conflicting.payment_reference = paykit_lib::PaymentReference::new("invoice-2026-0002").unwrap();
 
     let result = sdk
-        .prepare_receipt_issuance(counterparty, conflicting)
+        .prepare_receipt_issuance(counterparty, receiver_path(), conflicting)
         .await;
 
     assert_eq!(first, second);
@@ -199,12 +228,62 @@ async fn test_prepare_receipt_issuance_rejects_reused_receipt_id_for_other_count
         FixedClock,
     );
     let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
-    sdk.prepare_receipt_issuance(first_counterparty, receipt_draft(receipt_id))
-        .await
-        .unwrap();
+    sdk.prepare_receipt_issuance(
+        first_counterparty,
+        receiver_path(),
+        receipt_draft(receipt_id),
+    )
+    .await
+    .unwrap();
 
     let result = sdk
-        .prepare_receipt_issuance(second_counterparty, receipt_draft(receipt_id))
+        .prepare_receipt_issuance(
+            second_counterparty,
+            receiver_path(),
+            receipt_draft(receipt_id),
+        )
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+}
+
+#[tokio::test]
+async fn test_prepare_receipt_issuance_rejects_reused_receipt_id_for_other_receiver() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local_public_key),
+            capability: PubkyIdentityCapability::PublicOnly,
+            local_secret_available: false,
+            initialized_at: FixedClock.now(),
+            sign_out_generation: 0,
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
+    sdk.prepare_receipt_issuance(
+        counterparty.clone(),
+        receiver_path(),
+        receipt_draft(receipt_id),
+    )
+    .await
+    .unwrap();
+
+    let result = sdk
+        .prepare_receipt_issuance(
+            counterparty,
+            other_receiver_path(),
+            receipt_draft(receipt_id),
+        )
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
@@ -223,7 +302,9 @@ async fn test_issue_receipt_requires_retry_safe_receipt_id() {
     let mut draft = receipt_draft("550e8400-e29b-41d4-a716-446655440000");
     draft.receipt_id = None;
 
-    let result = sdk.issue_receipt(counterparty, draft).await;
+    let result = sdk
+        .issue_receipt(counterparty, receiver_path(), draft)
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
 }
@@ -253,24 +334,28 @@ async fn test_process_receipt_issuance_without_session_preserves_prepared_record
     let record = sdk
         .prepare_receipt_issuance(
             counterparty.clone(),
+            receiver_path(),
             receipt_draft("550e8400-e29b-41d4-a716-446655440000"),
         )
         .await
         .unwrap();
 
     let result = sdk
-        .process_receipt_issuance(counterparty.clone(), &record.receipt_id)
+        .process_receipt_issuance(counterparty.clone(), receiver_path(), &record.receipt_id)
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    let records = sdk.receipt_issuance_records(&counterparty).await.unwrap();
+    let records = sdk
+        .receipt_issuance_records(&counterparty, &receiver_path())
+        .await
+        .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].status, ReceiptIssuanceStatus::PendingStorage);
     let stored = storage
         .transaction({
             let counterparty = counterparty.clone();
             let receipt_id = record.receipt_id.clone();
-            move |tx| Ok(tx.receipt_issuance_record(&counterparty, &receipt_id))
+            move |tx| Ok(tx.receipt_issuance_record(&counterparty, &receiver_path(), &receipt_id))
         })
         .await
         .unwrap()
@@ -303,7 +388,10 @@ async fn test_receipt_access_records_require_initialized_identity() {
         FixedClock,
     );
 
-    let views = sdk.receipt_access_records(&counterparty).await.unwrap();
+    let views = sdk
+        .receipt_access_records(&counterparty, &receiver_path())
+        .await
+        .unwrap();
 
     assert!(views.is_empty());
 }
@@ -342,7 +430,10 @@ async fn test_receipt_access_records_allow_public_only_identity() {
         FixedClock,
     );
 
-    let views = sdk.receipt_access_records(&counterparty).await.unwrap();
+    let views = sdk
+        .receipt_access_records(&counterparty, &receiver_path())
+        .await
+        .unwrap();
 
     assert_eq!(views.len(), 1);
 }
@@ -381,7 +472,10 @@ async fn test_receipt_access_records_hide_conflicted_event_ids() {
         FixedClock,
     );
 
-    let views = sdk.receipt_access_records(&counterparty).await.unwrap();
+    let views = sdk
+        .receipt_access_records(&counterparty, &receiver_path())
+        .await
+        .unwrap();
 
     assert!(views.is_empty());
 }
@@ -420,7 +514,9 @@ async fn test_retrieve_receipt_reports_conflicted_access_before_missing_public_s
         FixedClock,
     );
 
-    let result = sdk.retrieve_receipt(counterparty, receipt_id).await;
+    let result = sdk
+        .retrieve_receipt(counterparty, receiver_path(), receipt_id)
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
 }
@@ -449,7 +545,9 @@ async fn test_retrieve_receipt_reports_missing_access_before_public_storage() {
         FixedClock,
     );
 
-    let result = sdk.retrieve_receipt(counterparty, receipt_id).await;
+    let result = sdk
+        .retrieve_receipt(counterparty, receiver_path(), receipt_id)
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
 }
@@ -487,7 +585,7 @@ async fn test_retrieve_receipt_returns_cached_record_for_public_only_identity() 
     );
 
     let record = sdk
-        .retrieve_receipt(counterparty, receipt_id)
+        .retrieve_receipt(counterparty, receiver_path(), receipt_id)
         .await
         .unwrap();
 
@@ -531,13 +629,15 @@ async fn test_retrieve_receipt_rejects_clean_mismatched_access_for_cached_receip
         FixedClock,
     );
 
-    let result = sdk.retrieve_receipt(counterparty.clone(), receipt_id).await;
+    let result = sdk
+        .retrieve_receipt(counterparty.clone(), receiver_path(), receipt_id)
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
     let access = storage
         .transaction(|tx| {
             Ok(tx
-                .receipt_access_records(&counterparty)
+                .receipt_access_records(&counterparty, &receiver_path())
                 .into_iter()
                 .find(|record| record.receipt_id == receipt_id)
                 .unwrap())
@@ -582,7 +682,9 @@ async fn test_retrieve_receipt_rejects_conflicted_access_for_cached_receipt() {
         FixedClock,
     );
 
-    let result = sdk.retrieve_receipt(counterparty, receipt_id).await;
+    let result = sdk
+        .retrieve_receipt(counterparty, receiver_path(), receipt_id)
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
 }
@@ -626,7 +728,9 @@ async fn test_retrieve_receipt_rejects_conflicted_cached_provenance_with_clean_a
         FixedClock,
     );
 
-    let result = sdk.retrieve_receipt(counterparty, receipt_id).await;
+    let result = sdk
+        .retrieve_receipt(counterparty, receiver_path(), receipt_id)
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
 }
@@ -669,7 +773,10 @@ async fn test_receipt_records_filter_recipient_identity() {
         FixedClock,
     );
 
-    let records = sdk.receipt_records(&issuer).await.unwrap();
+    let records = sdk
+        .receipt_records(&issuer, &receiver_path())
+        .await
+        .unwrap();
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].receipt_id, "receipt-1");
@@ -708,7 +815,10 @@ async fn test_receipt_records_hide_conflicted_receipt_access_provenance() {
         FixedClock,
     );
 
-    let records = sdk.receipt_records(&issuer).await.unwrap();
+    let records = sdk
+        .receipt_records(&issuer, &receiver_path())
+        .await
+        .unwrap();
 
     assert!(records.is_empty());
 }
@@ -745,7 +855,9 @@ async fn test_retrieve_receipt_requires_public_storage_when_uncached() {
         FixedClock,
     );
 
-    let result = sdk.retrieve_receipt(counterparty, receipt_id).await;
+    let result = sdk
+        .retrieve_receipt(counterparty, receiver_path(), receipt_id)
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
 }

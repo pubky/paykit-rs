@@ -13,6 +13,7 @@ async fn test_linked_peers_lists_tracked_peers() {
                 for counterparty in [second, first] {
                     tx.save_linked_peer(LinkedPeerRecord {
                         counterparty,
+                        counterparty_receiver_path: receiver_path(),
                         state: LinkedPeerState::Linked,
                         last_sync_at: Some(FixedClock.now()),
                         last_private_receive_at: None,

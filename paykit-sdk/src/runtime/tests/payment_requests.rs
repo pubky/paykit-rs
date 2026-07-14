@@ -24,6 +24,7 @@ async fn test_payment_requests_with_allows_public_only_identity() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
+        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440000",
             "550e8400-e29b-41d4-a716-446655440000",
@@ -42,7 +43,10 @@ async fn test_payment_requests_with_allows_public_only_identity() {
         FixedClock,
     );
 
-    let records = sdk.payment_requests_with(&counterparty).await.unwrap();
+    let records = sdk
+        .payment_requests_with(&counterparty, &receiver_path())
+        .await
+        .unwrap();
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].state, PaymentRequestLifecycleState::Proposed);
@@ -67,6 +71,7 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty,
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::RecoveryRequired,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -85,6 +90,7 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
+        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440000",
             "550e8400-e29b-41d4-a716-446655440000",
@@ -103,7 +109,10 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
         FixedClock,
     );
 
-    let records = sdk.payment_requests_with(&counterparty).await.unwrap();
+    let records = sdk
+        .payment_requests_with(&counterparty, &receiver_path())
+        .await
+        .unwrap();
 
     assert_eq!(records.len(), 1);
     assert_eq!(
@@ -133,6 +142,7 @@ async fn test_list_payment_requests_filters_across_counterparties() {
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: blocked,
+                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Blocked,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -151,6 +161,7 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     persist_private_stream_batch(
         &storage,
         first.clone(),
+        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440000",
             "550e8400-e29b-41d4-a716-446655440000",
@@ -164,6 +175,7 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     persist_private_stream_batch(
         &storage,
         second.clone(),
+        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440001",
             "550e8400-e29b-41d4-a716-446655440001",
@@ -177,6 +189,7 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     persist_private_stream_batch(
         &storage,
         blocked,
+        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440002",
             "550e8400-e29b-41d4-a716-446655440002",
@@ -212,6 +225,120 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     assert!(received
         .iter()
         .all(|record| record.local_role == Some(PaymentRequestLocalRole::Payer)));
+}
+
+#[tokio::test]
+async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_preserves_blocked_error(
+) {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let blocked = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let local_public_key = local_public_key.clone();
+            let blocked = blocked.clone();
+            move |tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_public_key),
+                    capability: PubkyIdentityCapability::PublicOnly,
+                    local_secret_available: false,
+                    initialized_at: FixedClock.now(),
+                    sign_out_generation: 0,
+                });
+                tx.save_linked_peer(LinkedPeerRecord {
+                    counterparty: blocked,
+                    counterparty_receiver_path: other_receiver_path(),
+                    state: LinkedPeerState::Blocked,
+                    last_sync_at: None,
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        vec![payment_request_message(
+            "650e8400-e29b-41d4-a716-446655440020",
+            "550e8400-e29b-41d4-a716-446655440020",
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        other_receiver_path(),
+        vec![payment_request_message(
+            "650e8400-e29b-41d4-a716-446655440021",
+            "550e8400-e29b-41d4-a716-446655440021",
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        blocked.clone(),
+        other_receiver_path(),
+        vec![payment_request_message(
+            "650e8400-e29b-41d4-a716-446655440022",
+            "550e8400-e29b-41d4-a716-446655440022",
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let records = sdk
+        .list_payment_requests(PaymentRequestFilter {
+            counterparty: Some(counterparty.clone()),
+            ..PaymentRequestFilter::default()
+        })
+        .await
+        .unwrap();
+    let blocked_result = sdk
+        .list_payment_requests(PaymentRequestFilter {
+            counterparty: Some(blocked),
+            ..PaymentRequestFilter::default()
+        })
+        .await;
+
+    assert_eq!(records.len(), 2);
+    assert!(records
+        .iter()
+        .all(|record| record.counterparty == counterparty));
+    assert!(records
+        .iter()
+        .any(|record| record.counterparty_receiver_path == receiver_path()));
+    assert!(records
+        .iter()
+        .any(|record| record.counterparty_receiver_path == other_receiver_path()));
+    assert!(matches!(blocked_result, Err(PaykitSdkError::Policy(_))));
 }
 
 #[tokio::test]
@@ -286,7 +413,7 @@ async fn test_enqueue_payment_request_event_requires_private_capable_identity() 
     );
 
     let result = sdk
-        .enqueue_raw_payment_request_acceptance(counterparty, &event)
+        .enqueue_raw_payment_request_acceptance(counterparty, receiver_path(), &event)
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -300,42 +427,7 @@ async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        vec![payment_request_message(
-            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
-            request_id.as_str(),
-            Some("2026-06-03T11:59:59Z"),
-        )],
-        None,
-        FixedClock.now(),
-    )
-    .await
-    .unwrap();
-    let sdk = PaykitSdk::with_clock(
-        storage.clone(),
-        TestPubkySessionProvider { session: None },
-        TestPaymentAdapter,
-        PaykitSdkConfig::default(),
-        FixedClock,
-    );
-
-    let result = sdk.accept_payment_request(counterparty, &request_id).await;
-
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-    assert!(storage
-        .snapshot()
-        .unwrap()
-        .outbound_private_messages
-        .is_empty());
-}
-
-#[tokio::test]
-async fn test_reject_payment_request_allows_expired_proposal_before_readiness_check() {
-    let storage = InMemoryStorage::new();
-    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
-    persist_private_stream_batch(
-        &storage,
-        counterparty.clone(),
+        receiver_path(),
         vec![payment_request_message(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
             request_id.as_str(),
@@ -355,7 +447,46 @@ async fn test_reject_payment_request_allows_expired_proposal_before_readiness_ch
     );
 
     let result = sdk
-        .reject_payment_request(counterparty, &request_id, None)
+        .accept_payment_request(counterparty, receiver_path(), &request_id)
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_reject_payment_request_allows_expired_proposal_before_readiness_check() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        vec![payment_request_message(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            request_id.as_str(),
+            Some("2026-06-03T11:59:59Z"),
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .reject_payment_request(counterparty, receiver_path(), &request_id, None)
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -374,6 +505,7 @@ async fn test_accept_payment_request_does_not_queue_without_private_send_readine
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
+        receiver_path(),
         vec![payment_request_message(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
             request_id.as_str(),
@@ -392,7 +524,9 @@ async fn test_accept_payment_request_does_not_queue_without_private_send_readine
         FixedClock,
     );
 
-    let result = sdk.accept_payment_request(counterparty, &request_id).await;
+    let result = sdk
+        .accept_payment_request(counterparty, receiver_path(), &request_id)
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     assert!(storage
@@ -456,6 +590,7 @@ async fn queue_request_with_inbound_acceptance(
     crate::domain::payment_requests::enqueue_payment_request_event(
         storage,
         counterparty.clone(),
+        receiver_path(),
         &request_event,
         FixedClock.now(),
     )
@@ -464,6 +599,7 @@ async fn queue_request_with_inbound_acceptance(
     persist_private_stream_batch(
         storage,
         counterparty,
+        receiver_path(),
         vec![payment_request_acceptance_message(
             acceptance_event_id,
             request_id,

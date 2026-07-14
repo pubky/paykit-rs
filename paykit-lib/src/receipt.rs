@@ -39,12 +39,16 @@ mod tests {
         value.as_object().cloned().expect("metadata object")
     }
 
+    fn receiver_path() -> crate::PaykitReceiverPath {
+        crate::PaykitReceiverPath::new("bitkit/wallet").unwrap()
+    }
+
     #[test]
     fn test_receipt_location_uses_receipt_id() {
         let receipt_id = ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(
-            ReceiptAccess::location_for(&receipt_id),
-            "/pub/paykit/v0/private/receipts/550e8400-e29b-41d4-a716-446655440000"
+            ReceiptAccess::location(&receiver_path(), &receipt_id),
+            "/pub/paykit/v0/private/bitkit/wallet/receipts/550e8400-e29b-41d4-a716-446655440000"
         );
     }
 
@@ -69,10 +73,10 @@ mod tests {
             amount: Some(PaymentAmount::new("1000", "sats").unwrap()),
             metadata: metadata(json!({"preimage": "abc", "details": {"confirmations": 3}})),
         };
-        let location = ReceiptAccess::location_for(&receipt_id);
+        let location = ReceiptAccess::location(&receiver_path(), &receipt_id);
         let key = ReceiptDecryptionKey::generate();
 
-        let encrypted = receipt.encrypt(&key).unwrap();
+        let encrypted = receipt.encrypt(&receiver_path(), &key).unwrap();
         let decrypted = decrypt_receipt(&encrypted, &key, &location).unwrap();
         assert_eq!(decrypted, receipt);
 
@@ -98,7 +102,7 @@ mod tests {
         };
 
         let err = receipt
-            .encrypt(&ReceiptDecryptionKey::generate())
+            .encrypt(&receiver_path(), &ReceiptDecryptionKey::generate())
             .unwrap_err();
         assert!(
             matches!(err, PaykitError::Validation(ref msg) if msg.contains("decimal string")),
@@ -135,11 +139,11 @@ mod tests {
             payment_reference: receipt.payment_reference.clone(),
             payment_request_id: Some(payment_request_id.clone()),
             billing_period: Some(billing_period.clone()),
-            location: ReceiptAccess::location_for(&receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &receipt_id),
             key: ReceiptDecryptionKey::generate(),
         };
 
-        let encrypted = receipt.encrypt(&access.key).unwrap();
+        let encrypted = receipt.encrypt(&receiver_path(), &access.key).unwrap();
         let decrypted = decrypt_receipt(&encrypted, &access.key, &access.location).unwrap();
         let parsed_access =
             wire::parse_receipt_access_json(&wire::serialize_receipt_access_json(&access).unwrap())
@@ -164,7 +168,7 @@ mod tests {
             amount: Some(PaymentAmount::new("1000", "sats").unwrap()),
             metadata: metadata(json!({"preimage": "abc", "details": {"confirmations": 3}})),
         };
-        let encrypted_receipt = receipt.encrypt(&key).unwrap();
+        let encrypted_receipt = receipt.encrypt(&receiver_path(), &key).unwrap();
         let access = ReceiptAccess {
             version: 1,
             kind: PrivateMessageKind::ReceiptAccess,
@@ -173,7 +177,7 @@ mod tests {
             payment_reference: reference,
             payment_request_id: None,
             billing_period: None,
-            location: ReceiptAccess::location_for(&receipt.receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &receipt.receipt_id),
             key,
         };
 
@@ -192,7 +196,9 @@ mod tests {
             "different".to_string(),
             JsonValue::String("value".to_string()),
         );
-        prepared.encrypted_receipt = other_receipt.encrypt(&prepared.access.key).unwrap();
+        prepared.encrypted_receipt = other_receipt
+            .encrypt(&receiver_path(), &prepared.access.key)
+            .unwrap();
 
         let err = access::validate_prepared_receipt(&prepared).unwrap_err();
         assert!(
@@ -253,7 +259,7 @@ mod tests {
             amount: Some(PaymentAmount::new("1000", "sats").unwrap()),
             metadata: JsonMap::new(),
         };
-        let location = ReceiptAccess::location_for(&location_receipt_id);
+        let location = ReceiptAccess::location(&receiver_path(), &location_receipt_id);
         let key = ReceiptDecryptionKey::generate();
         let encrypted = encrypt_receipt_for_test_location(&receipt, &key, &location);
 
@@ -280,7 +286,7 @@ mod tests {
         let mut plaintext = serde_json::to_value(ReceiptWire::from(&receipt)).unwrap();
         plaintext["payment_request_id"] = JsonValue::Null;
         let plaintext = serde_json::to_vec(&plaintext).unwrap();
-        let location = ReceiptAccess::location_for(&receipt_id);
+        let location = ReceiptAccess::location(&receiver_path(), &receipt_id);
         let key = ReceiptDecryptionKey::generate();
         let encrypted = encrypt_receipt_plaintext_for_test_location(&plaintext, &key, &location);
 
@@ -304,7 +310,7 @@ mod tests {
             payment_reference: reference.clone(),
             payment_request_id: None,
             billing_period: None,
-            location: ReceiptAccess::location_for(&other_receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &other_receipt_id),
             key: ReceiptDecryptionKey::generate(),
         };
         let json = wire::serialize_receipt_access_json(&access).unwrap();
@@ -329,7 +335,7 @@ mod tests {
             payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
             payment_request_id: None,
             billing_period: None,
-            location: ReceiptAccess::location_for(&other_receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &other_receipt_id),
             key: ReceiptDecryptionKey::generate(),
         };
         let raw_json = wire::serialize_receipt_access_json(&access).unwrap();
@@ -362,7 +368,7 @@ mod tests {
             payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
             payment_request_id: None,
             billing_period: None,
-            location: ReceiptAccess::location_for(&receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &receipt_id),
             key: ReceiptDecryptionKey::generate(),
         };
         let raw_json = wire::serialize_receipt_access_json(&access).unwrap();
@@ -390,7 +396,7 @@ mod tests {
             payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
             payment_request_id: None,
             billing_period: None,
-            location: ReceiptAccess::location_for(&receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &receipt_id),
             key: ReceiptDecryptionKey::generate(),
         };
         let mut value: serde_json::Value =
@@ -416,7 +422,7 @@ mod tests {
             payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
             payment_request_id: None,
             billing_period: None,
-            location: ReceiptAccess::location_for(&receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &receipt_id),
             key: ReceiptDecryptionKey::generate(),
         };
         let mut value: serde_json::Value =
@@ -443,7 +449,7 @@ mod tests {
             payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
             payment_request_id: None,
             billing_period: None,
-            location: ReceiptAccess::location_for(&other_receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &other_receipt_id),
             key: ReceiptDecryptionKey::generate(),
         };
 
@@ -462,7 +468,7 @@ mod tests {
             payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
             payment_request_id: None,
             billing_period: None,
-            location: ReceiptAccess::location_for(&receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &receipt_id),
             key: ReceiptDecryptionKey::generate(),
         };
 
@@ -495,7 +501,7 @@ mod tests {
                 .unwrap(),
             payment_request_id: None,
             billing_period: None,
-            location: ReceiptAccess::location_for(&receipt_id),
+            location: ReceiptAccess::location(&receiver_path(), &receipt_id),
             key,
         };
 

@@ -7,16 +7,10 @@ use crate::{
     domain::linked_peers::LinkedPeerHandshakeReport,
     domain::outbound_private::OutboundPrivateSendReport,
     domain::private_stream::PrivateStreamIntakeReport, domain::publication::PublicationStatus,
-    PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate, PaymentTarget, PubkyPublicKey,
-    Result,
+    PaykitReceiverPath, PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate,
+    PaymentTarget, PubkyPublicKey, Result,
 };
 
-/// Default public Paykit profile path.
-pub const DEFAULT_PAYKIT_PROFILE_PATH: &str = "/pub/paykit/profile.json";
-/// Default public Paykit blob prefix.
-pub const DEFAULT_PAYKIT_PROFILE_BLOB_PATH_PREFIX: &str = "/pub/paykit/blobs/";
-/// Default public Paykit contact marker prefix.
-pub const DEFAULT_PAYKIT_PUBLIC_CONTACT_PATH_PREFIX: &str = "/pub/paykit/contacts/";
 /// Pubky app profile path used by read-only fallback/helper APIs.
 pub const PUBKY_PROFILE_PATH: &str = "/pub/pubky.app/profile.json";
 /// Pubky app follows path used by read-only helper APIs.
@@ -337,6 +331,8 @@ pub struct PaykitBlobRecord {
 pub struct ContactUpdate {
     /// Contact public key.
     pub public_key: PubkyPublicKey,
+    /// Contact receiver/runtime folders used for Paykit private workflows.
+    pub receiver_paths: Vec<PaykitReceiverPath>,
     /// Optional local display label.
     pub label: Option<String>,
 }
@@ -345,6 +341,7 @@ impl fmt::Debug for ContactUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ContactUpdate")
             .field("public_key", &"<redacted>")
+            .field("receiver_paths", &self.receiver_paths)
             .field("label", &self.label.as_ref().map(|_| "<redacted>"))
             .finish()
     }
@@ -353,6 +350,7 @@ impl fmt::Debug for ContactUpdate {
 impl ContactUpdate {
     /// Validate contact update fields.
     pub fn validate(&self) -> Result<()> {
+        validate_receiver_paths(&self.receiver_paths)?;
         validate_optional_text(
             self.label.as_deref(),
             "contact label",
@@ -370,6 +368,8 @@ impl ContactUpdate {
 pub struct ContactRecord {
     /// Contact public key.
     pub public_key: PubkyPublicKey,
+    /// Contact receiver/runtime folders used for Paykit private workflows.
+    pub receiver_paths: Vec<PaykitReceiverPath>,
     /// Optional local display label.
     pub label: Option<String>,
     /// Cached public profile, when fetched.
@@ -382,6 +382,8 @@ pub struct ContactRecord {
     pub updated_at: chrono::DateTime<chrono::Utc>,
     /// Public Contact Marker publication state.
     pub public_contact_marker_status: PublicationStatus,
+    /// Receiver path for the current public contact marker state.
+    pub public_contact_marker_receiver_path: Option<PaykitReceiverPath>,
     /// Time the contact was last published publicly by explicit opt-in.
     pub public_contact_published_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Time the public contact marker was last removed.
@@ -394,6 +396,7 @@ impl fmt::Debug for ContactRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ContactRecord")
             .field("public_key", &"<redacted>")
+            .field("receiver_paths", &self.receiver_paths)
             .field("label", &self.label.as_ref().map(|_| "<redacted>"))
             .field("profile", &self.profile.as_ref().map(|_| "<redacted>"))
             .field("profile_fetched_at", &self.profile_fetched_at)
@@ -402,6 +405,10 @@ impl fmt::Debug for ContactRecord {
             .field(
                 "public_contact_marker_status",
                 &self.public_contact_marker_status,
+            )
+            .field(
+                "public_contact_marker_receiver_path",
+                &self.public_contact_marker_receiver_path,
             )
             .field(
                 "public_contact_published_at",
@@ -426,20 +433,24 @@ impl ContactRecord {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         let label = normalize_label(update.label);
+        let receiver_paths = normalized_receiver_paths(update.receiver_paths);
         match existing {
             Some(mut existing) => {
+                existing.receiver_paths = receiver_paths;
                 existing.label = label;
                 existing.updated_at = now;
                 existing
             }
             None => Self {
                 public_key: update.public_key,
+                receiver_paths,
                 label,
                 profile: None,
                 profile_fetched_at: None,
                 created_at: now,
                 updated_at: now,
                 public_contact_marker_status: PublicationStatus::NotPublished,
+                public_contact_marker_receiver_path: None,
                 public_contact_published_at: None,
                 public_contact_removed_at: None,
                 public_contact_last_error: None,
@@ -460,9 +471,11 @@ impl ContactRecord {
 
     pub(crate) fn mark_public_contact_publication_pending(
         mut self,
+        receiver_path: PaykitReceiverPath,
         updated_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         self.public_contact_marker_status = PublicationStatus::PendingPublication;
+        self.public_contact_marker_receiver_path = Some(receiver_path);
         self.public_contact_last_error = None;
         self.updated_at = updated_at;
         self
@@ -482,9 +495,11 @@ impl ContactRecord {
 
     pub(crate) fn mark_public_contact_removal_pending(
         mut self,
+        receiver_path: PaykitReceiverPath,
         updated_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         self.public_contact_marker_status = PublicationStatus::PendingRemoval;
+        self.public_contact_marker_receiver_path = Some(receiver_path);
         self.public_contact_last_error = None;
         self.updated_at = updated_at;
         self
@@ -495,6 +510,7 @@ impl ContactRecord {
         removed_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         self.public_contact_marker_status = PublicationStatus::Removed;
+        self.public_contact_marker_receiver_path = None;
         self.public_contact_published_at = None;
         self.public_contact_removed_at = Some(removed_at);
         self.public_contact_last_error = None;
@@ -529,6 +545,37 @@ impl ContactRecord {
         ) || (self.public_contact_published_at.is_some()
             && self.public_contact_removed_at.is_none())
     }
+
+    pub(crate) fn contains_receiver_path(&self, receiver_path: &PaykitReceiverPath) -> bool {
+        self.receiver_paths
+            .iter()
+            .any(|candidate| candidate == receiver_path)
+    }
+}
+
+pub(crate) fn normalized_receiver_paths(
+    mut receiver_paths: Vec<PaykitReceiverPath>,
+) -> Vec<PaykitReceiverPath> {
+    receiver_paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    receiver_paths.dedup();
+    receiver_paths
+}
+
+fn validate_receiver_paths(receiver_paths: &[PaykitReceiverPath]) -> Result<()> {
+    if receiver_paths.is_empty() {
+        return Err(PaykitSdkError::Protocol(
+            "contact receiver paths must not be empty".into(),
+        ));
+    }
+    let mut normalized = receiver_paths.to_vec();
+    normalized.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    normalized.dedup();
+    if normalized.len() != receiver_paths.len() {
+        return Err(PaykitSdkError::Protocol(
+            "contact receiver paths must not contain duplicates".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -544,6 +591,7 @@ struct PublicContactDocument {
     version: u32,
     kind: String,
     public_key: PubkyPublicKey,
+    receiver_path: PaykitReceiverPath,
 }
 
 pub(crate) fn profile_json(profile: &PaykitProfile) -> Result<String> {
@@ -670,11 +718,15 @@ fn direct_pubky_follow_key(path: &str) -> Option<&str> {
     Some(value)
 }
 
-pub(crate) fn public_contact_json(public_key: &PubkyPublicKey) -> Result<String> {
+pub(crate) fn public_contact_json(
+    public_key: &PubkyPublicKey,
+    receiver_path: &PaykitReceiverPath,
+) -> Result<String> {
     serde_json::to_string(&PublicContactDocument {
         version: PUBLIC_CONTACT_VERSION,
         kind: PUBLIC_CONTACT_KIND.into(),
         public_key: public_key.clone(),
+        receiver_path: receiver_path.clone(),
     })
     .map_err(|err| {
         PaykitSdkError::Protocol(format!("failed to serialize Paykit public contact: {err}"))
@@ -712,6 +764,8 @@ pub enum ContactPaymentResolutionPrivateState {
 pub struct ContactPaymentResolutionRequest {
     /// Counterparty to pay.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder to query.
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Optional amount context used by the payment adapter.
     pub amount: Option<PaymentAmountContext>,
     /// Include public Payment Endpoints after private candidates.

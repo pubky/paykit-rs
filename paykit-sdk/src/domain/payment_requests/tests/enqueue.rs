@@ -12,10 +12,16 @@ async fn test_enqueue_payment_request_event_stores_canonical_payload() {
         None,
     ));
 
-    let record = enqueue_payment_request_event(&storage, counterparty.clone(), &event, timestamp())
-        .await
-        .unwrap();
-    let queued = queued_outbound_private_messages(&storage, &counterparty)
+    let record = enqueue_payment_request_event(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        &event,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();
 
@@ -38,9 +44,15 @@ async fn test_enqueue_payment_request_acceptance_sets_kind() {
         panic!("expected acceptance event");
     };
 
-    let record = enqueue_payment_request_acceptance(&storage, counterparty, &event, timestamp())
-        .await
-        .unwrap();
+    let record = enqueue_payment_request_acceptance(
+        &storage,
+        counterparty,
+        receiver_path(),
+        &event,
+        timestamp(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(record.kind, "paykit.payment_request_acceptance");
 }
@@ -60,10 +72,16 @@ async fn test_enqueue_payment_request_rejects_invalid_terms() {
     };
     event.request.accepted_payment_endpoint_identifiers.clear();
 
-    let err = enqueue_payment_request(&storage, counterparty.clone(), &event, timestamp())
-        .await
-        .unwrap_err();
-    let queued = queued_outbound_private_messages(&storage, &counterparty)
+    let err = enqueue_payment_request(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        &event,
+        timestamp(),
+    )
+    .await
+    .unwrap_err();
+    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();
 

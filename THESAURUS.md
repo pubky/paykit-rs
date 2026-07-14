@@ -30,8 +30,20 @@
 - **Synonyms to AVOID**: Paykit core, Paykit runtime core, Pubky SDK
 - **Related terms**: Paykit, Paykit Library, Language Bindings
 
+### Paykit Receiver Path
+- **Definition**: The folder-safe app/runtime path for one Paykit runtime under a Pubky identity, currently shaped as `{app}/{wallet|server}` such as `bitkit/wallet` or `bitkit/server`. It scopes public Payment Endpoints, private Paykit paths, receipts, profiles, and SDK state.
+- **NOT**: A payment-role receiver, payee, wallet address, or Pubky public key.
+- **Synonyms to AVOID**: receiver id, receiver when it could mean the party receiving value
+- **Related terms**: Payee, Pubky Routing, Payment Endpoint
+
+### Paykit Receiver Reference
+- **Definition**: The combination of a Pubky public key and Paykit Receiver Path that identifies one concrete Paykit app/runtime folder.
+- **NOT**: Only the Pubky public key, a human contact, or a Payment Endpoint.
+- **Synonyms to AVOID**: receiver id, receiver when the identity plus path distinction matters
+- **Related terms**: Paykit Receiver Path, Pubky Routing, Payment Endpoint
+
 ### Language Bindings
-- **Definition**: Distribution/integration surfaces for Paykit Library or Paykit SDK in languages or platforms such as Swift, Kotlin, and React Native.
+- **Definition**: Distribution/integration surfaces for Paykit Library or Paykit SDK in languages or platforms such as Swift and Kotlin.
 - **NOT**: First-class Paykit architecture components.
 - **Synonyms to AVOID**: Paykit SDK
 - **Related terms**: Paykit Library, Paykit SDK
@@ -67,6 +79,12 @@
 - **NOT**: The default Contact Record storage model or proof of an active Encrypted Link.
 - **Synonyms to AVOID**: public contact record when referring to the marker only
 - **Related terms**: Contact Record, Paykit Profile, Paykit SDK
+
+### Receiver Marker
+- **Definition**: An optional public Pubky marker at `/pub/paykit/v0/{receiver_path}/receiver.json` that makes one Paykit Receiver Path discoverable even when it has no public Payment Endpoints. The payload carries version, kind, receiver path, and coarse receiver capabilities.
+- **NOT**: A Payment Endpoint, Payment List, public profile, or proof of an active Encrypted Link.
+- **Synonyms to AVOID**: receiver record, receiver index entry when referring to the marker payload
+- **Related terms**: Paykit Receiver Path, Payment Endpoint, Pubky Routing, Paykit SDK
 
 ## Core Protocol Terms
 
@@ -375,9 +393,8 @@ Protocol concepts:
 Future/planned:
 - Paykit SDK platform bindings
 
-Implementation/legacy details:
+Implementation details:
 - Paykit FFI
-- Paykit React Native
 - Paykit PDK
 - MethodId
 - EndpointData

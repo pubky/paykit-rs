@@ -38,7 +38,7 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
         .public_key
         .to_public_key()
         .expect("public key conversion should succeed");
-    let list = paykit_lib::get_payment_list(&storage, &payee)
+    let list = paykit_lib::get_payment_list(&storage, &payee, &user.receiver_path)
         .await
         .expect("Payment List fetch should succeed");
     assert_eq!(
@@ -71,7 +71,7 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
     assert_eq!(report.removed[0].status, PublicationStatus::Removed);
     assert!(report.failed.is_empty());
 
-    let list = paykit_lib::get_payment_list(&storage, &payee)
+    let list = paykit_lib::get_payment_list(&storage, &payee, &user.receiver_path)
         .await
         .expect("Payment List fetch should succeed");
     assert_eq!(payload_of(&list, "btc-onchain"), None);

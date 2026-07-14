@@ -11,7 +11,7 @@ Use GitHub's private vulnerability reporting:
 Include as much as you can:
 
 - affected crate(s) and version or commit — `paykit-lib`, `paykit-sdk`,
-  `paykit-ffi`, or a Swift / React Native / Kotlin binding
+  `paykit-ffi`, or a Swift / Kotlin binding
 - the impact (e.g. key exposure, ciphertext malleability, path traversal,
   timing leak, broken access control on private messages/Receipts)
 - steps to reproduce, or a minimal proof of concept

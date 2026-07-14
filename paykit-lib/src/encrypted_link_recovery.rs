@@ -22,8 +22,9 @@ use pubky::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    pubky_routing::{encrypted_link_recovery_path_prefix, receiver_pair_path_domain},
     validation::{invalid_data, invalid_wire, parse_utc_timestamp, validate_uuid_v4},
-    PaykitError, Result, PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX,
+    PaykitError, PaykitReceiverPath, Result,
 };
 
 const RECOVERY_MARKER_KIND: &str = "paykit.encrypted_link_recovery";
@@ -130,13 +131,32 @@ pub fn parse_encrypted_link_recovery_marker_json(
 pub fn encrypted_link_recovery_marker_paths(
     local_secret_key: &[u8; 32],
     remote_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
 ) -> (String, String) {
-    pubky_noise::path_derivation::derive_asymmetric_paths(
+    let local_base = encrypted_link_recovery_path_prefix(local_receiver_path);
+    let remote_base = encrypted_link_recovery_path_prefix(remote_receiver_path);
+    let local_public_key = pubky::Keypair::from_secret(local_secret_key).public_key();
+    let path_domain = receiver_pair_path_domain(
+        RECOVERY_MARKER_PATH_DOMAIN,
+        &local_public_key,
+        local_receiver_path,
+        remote_pubkey,
+        remote_receiver_path,
+    );
+    let (write_path, _) = pubky_noise::path_derivation::derive_asymmetric_paths(
         local_secret_key,
         remote_pubkey,
-        RECOVERY_MARKER_PATH_DOMAIN,
-        PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX,
-    )
+        &path_domain,
+        &local_base,
+    );
+    let (_, read_path) = pubky_noise::path_derivation::derive_asymmetric_paths(
+        local_secret_key,
+        remote_pubkey,
+        &path_domain,
+        &remote_base,
+    );
+    (write_path, read_path)
 }
 
 /// Publish a local recovery marker and return the path written.
@@ -144,9 +164,16 @@ pub async fn publish_encrypted_link_recovery_marker(
     session: &PubkySession,
     local_secret_key: &[u8; 32],
     remote_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
     marker: &EncryptedLinkRecoveryMarker,
 ) -> Result<String> {
-    let (write_path, _) = encrypted_link_recovery_marker_paths(local_secret_key, remote_pubkey);
+    let (write_path, _) = encrypted_link_recovery_marker_paths(
+        local_secret_key,
+        remote_pubkey,
+        local_receiver_path,
+        remote_receiver_path,
+    );
     let payload = serialize_encrypted_link_recovery_marker(marker)?;
     session
         .storage()
@@ -164,8 +191,15 @@ pub async fn remove_encrypted_link_recovery_marker(
     session: &PubkySession,
     local_secret_key: &[u8; 32],
     remote_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<String> {
-    let (write_path, _) = encrypted_link_recovery_marker_paths(local_secret_key, remote_pubkey);
+    let (write_path, _) = encrypted_link_recovery_marker_paths(
+        local_secret_key,
+        remote_pubkey,
+        local_receiver_path,
+        remote_receiver_path,
+    );
     match session.storage().delete(write_path.clone()).await {
         Ok(_) => Ok(write_path),
         Err(err) if is_not_found(&err) => Ok(write_path),
@@ -181,8 +215,15 @@ pub async fn fetch_encrypted_link_recovery_marker(
     storage: &PublicStorage,
     local_secret_key: &[u8; 32],
     remote_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<Option<EncryptedLinkRecoveryMarker>> {
-    let (_, read_path) = encrypted_link_recovery_marker_paths(local_secret_key, remote_pubkey);
+    let (_, read_path) = encrypted_link_recovery_marker_paths(
+        local_secret_key,
+        remote_pubkey,
+        local_receiver_path,
+        remote_receiver_path,
+    );
     let addr = format!("{remote_pubkey}{read_path}");
     match storage.get(&addr).await {
         Ok(resp) => {
@@ -257,15 +298,54 @@ mod tests {
     fn test_recovery_marker_paths_are_pairwise_symmetric() {
         let (alice_secret, alice_public) = secret_pair();
         let (bob_secret, bob_public) = secret_pair();
+        let alice_receiver = PaykitReceiverPath::new("bitkit/wallet").unwrap();
+        let bob_receiver = PaykitReceiverPath::new("tether/wallet").unwrap();
 
-        let (alice_write, alice_read) =
-            encrypted_link_recovery_marker_paths(&alice_secret, &bob_public);
-        let (bob_write, bob_read) =
-            encrypted_link_recovery_marker_paths(&bob_secret, &alice_public);
+        let (alice_write, alice_read) = encrypted_link_recovery_marker_paths(
+            &alice_secret,
+            &bob_public,
+            &alice_receiver,
+            &bob_receiver,
+        );
+        let (bob_write, bob_read) = encrypted_link_recovery_marker_paths(
+            &bob_secret,
+            &alice_public,
+            &bob_receiver,
+            &alice_receiver,
+        );
 
         assert_eq!(alice_write, bob_read);
         assert_eq!(alice_read, bob_write);
-        assert!(alice_write.starts_with(PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX));
+        assert!(
+            alice_write.starts_with("/pub/paykit/v0/private/bitkit/wallet/encrypted-link-recovery")
+        );
+        assert!(
+            bob_write.starts_with("/pub/paykit/v0/private/tether/wallet/encrypted-link-recovery")
+        );
         assert_ne!(alice_write, alice_read);
+    }
+
+    #[test]
+    fn test_recovery_marker_paths_include_both_receiver_paths() {
+        let (alice_secret, _) = secret_pair();
+        let (_, bob_public) = secret_pair();
+        let alice_receiver = PaykitReceiverPath::new("bitkit/wallet").unwrap();
+        let bob_receiver = PaykitReceiverPath::new("tether/wallet").unwrap();
+        let bob_other_receiver = PaykitReceiverPath::new("bitkit/server").unwrap();
+
+        let (write_to_bob_receiver, _) = encrypted_link_recovery_marker_paths(
+            &alice_secret,
+            &bob_public,
+            &alice_receiver,
+            &bob_receiver,
+        );
+        let (write_to_bob_other_receiver, _) = encrypted_link_recovery_marker_paths(
+            &alice_secret,
+            &bob_public,
+            &alice_receiver,
+            &bob_other_receiver,
+        );
+
+        assert_ne!(write_to_bob_receiver, write_to_bob_other_receiver);
     }
 }

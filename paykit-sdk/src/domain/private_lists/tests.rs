@@ -18,6 +18,10 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
+fn receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("bitkit/wallet").unwrap()
+}
+
 fn stream_item(
     stream_item_id: u64,
     raw_json: &str,
@@ -26,6 +30,7 @@ fn stream_item(
     PrivateStreamItemRecord {
         stream_item_id,
         counterparty: counterparty(),
+        counterparty_receiver_path: receiver_path(),
         receive_batch_id: 0,
         raw_json: raw_json.into(),
         parsed_version: Some(1),
@@ -109,6 +114,7 @@ async fn test_current_private_payment_list_loads_from_storage() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
+        receiver_path(),
         vec![private_message(json)],
         None,
         timestamp(),
@@ -116,7 +122,7 @@ async fn test_current_private_payment_list_loads_from_storage() {
     .await
     .unwrap();
 
-    let view = current_private_payment_list(&storage, &counterparty)
+    let view = current_private_payment_list(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
         .unwrap();
@@ -133,6 +139,7 @@ async fn test_enqueue_private_payment_list_stores_exact_list_message() {
     let record = enqueue_private_payment_list(
         &storage,
         counterparty.clone(),
+        receiver_path(),
         vec![ReceivingDetail {
             identifier: "btc-lightning-bolt11".into(),
             payload: "ln-private".into(),
@@ -142,7 +149,7 @@ async fn test_enqueue_private_payment_list_stores_exact_list_message() {
     .await
     .unwrap();
 
-    let queued = queued_outbound_private_messages(&storage, &counterparty)
+    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();
     assert_eq!(record.outbound_message_id, queued[0].outbound_message_id);
@@ -167,6 +174,7 @@ async fn test_enqueue_private_payment_list_with_link_lease_rejects_stale_lease()
                 Ok(tx
                     .claim_peer_link_operation(
                         &counterparty,
+                        &receiver_path(),
                         timestamp(),
                         timestamp() + ChronoDuration::seconds(10),
                     )
@@ -181,6 +189,7 @@ async fn test_enqueue_private_payment_list_with_link_lease_rejects_stale_lease()
             move |tx| {
                 let _ = tx.claim_peer_link_operation(
                     &counterparty,
+                    &receiver_path(),
                     timestamp() + ChronoDuration::seconds(11),
                     timestamp() + ChronoDuration::seconds(71),
                 );
@@ -203,8 +212,10 @@ async fn test_enqueue_private_payment_list_with_link_lease_rejects_stale_lease()
     .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
-    assert!(queued_outbound_private_messages(&storage, &counterparty)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

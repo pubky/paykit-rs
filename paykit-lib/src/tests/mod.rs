@@ -48,6 +48,10 @@ struct TestSetup {
     public_key: PublicKey,
 }
 
+fn receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("bitkit/wallet").unwrap()
+}
+
 impl TestSetup {
     async fn new() -> Self {
         let testnet = build_testnet().await;
@@ -110,6 +114,8 @@ impl InProgressHandshakeSetup {
             initiator_session.clone(),
             initiator_keypair.secret_key(),
             responder_public_key,
+            &receiver_path(),
+            &receiver_path(),
             initiator_sdk,
         )
         .unwrap();
@@ -118,6 +124,8 @@ impl InProgressHandshakeSetup {
             responder_session.clone(),
             responder_keypair.secret_key(),
             initiator_public_key,
+            &receiver_path(),
+            &receiver_path(),
             responder_sdk,
         )
         .unwrap();
@@ -206,6 +214,8 @@ impl PrivateTestSetup {
             sender_session.clone(),
             sender_keypair.secret_key(),
             receiver_public_key,
+            &receiver_path(),
+            &receiver_path(),
             sender_sdk,
         )
         .unwrap();
@@ -215,6 +225,8 @@ impl PrivateTestSetup {
             receiver_session.clone(),
             receiver_keypair.secret_key(),
             sender_public_key,
+            &receiver_path(),
+            &receiver_path(),
             receiver_sdk,
         )
         .unwrap();

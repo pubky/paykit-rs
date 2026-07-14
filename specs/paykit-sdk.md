@@ -31,6 +31,19 @@ or aggregated explicitly above the app-owned runtime model. That does not mean
 all apps silently share one private Paykit runtime, one Encrypted Link state
 machine, or one payment execution state.
 
+Each SDK runtime is configured with one local Paykit receiver path. That path
+describes the local app/runtime folder only. Private and payment counterparty
+APIs must receive the counterparty's exact receiver path, because a Pubky key
+alone is not enough information to route private links, private streams,
+receipts, requests, recovery state, or public endpoint reads to one app/runtime
+folder. `paykit_receiver_paths` is a discovery helper; it does not make the SDK
+guess which receiver to use. It returns receiver paths that publish a valid
+Receiver Marker or at least one public Payment Endpoint. Receivers that want to
+be discoverable without public Payment Endpoints can publish a small marker at
+`/pub/paykit/v0/{receiver_path}/receiver.json`. Publishing or removing that
+marker is an explicit app decision, not an automatic SDK setup, auth, or profile
+side effect.
+
 ## Design Principles
 
 - Keep `paykit-lib` stateless. It validates and sends protocol objects, but it
@@ -301,8 +314,9 @@ workflows: signup, signin, session-secret import, auth handoff
 start/resume/approve helpers, and `pubky://` resource normalization. Full SDK
 runtime auth should use `config.required_session_capabilities()` as the expected
 scope for auth start/resume/approve, completion, and session import. The
-default Paykit capability covers the public Paykit namespace used by protocol
-paths and SDK-managed Paykit public data.
+required scope covers this runtime's receiver-scoped public and private Paykit
+paths; it adds the configured profile/contact namespace only when that namespace
+is outside the receiver-scoped Paykit default.
 `PubkyLocalSecretKey` also provides Pubky Core-compatible BIP39 seed and
 mnemonic helpers plus public-key-from-secret helpers. Apps that intentionally
 share the same Pubky identity material should derive the same Pubky key; app
@@ -318,26 +332,38 @@ The SDK provides default Pubky-backed Paykit-facing profile metadata so
 different Paykit apps can interoperate. This belongs in the SDK, not in
 `paykit-lib` core protocol validation.
 
-The default public profile/contact namespace is unversioned:
+The default public profile/contact namespace is receiver-scoped:
 
-- profile record: `/pub/paykit/profile.json`
-- Paykit blobs: `/pub/paykit/blobs/...`
-- public contact markers: `/pub/paykit/contacts/...`
+- profile record: `/pub/paykit/v0/{receiver_path}/profile.json`
+- Paykit blobs: `/pub/paykit/v0/{receiver_path}/blobs/...`
+- public contact markers: `/pub/paykit/v0/{receiver_path}/contacts/...`
 
-Public Payment Endpoints remain under `/pub/paykit/v0/`, so SDK profile paths
-do not collide with Payment Endpoint Identifier files.
+Public Payment Endpoints for the same receiver are stored under
+`/pub/paykit/v0/{receiver_path}/endpoints/...`, so SDK profile paths do
+not collide with Payment Endpoint Identifier files. Public receiver discovery
+markers are stored at `/pub/paykit/v0/{receiver_path}/receiver.json`; they
+advertise only the receiver path and coarse capabilities, not payment details.
+Marker parsing is strict. Future marker wire changes should use a new version;
+older clients ignore unsupported marker data during receiver-path discovery
+unless the receiver also publishes public Payment Endpoints.
 
 Apps that already have a public product namespace can configure the SDK
 profile/contact namespace segment. For example, `profile_namespace =
 "bitkit.to"` makes Paykit Profile and contact marker helpers use
-`/pub/bitkit.to/profile.json`, `/pub/bitkit.to/blobs/...`, and
-`/pub/bitkit.to/contacts/...`. This does not change core Paykit Protocol paths
-such as public Payment Endpoints, and it does not create app-specific private
-runtime isolation under one shared key. The app should request the capability
-scope returned by `PaykitSdkConfig::required_session_capabilities()` and
-validate imported/completed sessions against that same scope. The default
-namespace is covered by `/pub/paykit/:rw`; a custom profile/contact namespace
-adds the matching `/pub/<namespace>/:rw` capability.
+`/pub/bitkit.to/{receiver_path}/profile.json`,
+`/pub/bitkit.to/{receiver_path}/blobs/...`, and
+`/pub/bitkit.to/{receiver_path}/contacts/...`. This does not change
+core Paykit Protocol paths or receiver-scoped private runtime paths. The app
+should request the capability scope returned by
+`PaykitSdkConfig::required_session_capabilities()` and validate
+imported/completed sessions against that same scope. The default receiver
+namespace is covered by receiver-scoped public/private Paykit capabilities; a
+custom profile/contact namespace adds the matching
+`/pub/<namespace>/{receiver_path}/:rw` capability.
+
+Remote Paykit Profile fetches use the same configured profile namespace.
+Cross-app profile discovery therefore requires an agreed namespace or explicit
+metadata that describes which profile namespace a receiver path uses.
 
 `image_uri` may point at the configured blob prefix or another public image
 location. The SDK can publish/delete Paykit blobs under the configured blob
@@ -373,6 +399,8 @@ Contacts need more care because they can reveal a social/payment graph. The SDK
 keeps saved contacts in local/private SDK storage by default. Public contact
 markers under the configured contact marker prefix are opt-in through SDK policy
 and explicit runtime calls.
+One Contact Record represents one Pubky identity and stores the Paykit receiver
+paths that app wants to keep linked for that identity.
 
 Profile JSON may ignore unknown fields so the public profile schema can grow
 without breaking older SDKs. Private Paykit protocol messages remain
@@ -502,9 +530,10 @@ Tracks local Pubky identity state:
 
 ### LinkedPeerRecord
 
-One record per counterparty:
+One record per counterparty receiver/runtime in the current Rust SDK:
 
 - counterparty public key
+- counterparty receiver path
 - relationship state: not linked, linking, linked, recovery required, blocked
 - in-progress handshake role: initiator or responder
 - last sync time
@@ -513,19 +542,25 @@ One record per counterparty:
 - failure counters
 - policy overrides
 
+Private and payment state is scoped by counterparty Pubky key plus
+counterparty receiver path. APIs that operate on private links, private streams,
+Private Payment Lists, Payment Requests, payment resolution, Receipt Access, and
+recovery markers require that exact receiver path instead of deriving it from the
+local runtime config.
+
 ### EncryptedLinkState
 
-One record per linked peer:
+One record per linked peer in the current Rust SDK:
 
 - active link snapshot
 - handshake snapshot
-- snapshot recipient public key
+- snapshot recipient public key and receiver scope
 - read/write progress metadata
 - last persisted checkpoint time
 - snapshot generation
 
 Snapshots are opaque `paykit-lib` snapshots. The SDK validates the expected
-counterparty before restoring them.
+counterparty and receiver scope before restoring them.
 
 ### PrivateStreamItem
 
@@ -533,6 +568,7 @@ Append-only raw private stream item:
 
 - local identity
 - counterparty
+- counterparty receiver path
 - stream sequence number assigned by the SDK
 - receive batch id
 - raw UTF-8 payload, or a retained invalid-frame marker when plaintext bytes
@@ -551,6 +587,7 @@ This is the source of truth for private protocol-derived state.
 Tracks Event Message idempotency:
 
 - counterparty
+- counterparty receiver path
 - event id
 - event kind
 - payload hash of the exact stored payload
@@ -562,7 +599,7 @@ Conflicting reused Event IDs must fail closed for the affected derived state.
 
 ### PrivatePaymentListView
 
-Latest-state view per counterparty:
+Latest-state view per counterparty receiver/runtime:
 
 - latest valid stream item id
 - current Payment Endpoint map
@@ -591,6 +628,7 @@ Tracks optional contact-scoped receiving details:
 
 - reservation id
 - counterparty public key
+- counterparty receiver path
 - Payment Endpoint Identifier
 - payload hash
 - latest outbound message id used to queue the reservation for sharing
@@ -604,6 +642,7 @@ Derived record per Payment Request:
 
 - payment request id
 - proposer/payee counterparty
+- counterparty receiver path
 - current local role: payer or payee
 - immutable terms
 - proposal event id
@@ -632,6 +671,7 @@ settlement finality unless the payment adapter confirms it.
 know every counterparty in advance:
 
 - optional counterparty
+- optional counterparty receiver path
 - optional local role
 - optional lifecycle states, where an empty list means all states
 - optional recurring/one-time filter
@@ -642,6 +682,7 @@ know every counterparty in advance:
 Receipt issuance records:
 
 - counterparty that should receive Receipt Access
+- counterparty receiver path
 - receipt id and Receipt Access Event ID
 - payment reference and optional Payment Request correlation fields
 - Encrypted Receipt JSON
@@ -653,6 +694,7 @@ Receipt Access records:
 - event id
 - receipt id
 - sender/issuer counterparty
+- sender/issuer receiver path
 - Receipt Location path
 - Receipt Decryption Key
 - optional Payment Request ID
@@ -666,6 +708,7 @@ Receipt records:
 - optional Payment Request ID
 - optional Billing Period
 - issuer context
+- issuer receiver path
 - recipient public key
 - optional Payment Endpoint Identifier
 - optional Payment Amount
@@ -681,6 +724,7 @@ Durable outbound Private Application Message queue:
 
 - outbound id
 - counterparty
+- counterparty receiver path
 - Private Message Kind
 - exact raw JSON payload, including Event ID when the message kind has one
 - send status
@@ -690,7 +734,7 @@ Durable outbound Private Application Message queue:
 
 The SDK should use one generic outbound Private Application Message record type
 for all Private Application Message kinds. Event Messages are processed as FIFO
-per counterparty/Encrypted Link. Private Payment Lists use latest-state
+per counterparty receiver/Encrypted Link. Private Payment Lists use latest-state
 semantics, so older unsent lists may be superseded by a newer complete list.
 Send workers must claim the next sendable message through storage before
 sending it. A stale `Sending` queue head can be reclaimed after the lease
@@ -724,7 +768,7 @@ advanced Encrypted Link snapshot.
 
 For each receive cycle:
 
-1. Claim the per-counterparty peer link operation lease.
+1. Claim the per-counterparty-receiver peer link operation lease.
 2. Restore or establish the Encrypted Link.
 3. Receive the full batch from `paykit-lib`.
 4. Persist every received Private Application Message plaintext and parse enough
@@ -748,8 +792,8 @@ Recommended locks:
 - public endpoint lock: serializes publication and cleanup of local public
   Payment Endpoints.
 - storage-backed peer link operation lease: serializes Encrypted Link restore,
-  handshake, send, receive, and snapshot updates per counterparty.
-- outbound queue claim/lock: serializes retry workers per counterparty.
+  handshake, send, receive, and snapshot updates per counterparty receiver.
+- outbound queue claim/lock: serializes retry workers per counterparty receiver.
 - reservation transaction: stores reservation records and the outbound message
   that shares them atomically. Existing reservation IDs with the same
   counterparty, Payment Endpoint Identifier, and payload hash are idempotent;
@@ -896,6 +940,7 @@ Payment Proofs, and any other Event Message kinds.
 Input:
 
 - counterparty public key
+- counterparty receiver path
 - desired amount/asset, if known
 - payment adapter support policy
 - whether public Payment Endpoints should be included
@@ -909,8 +954,8 @@ Flow:
 3. If no cached private endpoint is available and public endpoints are not
    included, try an immediate private refresh/recovery path when an active link
    exists.
-4. If public endpoints are included, fetch the counterparty's public Payment
-   List and append those candidates after private candidates.
+4. If public endpoints are included, fetch that receiver's public Payment
+   Endpoints and append those candidates after private candidates.
 5. Pass the full candidate list to `PaymentAdapter` as one batch with amount
    context when known.
 6. Return a structured result with a general payment `status`:
@@ -999,10 +1044,11 @@ settlement confirmation.
 5. Treat outbound status as local delivery checkpoint state, not counterparty
    acknowledgement.
 
-Receipt IDs are unique per issuer because Receipt Location is derived from only
-the Receipt ID. `prepare_receipt_issuance` may generate a Receipt ID and return
-it to the caller; retries should then call `process_receipt_issuance` with that
-ID. The one-call `issue_receipt` helper requires the draft to already contain a
+Receipt IDs are unique per issuer receiver because Receipt Location is derived
+from the issuer's receiver path and Receipt ID. `prepare_receipt_issuance` may
+generate a Receipt ID and return it to the caller; retries should then call
+`process_receipt_issuance` with that ID from the same SDK receiver runtime. The
+one-call `issue_receipt` helper requires the draft to already contain a
 caller-provided Receipt ID so repeating the same call cannot create a second
 receipt after a partial failure.
 
@@ -1024,6 +1070,7 @@ receipt after a partial failure.
 
 Backup should include SDK-managed state:
 
+- local receiver/runtime path
 - public identity/capability state
 - peer records
 - Encrypted Link snapshots
@@ -1060,8 +1107,10 @@ Backup should not include:
 
 Restore flow:
 
-1. Validate local identity compatibility before replacing storage state.
-2. Validate backup record shape and every link snapshot recipient.
+1. Validate local identity and exact receiver path before replacing storage
+   state.
+2. Validate backup record shape plus every link snapshot recipient and receiver
+   scope.
 3. Preserve valid active Encrypted Link snapshots and in-progress handshake
    snapshots so the SDK can catch up from the restored checkpoint.
 4. Mark peers recovery-required only when no safe restored checkpoint exists,
@@ -1111,7 +1160,7 @@ Recommended approach:
 
 - Rust SDK crate owns the runtime and core state machine.
 - FFI crate exposes an opaque SDK handle.
-- Platform wrappers provide ergonomic Swift/Kotlin/React Native APIs.
+- Platform wrappers provide ergonomic Swift/Kotlin APIs.
 - Apps provide adapter implementations through platform callbacks or through
   small platform-side adapter objects.
 

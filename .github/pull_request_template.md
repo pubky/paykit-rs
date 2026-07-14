@@ -19,7 +19,7 @@ Write "None" if this PR has no protocol impact.
 
 <!--
 Does this change any exposed struct, enum, or capability string that the
-Swift / React Native / Kotlin bindings consume? If so, note what needs to be
+Swift / Kotlin bindings consume? If so, note what needs to be
 regenerated or updated in sync. Write "None" if not applicable.
 -->
 

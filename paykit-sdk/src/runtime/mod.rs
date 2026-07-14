@@ -6,8 +6,9 @@ use std::{
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use paykit_lib::{
-    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaymentEndpointIdentifier, PaymentProof,
-    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestId,
+    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaykitReceiverCapabilities,
+    PaykitReceiverMarker, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
+    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestId,
     PaymentRequestRejection, PaymentRequestTerms, PrivateMessageKind, ReceiptDraft,
 };
 use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
@@ -101,10 +102,10 @@ use crate::{
         outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
         OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
-    PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointReservation,
-    PaymentEndpointReservationCancellation, PaymentEndpointSelectionRequest, PaymentEndpointSource,
-    PrivatePaymentListView, PubkyPublicKey, PubkySessionAccess, PubkySessionProvider,
-    ReceivingDetail, ReceivingDetailScope, Result,
+    PaykitReceiverPath, PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate,
+    PaymentEndpointReservation, PaymentEndpointReservationCancellation,
+    PaymentEndpointSelectionRequest, PaymentEndpointSource, PrivatePaymentListView, PubkyPublicKey,
+    PubkySessionAccess, PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, Result,
 };
 
 mod backup;
@@ -456,7 +457,14 @@ where
                     .into_values()
                     .collect::<Vec<_>>();
                 records.sort_by(|left, right| {
-                    left.counterparty.as_str().cmp(right.counterparty.as_str())
+                    left.counterparty
+                        .as_str()
+                        .cmp(right.counterparty.as_str())
+                        .then_with(|| {
+                            left.counterparty_receiver_path
+                                .as_str()
+                                .cmp(right.counterparty_receiver_path.as_str())
+                        })
                 });
                 Ok(records)
             })

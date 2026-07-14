@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use paykit_sdk::{
-    EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
-    PublicContactSharingPolicy, PAYKIT_SESSION_CAPABILITIES,
+    EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitReceiverPath,
+    PaykitSdkConfig, PublicContactSharingPolicy,
 };
 
 use crate::errors::{validation_error, PaykitFfiError};
@@ -44,6 +44,8 @@ pub enum FfiPublicContactSharingPolicy {
 /// Runtime configuration for Paykit SDK bindings.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiPaykitSdkConfig {
+    /// Receiver folder for this app/runtime under `/pub/paykit/v0/{app}/{wallet|server}`.
+    pub receiver_path: String,
     /// Namespace segment for SDK profile/contact public data under `/pub/`.
     pub profile_namespace: String,
     /// Public endpoint management scope.
@@ -67,10 +69,13 @@ pub struct FfiPubkyClientConfig {
     pub request_timeout_secs: u64,
 }
 
-/// Return the default SDK configuration.
+/// Return the default SDK policy for an explicit Paykit receiver path.
 #[uniffi::export]
-pub fn default_config() -> FfiPaykitSdkConfig {
-    PaykitSdkConfig::default().into()
+pub fn default_config(receiver_path: String) -> Result<FfiPaykitSdkConfig, PaykitFfiError> {
+    Ok(PaykitSdkConfig::new(
+        PaykitReceiverPath::new(receiver_path).map_err(|err| validation_error(err.to_string()))?,
+    )
+    .into())
 }
 
 /// Return the default Pubky client configuration.
@@ -84,13 +89,11 @@ pub fn default_pubky_client_config() -> FfiPubkyClientConfig {
 /// Return Pubky capabilities required by this SDK configuration.
 #[uniffi::export]
 pub fn required_session_capabilities(config: FfiPaykitSdkConfig) -> Result<String, PaykitFfiError> {
-    Ok(PaykitSdkConfig::try_from(config)?.required_session_capabilities())
-}
-
-/// Return the core Paykit session capabilities.
-#[uniffi::export]
-pub fn core_session_capabilities() -> String {
-    PAYKIT_SESSION_CAPABILITIES.to_string()
+    let config = PaykitSdkConfig::try_from(config)?;
+    config
+        .validate()
+        .map_err(|err| validation_error(err.to_string()))?;
+    Ok(config.required_session_capabilities())
 }
 
 impl TryFrom<FfiPaykitSdkConfig> for PaykitSdkConfig {
@@ -98,6 +101,8 @@ impl TryFrom<FfiPaykitSdkConfig> for PaykitSdkConfig {
 
     fn try_from(value: FfiPaykitSdkConfig) -> Result<Self, Self::Error> {
         Ok(Self {
+            receiver_path: PaykitReceiverPath::new(value.receiver_path)
+                .map_err(|err| validation_error(err.to_string()))?,
             profile_namespace: value.profile_namespace,
             endpoint_management_scope: value.endpoint_management_scope.try_into()?,
             encrypted_link_recovery_markers: value.encrypted_link_recovery_markers.try_into()?,
@@ -118,6 +123,7 @@ impl TryFrom<FfiPaykitSdkConfig> for PaykitSdkConfig {
 impl From<PaykitSdkConfig> for FfiPaykitSdkConfig {
     fn from(value: PaykitSdkConfig) -> Self {
         Self {
+            receiver_path: value.receiver_path.to_string(),
             profile_namespace: value.profile_namespace,
             endpoint_management_scope: value.endpoint_management_scope.into(),
             encrypted_link_recovery_markers: value.encrypted_link_recovery_markers.into(),

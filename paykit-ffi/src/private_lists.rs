@@ -13,7 +13,7 @@ use crate::{
     },
     private_links::FfiPrivateOperationError,
     sdk::FfiPaykitSdk,
-    session::{app_public_key, parse_public_key},
+    session::{app_public_key, parse_public_key, parse_receiver_path},
     PaykitFfiError,
 };
 
@@ -45,6 +45,8 @@ pub struct FfiQueuedPrivateMessage {
     pub outbound_message_id: u64,
     /// Counterparty public key.
     pub counterparty: String,
+    /// Counterparty Paykit receiver path.
+    pub counterparty_receiver_path: String,
     /// Private Message Kind string.
     pub kind: String,
     /// Delivery status.
@@ -72,7 +74,7 @@ pub struct FfiPrivatePaymentListEndpoint {
     pub payload: Arc<FfiPaymentPayload>,
 }
 
-/// Latest valid Private Payment List view for one counterparty.
+/// Latest valid Private Payment List view for one counterparty receiver.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiPrivatePaymentListView {
     /// Stream item id of the latest valid list.
@@ -83,14 +85,14 @@ pub struct FfiPrivatePaymentListView {
     pub last_refresh_at: Option<String>,
 }
 
-/// Report from syncing Private Payment Lists for local contacts.
+/// Report from syncing Private Payment Lists for local contact receivers.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiPrivatePaymentListSyncReport {
-    /// Counterparties that had a current Private Payment List queued.
+    /// Counterparty receivers that had a current Private Payment List queued.
     pub queued: Vec<FfiPrivatePaymentListSyncChange>,
-    /// Counterparties that had an empty Private Payment List queued.
+    /// Counterparty receivers that had an empty Private Payment List queued.
     pub cleared: Vec<FfiPrivatePaymentListSyncChange>,
-    /// Counterparties that could not be queued or cleared.
+    /// Counterparty receivers that could not be queued or cleared.
     pub failed: Vec<FfiPrivatePaymentListSyncChange>,
 }
 
@@ -109,11 +111,13 @@ pub struct FfiPaymentEndpointReservationInput {
     pub attribution: HashMap<String, String>,
 }
 
-/// Reservation-backed Private Payment List input for one counterparty.
+/// Reservation-backed Private Payment List input for one counterparty receiver.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiPrivatePaymentListReservationUpdateInput {
     /// Counterparty that should receive the Private Payment List.
     pub counterparty: String,
+    /// Counterparty Paykit receiver path.
+    pub counterparty_receiver_path: String,
     /// Complete reserved receiving details to share with this counterparty.
     ///
     /// An empty list queues an empty Private Payment List for this counterparty.
@@ -125,6 +129,8 @@ pub struct FfiPrivatePaymentListReservationUpdateInput {
 pub struct FfiPrivatePaymentListDeliveryFailure {
     /// Counterparty whose outbound delivery failed.
     pub counterparty: String,
+    /// Counterparty Paykit receiver path.
+    pub counterparty_receiver_path: String,
     /// Outbound message id, when the failure is tied to one message.
     pub outbound_message_id: Option<u64>,
     /// Reservation id, when the failure is tied to reservation cleanup.
@@ -136,21 +142,23 @@ pub struct FfiPrivatePaymentListDeliveryFailure {
 /// Report from queueing and delivering Private Payment Lists.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiPrivatePaymentListDeliveryReport {
-    /// Counterparties that had a non-empty Private Payment List queued.
+    /// Counterparty receivers that had a non-empty Private Payment List queued.
     pub queued: Vec<FfiPrivatePaymentListSyncChange>,
-    /// Counterparties that had an empty Private Payment List queued.
+    /// Counterparty receivers that had an empty Private Payment List queued.
     pub cleared: Vec<FfiPrivatePaymentListSyncChange>,
-    /// Counterparties that could not be queued or cleared.
+    /// Counterparty receivers that could not be queued or cleared.
     pub failed_to_queue: Vec<FfiPrivatePaymentListSyncChange>,
-    /// Counterparties queued successfully but failed during outbound delivery.
+    /// Counterparty receivers queued successfully but failed during outbound delivery.
     pub failed_to_deliver: Vec<FfiPrivatePaymentListDeliveryFailure>,
 }
 
-/// One counterparty result from a Private Payment List sync.
+/// One counterparty receiver result from a Private Payment List sync.
 #[derive(uniffi::Record, Clone)]
 pub struct FfiPrivatePaymentListSyncChange {
     /// Counterparty affected by the sync.
     pub counterparty: String,
+    /// Counterparty Paykit receiver path.
+    pub counterparty_receiver_path: String,
     /// Queued outbound message id, when queueing succeeded.
     pub outbound_message_id: Option<u64>,
     /// Error text, when queueing failed.
@@ -173,30 +181,39 @@ impl FfiPaykitSdk {
     pub async fn current_private_payment_list(
         &self,
         counterparty: String,
+        counterparty_receiver_path: String,
     ) -> Result<Option<FfiPrivatePaymentListView>, PaykitFfiError> {
         self.runtime
-            .current_private_payment_list(&parse_public_key(counterparty)?)
+            .current_private_payment_list(
+                &parse_public_key(counterparty)?,
+                &parse_receiver_path(counterparty_receiver_path)?,
+            )
             .await
             .map(|view| view.map(Into::into))
             .map_err(Into::into)
     }
 
-    /// Queue the current complete Private Payment List for one counterparty.
+    /// Queue the current complete Private Payment List for one counterparty receiver.
     pub async fn enqueue_private_payment_list(
         &self,
         counterparty: String,
+        counterparty_receiver_path: String,
     ) -> Result<FfiQueuedPrivateMessage, PaykitFfiError> {
         self.runtime
-            .enqueue_private_payment_list(parse_public_key(counterparty)?)
+            .enqueue_private_payment_list(
+                parse_public_key(counterparty)?,
+                parse_receiver_path(counterparty_receiver_path)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
     }
 
-    /// Queue an explicit complete Private Payment List for one counterparty.
+    /// Queue an explicit complete Private Payment List for one counterparty receiver.
     pub async fn enqueue_private_payment_list_with_receiving_details(
         &self,
         counterparty: String,
+        counterparty_receiver_path: String,
         receiving_details: Vec<FfiReceivingDetail>,
     ) -> Result<FfiQueuedPrivateMessage, PaykitFfiError> {
         let receiving_details = receiving_details
@@ -206,6 +223,7 @@ impl FfiPaykitSdk {
         self.runtime
             .enqueue_private_payment_list_with_receiving_details(
                 parse_public_key(counterparty)?,
+                parse_receiver_path(counterparty_receiver_path)?,
                 receiving_details,
             )
             .await
@@ -213,13 +231,17 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Queue an empty Private Payment List for one counterparty.
+    /// Queue an empty Private Payment List for one counterparty receiver.
     pub async fn clear_private_payment_list(
         &self,
         counterparty: String,
+        counterparty_receiver_path: String,
     ) -> Result<FfiQueuedPrivateMessage, PaykitFfiError> {
         self.runtime
-            .clear_private_payment_list(parse_public_key(counterparty)?)
+            .clear_private_payment_list(
+                parse_public_key(counterparty)?,
+                parse_receiver_path(counterparty_receiver_path)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -229,9 +251,13 @@ impl FfiPaykitSdk {
     pub async fn clear_private_payment_list_and_process_outbound(
         &self,
         counterparty: String,
+        counterparty_receiver_path: String,
     ) -> Result<FfiPrivatePaymentListDeliveryReport, PaykitFfiError> {
         self.runtime
-            .clear_private_payment_list_and_process_outbound(parse_public_key(counterparty)?)
+            .clear_private_payment_list_and_process_outbound(
+                parse_public_key(counterparty)?,
+                parse_receiver_path(counterparty_receiver_path)?,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -302,6 +328,7 @@ impl From<OutboundPrivateMessageRecord> for FfiQueuedPrivateMessage {
         Self {
             outbound_message_id: value.outbound_message_id,
             counterparty: app_public_key(&value.counterparty),
+            counterparty_receiver_path: value.counterparty_receiver_path.to_string(),
             kind: value.kind,
             status: value.status.into(),
             attempt_count: value.attempt_count,
@@ -369,6 +396,7 @@ impl From<PrivatePaymentListSyncChange> for FfiPrivatePaymentListSyncChange {
     fn from(value: PrivatePaymentListSyncChange) -> Self {
         Self {
             counterparty: app_public_key(&value.counterparty),
+            counterparty_receiver_path: value.counterparty_receiver_path.to_string(),
             outbound_message_id: value.outbound_message_id,
             error: value.error,
         }
@@ -379,6 +407,7 @@ impl From<PrivatePaymentListDeliveryFailure> for FfiPrivatePaymentListDeliveryFa
     fn from(value: PrivatePaymentListDeliveryFailure) -> Self {
         Self {
             counterparty: app_public_key(&value.counterparty),
+            counterparty_receiver_path: value.counterparty_receiver_path.to_string(),
             outbound_message_id: value.outbound_message_id,
             reservation_id: value.reservation_id,
             error: private_error(
@@ -411,6 +440,7 @@ impl TryFrom<FfiPrivatePaymentListReservationUpdateInput> for PrivatePaymentList
     fn try_from(value: FfiPrivatePaymentListReservationUpdateInput) -> Result<Self, Self::Error> {
         Ok(Self {
             counterparty: parse_public_key(value.counterparty)?,
+            counterparty_receiver_path: parse_receiver_path(value.counterparty_receiver_path)?,
             reservations: value
                 .reservations
                 .into_iter()
@@ -440,6 +470,10 @@ mod tests {
         parse_public_key("8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io".into()).unwrap()
     }
 
+    fn receiver_path() -> paykit_sdk::PaykitReceiverPath {
+        paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap()
+    }
+
     #[test]
     fn test_private_payment_list_view_sorts_and_wraps_payloads() {
         let mut payment_endpoints = HashMap::new();
@@ -466,6 +500,7 @@ mod tests {
         let record = OutboundPrivateMessageRecord {
             outbound_message_id: 4,
             counterparty: public_key(),
+            counterparty_receiver_path: receiver_path(),
             kind: "paykit.private_payment_list".into(),
             raw_json: "{\"secret\":true}".into(),
             status: OutboundPrivateMessageStatus::Failed,
@@ -491,6 +526,7 @@ mod tests {
     fn test_private_payment_list_sync_change_redacts_error_debug() {
         let change = FfiPrivatePaymentListSyncChange {
             counterparty: public_key().to_app_key(),
+            counterparty_receiver_path: receiver_path().to_string(),
             outbound_message_id: None,
             error: Some("private queue failure".into()),
         };
@@ -505,6 +541,7 @@ mod tests {
     fn test_private_payment_list_reservation_update_converts() {
         let update = FfiPrivatePaymentListReservationUpdateInput {
             counterparty: public_key().to_app_key(),
+            counterparty_receiver_path: receiver_path().to_string(),
             reservations: vec![FfiPaymentEndpointReservationInput {
                 reservation_id: "reservation-1".into(),
                 identifier: "btc-lightning-bolt11".into(),
@@ -533,6 +570,7 @@ mod tests {
         let failure =
             FfiPrivatePaymentListDeliveryFailure::from(PrivatePaymentListDeliveryFailure {
                 counterparty: public_key(),
+                counterparty_receiver_path: receiver_path(),
                 outbound_message_id: Some(7),
                 reservation_id: Some("reservation-1".into()),
                 error: "private delivery failure".into(),

@@ -4,7 +4,7 @@ use paykit_sdk::{
 };
 use pubky_testnet::pubky::Keypair;
 
-use crate::harness::{build_testnet, drive_link_to_linked, two_party, TestUser};
+use crate::harness::{build_testnet, drive_link_to_linked, receiver_path, two_party, TestUser};
 
 #[tokio::test]
 async fn test_link_handshake_two_party_reaches_linked() {
@@ -13,7 +13,7 @@ async fn test_link_handshake_two_party_reaches_linked() {
     let initiated = pair
         .alice
         .sdk
-        .initiate_link_with_peer(pair.bob.public_key.clone())
+        .initiate_link_with_peer(pair.bob.public_key.clone(), pair.bob.receiver_path.clone())
         .await
         .expect("initiating the handshake should succeed");
     assert_eq!(initiated.state, LinkedPeerState::Linking);
@@ -25,7 +25,10 @@ async fn test_link_handshake_two_party_reaches_linked() {
     let accepted = pair
         .bob
         .sdk
-        .accept_link_with_peer(pair.alice.public_key.clone())
+        .accept_link_with_peer(
+            pair.alice.public_key.clone(),
+            pair.alice.receiver_path.clone(),
+        )
         .await
         .expect("accepting the handshake should succeed");
     assert_eq!(accepted.state, LinkedPeerState::Linking);
@@ -47,10 +50,14 @@ async fn test_link_handshake_two_party_reaches_linked() {
 
     // The durable link state holds an active link snapshot and no leftover
     // handshake state.
-    let link_state = load_encrypted_link_state(&pair.alice.storage, &pair.bob.public_key)
-        .await
-        .expect("loading link state should succeed")
-        .expect("link state should exist after handshake completion");
+    let link_state = load_encrypted_link_state(
+        &pair.alice.storage,
+        &pair.bob.public_key,
+        &pair.bob.receiver_path,
+    )
+    .await
+    .expect("loading link state should succeed")
+    .expect("link state should exist after handshake completion");
     assert!(link_state.link_snapshot.is_some());
     assert!(link_state.handshake_snapshot.is_none());
     assert!(link_state.handshake_role.is_none());
@@ -64,7 +71,7 @@ async fn test_advance_link_handshake_without_started_handshake_fails() {
 
     let err = user
         .sdk
-        .advance_link_handshake(stranger)
+        .advance_link_handshake(stranger, receiver_path("other/wallet"))
         .await
         .expect_err("advancing without stored handshake state must fail");
     assert!(

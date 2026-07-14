@@ -1,9 +1,9 @@
 use tracing::{debug, instrument};
 
-use crate::{PaykitError, PublicKey, Result};
+use crate::{PaykitError, PaykitReceiverPath, PublicKey, Result};
 
 use super::{
-    paths::compute_private_payment_paths,
+    paths::{compute_private_payment_paths, validate_private_payment_paths},
     private_application_message::{self, PrivateApplicationMessage},
     EncryptedLinkSnapshot,
 };
@@ -42,6 +42,10 @@ pub struct EncryptedLink {
     recipient: PublicKey,
     /// Shared Noise configuration retained for snapshot-based session resumption.
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    /// Local receiver path used by this link.
+    local_receiver_path: PaykitReceiverPath,
+    /// Counterparty receiver path used by this link.
+    remote_receiver_path: PaykitReceiverPath,
     /// Maximum number of automatic Private Application Message `send_message`
     /// retries.
     max_send_retries: u32,
@@ -52,11 +56,15 @@ impl EncryptedLink {
         encryptor: pubky_noise::PubkyNoiseEncryptor,
         recipient: PublicKey,
         config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+        local_receiver_path: PaykitReceiverPath,
+        remote_receiver_path: PaykitReceiverPath,
     ) -> Self {
         Self {
             encryptor,
             recipient,
             config,
+            local_receiver_path,
+            remote_receiver_path,
             max_send_retries: DEFAULT_MAX_SEND_RETRIES,
         }
     }
@@ -77,13 +85,20 @@ impl EncryptedLink {
     /// Capture the current link state as a serializable snapshot.
     ///
     /// The snapshot captures transport keys, counters, and counterparty identity.
+    /// It also records the local and remote Paykit receiver paths, so restore can
+    /// reject attempts to reuse the Noise state with different Pubky folders.
     /// Take a new snapshot after receiving or sending messages when the caller
     /// wants the persisted read/write counters to catch up with local state.
     ///
     /// Snapshot bytes include sensitive key material and must be stored as
     /// secrets. Do not log them or include them in telemetry.
     pub fn snapshot(&self) -> EncryptedLinkSnapshot {
-        EncryptedLinkSnapshot::from_state(self.encryptor.snapshot(), self.recipient.clone())
+        EncryptedLinkSnapshot::from_state(
+            self.encryptor.snapshot(),
+            self.recipient.clone(),
+            self.local_receiver_path.clone(),
+            self.remote_receiver_path.clone(),
+        )
     }
 
     /// Serialize the current link state to bytes for persistence.
@@ -104,6 +119,11 @@ impl EncryptedLink {
     /// Access the counterparty public key for this Encrypted Link.
     pub fn recipient(&self) -> &PublicKey {
         &self.recipient
+    }
+
+    /// Access the local Paykit receiver path for this Encrypted Link.
+    pub fn local_receiver_path(&self) -> &PaykitReceiverPath {
+        &self.local_receiver_path
     }
 
     async fn send_private_application_message_with_context(
@@ -267,12 +287,40 @@ pub async fn restore_encrypted_link(
     session: pubky::PubkySession,
     secret_key: [u8; 32],
     remote_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
     outbox_client: pubky::Pubky,
     snapshot: EncryptedLinkSnapshot,
 ) -> Result<EncryptedLink> {
+    snapshot.validate_receiver_scope(local_receiver_path, remote_receiver_path)?;
+    let paths = compute_private_payment_paths(
+        &secret_key,
+        remote_pubkey,
+        local_receiver_path,
+        remote_receiver_path,
+    );
+    restore_encrypted_link_with_paths(
+        session,
+        secret_key,
+        remote_pubkey,
+        outbox_client,
+        snapshot,
+        paths,
+    )
+    .await
+}
+
+async fn restore_encrypted_link_with_paths(
+    session: pubky::PubkySession,
+    secret_key: [u8; 32],
+    remote_pubkey: &PublicKey,
+    outbox_client: pubky::Pubky,
+    snapshot: EncryptedLinkSnapshot,
+    paths: (String, String),
+) -> Result<EncryptedLink> {
     debug!("restoring Encrypted Link from snapshot (raw params)");
 
-    let (write_path, read_path) = compute_private_payment_paths(&secret_key, remote_pubkey);
+    let (write_path, read_path) = paths;
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         secret_key,
@@ -331,6 +379,14 @@ async fn restore_encrypted_link_inner(
         )));
     }
 
+    let local_receiver_path = snapshot.local_receiver_path().clone();
+    let remote_receiver_path = snapshot.remote_receiver_path().clone();
+    validate_private_payment_paths(
+        &config,
+        remote_pubkey,
+        &local_receiver_path,
+        &remote_receiver_path,
+    )?;
     let state = snapshot.into_state();
     let encryptor =
         pubky_noise::PubkyNoiseEncryptor::restore(config.clone(), state, remote_pubkey.clone())
@@ -345,6 +401,8 @@ async fn restore_encrypted_link_inner(
         encryptor,
         remote_pubkey.clone(),
         config,
+        local_receiver_path,
+        remote_receiver_path,
     ))
 }
 

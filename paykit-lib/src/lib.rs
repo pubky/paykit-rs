@@ -12,6 +12,8 @@ mod payment_request;
 mod private_payment_list;
 mod pubky_routing;
 mod receipt;
+mod receiver;
+mod receiver_marker;
 mod shared_wire;
 mod validation;
 
@@ -39,8 +41,8 @@ pub use event::EventId;
 pub use payment_amount::PaymentAmount;
 #[doc(inline)]
 pub use payment_endpoint::{
-    get_payment_endpoint, get_payment_list, remove_payment_endpoint, set_payment_endpoint,
-    PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList,
+    get_payment_endpoint, get_payment_list, list_paykit_receiver_paths, remove_payment_endpoint,
+    set_payment_endpoint, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList,
 };
 #[doc(inline)]
 pub use payment_reference::{PaymentReference, PAYMENT_REFERENCE_MAX_LEN};
@@ -62,15 +64,21 @@ pub use private_payment_list::{
 pub use pubky::PublicKey;
 pub use pubky_noise;
 #[doc(inline)]
-pub use pubky_routing::{
-    PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX, PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX,
-};
+pub use pubky_routing::{PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX};
 #[doc(inline)]
 pub use receipt::{
     decrypt_receipt, parse_receipt_access_event_message, parse_receipt_access_json,
     prepare_receipt, prepare_receipt_for_recipient, send_receipt_access,
     serialize_receipt_access_json, store_prepared_receipt, PreparedReceipt, Receipt, ReceiptAccess,
     ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptDraft, ReceiptId,
+};
+#[doc(inline)]
+pub use receiver::PaykitReceiverPath;
+#[doc(inline)]
+pub use receiver_marker::{
+    get_paykit_receiver_marker, parse_paykit_receiver_marker_json, publish_paykit_receiver_marker,
+    remove_paykit_receiver_marker, serialize_paykit_receiver_marker, PaykitReceiverCapabilities,
+    PaykitReceiverMarker,
 };
 
 /// Common result alias for Paykit operations.

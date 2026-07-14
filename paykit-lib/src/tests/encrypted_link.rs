@@ -12,13 +12,26 @@ async fn test_handshake_snapshot_serialize_roundtrip() {
 
     let snapshot = initiator_handshake.snapshot();
     let bytes = snapshot.serialize();
-    assert_eq!(bytes.len(), 197, "snapshot should be 197 bytes");
+    assert!(
+        bytes.len() > 197,
+        "snapshot should include receiver scope plus Noise state"
+    );
 
     let restored_snapshot = EncryptedLinkHandshakeSnapshot::deserialize(&bytes).unwrap();
     assert_eq!(
         restored_snapshot.recipient(),
         snapshot.recipient(),
         "recipient public key should survive serialize/deserialize"
+    );
+    assert_eq!(
+        restored_snapshot.local_receiver_path(),
+        snapshot.local_receiver_path(),
+        "local receiver path should survive serialize/deserialize"
+    );
+    assert_eq!(
+        restored_snapshot.remote_receiver_path(),
+        snapshot.remote_receiver_path(),
+        "remote receiver path should survive serialize/deserialize"
     );
 
     let bytes2 = restored_snapshot.serialize();
@@ -29,6 +42,66 @@ async fn test_handshake_snapshot_serialize_roundtrip() {
 
     initiator_session.signout().await.unwrap();
     responder_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_handshake_restore_from_config_rejects_mismatched_paths() {
+    let InProgressHandshakeSetup {
+        _testnet,
+        initiator_session,
+        responder_session,
+        initiator_handshake,
+        responder_handshake,
+    } = InProgressHandshakeSetup::new().await;
+
+    let snapshot = initiator_handshake.snapshot();
+    let wrong_config = responder_handshake.config().clone();
+    let remote = snapshot.recipient().clone();
+
+    let result =
+        restore_encrypted_link_handshake_from_config(wrong_config, &remote, snapshot).await;
+    let err = match result {
+        Ok(_) => panic!("restore should reject a config with mismatched paths"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, PaykitError::Validation(ref msg) if msg.contains("Noise config paths do not match receiver scope")),
+        "expected Validation path scope error, got: {err}"
+    );
+
+    initiator_session.signout().await.unwrap();
+    responder_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_handshake_restore_rejects_mismatched_receiver_scope() {
+    let setup = InProgressHandshakeSetup::new().await;
+    let snapshot = setup.initiator_handshake.snapshot();
+    let remote = snapshot.recipient().clone();
+    let local_receiver_path = snapshot.local_receiver_path().clone();
+    let wrong_receiver_path = PaykitReceiverPath::new("bitkit/server").unwrap();
+
+    let result = restore_encrypted_link_handshake(
+        setup.initiator_session.clone(),
+        [0; 32],
+        &remote,
+        &local_receiver_path,
+        &wrong_receiver_path,
+        setup._testnet.sdk().unwrap(),
+        snapshot,
+    )
+    .await;
+    let err = match result {
+        Ok(_) => panic!("restore should reject mismatched receiver scope"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, PaykitError::Validation(ref msg) if msg.contains("receiver scope mismatch")),
+        "expected Validation receiver scope error, got: {err}"
+    );
+
+    setup.initiator_session.signout().await.unwrap();
+    setup.responder_session.signout().await.unwrap();
 }
 
 #[tokio::test]
@@ -248,14 +321,27 @@ async fn test_encrypted_link_snapshot_serialize_roundtrip() {
     // Take a snapshot and serialize.
     let snapshot = setup.sender_link.snapshot();
     let bytes = snapshot.serialize();
-    assert_eq!(bytes.len(), 197, "snapshot should be 197 bytes");
+    assert!(
+        bytes.len() > 197,
+        "snapshot should include receiver scope plus Noise state"
+    );
 
-    // Deserialize and verify the recipient is reconstructed correctly.
+    // Deserialize and verify the scoped fields are reconstructed correctly.
     let restored_snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
     assert_eq!(
         restored_snapshot.recipient(),
         snapshot.recipient(),
         "recipient public key should survive serialize/deserialize"
+    );
+    assert_eq!(
+        restored_snapshot.local_receiver_path(),
+        snapshot.local_receiver_path(),
+        "local receiver path should survive serialize/deserialize"
+    );
+    assert_eq!(
+        restored_snapshot.remote_receiver_path(),
+        snapshot.remote_receiver_path(),
+        "remote receiver path should survive serialize/deserialize"
     );
 
     // Re-serialize and verify byte-level equality.
@@ -407,6 +493,63 @@ async fn test_receive_private_application_messages_returns_full_stream() {
 }
 
 #[tokio::test]
+async fn test_encrypted_link_restore_from_config_rejects_mismatched_paths() {
+    let setup = PrivateTestSetup::new().await;
+
+    let snapshot = setup.sender_link.snapshot();
+    let wrong_config = setup.receiver_link.config().clone();
+    let remote = snapshot.recipient().clone();
+
+    let result = restore_encrypted_link_from_config(wrong_config, &remote, snapshot).await;
+    let err = match result {
+        Ok(_) => panic!("restore should reject a config with mismatched paths"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, PaykitError::Validation(ref msg) if msg.contains("Noise config paths do not match receiver scope")),
+        "expected Validation path scope error, got: {err}"
+    );
+
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(setup.receiver_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_encrypted_link_restore_rejects_mismatched_receiver_scope() {
+    let setup = PrivateTestSetup::new().await;
+    let snapshot = setup.sender_link.snapshot();
+    let remote = snapshot.recipient().clone();
+    let local_receiver_path = snapshot.local_receiver_path().clone();
+    let wrong_receiver_path = PaykitReceiverPath::new("bitkit/server").unwrap();
+
+    let result = restore_encrypted_link(
+        setup.sender_session.clone(),
+        [0; 32],
+        &remote,
+        &local_receiver_path,
+        &wrong_receiver_path,
+        setup._testnet.sdk().unwrap(),
+        snapshot,
+    )
+    .await;
+    let err = match result {
+        Ok(_) => panic!("restore should reject mismatched receiver scope"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, PaykitError::Validation(ref msg) if msg.contains("receiver scope mismatch")),
+        "expected Validation receiver scope error, got: {err}"
+    );
+
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(setup.receiver_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_encrypted_link_restore_rejects_mismatched_remote_pubkey() {
     let setup = PrivateTestSetup::new().await;
 
@@ -462,25 +605,52 @@ async fn test_encrypted_link_snapshot_deserialize_rejects_wrong_length() {
     let result = EncryptedLinkSnapshot::deserialize(&[0u8; 189]);
     assert!(
         matches!(result, Err(PaykitError::InvalidData { .. })),
-        "snapshots with the wrong serialized length should fail"
+        "snapshots with invalid wire bytes should fail"
+    );
+}
+
+#[test]
+fn test_encrypted_link_snapshot_deserialize_rejects_unsupported_wire_version() {
+    let state = transport_snapshot_state_with_nonces(0, 0);
+    let mut wire: serde_json::Value =
+        serde_json::from_slice(&scoped_snapshot_bytes(state)).unwrap();
+    wire["version"] = serde_json::json!(2);
+    let bytes = serde_json::to_vec(&wire).unwrap();
+
+    let result = EncryptedLinkSnapshot::deserialize(&bytes);
+
+    assert!(
+        matches!(result, Err(PaykitError::InvalidData { .. })),
+        "unsupported snapshot wire version should fail"
     );
 }
 
 #[test]
 fn test_encrypted_link_snapshot_deserialize_accepts_max_usable_noise_nonce() {
     let state = transport_snapshot_state_with_nonces(u64::MAX - 1, u64::MAX - 1);
-    let bytes = state.serialize();
+    let bytes = scoped_snapshot_bytes(state);
 
     let snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
+    let restored = EncryptedLinkSnapshot::deserialize(&snapshot.serialize()).unwrap();
 
-    assert_eq!(snapshot.serialize(), bytes);
+    assert_eq!(restored.recipient(), snapshot.recipient());
+    assert_eq!(
+        restored.local_receiver_path(),
+        snapshot.local_receiver_path()
+    );
+    assert_eq!(
+        restored.remote_receiver_path(),
+        snapshot.remote_receiver_path()
+    );
 }
 
 #[test]
 fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
     for (sending_nonce, receiving_nonce) in [(u64::MAX, 0), (0, u64::MAX)] {
-        let bytes =
-            transport_snapshot_state_with_nonces(sending_nonce, receiving_nonce).serialize();
+        let bytes = scoped_snapshot_bytes(transport_snapshot_state_with_nonces(
+            sending_nonce,
+            receiving_nonce,
+        ));
 
         assert!(
             matches!(
@@ -490,4 +660,14 @@ fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
             "reserved Noise nonce should be rejected"
         );
     }
+}
+
+fn scoped_snapshot_bytes(state: pubky_noise::serializer::PubkyNoiseSessionState) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "local_receiver_path": "bitkit/wallet",
+        "remote_receiver_path": "tether/wallet",
+        "state": state.serialize(),
+    }))
+    .unwrap()
 }

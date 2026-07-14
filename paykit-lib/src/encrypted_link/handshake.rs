@@ -1,9 +1,10 @@
 use tracing::{debug, instrument, warn};
 
-use crate::{PaykitError, PublicKey, Result};
+use crate::{PaykitError, PaykitReceiverPath, PublicKey, Result};
 
 use super::{
-    link::EncryptedLink, paths::compute_private_payment_paths,
+    link::EncryptedLink,
+    paths::{compute_private_payment_paths, validate_private_payment_paths},
     snapshot::EncryptedLinkHandshakeSnapshot,
 };
 
@@ -30,6 +31,10 @@ pub struct EncryptedLinkHandshake {
     remote_pubkey: PublicKey,
     /// Shared Noise configuration needed for snapshot-based recovery.
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
+    /// Local receiver path used by this handshake.
+    local_receiver_path: PaykitReceiverPath,
+    /// Counterparty receiver path used by this handshake.
+    remote_receiver_path: PaykitReceiverPath,
     /// Number of consecutive recovery attempts so far.
     recovery_attempts: u32,
     /// Maximum consecutive recovery attempts before giving up.
@@ -55,6 +60,8 @@ impl EncryptedLinkHandshake {
         EncryptedLinkHandshakeSnapshot::from_state(
             self.encryptor.snapshot(),
             self.remote_pubkey.clone(),
+            self.local_receiver_path.clone(),
+            self.remote_receiver_path.clone(),
         )
     }
 
@@ -105,12 +112,39 @@ pub fn initiate_encrypted_link(
     session: pubky::PubkySession,
     sender_secret_key: [u8; 32],
     receiver_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
     outbox_client: pubky::Pubky,
+) -> Result<EncryptedLinkHandshake> {
+    let paths = compute_private_payment_paths(
+        &sender_secret_key,
+        receiver_pubkey,
+        local_receiver_path,
+        remote_receiver_path,
+    );
+    initiate_encrypted_link_with_paths(
+        session,
+        sender_secret_key,
+        receiver_pubkey,
+        local_receiver_path,
+        remote_receiver_path,
+        outbox_client,
+        paths,
+    )
+}
+
+fn initiate_encrypted_link_with_paths(
+    session: pubky::PubkySession,
+    sender_secret_key: [u8; 32],
+    receiver_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
+    outbox_client: pubky::Pubky,
+    paths: (String, String),
 ) -> Result<EncryptedLinkHandshake> {
     debug!("initializing Encrypted Link handshake (initiator)");
 
-    let (write_path, read_path) =
-        compute_private_payment_paths(&sender_secret_key, receiver_pubkey);
+    let (write_path, read_path) = paths;
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         sender_secret_key,
@@ -142,6 +176,8 @@ pub fn initiate_encrypted_link(
         encryptor,
         remote_pubkey: receiver_pubkey.clone(),
         config,
+        local_receiver_path: local_receiver_path.clone(),
+        remote_receiver_path: remote_receiver_path.clone(),
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })
@@ -156,12 +192,39 @@ pub fn accept_encrypted_link(
     session: pubky::PubkySession,
     receiver_secret_key: [u8; 32],
     sender_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
     outbox_client: pubky::Pubky,
+) -> Result<EncryptedLinkHandshake> {
+    let paths = compute_private_payment_paths(
+        &receiver_secret_key,
+        sender_pubkey,
+        local_receiver_path,
+        remote_receiver_path,
+    );
+    accept_encrypted_link_with_paths(
+        session,
+        receiver_secret_key,
+        sender_pubkey,
+        local_receiver_path,
+        remote_receiver_path,
+        outbox_client,
+        paths,
+    )
+}
+
+fn accept_encrypted_link_with_paths(
+    session: pubky::PubkySession,
+    receiver_secret_key: [u8; 32],
+    sender_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
+    outbox_client: pubky::Pubky,
+    paths: (String, String),
 ) -> Result<EncryptedLinkHandshake> {
     debug!("initializing Encrypted Link handshake (responder)");
 
-    let (write_path, read_path) =
-        compute_private_payment_paths(&receiver_secret_key, sender_pubkey);
+    let (write_path, read_path) = paths;
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         receiver_secret_key,
@@ -193,6 +256,8 @@ pub fn accept_encrypted_link(
         encryptor,
         remote_pubkey: sender_pubkey.clone(),
         config,
+        local_receiver_path: local_receiver_path.clone(),
+        remote_receiver_path: remote_receiver_path.clone(),
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })
@@ -271,6 +336,8 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
                 encryptor: restored,
                 config: handshake.config,
                 remote_pubkey: handshake.remote_pubkey,
+                local_receiver_path: handshake.local_receiver_path,
+                remote_receiver_path: handshake.remote_receiver_path,
                 recovery_attempts: handshake.recovery_attempts,
                 max_recovery_attempts: handshake.max_recovery_attempts,
             }))
@@ -298,6 +365,8 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
         handshake.encryptor,
         handshake.remote_pubkey,
         handshake.config,
+        handshake.local_receiver_path,
+        handshake.remote_receiver_path,
     )))
 }
 
@@ -310,12 +379,40 @@ pub async fn restore_encrypted_link_handshake(
     session: pubky::PubkySession,
     secret_key: [u8; 32],
     remote_pubkey: &PublicKey,
+    local_receiver_path: &PaykitReceiverPath,
+    remote_receiver_path: &PaykitReceiverPath,
     outbox_client: pubky::Pubky,
     snapshot: EncryptedLinkHandshakeSnapshot,
 ) -> Result<EncryptedLinkHandshake> {
+    snapshot.validate_receiver_scope(local_receiver_path, remote_receiver_path)?;
+    let paths = compute_private_payment_paths(
+        &secret_key,
+        remote_pubkey,
+        local_receiver_path,
+        remote_receiver_path,
+    );
+    restore_encrypted_link_handshake_with_paths(
+        session,
+        secret_key,
+        remote_pubkey,
+        outbox_client,
+        snapshot,
+        paths,
+    )
+    .await
+}
+
+async fn restore_encrypted_link_handshake_with_paths(
+    session: pubky::PubkySession,
+    secret_key: [u8; 32],
+    remote_pubkey: &PublicKey,
+    outbox_client: pubky::Pubky,
+    snapshot: EncryptedLinkHandshakeSnapshot,
+    paths: (String, String),
+) -> Result<EncryptedLinkHandshake> {
     debug!("restoring Encrypted Link handshake from snapshot (raw params)");
 
-    let (write_path, read_path) = compute_private_payment_paths(&secret_key, remote_pubkey);
+    let (write_path, read_path) = paths;
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         secret_key,
@@ -371,6 +468,14 @@ async fn restore_encrypted_link_handshake_inner(
         )));
     }
 
+    let local_receiver_path = snapshot.local_receiver_path().clone();
+    let remote_receiver_path = snapshot.remote_receiver_path().clone();
+    validate_private_payment_paths(
+        &config,
+        remote_pubkey,
+        &local_receiver_path,
+        &remote_receiver_path,
+    )?;
     let state = snapshot.into_state();
     let encryptor =
         pubky_noise::PubkyNoiseEncryptor::restore(config.clone(), state, remote_pubkey.clone())
@@ -386,6 +491,8 @@ async fn restore_encrypted_link_handshake_inner(
         encryptor,
         remote_pubkey: remote_pubkey.clone(),
         config,
+        local_receiver_path,
+        remote_receiver_path,
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })

@@ -26,7 +26,7 @@ use crate::{
     storage::{
         EventDedupRecord, OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageAdapter,
     },
-    PubkyPublicKey, Result,
+    PaykitReceiverPath, PubkyPublicKey, Result,
 };
 
 mod derivation;
@@ -77,9 +77,11 @@ pub enum PaymentRequestLifecycleState {
 /// Filter for listing SDK-derived Payment Requests.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentRequestFilter {
-    /// Restrict results to one counterparty. `None` lists across all known
-    /// counterparties with Payment Request activity.
+    /// Restrict results to one counterparty. Without a receiver path, results
+    /// include all receiver/runtime folders for that counterparty.
     pub counterparty: Option<PubkyPublicKey>,
+    /// Restrict results to one counterparty receiver/runtime folder.
+    pub counterparty_receiver_path: Option<PaykitReceiverPath>,
     /// Restrict results to one local role.
     pub local_role: Option<PaymentRequestLocalRole>,
     /// Restrict results to lifecycle states. An empty list means all states.
@@ -94,6 +96,11 @@ impl PaymentRequestFilter {
     pub(crate) fn matches(&self, record: &PaymentRequestRecord) -> bool {
         if let Some(counterparty) = &self.counterparty {
             if &record.counterparty != counterparty {
+                return false;
+            }
+        }
+        if let Some(receiver_path) = &self.counterparty_receiver_path {
+            if &record.counterparty_receiver_path != receiver_path {
                 return false;
             }
         }
@@ -245,6 +252,8 @@ impl fmt::Debug for PaymentProofRecord {
 pub struct PaymentRequestRecord {
     /// Counterparty associated with the private stream.
     pub counterparty: PubkyPublicKey,
+    /// Counterparty receiver/runtime folder associated with the private stream.
+    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Stable Payment Request ID.
     pub payment_request_id: String,
     /// Local role, when known.
@@ -291,6 +300,10 @@ impl fmt::Debug for PaymentRequestRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PaymentRequestRecord")
             .field("counterparty", &self.counterparty)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
             .field("payment_request_id", &self.payment_request_id)
             .field("local_role", &self.local_role)
             .field("state", &self.state)
@@ -318,9 +331,14 @@ impl fmt::Debug for PaymentRequestRecord {
 }
 
 impl PaymentRequestRecord {
-    fn new(counterparty: PubkyPublicKey, payment_request_id: String) -> Self {
+    fn new(
+        counterparty: PubkyPublicKey,
+        counterparty_receiver_path: PaykitReceiverPath,
+        payment_request_id: String,
+    ) -> Self {
         Self {
             counterparty,
+            counterparty_receiver_path,
             payment_request_id,
             local_role: None,
             state: PaymentRequestLifecycleState::InvalidConflict,
@@ -379,6 +397,7 @@ impl PaymentRequestRecord {
 pub(crate) async fn enqueue_payment_request_event<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
     event: &PaymentRequestEvent,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -386,13 +405,21 @@ where
     S: StorageAdapter,
 {
     let raw_json = serialize_payment_request_event(event)?;
-    enqueue_private_message(storage, counterparty, raw_json, now).await
+    enqueue_private_message(
+        storage,
+        counterparty,
+        counterparty_receiver_path,
+        raw_json,
+        now,
+    )
+    .await
 }
 
 /// Queue a raw Payment Request proposal for outbound delivery.
 pub(crate) async fn enqueue_payment_request<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
     event: &PaymentRequest,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -400,13 +427,21 @@ where
     S: StorageAdapter,
 {
     let event = PaymentRequestEvent::Request(event.clone());
-    enqueue_payment_request_event(storage, counterparty, &event, now).await
+    enqueue_payment_request_event(
+        storage,
+        counterparty,
+        counterparty_receiver_path,
+        &event,
+        now,
+    )
+    .await
 }
 
 /// Queue a raw Payment Request acceptance for outbound delivery.
 pub(crate) async fn enqueue_payment_request_acceptance<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
     event: &PaymentRequestAcceptance,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -414,13 +449,21 @@ where
     S: StorageAdapter,
 {
     let event = PaymentRequestEvent::Acceptance(event.clone());
-    enqueue_payment_request_event(storage, counterparty, &event, now).await
+    enqueue_payment_request_event(
+        storage,
+        counterparty,
+        counterparty_receiver_path,
+        &event,
+        now,
+    )
+    .await
 }
 
 /// Queue a raw Payment Request rejection for outbound delivery.
 pub(crate) async fn enqueue_payment_request_rejection<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
     event: &PaymentRequestRejection,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -428,13 +471,21 @@ where
     S: StorageAdapter,
 {
     let event = PaymentRequestEvent::Rejection(event.clone());
-    enqueue_payment_request_event(storage, counterparty, &event, now).await
+    enqueue_payment_request_event(
+        storage,
+        counterparty,
+        counterparty_receiver_path,
+        &event,
+        now,
+    )
+    .await
 }
 
 /// Queue a raw Payment Request cancellation for outbound delivery.
 pub(crate) async fn enqueue_payment_request_cancellation<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
     event: &PaymentRequestCancellation,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -442,13 +493,21 @@ where
     S: StorageAdapter,
 {
     let event = PaymentRequestEvent::Cancellation(event.clone());
-    enqueue_payment_request_event(storage, counterparty, &event, now).await
+    enqueue_payment_request_event(
+        storage,
+        counterparty,
+        counterparty_receiver_path,
+        &event,
+        now,
+    )
+    .await
 }
 
 /// Queue a raw Payment Proof for outbound delivery.
 pub(crate) async fn enqueue_payment_proof<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
     event: &PaymentProof,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -456,7 +515,14 @@ where
     S: StorageAdapter,
 {
     let event = PaymentRequestEvent::Proof(event.clone());
-    enqueue_payment_request_event(storage, counterparty, &event, now).await
+    enqueue_payment_request_event(
+        storage,
+        counterparty,
+        counterparty_receiver_path,
+        &event,
+        now,
+    )
+    .await
 }
 
 #[cfg(test)]

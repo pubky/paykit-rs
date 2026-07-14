@@ -20,7 +20,7 @@ use crate::*;
 
 #[test]
 fn test_default_config_round_trips_to_sdk_config() {
-    let ffi = default_config();
+    let ffi = default_config("bitkit/wallet".into()).unwrap();
     let sdk = PaykitSdkConfig::try_from(ffi.clone()).unwrap();
     let round_trip = FfiPaykitSdkConfig::from(sdk);
 
@@ -29,14 +29,28 @@ fn test_default_config_round_trips_to_sdk_config() {
 
 #[test]
 fn test_required_capabilities_include_custom_namespace_scope() {
-    let mut config = default_config();
+    let mut config = default_config("bitkit/wallet".into()).unwrap();
     config.public_contact_sharing = FfiPublicContactSharingPolicy::ConfiguredPublicNamespace;
     config.profile_namespace = "bitkit.to".into();
 
     let capabilities = required_session_capabilities(config).unwrap();
 
-    assert!(capabilities.contains("/pub/paykit/:rw"));
-    assert!(capabilities.contains("/pub/bitkit.to:rw"));
+    assert!(capabilities.contains("/pub/paykit/v0/bitkit/wallet/:rw"));
+    assert!(capabilities.contains("/pub/paykit/v0/private/bitkit/wallet/:rw"));
+    assert!(capabilities.contains("/pub/bitkit.to/bitkit/wallet/:rw"));
+}
+
+#[test]
+fn test_required_capabilities_validate_config() {
+    let mut config = default_config("bitkit/wallet".into()).unwrap();
+    config.profile_namespace = "pubky.app".into();
+
+    let err = required_session_capabilities(config).unwrap_err();
+
+    assert!(
+        err.to_string().contains("profile namespace"),
+        "expected profile namespace validation error, got: {err}"
+    );
 }
 
 #[test]
@@ -62,6 +76,7 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     let outbound = paykit_sdk::storage::OutboundPrivateMessageRecord {
         outbound_message_id: 0,
         counterparty: counterparty.clone(),
+        counterparty_receiver_path: paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
         kind: "paykit.private_payment_list".into(),
         raw_json: r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"btc-lightning-bolt11":"ln-private"}}"#.into(),
         status: OutboundPrivateMessageStatus::Pending,
@@ -84,10 +99,13 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     };
     assert_round_trip("identity", &state);
 
+    let receiver_path = paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap();
+
     state.contact_records = HashMap::from([(
         counterparty.clone(),
         ContactRecord {
             public_key: counterparty.clone(),
+            receiver_paths: vec![receiver_path.clone()],
             label: None,
             profile: Some(PaykitProfile {
                 display_name: Some("Bob".into()),
@@ -98,6 +116,7 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
             created_at: now,
             updated_at: now,
             public_contact_marker_status: PublicationStatus::NotPublished,
+            public_contact_marker_receiver_path: None,
             public_contact_published_at: None,
             public_contact_removed_at: None,
             public_contact_last_error: None,
@@ -106,9 +125,10 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     assert_round_trip("contact", &state);
 
     state.linked_peers = HashMap::from([(
-        counterparty.clone(),
+        (counterparty.clone(), receiver_path.clone()),
         paykit_sdk::storage::LinkedPeerRecord {
             counterparty: counterparty.clone(),
+            counterparty_receiver_path: receiver_path.clone(),
             state: LinkedPeerState::Linking,
             last_sync_at: None,
             last_private_receive_at: None,
@@ -123,9 +143,10 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     assert_round_trip("linked_peer", &state);
 
     state.encrypted_link_states = HashMap::from([(
-        counterparty.clone(),
+        (counterparty.clone(), receiver_path.clone()),
         paykit_sdk::storage::EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
+            counterparty_receiver_path: receiver_path.clone(),
             link_snapshot: None,
             handshake_snapshot: Some(vec![1, 2, 3, 4, 5]),
             handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
@@ -136,9 +157,10 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     assert_round_trip("encrypted_link", &state);
 
     state.peer_link_operation_leases = HashMap::from([(
-        counterparty.clone(),
+        (counterparty.clone(), receiver_path.clone()),
         PeerLinkOperationLease {
             counterparty: counterparty.clone(),
+            counterparty_receiver_path: receiver_path.clone(),
             lease_id: 0,
             claimed_at: now,
             expires_at: now,
@@ -152,10 +174,15 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     assert_round_trip("outbound", &state);
 
     state.payment_endpoint_reservations = HashMap::from([(
-        (counterparty.clone(), "reservation-1".into()),
+        (
+            counterparty.clone(),
+            receiver_path.clone(),
+            "reservation-1".into(),
+        ),
         PaymentEndpointReservationRecord {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
+            counterparty_receiver_path: receiver_path.clone(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: "payload-hash".into(),
             outbound_message_id: outbound.outbound_message_id,
@@ -170,6 +197,7 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     state.private_stream_items = vec![paykit_sdk::storage::PrivateStreamItemRecord {
         stream_item_id: 0,
         counterparty: counterparty.clone(),
+        counterparty_receiver_path: paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
         receive_batch_id: 0,
         raw_json: r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
             .into(),
@@ -439,7 +467,12 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
 
     let secret = FfiPubkyLocalSecretKey::new(vec![8; 32]);
     let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
-    let result = bootstrap.sign_in(Arc::new(secret)).await.unwrap();
+    let config = default_config("bitkit/wallet".into()).unwrap();
+    let capabilities = required_session_capabilities(config.clone()).unwrap();
+    let result = bootstrap
+        .sign_in(Arc::new(secret), capabilities)
+        .await
+        .unwrap();
     let store = Arc::new(MemoryStore::default());
     let provider = Arc::new(MemorySessionProvider {
         access: result.session_access.clone(),
@@ -448,7 +481,7 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
         store,
         provider,
         Arc::new(FfiNoopSdkPaymentAdapter),
-        default_config(),
+        config,
     )
     .unwrap();
 
