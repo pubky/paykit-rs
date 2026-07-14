@@ -69,16 +69,21 @@ impl From<PaykitSdkError> for PaykitFfiError {
                 code: "recovery_required".into(),
                 context,
             },
-            _ => Self::Protocol {
+            other => Self::Protocol {
                 code: "unsupported_sdk_error".into(),
-                context: "unsupported SDK error".into(),
+                context: other.to_string(),
             },
         }
     }
 }
 
-fn format_context(context: String, _source: Option<anyhow::Error>) -> String {
-    context
+fn format_context(context: String, source: Option<anyhow::Error>) -> String {
+    match source {
+        // `{:#}` prints the full anyhow cause chain, so diagnostics crossing to
+        // Swift/Kotlin retain the underlying cause instead of only the outer label.
+        Some(source) => format!("{context}: {source:#}"),
+        None => context,
+    }
 }
 
 fn callback_ffi_error(source: Option<&anyhow::Error>) -> Option<PaykitFfiError> {
@@ -126,7 +131,7 @@ pub(crate) fn ffi_error_to_sdk(err: PaykitFfiError, context: &'static str) -> Pa
             context: _reason,
         } => PaykitSdkError::PaymentAdapter {
             context: format!("{context}: {code}"),
-            source: None,
+            source,
         },
         PaykitFfiError::RecoveryRequired {
             code,
@@ -158,3 +163,6 @@ pub(crate) fn validation_error(reason: impl Into<String>) -> PaykitFfiError {
         context: reason.into(),
     }
 }
+
+#[cfg(test)]
+mod tests;
