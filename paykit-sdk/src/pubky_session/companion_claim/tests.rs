@@ -15,6 +15,19 @@ fn test_claim() -> PubkyAuthCompanionClaim {
     PubkyAuthCompanionClaim::new(QUERY_PARAMETER, CLAIM_TYPE, (0_u8..84).collect()).unwrap()
 }
 
+#[test]
+fn test_companion_claim_debug_redacts_unsigned_payload() {
+    let claim = PubkyAuthCompanionClaim::new(QUERY_PARAMETER, CLAIM_TYPE, vec![222, 173, 190, 239])
+        .unwrap();
+
+    let debug = format!("{claim:?}");
+
+    assert!(debug.contains(QUERY_PARAMETER));
+    assert!(debug.contains(CLAIM_TYPE));
+    assert!(debug.contains("<redacted:4 bytes>"));
+    assert!(!debug.contains("[222, 173, 190, 239]"));
+}
+
 fn auth_url(relay: &Url, secret: &[u8; 32], claim_type: &str) -> String {
     format!(
         "pubkyauth://signin?caps={CAPABILITY}&relay={relay}&secret={}&{QUERY_PARAMETER}={claim_type}",
@@ -121,6 +134,22 @@ fn test_companion_channel_uses_claim_type_and_decoded_secret() {
     );
 }
 
+#[test]
+fn test_relay_delivery_failure_redacts_server_details() {
+    let error = relay_delivery_failure(PubkyError::Request(RequestError::Server {
+        status: "503".parse().unwrap(),
+        message: "https://relay.example/inbox/sensitive-channel: secret body".into(),
+    }));
+
+    let reason = match &error {
+        PubkyAuthCompanionClaimApprovalError::RelayDeliveryFailure { reason } => reason,
+        other => panic!("expected relay delivery failure, got {other:?}"),
+    };
+    assert_eq!(reason, "relay returned HTTP status 503");
+    assert!(!error.to_string().contains("sensitive-channel"));
+    assert!(!error.to_string().contains("secret body"));
+}
+
 #[tokio::test]
 async fn test_approve_auth_with_companion_claim_delivers_both_envelopes() {
     let relay = http_relay::HttpRelay::builder()
@@ -171,7 +200,9 @@ async fn test_approve_auth_with_companion_claim_reports_relay_failure() {
     let relay = Url::parse(&format!("http://{}/inbox", listener.local_addr().unwrap())).unwrap();
     drop(listener);
     let bootstrap = PubkySessionBootstrap::new().unwrap();
-    let auth_url = auth_url(&relay, &[9; 32], CLAIM_TYPE);
+    let auth_secret = [9; 32];
+    let auth_url = auth_url(&relay, &auth_secret, CLAIM_TYPE);
+    let channel_id = derive_companion_channel_id(CLAIM_TYPE, &auth_secret);
 
     let error = bootstrap
         .approve_auth_with_companion_claim(
@@ -183,8 +214,14 @@ async fn test_approve_auth_with_companion_claim_reports_relay_failure() {
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        error,
-        PubkyAuthCompanionClaimApprovalError::RelayDeliveryFailure { .. }
-    ));
+    let reason = match &error {
+        PubkyAuthCompanionClaimApprovalError::RelayDeliveryFailure { reason } => reason,
+        other => panic!("expected relay delivery failure, got {other:?}"),
+    };
+    assert_eq!(reason, "relay HTTP transport failed");
+
+    let display = error.to_string();
+    assert!(!display.contains(relay.as_str()));
+    assert!(!display.contains(&channel_id));
+    assert!(!display.contains(&URL_SAFE_NO_PAD.encode(auth_secret)));
 }

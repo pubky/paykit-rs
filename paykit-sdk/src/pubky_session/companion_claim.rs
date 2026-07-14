@@ -1,11 +1,15 @@
 //! Signed companion claims for Pubky Auth approval.
 
+use std::fmt;
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use crypto_secretbox::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     XSalsa20Poly1305,
 };
-use pubky::{deep_links::DeepLink, HttpRelayInboxChannel};
+use pubky::{
+    deep_links::DeepLink, errors::RequestError, Error as PubkyError, HttpRelayInboxChannel,
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -23,11 +27,24 @@ const MAX_CLAIM_TYPE_LEN: usize = 128;
 /// its unsigned binary representation. Paykit owns request validation,
 /// request-bound identity signing, encryption, relay delivery, and approval
 /// ordering. It does not expose the underlying cryptographic primitives.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PubkyAuthCompanionClaim {
     query_parameter: String,
     claim_type: String,
     unsigned_payload: Vec<u8>,
+}
+
+impl fmt::Debug for PubkyAuthCompanionClaim {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PubkyAuthCompanionClaim")
+            .field("query_parameter", &self.query_parameter)
+            .field("claim_type", &self.claim_type)
+            .field(
+                "unsigned_payload",
+                &format_args!("<redacted:{} bytes>", self.unsigned_payload.len()),
+            )
+            .finish()
+    }
 }
 
 impl PubkyAuthCompanionClaim {
@@ -161,11 +178,7 @@ impl PubkySessionBootstrap {
         channel
             .produce(self.pubky.client(), encrypted_claim)
             .await
-            .map_err(
-                |err| PubkyAuthCompanionClaimApprovalError::RelayDeliveryFailure {
-                    reason: err.to_string(),
-                },
-            )
+            .map_err(relay_delivery_failure)
     }
 }
 
@@ -324,6 +337,19 @@ fn invalid_claim(reason: impl Into<String>) -> PubkyAuthCompanionClaimApprovalEr
     PubkyAuthCompanionClaimApprovalError::InvalidClaim {
         reason: reason.into(),
     }
+}
+
+fn relay_delivery_failure(error: PubkyError) -> PubkyAuthCompanionClaimApprovalError {
+    let reason = match error {
+        PubkyError::Request(RequestError::Server { status, .. }) => {
+            format!("relay returned HTTP status {}", status.as_u16())
+        }
+        PubkyError::Request(RequestError::Transport(_)) => {
+            "relay HTTP transport failed".to_string()
+        }
+        _ => "relay request failed".to_string(),
+    };
+    PubkyAuthCompanionClaimApprovalError::RelayDeliveryFailure { reason }
 }
 
 #[cfg(test)]

@@ -7,6 +7,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc35] - 2026-07-14
+
+### Added
+- Added high-level application-defined companion claim approval for
+  `pubkyauth://` requests, including request-bound identity signatures,
+  claim-specific relay delivery, and fail-closed AuthToken ordering.
+- Exposed generic companion claim inputs and distinct approval errors in the
+  generated Swift and Kotlin bindings, leaving application payload schemas and
+  capability choices to SDK integrators.
+
 ## [0.1.0-rc33] - 2026-07-08
 
 ### Changed
@@ -24,16 +34,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   capability helpers. Apps must pass an explicit receiver path/config.
 - Removed the unmaintained `paykit-react-native` package. Supported platform
   bindings are Swift and Kotlin.
-
-## [0.1.0-rc34] - 2026-07-14
-
-### Added
-- Added high-level application-defined companion claim approval for
-  `pubkyauth://` requests, including request-bound identity signatures,
-  claim-specific relay delivery, and fail-closed AuthToken ordering.
-- Exposed generic companion claim inputs and distinct approval errors in the
-  generated Swift and Kotlin bindings, leaving application payload schemas and
-  capability choices to SDK integrators.
 
 ## [0.1.0-rc32] - 2026-07-07
 
@@ -277,8 +277,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc34...HEAD
-[0.1.0-rc34]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc34
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc35...HEAD
+[0.1.0-rc35]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc35
+[0.1.0-rc33]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc33
 [0.1.0-rc32]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc32
 [0.1.0-rc31]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc31
 [0.1.0-rc30]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc30

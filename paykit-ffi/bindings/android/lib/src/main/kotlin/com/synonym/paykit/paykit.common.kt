@@ -2639,6 +2639,9 @@ public data class PrivateStreamIntakeReport (
  * The application serializes its protocol-specific unsigned payload. Paykit
  * validates the identifiers, creates the request-bound identity signature,
  * encrypts the signed payload, and delivers it before normal Pubky Auth.
+ *
+ * Generated platform record descriptions may include the raw payload. Apps
+ * must not log, interpolate, or otherwise stringify this record.
  */
 @kotlinx.serialization.Serializable
 public data class PubkyAuthCompanionClaim (
@@ -2651,7 +2654,7 @@ public data class PubkyAuthCompanionClaim (
      */
     val `claimType`: kotlin.String,
     /**
-     * Protocol-specific unsigned binary payload.
+     * Protocol-specific unsigned binary payload. Do not log this value.
      */
     val `unsignedPayload`: kotlin.ByteArray
 ) {
@@ -3932,6 +3935,16 @@ public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception()
      * Normal Pubky Auth approval failed after companion delivery succeeded.
      */
     public class AuthorizationFailure(
+        public val `reason`: kotlin.String,
+    ) : PubkyAuthCompanionClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * An unknown SDK failure occurred; no claim-delivery state is implied.
+     */
+    public class Unexpected(
         public val `reason`: kotlin.String,
     ) : PubkyAuthCompanionClaimApprovalException() {
         override val message: String
