@@ -70,10 +70,41 @@ fn test_companion_claim_rejects_auth_claim_type_mismatch() {
 }
 
 #[test]
-fn test_companion_query_decoding_preserves_literal_plus() {
-    let url = Url::parse("pubkyauth://signin?secret=one%2Ftwo+three").unwrap();
+fn test_companion_query_uses_url_decoding() {
+    let url = Url::parse("pubkyauth://signin?x-example-claim=account%2Dexport%2Dv1").unwrap();
 
-    assert_eq!(unique_query_value(&url, "secret").unwrap(), "one/two+three");
+    assert_eq!(
+        unique_query_value(&url, QUERY_PARAMETER).unwrap(),
+        CLAIM_TYPE
+    );
+}
+
+#[test]
+fn test_companion_auth_request_parses_relay_and_secret() {
+    let relay = Url::parse("https://relay.example/inbox").unwrap();
+    let secret = [3; 32];
+    let url = auth_url(&relay, &secret, CLAIM_TYPE);
+
+    let request = parse_companion_auth_request(&url, CAPABILITY, &test_claim()).unwrap();
+
+    assert_eq!(request.relay, relay);
+    assert_eq!(request.secret, secret);
+}
+
+#[test]
+fn test_companion_auth_request_rejects_duplicate_secret() {
+    let relay = Url::parse("https://relay.example/inbox").unwrap();
+    let secret = [3; 32];
+    let url = format!(
+        "{}&secret={}",
+        auth_url(&relay, &secret, CLAIM_TYPE),
+        URL_SAFE_NO_PAD.encode(secret)
+    );
+
+    assert!(matches!(
+        parse_companion_auth_request(&url, CAPABILITY, &test_claim()),
+        Err(PubkyAuthCompanionClaimApprovalError::InvalidAuthUrl { .. })
+    ));
 }
 
 #[test]
