@@ -1,4 +1,5 @@
 use std::fmt;
+use zeroize::Zeroize;
 
 /// SDK state blob owned by platform storage.
 #[derive(uniffi::Object)]
@@ -79,5 +80,66 @@ impl FfiPubkyLocalSecretKey {
     /// Export the raw bytes for platform secure storage.
     pub fn export_bytes(&self) -> Vec<u8> {
         self.bytes.clone()
+    }
+}
+
+// SECURITY (auditor note): these Drop impls scrub the Rust-owned key buffers on
+// drop. Zeroization here is BEST-EFFORT, not a guarantee:
+//   * `export_bytes()` returns a plaintext `Vec<u8>` clone the caller owns; that
+//     copy is outside Paykit's control.
+//   * UniFFI lowering copies the bytes into foreign-managed (Swift/Kotlin) memory
+//     that Rust cannot scrub.
+// The goal is to shrink the window a resident plaintext copy sits in Rust-owned
+// heap for memory-dump / swap scenarios; it does NOT defend against remote
+// exploitation. Manual Drop is used deliberately: paykit-ffi declares `zeroize`
+// without the `derive` feature, so `#[derive(ZeroizeOnDrop)]` is not available.
+impl Drop for FfiSdkStateBlob {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+impl Drop for FfiSdkBackupBlob {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+impl Drop for FfiPubkyLocalSecretKey {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Positive regression guard: adding `impl Drop`/`zeroize` must not break
+    // construction or byte export for any of the three secret-bearing blobs.
+    //
+    // Note: we deliberately do NOT try to assert zeroize-on-drop by inspecting
+    // memory after the value is dropped. Reading freed memory is undefined
+    // behavior and cannot be tested soundly, so this test only exercises the
+    // still-live construction/export path.
+    #[test]
+    fn test_secrets_blobs_export_roundtrip() {
+        let state_bytes = vec![1u8, 2, 3, 4];
+        assert_eq!(
+            FfiSdkStateBlob::new(state_bytes.clone()).export_bytes(),
+            state_bytes
+        );
+
+        let backup_bytes = vec![5u8, 6, 7, 8];
+        assert_eq!(
+            FfiSdkBackupBlob::new(backup_bytes.clone()).export_bytes(),
+            backup_bytes
+        );
+
+        let secret_bytes = vec![9u8, 10, 11, 12];
+        assert_eq!(
+            FfiPubkyLocalSecretKey::new(secret_bytes.clone()).export_bytes(),
+            secret_bytes
+        );
     }
 }
