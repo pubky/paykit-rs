@@ -3200,7 +3200,6 @@ dependencies = [
  "hex",
  "http-relay",
  "paykit-lib",
- "percent-encoding",
  "pubky",
  "pubky-testnet",
  "serde",

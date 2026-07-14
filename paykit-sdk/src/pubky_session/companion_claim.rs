@@ -5,15 +5,12 @@ use crypto_secretbox::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     XSalsa20Poly1305,
 };
-use percent_encoding::percent_decode_str;
-use pubky::HttpRelayInboxChannel;
+use pubky::{deep_links::DeepLink, HttpRelayInboxChannel};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
-use super::{
-    validate_auth_url_capabilities, validate_sign_in_or_sign_up_auth_url, PubkySessionBootstrap,
-};
+use super::{validate_auth_url_capabilities, PubkySessionBootstrap};
 use crate::PubkyLocalSecretKey;
 
 const ED25519_SIGNATURE_LEN: usize = 64;
@@ -181,7 +178,7 @@ fn parse_companion_auth_request(
     if url.scheme() != "pubkyauth" {
         return Err(invalid_auth_url("URL scheme must be pubkyauth"));
     }
-    validate_sign_in_or_sign_up_auth_url(auth_url).map_err(invalid_auth_url)?;
+    let request = parse_pubky_auth_request(auth_url)?;
     validate_auth_url_capabilities(auth_url, expected_capabilities).map_err(invalid_auth_url)?;
 
     let claim_type = unique_query_value(&url, claim.query_parameter())?;
@@ -192,10 +189,25 @@ fn parse_companion_auth_request(
         )));
     }
 
-    let secret_text = unique_query_value(&url, "secret")?;
-    let secret = decode_auth_secret(&secret_text)?;
-    let relay_text = unique_query_value(&url, "relay")?;
-    let relay = validate_relay_url(&relay_text)?;
+    unique_query_value(&url, "secret")?;
+    unique_query_value(&url, "relay")?;
+    validate_relay_url(&request.relay)?;
+    Ok(request)
+}
+
+fn parse_pubky_auth_request(
+    auth_url: &str,
+) -> Result<CompanionAuthRequest, PubkyAuthCompanionClaimApprovalError> {
+    let deep_link: DeepLink = auth_url.parse().map_err(invalid_auth_url)?;
+    let (relay, secret) = match deep_link {
+        DeepLink::Signin(link) => (link.relay().clone(), *link.secret()),
+        DeepLink::Signup(link) => (link.relay().clone(), *link.secret()),
+        DeepLink::SeedExport(_) => {
+            return Err(invalid_auth_url(
+                "Pubky secret-export URLs cannot carry companion claims",
+            ));
+        }
+    };
     Ok(CompanionAuthRequest { relay, secret })
 }
 
@@ -228,9 +240,7 @@ fn unique_query_value(
     name: &str,
 ) -> Result<String, PubkyAuthCompanionClaimApprovalError> {
     let mut value = None;
-    for pair in url.query().unwrap_or_default().split('&') {
-        let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = decode_query_component(raw_key, name)?;
+    for (key, query_value) in url.query_pairs() {
         if key != name {
             continue;
         }
@@ -239,7 +249,7 @@ fn unique_query_value(
                 "duplicate {name} query parameter"
             )));
         }
-        value = Some(decode_query_component(raw_value, name)?);
+        value = Some(query_value.into_owned());
     }
     let value = value.ok_or_else(|| invalid_auth_url(format!("missing {name} query parameter")))?;
     if value.is_empty() {
@@ -248,54 +258,13 @@ fn unique_query_value(
     Ok(value)
 }
 
-fn decode_query_component(
-    value: &str,
-    parameter_name: &str,
-) -> Result<String, PubkyAuthCompanionClaimApprovalError> {
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'%' {
-            index += 1;
-            continue;
-        }
-        if index + 2 >= bytes.len()
-            || !bytes[index + 1].is_ascii_hexdigit()
-            || !bytes[index + 2].is_ascii_hexdigit()
-        {
-            return Err(invalid_auth_url(format!(
-                "invalid percent encoding in {parameter_name} query parameter"
-            )));
-        }
-        index += 3;
-    }
-    percent_decode_str(value)
-        .decode_utf8()
-        .map(|value| value.into_owned())
-        .map_err(|_| {
-            invalid_auth_url(format!(
-                "{parameter_name} query parameter must be valid UTF-8"
-            ))
-        })
-}
-
-fn decode_auth_secret(secret_text: &str) -> Result<[u8; 32], PubkyAuthCompanionClaimApprovalError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(secret_text)
-        .map_err(invalid_auth_url)?;
-    bytes.try_into().map_err(|bytes: Vec<u8>| {
-        invalid_auth_url(format!("auth secret must be 32 bytes, got {}", bytes.len()))
-    })
-}
-
-fn validate_relay_url(value: &str) -> Result<Url, PubkyAuthCompanionClaimApprovalError> {
-    let relay = Url::parse(value).map_err(invalid_auth_url)?;
+fn validate_relay_url(relay: &Url) -> Result<(), PubkyAuthCompanionClaimApprovalError> {
     if !matches!(relay.scheme(), "http" | "https") || relay.host_str().is_none() {
         return Err(invalid_auth_url(
             "relay URL must be an absolute HTTP(S) URL",
         ));
     }
-    Ok(relay)
+    Ok(())
 }
 
 fn encode_signed_claim(
