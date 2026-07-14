@@ -216,8 +216,6 @@ remain with the integrating application and its adapters.
 - [`paykit-sdk`](paykit-sdk/) is the Rust SDK runtime for stateful Paykit
   workflows.
 - [`paykit-ffi`](paykit-ffi/) exposes UniFFI bindings for Swift and Kotlin.
-- [`paykit-react-native`](paykit-react-native/) wraps the generated bindings for
-  React Native.
 
 ## Functional Requirements
 
