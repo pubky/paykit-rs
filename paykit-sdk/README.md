@@ -31,7 +31,12 @@ only describes this app/runtime's folder. Private and payment counterparty APIs 
 the counterparty's exact receiver path separately. A Pubky key alone is not enough
 information to route private Paykit state to a specific app/runtime folder.
 Apps can call `paykit_receiver_paths` as a discovery helper, but they still choose
-the receiver path explicitly.
+the receiver path explicitly. Discovery returns receiver paths that publish a
+valid Receiver Marker or at least one public Payment Endpoint. A receiver with
+no public Payment Endpoints can publish a lightweight Receiver Marker so it is
+still discoverable from the Pubky identity. Marker publication is explicit
+because it makes the receiver publicly discoverable; SDK setup, auth, and
+profile helpers do not publish it automatically.
 
 ## Current Scope
 
@@ -154,6 +159,7 @@ SDK uses receiver-scoped Paykit paths:
 - `/pub/paykit/v0/{receiver_path}/profile.json` for Paykit Profile
 - `/pub/paykit/v0/{receiver_path}/blobs/...` for Paykit Profile blobs
 - `/pub/paykit/v0/{receiver_path}/contacts/...` for optional Public Contact Markers
+- `/pub/paykit/v0/{receiver_path}/receiver.json` for optional public receiver discovery
 
 Apps can set `profile_namespace` to use their own public app namespace, such as
 `bitkit.to`. Those helper paths still stay receiver-scoped, for example

@@ -1,5 +1,18 @@
 use super::*;
 
+fn server_receiver_path() -> PaykitReceiverPath {
+    PaykitReceiverPath::new("bitkit/server").unwrap()
+}
+
+fn receiver_capabilities() -> PaykitReceiverCapabilities {
+    PaykitReceiverCapabilities {
+        private_payments: true,
+        payment_requests: true,
+        receipts: true,
+        outgoing_payments: false,
+    }
+}
+
 #[tokio::test]
 async fn endpoint_round_trip_and_update() {
     let setup = TestSetup::new().await;
@@ -29,6 +42,9 @@ async fn endpoint_round_trip_and_update() {
     let list = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_path())
         .await
         .unwrap();
+    let receiver_paths = list_paykit_receiver_paths(&setup.public_storage, &setup.public_key)
+        .await
+        .unwrap();
     assert_eq!(
         list,
         PaymentList {
@@ -37,6 +53,7 @@ async fn endpoint_round_trip_and_update() {
                 .collect()
         }
     );
+    assert!(receiver_paths.contains(&receiver_path()));
 
     let new_endpoint = PaymentEndpointPayload::new("{\"address\":\"1c1...\"}");
 
@@ -58,6 +75,143 @@ async fn endpoint_round_trip_and_update() {
     .await
     .unwrap();
     assert_eq!(updated, Some(new_endpoint.clone()));
+
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn receiver_marker_round_trip_and_discovery() {
+    let setup = TestSetup::new().await;
+    let marker = PaykitReceiverMarker::new(server_receiver_path(), receiver_capabilities());
+
+    publish_paykit_receiver_marker(&setup.session, &marker)
+        .await
+        .unwrap();
+
+    let fetched = get_paykit_receiver_marker(
+        &setup.public_storage,
+        &setup.public_key,
+        &server_receiver_path(),
+    )
+    .await
+    .unwrap();
+    let receiver_paths = list_paykit_receiver_paths(&setup.public_storage, &setup.public_key)
+        .await
+        .unwrap();
+    let payment_list = get_payment_list(
+        &setup.public_storage,
+        &setup.public_key,
+        &server_receiver_path(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(fetched, Some(marker));
+    assert!(receiver_paths.contains(&server_receiver_path()));
+    assert!(payment_list.payment_endpoints.is_empty());
+
+    remove_paykit_receiver_marker(&setup.session, &server_receiver_path())
+        .await
+        .unwrap();
+    let removed = get_paykit_receiver_marker(
+        &setup.public_storage,
+        &setup.public_key,
+        &server_receiver_path(),
+    )
+    .await
+    .unwrap();
+    let receiver_paths = list_paykit_receiver_paths(&setup.public_storage, &setup.public_key)
+        .await
+        .unwrap();
+    assert!(removed.is_none());
+    assert!(!receiver_paths.contains(&server_receiver_path()));
+
+    remove_paykit_receiver_marker(&setup.session, &server_receiver_path())
+        .await
+        .unwrap();
+
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_receiver_marker_does_not_block_sibling_discovery() {
+    let setup = TestSetup::new().await;
+    let method = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+    let endpoint = PaymentEndpointPayload::new("lnbc...");
+
+    set_payment_endpoint(
+        &setup.session,
+        &receiver_path(),
+        method.clone(),
+        endpoint.clone(),
+    )
+    .await
+    .unwrap();
+    setup
+        .session
+        .storage()
+        .put(
+            format!(
+                "{PAYKIT_PATH_PREFIX}/{}/receiver.json",
+                server_receiver_path()
+            ),
+            "not-json".to_string(),
+        )
+        .await
+        .unwrap();
+
+    let direct_marker = get_paykit_receiver_marker(
+        &setup.public_storage,
+        &setup.public_key,
+        &server_receiver_path(),
+    )
+    .await;
+    let receiver_paths = list_paykit_receiver_paths(&setup.public_storage, &setup.public_key)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        direct_marker,
+        Err(PaykitError::InvalidData { .. })
+    ));
+    assert!(receiver_paths.contains(&receiver_path()));
+    assert!(!receiver_paths.contains(&server_receiver_path()));
+
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn empty_receiver_marker_is_invalid_and_does_not_advertise_receiver() {
+    let setup = TestSetup::new().await;
+
+    setup
+        .session
+        .storage()
+        .put(
+            format!(
+                "{PAYKIT_PATH_PREFIX}/{}/receiver.json",
+                server_receiver_path()
+            ),
+            String::new(),
+        )
+        .await
+        .unwrap();
+
+    let direct_marker = get_paykit_receiver_marker(
+        &setup.public_storage,
+        &setup.public_key,
+        &server_receiver_path(),
+    )
+    .await;
+    let receiver_paths = list_paykit_receiver_paths(&setup.public_storage, &setup.public_key)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        direct_marker,
+        Err(PaykitError::InvalidData { .. })
+    ));
+    assert!(!receiver_paths.contains(&server_receiver_path()));
 
     setup.raw_session.signout().await.unwrap();
 }

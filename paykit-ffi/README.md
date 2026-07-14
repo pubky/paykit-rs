@@ -50,6 +50,9 @@ load the native UniFFI library just to format keys.
   callbacks.
 - `paykitReceiverPaths` — list a Pubky identity's Paykit receiver paths before
   scoped public Payment List reads.
+- `publishPaykitReceiverMarker`, `removePaykitReceiverMarker`, and
+  `paykitReceiverMarker` — publish or inspect a lightweight public receiver
+  discovery marker.
 - `PaykitSdk.syncPublicEndpoints` — publish current public receiving details
   and remove stale SDK-managed public Payment Endpoints.
 - `PaykitSdk.syncPublicEndpointsWithReceivingDetails` — publish explicit

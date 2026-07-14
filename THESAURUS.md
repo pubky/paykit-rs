@@ -80,6 +80,12 @@
 - **Synonyms to AVOID**: public contact record when referring to the marker only
 - **Related terms**: Contact Record, Paykit Profile, Paykit SDK
 
+### Receiver Marker
+- **Definition**: An optional public Pubky marker at `/pub/paykit/v0/{receiver_path}/receiver.json` that makes one Paykit Receiver Path discoverable even when it has no public Payment Endpoints. The payload carries version, kind, receiver path, and coarse receiver capabilities.
+- **NOT**: A Payment Endpoint, Payment List, public profile, or proof of an active Encrypted Link.
+- **Synonyms to AVOID**: receiver record, receiver index entry when referring to the marker payload
+- **Related terms**: Paykit Receiver Path, Payment Endpoint, Pubky Routing, Paykit SDK
+
 ## Core Protocol Terms
 
 ### Pubky Routing

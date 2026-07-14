@@ -7,10 +7,10 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paykit_sdk::{
-    EndpointSyncChange, EndpointSyncReport, PaymentAdapter, PaymentAmountContext,
-    PaymentEndpointCandidate, PaymentEndpointReservation, PaymentEndpointReservationCancellation,
-    PaymentEndpointSelectionRequest, PaymentEndpointSource, PaymentTarget, PubkyPublicKey,
-    ReceivingDetail, ReceivingDetailScope,
+    EndpointSyncChange, EndpointSyncReport, PaykitReceiverCapabilities, PaykitReceiverMarker,
+    PaymentAdapter, PaymentAmountContext, PaymentEndpointCandidate, PaymentEndpointReservation,
+    PaymentEndpointReservationCancellation, PaymentEndpointSelectionRequest, PaymentEndpointSource,
+    PaymentTarget, PubkyPublicKey, ReceivingDetail, ReceivingDetailScope,
 };
 use sha2::{Digest, Sha256};
 
@@ -237,6 +237,28 @@ pub struct FfiEndpointSyncReport {
     pub failed: Vec<FfiEndpointSyncChange>,
 }
 
+/// Public capabilities advertised by a Paykit receiver marker.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiPaykitReceiverCapabilities {
+    /// Receiver can participate in private Paykit payment workflows.
+    pub private_payments: bool,
+    /// Receiver can send or receive Payment Request messages.
+    pub payment_requests: bool,
+    /// Receiver can issue or retrieve Paykit Receipts.
+    pub receipts: bool,
+    /// Receiver can execute outgoing payments itself.
+    pub outgoing_payments: bool,
+}
+
+/// Lightweight public marker for one Paykit receiver path.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiPaykitReceiverMarker {
+    /// Receiver path this marker belongs to.
+    pub receiver_path: String,
+    /// Public receiver capabilities.
+    pub capabilities: FfiPaykitReceiverCapabilities,
+}
+
 /// Platform-owned payment adapter callbacks.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkPaymentAdapter: Send + Sync {
@@ -444,6 +466,43 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Fetch one public Paykit receiver marker, if present.
+    pub async fn paykit_receiver_marker(
+        &self,
+        public_key: String,
+        receiver_path: String,
+    ) -> Result<Option<FfiPaykitReceiverMarker>, PaykitFfiError> {
+        self.runtime
+            .paykit_receiver_marker(
+                parse_public_key(public_key)?,
+                paykit_sdk::PaykitReceiverPath::new(receiver_path)
+                    .map_err(|err| validation_error(err.to_string()))?,
+            )
+            .await
+            .map(|marker| marker.map(Into::into))
+            .map_err(Into::into)
+    }
+
+    /// Publish the configured local receiver marker.
+    pub async fn publish_paykit_receiver_marker(
+        &self,
+        capabilities: FfiPaykitReceiverCapabilities,
+    ) -> Result<FfiPaykitReceiverMarker, PaykitFfiError> {
+        self.runtime
+            .publish_paykit_receiver_marker(capabilities.into())
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Remove the configured local receiver marker.
+    pub async fn remove_paykit_receiver_marker(&self) -> Result<(), PaykitFfiError> {
+        self.runtime
+            .remove_paykit_receiver_marker()
+            .await
+            .map_err(Into::into)
+    }
+
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     pub async fn sync_public_endpoints(&self) -> Result<FfiEndpointSyncReport, PaykitFfiError> {
         self.runtime
@@ -467,6 +526,37 @@ impl FfiPaykitSdk {
             .await
             .map(Into::into)
             .map_err(Into::into)
+    }
+}
+
+impl From<FfiPaykitReceiverCapabilities> for PaykitReceiverCapabilities {
+    fn from(value: FfiPaykitReceiverCapabilities) -> Self {
+        Self {
+            private_payments: value.private_payments,
+            payment_requests: value.payment_requests,
+            receipts: value.receipts,
+            outgoing_payments: value.outgoing_payments,
+        }
+    }
+}
+
+impl From<PaykitReceiverCapabilities> for FfiPaykitReceiverCapabilities {
+    fn from(value: PaykitReceiverCapabilities) -> Self {
+        Self {
+            private_payments: value.private_payments,
+            payment_requests: value.payment_requests,
+            receipts: value.receipts,
+            outgoing_payments: value.outgoing_payments,
+        }
+    }
+}
+
+impl From<PaykitReceiverMarker> for FfiPaykitReceiverMarker {
+    fn from(value: PaykitReceiverMarker) -> Self {
+        Self {
+            receiver_path: value.receiver_path.to_string(),
+            capabilities: value.capabilities.into(),
+        }
     }
 }
 

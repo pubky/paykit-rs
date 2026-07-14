@@ -240,7 +240,9 @@ pub async fn get_payment_list(
 /// Lists public Paykit receiver paths for a Pubky identity.
 ///
 /// This is a discovery helper only. Payment flows should still use the exact
-/// receiver path selected by the app/user instead of guessing one.
+/// receiver path selected by the app/user instead of guessing one. Discovery
+/// returns receiver paths that publish a valid Receiver Marker or at least one
+/// public Payment Endpoint.
 #[instrument(skip(storage))]
 pub async fn list_paykit_receiver_paths(
     storage: &pubky::PublicStorage,

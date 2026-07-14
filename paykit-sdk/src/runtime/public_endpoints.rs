@@ -29,6 +29,61 @@ where
         )
     }
 
+    /// Fetch one public Paykit receiver marker, if present.
+    pub async fn paykit_receiver_marker(
+        &self,
+        owner: PubkyPublicKey,
+        receiver_path: PaykitReceiverPath,
+    ) -> Result<Option<PaykitReceiverMarker>> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available".into(),
+                    source: None,
+                })?;
+        Ok(paykit_lib::get_paykit_receiver_marker(
+            &public_storage,
+            &owner.to_public_key()?,
+            &receiver_path,
+        )
+        .await?)
+    }
+
+    /// Publish the configured local receiver marker.
+    pub async fn publish_paykit_receiver_marker(
+        &self,
+        capabilities: PaykitReceiverCapabilities,
+    ) -> Result<PaykitReceiverMarker> {
+        let _identity_guard = self.claim_identity_operation("publish Paykit receiver marker")?;
+        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
+        validate_receiver_marker_capabilities(&capabilities, identity.capability)?;
+        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available".into(),
+            source: None,
+        })?;
+        let marker = PaykitReceiverMarker::new(self.config.receiver_path.clone(), capabilities);
+        paykit_lib::publish_paykit_receiver_marker(&session_access.session, &marker).await?;
+        Ok(marker)
+    }
+
+    /// Remove the configured local receiver marker.
+    pub async fn remove_paykit_receiver_marker(&self) -> Result<()> {
+        let _identity_guard = self.claim_identity_operation("remove Paykit receiver marker")?;
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available".into(),
+            source: None,
+        })?;
+        paykit_lib::remove_paykit_receiver_marker(
+            &session_access.session,
+            &self.config.receiver_path,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     pub async fn sync_public_endpoints(&self) -> Result<EndpointSyncReport> {
         let details = self
@@ -253,4 +308,20 @@ where
 
         Ok(report)
     }
+}
+
+pub(super) fn validate_receiver_marker_capabilities(
+    capabilities: &PaykitReceiverCapabilities,
+    identity_capability: PubkyIdentityCapability,
+) -> Result<()> {
+    let advertises_private_workflows =
+        capabilities.private_payments || capabilities.payment_requests || capabilities.receipts;
+    if advertises_private_workflows
+        && identity_capability != PubkyIdentityCapability::PrivateLinkCapable
+    {
+        return Err(PaykitSdkError::Policy(
+            "receiver marker private capabilities require a local Pubky secret key".into(),
+        ));
+    }
+    Ok(())
 }
