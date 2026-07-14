@@ -648,6 +648,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bs58"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
+dependencies = [
+ "sha2 0.10.9",
+ "tinyvec",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3142,7 +3152,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "paykit-ffi"
-version = "0.1.0-rc33"
+version = "0.1.0-rc34"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -3169,7 +3179,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-lib"
-version = "0.1.0-rc33"
+version = "0.1.0-rc34"
 dependencies = [
  "anyhow",
  "base64",
@@ -3188,14 +3198,20 @@ dependencies = [
 
 [[package]]
 name = "paykit-sdk"
-version = "0.1.0-rc33"
+version = "0.1.0-rc34"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "bip39",
+ "blake3",
+ "bs58",
  "chrono",
+ "crypto_secretbox",
  "hex",
+ "http-relay",
  "paykit-lib",
+ "percent-encoding",
  "pubky",
  "pubky-testnet",
  "serde",

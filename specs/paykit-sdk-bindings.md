@@ -173,6 +173,12 @@ session import, capability-checked auth handoff, and `pubky://` normalization.
 Binding helpers should request the capability scope returned by the active
 `PaykitSdkConfig` and validate completed/imported sessions against that same
 scope.
+For Bitkit watch-only account setup, bindings should expose the structured
+companion claim and the single high-level approval operation. Channel
+derivation, account-xpub decoding, identity signatures, nonces, encryption,
+and relay posting remain inside Rust. Binding errors should preserve distinct
+invalid-request, invalid-claim, encryption, relay-delivery, and normal-auth
+failure cases.
 When bindings create the Pubky client internally, they should expose FFI-safe
 client configuration for platform-owned network policy such as request
 timeouts.

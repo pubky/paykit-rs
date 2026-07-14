@@ -25,6 +25,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Removed the unmaintained `paykit-react-native` package. Supported platform
   bindings are Swift and Kotlin.
 
+## [0.1.0-rc34] - 2026-07-14
+
+### Added
+- Added high-level Bitkit watch-only account companion claim approval for
+  `pubkyauth://` requests, including request-bound identity signatures,
+  claim-specific relay delivery, and fail-closed AuthToken ordering.
+- Exposed structured watch-only account claims and distinct approval errors in
+  the generated Swift and Kotlin bindings.
+
 ## [0.1.0-rc32] - 2026-07-07
 
 ### Fixed
@@ -267,7 +276,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc32...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc34...HEAD
+[0.1.0-rc34]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc34
 [0.1.0-rc32]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc32
 [0.1.0-rc31]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc31
 [0.1.0-rc30]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc30
