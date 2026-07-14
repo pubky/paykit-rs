@@ -462,10 +462,12 @@ impl From<PaykitProfile> for FfiPaykitProfile {
         Self {
             display_name: value.display_name,
             image_uri: value.image_uri,
-            extra_json: value.extra.map(|extra| {
-                serde_json::to_string(&extra)
-                    .expect("profile extra is a serde_json object and serializes")
-            }),
+            // serde_json::to_string cannot fail for a string-keyed Value map
+            // (no arbitrary_precision), so this is defensive: prefer None over a
+            // fabricated "{}" that would round-trip into Some(empty map).
+            extra_json: value
+                .extra
+                .and_then(|extra| serde_json::to_string(&extra).ok()),
         }
     }
 }
