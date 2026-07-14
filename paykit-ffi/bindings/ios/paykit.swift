@@ -406,6 +406,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -3886,6 +3902,14 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     func approveAuth(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey) async throws
 
     /**
+     * Deliver a signed Bitkit watch-only account claim, then approve Pubky Auth.
+     *
+     * This high-level operation owns validation, request-bound signing,
+     * channel derivation, encryption, relay delivery, and approval ordering.
+     */
+    func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey, claim: WatchOnlyAccountClaim) async throws
+
+    /**
      * Import an exported Pubky session secret.
      */
     func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
@@ -4009,6 +4033,29 @@ open func approveAuth(authUrl: String, expectedCapabilities: String, localSecret
             freeFunc: ffi_paykit_rust_future_free_void,
             liftFunc: { $0 },
             errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Deliver a signed Bitkit watch-only account claim, then approve Pubky Auth.
+     *
+     * This high-level operation owns validation, request-bound signing,
+     * channel derivation, encryption, relay delivery, and approval ordering.
+     */
+open func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey, claim: WatchOnlyAccountClaim)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(authUrl),FfiConverterString.lower(expectedCapabilities),FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterTypeWatchOnlyAccountClaim_lower(claim)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWatchOnlyAccountClaimApprovalError_lift
         )
 }
 
@@ -12563,6 +12610,125 @@ public func FfiConverterTypeSdkStateBlobSnapshot_lower(_ value: SdkStateBlobSnap
     return FfiConverterTypeSdkStateBlobSnapshot.lower(value)
 }
 
+
+/**
+ * Structured input for a Bitkit watch-only account companion claim.
+ *
+ * Paykit validates and decodes the xpub, signs the binary claim with the
+ * approving Pubky identity, encrypts it with the auth request secret, and
+ * delivers it before approving normal Pubky Auth.
+ */
+public struct WatchOnlyAccountClaim {
+    /**
+     * Companion claim protocol version.
+     */
+    public var version: UInt8
+    /**
+     * BIP account index represented by the account xpub.
+     */
+    public var accountIndex: UInt32
+    /**
+     * Address type used to derive addresses from the account xpub.
+     */
+    public var addressType: WatchOnlyAccountAddressType
+    /**
+     * Base58Check-encoded 78-byte serialized account extended public key.
+     */
+    public var accountXpub: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Companion claim protocol version.
+         */version: UInt8,
+        /**
+         * BIP account index represented by the account xpub.
+         */accountIndex: UInt32,
+        /**
+         * Address type used to derive addresses from the account xpub.
+         */addressType: WatchOnlyAccountAddressType,
+        /**
+         * Base58Check-encoded 78-byte serialized account extended public key.
+         */accountXpub: String) {
+        self.version = version
+        self.accountIndex = accountIndex
+        self.addressType = addressType
+        self.accountXpub = accountXpub
+    }
+}
+
+#if compiler(>=6)
+extension WatchOnlyAccountClaim: Sendable {}
+#endif
+
+
+extension WatchOnlyAccountClaim: Equatable, Hashable {
+    public static func ==(lhs: WatchOnlyAccountClaim, rhs: WatchOnlyAccountClaim) -> Bool {
+        if lhs.version != rhs.version {
+            return false
+        }
+        if lhs.accountIndex != rhs.accountIndex {
+            return false
+        }
+        if lhs.addressType != rhs.addressType {
+            return false
+        }
+        if lhs.accountXpub != rhs.accountXpub {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(version)
+        hasher.combine(accountIndex)
+        hasher.combine(addressType)
+        hasher.combine(accountXpub)
+    }
+}
+
+extension WatchOnlyAccountClaim: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWatchOnlyAccountClaim: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WatchOnlyAccountClaim {
+        return
+            try WatchOnlyAccountClaim(
+                version: FfiConverterUInt8.read(from: &buf),
+                accountIndex: FfiConverterUInt32.read(from: &buf),
+                addressType: FfiConverterTypeWatchOnlyAccountAddressType.read(from: &buf),
+                accountXpub: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WatchOnlyAccountClaim, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.version, into: &buf)
+        FfiConverterUInt32.write(value.accountIndex, into: &buf)
+        FfiConverterTypeWatchOnlyAccountAddressType.write(value.addressType, into: &buf)
+        FfiConverterString.write(value.accountXpub, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWatchOnlyAccountClaim_lift(_ buf: RustBuffer) throws -> WatchOnlyAccountClaim {
+    return try FfiConverterTypeWatchOnlyAccountClaim.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWatchOnlyAccountClaim_lower(_ value: WatchOnlyAccountClaim) -> RustBuffer {
+    return FfiConverterTypeWatchOnlyAccountClaim.lower(value)
+}
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
@@ -14572,6 +14738,226 @@ extension ReceivingDetailScopeKind: Codable {}
 
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Bitcoin address type represented by a watch-only account claim.
+ */
+
+public enum WatchOnlyAccountAddressType {
+
+    /**
+     * BIP84 native SegWit account (`P2WPKH`).
+     */
+    case nativeSegwit
+}
+
+
+#if compiler(>=6)
+extension WatchOnlyAccountAddressType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWatchOnlyAccountAddressType: FfiConverterRustBuffer {
+    typealias SwiftType = WatchOnlyAccountAddressType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WatchOnlyAccountAddressType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .nativeSegwit
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WatchOnlyAccountAddressType, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .nativeSegwit:
+            writeInt(&buf, Int32(1))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWatchOnlyAccountAddressType_lift(_ buf: RustBuffer) throws -> WatchOnlyAccountAddressType {
+    return try FfiConverterTypeWatchOnlyAccountAddressType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWatchOnlyAccountAddressType_lower(_ value: WatchOnlyAccountAddressType) -> RustBuffer {
+    return FfiConverterTypeWatchOnlyAccountAddressType.lower(value)
+}
+
+
+extension WatchOnlyAccountAddressType: Equatable, Hashable {}
+
+extension WatchOnlyAccountAddressType: Codable {}
+
+
+
+
+
+
+
+/**
+ * Failure returned while approving Pubky Auth with a companion claim.
+ */
+public enum WatchOnlyAccountClaimApprovalError: Swift.Error {
+
+
+
+    /**
+     * The URL, claim type, secret, relay, or capability request is invalid.
+     */
+    case InvalidAuthUrl(reason: String
+    )
+    /**
+     * The structured watch-only account claim is invalid.
+     */
+    case InvalidClaim(reason: String
+    )
+    /**
+     * The supplied local Pubky identity key is invalid.
+     */
+    case InvalidLocalSecretKey(reason: String
+    )
+    /**
+     * XSalsa20-Poly1305 encryption failed before relay delivery.
+     */
+    case EncryptionFailure(reason: String
+    )
+    /**
+     * The encrypted companion claim could not be delivered to its relay channel.
+     */
+    case RelayDeliveryFailure(reason: String
+    )
+    /**
+     * Normal Pubky Auth approval failed after companion delivery succeeded.
+     */
+    case AuthorizationFailure(reason: String
+    )
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWatchOnlyAccountClaimApprovalError: FfiConverterRustBuffer {
+    typealias SwiftType = WatchOnlyAccountClaimApprovalError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WatchOnlyAccountClaimApprovalError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .InvalidAuthUrl(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 2: return .InvalidClaim(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 3: return .InvalidLocalSecretKey(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 4: return .EncryptionFailure(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 5: return .RelayDeliveryFailure(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 6: return .AuthorizationFailure(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WatchOnlyAccountClaimApprovalError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case let .InvalidAuthUrl(reason):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .InvalidClaim(reason):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .InvalidLocalSecretKey(reason):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .EncryptionFailure(reason):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .RelayDeliveryFailure(reason):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case let .AuthorizationFailure(reason):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(reason, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWatchOnlyAccountClaimApprovalError_lift(_ buf: RustBuffer) throws -> WatchOnlyAccountClaimApprovalError {
+    return try FfiConverterTypeWatchOnlyAccountClaimApprovalError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWatchOnlyAccountClaimApprovalError_lower(_ value: WatchOnlyAccountClaimApprovalError) -> RustBuffer {
+    return FfiConverterTypeWatchOnlyAccountClaimApprovalError.lower(value)
+}
+
+
+extension WatchOnlyAccountClaimApprovalError: Equatable, Hashable {}
+
+extension WatchOnlyAccountClaimApprovalError: Codable {}
+
+
+
+
+extension WatchOnlyAccountClaimApprovalError: Foundation.LocalizedError {
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+}
+
+
+
+
 
 /**
  * Error type exposed through generated bindings.
@@ -16182,6 +16568,33 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
+ * Return the capability required by Bitkit watch-only account setup.
+ */
+public func bitkitWatchOnlyAccountCapability() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_func_bitkit_watch_only_account_capability($0
+    )
+})
+}
+/**
+ * Return the query value identifying the Bitkit watch-only account claim.
+ */
+public func bitkitWatchOnlyAccountClaimType() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_func_bitkit_watch_only_account_claim_type($0
+    )
+})
+}
+/**
+ * Return the current Bitkit watch-only account companion claim version.
+ */
+public func bitkitWatchOnlyAccountClaimVersion() -> UInt8  {
+    return try!  FfiConverterUInt8.lift(try! rustCall() {
+    uniffi_paykit_fn_func_bitkit_watch_only_account_claim_version($0
+    )
+})
+}
+/**
  * Return the core Paykit session capabilities.
  */
 public func coreSessionCapabilities() -> String  {
@@ -16352,6 +16765,15 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_paykit_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_paykit_checksum_func_bitkit_watch_only_account_capability() != 40408) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_bitkit_watch_only_account_claim_type() != 54275) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_bitkit_watch_only_account_claim_version() != 59433) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_core_session_capabilities() != 53661) {
         return InitializationResult.apiChecksumMismatch
@@ -16690,6 +17112,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 21644) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 15287) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 19676) {

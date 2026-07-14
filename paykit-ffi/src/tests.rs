@@ -40,6 +40,59 @@ fn test_required_capabilities_include_custom_namespace_scope() {
 }
 
 #[test]
+fn test_watch_only_account_companion_constants_and_claim_conversion() {
+    assert_eq!(
+        bitkit_watch_only_account_claim_type(),
+        "watch-only-account-v1"
+    );
+    assert_eq!(bitkit_watch_only_account_claim_version(), 1);
+    assert_eq!(
+        bitkit_watch_only_account_capability(),
+        "/pub/paykit/v0/bitkit/server/:rw"
+    );
+
+    let claim = FfiWatchOnlyAccountClaim {
+        version: bitkit_watch_only_account_claim_version(),
+        account_index: 7,
+        address_type: FfiWatchOnlyAccountAddressType::NativeSegwit,
+        account_xpub: "xpub-example".into(),
+    };
+    let sdk_claim: paykit_sdk::WatchOnlyAccountClaim = claim.into();
+
+    assert_eq!(sdk_claim.version, 1);
+    assert_eq!(sdk_claim.account_index, 7);
+    assert_eq!(
+        sdk_claim.address_type,
+        paykit_sdk::WatchOnlyAccountAddressType::NativeSegwit
+    );
+    assert_eq!(sdk_claim.account_xpub, "xpub-example");
+}
+
+#[tokio::test]
+async fn test_watch_only_account_companion_reports_invalid_auth_url() {
+    let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
+    let error = bootstrap
+        .approve_auth_with_companion_claim(
+            "https://example.com/not-pubky-auth".into(),
+            bitkit_watch_only_account_capability(),
+            Arc::new(FfiPubkyLocalSecretKey::new(vec![7; 32])),
+            FfiWatchOnlyAccountClaim {
+                version: bitkit_watch_only_account_claim_version(),
+                account_index: 0,
+                address_type: FfiWatchOnlyAccountAddressType::NativeSegwit,
+                account_xpub: "xpub-example".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FfiWatchOnlyAccountClaimApprovalError::InvalidAuthUrl { .. }
+    ));
+}
+
+#[test]
 fn test_storage_state_blob_round_trips() {
     let state = StorageState::default();
     let encoded = encode_storage_state(&state).unwrap();

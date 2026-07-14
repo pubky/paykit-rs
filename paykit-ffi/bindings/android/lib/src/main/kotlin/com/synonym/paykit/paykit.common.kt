@@ -105,6 +105,8 @@ public object NoPointer
 
 
 
+
+
 /**
  * Stateful Paykit SDK runtime handle.
  */
@@ -773,6 +775,15 @@ public interface PubkySessionBootstrapInterface {
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `approveAuth`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey)
+
+    /**
+     * Deliver a signed Bitkit watch-only account claim, then approve Pubky Auth.
+     *
+     * This high-level operation owns validation, request-bound signing,
+     * channel derivation, encryption, relay delivery, and approval ordering.
+     */
+    @Throws(WatchOnlyAccountClaimApprovalException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: WatchOnlyAccountClaim)
 
     /**
      * Import an exported Pubky session secret.
@@ -3231,6 +3242,37 @@ public data class SdkStateBlobSnapshot (
 
 
 
+/**
+ * Structured input for a Bitkit watch-only account companion claim.
+ *
+ * Paykit validates and decodes the xpub, signs the binary claim with the
+ * approving Pubky identity, encrypts it with the auth request secret, and
+ * delivers it before approving normal Pubky Auth.
+ */
+@kotlinx.serialization.Serializable
+public data class WatchOnlyAccountClaim (
+    /**
+     * Companion claim protocol version.
+     */
+    val `version`: kotlin.UByte,
+    /**
+     * BIP account index represented by the account xpub.
+     */
+    val `accountIndex`: kotlin.UInt,
+    /**
+     * Address type used to derive addresses from the account xpub.
+     */
+    val `addressType`: WatchOnlyAccountAddressType,
+    /**
+     * Base58Check-encoded 78-byte serialized account extended public key.
+     */
+    val `accountXpub`: kotlin.String
+) {
+    public companion object
+}
+
+
+
 
 /**
  * Private-payment state observed while resolving a contact payment.
@@ -3853,6 +3895,96 @@ public enum class ReceivingDetailScopeKind {
 }
 
 
+
+
+
+
+/**
+ * Bitcoin address type represented by a watch-only account claim.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class WatchOnlyAccountAddressType {
+
+    /**
+     * BIP84 native SegWit account (`P2WPKH`).
+     */
+    NATIVE_SEGWIT;
+    public companion object
+}
+
+
+
+
+
+
+
+/**
+ * Failure returned while approving Pubky Auth with a companion claim.
+ */
+public sealed class WatchOnlyAccountClaimApprovalException: kotlin.Exception() {
+
+    /**
+     * The URL, claim type, secret, relay, or capability request is invalid.
+     */
+    public class InvalidAuthUrl(
+        public val `reason`: kotlin.String,
+    ) : WatchOnlyAccountClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * The structured watch-only account claim is invalid.
+     */
+    public class InvalidClaim(
+        public val `reason`: kotlin.String,
+    ) : WatchOnlyAccountClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * The supplied local Pubky identity key is invalid.
+     */
+    public class InvalidLocalSecretKey(
+        public val `reason`: kotlin.String,
+    ) : WatchOnlyAccountClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * XSalsa20-Poly1305 encryption failed before relay delivery.
+     */
+    public class EncryptionFailure(
+        public val `reason`: kotlin.String,
+    ) : WatchOnlyAccountClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * The encrypted companion claim could not be delivered to its relay channel.
+     */
+    public class RelayDeliveryFailure(
+        public val `reason`: kotlin.String,
+    ) : WatchOnlyAccountClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+    /**
+     * Normal Pubky Auth approval failed after companion delivery succeeded.
+     */
+    public class AuthorizationFailure(
+        public val `reason`: kotlin.String,
+    ) : WatchOnlyAccountClaimApprovalException() {
+        override val message: String
+            get() = "reason=${ `reason` }"
+    }
+
+}
 
 
 

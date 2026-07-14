@@ -86,7 +86,10 @@ pub use identity::{
 pub use pubky_session::{
     parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthDetails,
     PubkyAuthRequest, PubkyAuthRequestKind, PubkyResourceRef, PubkySessionBootstrap,
-    PubkySessionBootstrapResult, PubkySessionSecret, PAYKIT_SESSION_CAPABILITIES,
+    PubkySessionBootstrapResult, PubkySessionSecret, WatchOnlyAccountAddressType,
+    WatchOnlyAccountClaim, WatchOnlyAccountClaimApprovalError,
+    BITKIT_WATCH_ONLY_ACCOUNT_CAPABILITY, BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_TYPE,
+    BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_VERSION, PAYKIT_SESSION_CAPABILITIES,
 };
 #[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};

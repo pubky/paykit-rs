@@ -1446,6 +1446,14 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1485,6 +1493,15 @@ internal object IntegrityCheckingUniffiLib : Library {
         }
     }
     private fun uniffiCheckApiChecksums() {
+        if (uniffi_paykit_checksum_func_bitkit_watch_only_account_capability() != 40408.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_bitkit_watch_only_account_claim_type() != 54275.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_func_bitkit_watch_only_account_claim_version() != 59433.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_func_core_session_capabilities() != 53661.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1824,6 +1841,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 21644.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 15287.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 19676.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1926,6 +1946,15 @@ internal object IntegrityCheckingUniffiLib : Library {
     }
 
     // Integrity check functions only
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_bitkit_watch_only_account_capability(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_bitkit_watch_only_account_claim_type(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_func_bitkit_watch_only_account_claim_version(
+    ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_core_session_capabilities(
     ): Short
@@ -2264,6 +2293,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session(
@@ -3036,6 +3068,14 @@ internal object UniffiLib : Library {
         `localSecretKey`: Pointer?,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim(
+        `ptr`: Pointer?,
+        `authUrl`: RustBufferByValue,
+        `expectedCapabilities`: RustBufferByValue,
+        `localSecretKey`: Pointer?,
+        `claim`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipubkysessionbootstrap_import_session(
         `ptr`: Pointer?,
         `sessionSecret`: RustBufferByValue,
@@ -3231,6 +3271,18 @@ internal object UniffiLib : Library {
         `expectedRevision`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_bitkit_watch_only_account_capability(
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_bitkit_watch_only_account_claim_type(
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_func_bitkit_watch_only_account_claim_version(
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Byte
     @JvmStatic
     external fun uniffi_paykit_fn_func_core_session_capabilities(
         uniffiCallStatus: UniffiRustCallStatus,
@@ -3672,6 +3724,27 @@ private fun UniffiCleaner.Companion.create(): UniffiCleaner {
         }
     }
     return UniffiJnaCleaner()
+}
+
+
+public object FfiConverterUByte: FfiConverter<UByte, Byte> {
+    override fun lift(value: Byte): UByte {
+        return value.toUByte()
+    }
+
+    override fun read(buf: ByteBuffer): UByte {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: UByte): Byte {
+        return value.toByte()
+    }
+
+    override fun allocationSize(value: UByte): ULong = 1UL
+
+    override fun write(value: UByte, buf: ByteBuffer) {
+        buf.put(value.toByte())
+    }
 }
 
 
@@ -7241,6 +7314,36 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     }
 
     /**
+     * Deliver a signed Bitkit watch-only account claim, then approve Pubky Auth.
+     *
+     * This high-level operation owns validation, request-bound signing,
+     * channel derivation, encryption, relay delivery, and approval ordering.
+     */
+    @Throws(WatchOnlyAccountClaimApprovalException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: WatchOnlyAccountClaim) {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim(
+                    thisPtr,
+                    FfiConverterString.lower(`authUrl`),
+                    FfiConverterString.lower(`expectedCapabilities`),
+                    FfiConverterTypePubkyLocalSecretKey.lower(`localSecretKey`),
+                    FfiConverterTypeWatchOnlyAccountClaim.lower(`claim`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_void(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_void(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_void(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_void(future) },
+            // lift function
+            { Unit },
+
+            // Error FFI converter
+            WatchOnlyAccountClaimApprovalExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Import an exported Pubky session secret.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -10756,6 +10859,34 @@ public object FfiConverterTypeSdkStateBlobSnapshot: FfiConverterRustBuffer<SdkSt
 
 
 
+public object FfiConverterTypeWatchOnlyAccountClaim: FfiConverterRustBuffer<WatchOnlyAccountClaim> {
+    override fun read(buf: ByteBuffer): WatchOnlyAccountClaim {
+        return WatchOnlyAccountClaim(
+            FfiConverterUByte.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterTypeWatchOnlyAccountAddressType.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WatchOnlyAccountClaim): ULong = (
+            FfiConverterUByte.allocationSize(value.`version`) +
+            FfiConverterUInt.allocationSize(value.`accountIndex`) +
+            FfiConverterTypeWatchOnlyAccountAddressType.allocationSize(value.`addressType`) +
+            FfiConverterString.allocationSize(value.`accountXpub`)
+    )
+
+    override fun write(value: WatchOnlyAccountClaim, buf: ByteBuffer) {
+        FfiConverterUByte.write(value.`version`, buf)
+        FfiConverterUInt.write(value.`accountIndex`, buf)
+        FfiConverterTypeWatchOnlyAccountAddressType.write(value.`addressType`, buf)
+        FfiConverterString.write(value.`accountXpub`, buf)
+    }
+}
+
+
+
+
 
 public object FfiConverterTypeContactPaymentResolutionPrivateState: FfiConverterRustBuffer<ContactPaymentResolutionPrivateState> {
     override fun read(buf: ByteBuffer): ContactPaymentResolutionPrivateState = try {
@@ -11092,6 +11223,127 @@ public object FfiConverterTypeReceivingDetailScopeKind: FfiConverterRustBuffer<R
 
     override fun write(value: ReceivingDetailScopeKind, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+public object FfiConverterTypeWatchOnlyAccountAddressType: FfiConverterRustBuffer<WatchOnlyAccountAddressType> {
+    override fun read(buf: ByteBuffer): WatchOnlyAccountAddressType = try {
+        WatchOnlyAccountAddressType.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WatchOnlyAccountAddressType): ULong = 4UL
+
+    override fun write(value: WatchOnlyAccountAddressType, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+public object WatchOnlyAccountClaimApprovalExceptionErrorHandler : UniffiRustCallStatusErrorHandler<WatchOnlyAccountClaimApprovalException> {
+    override fun lift(errorBuf: RustBufferByValue): WatchOnlyAccountClaimApprovalException = FfiConverterTypeWatchOnlyAccountClaimApprovalError.lift(errorBuf)
+}
+
+public object FfiConverterTypeWatchOnlyAccountClaimApprovalError : FfiConverterRustBuffer<WatchOnlyAccountClaimApprovalException> {
+    override fun read(buf: ByteBuffer): WatchOnlyAccountClaimApprovalException {
+        return when (buf.getInt()) {
+            1 -> WatchOnlyAccountClaimApprovalException.InvalidAuthUrl(
+                FfiConverterString.read(buf),
+                )
+            2 -> WatchOnlyAccountClaimApprovalException.InvalidClaim(
+                FfiConverterString.read(buf),
+                )
+            3 -> WatchOnlyAccountClaimApprovalException.InvalidLocalSecretKey(
+                FfiConverterString.read(buf),
+                )
+            4 -> WatchOnlyAccountClaimApprovalException.EncryptionFailure(
+                FfiConverterString.read(buf),
+                )
+            5 -> WatchOnlyAccountClaimApprovalException.RelayDeliveryFailure(
+                FfiConverterString.read(buf),
+                )
+            6 -> WatchOnlyAccountClaimApprovalException.AuthorizationFailure(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WatchOnlyAccountClaimApprovalException): ULong {
+        return when (value) {
+            is WatchOnlyAccountClaimApprovalException.InvalidAuthUrl -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is WatchOnlyAccountClaimApprovalException.InvalidClaim -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is WatchOnlyAccountClaimApprovalException.InvalidLocalSecretKey -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is WatchOnlyAccountClaimApprovalException.EncryptionFailure -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is WatchOnlyAccountClaimApprovalException.RelayDeliveryFailure -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is WatchOnlyAccountClaimApprovalException.AuthorizationFailure -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+        }
+    }
+
+    override fun write(value: WatchOnlyAccountClaimApprovalException, buf: ByteBuffer) {
+        when (value) {
+            is WatchOnlyAccountClaimApprovalException.InvalidAuthUrl -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is WatchOnlyAccountClaimApprovalException.InvalidClaim -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is WatchOnlyAccountClaimApprovalException.InvalidLocalSecretKey -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is WatchOnlyAccountClaimApprovalException.EncryptionFailure -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is WatchOnlyAccountClaimApprovalException.RelayDeliveryFailure -> {
+                buf.putInt(5)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is WatchOnlyAccountClaimApprovalException.AuthorizationFailure -> {
+                buf.putInt(6)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 
@@ -12780,6 +13032,39 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
 
 
 
+
+/**
+ * Return the capability required by Bitkit watch-only account setup.
+ */
+public fun `bitkitWatchOnlyAccountCapability`(): kotlin.String {
+    return FfiConverterString.lift(uniffiRustCall { uniffiRustCallStatus ->
+        UniffiLib.uniffi_paykit_fn_func_bitkit_watch_only_account_capability(
+            uniffiRustCallStatus,
+        )
+    })
+}
+
+/**
+ * Return the query value identifying the Bitkit watch-only account claim.
+ */
+public fun `bitkitWatchOnlyAccountClaimType`(): kotlin.String {
+    return FfiConverterString.lift(uniffiRustCall { uniffiRustCallStatus ->
+        UniffiLib.uniffi_paykit_fn_func_bitkit_watch_only_account_claim_type(
+            uniffiRustCallStatus,
+        )
+    })
+}
+
+/**
+ * Return the current Bitkit watch-only account companion claim version.
+ */
+public fun `bitkitWatchOnlyAccountClaimVersion`(): kotlin.UByte {
+    return FfiConverterUByte.lift(uniffiRustCall { uniffiRustCallStatus ->
+        UniffiLib.uniffi_paykit_fn_func_bitkit_watch_only_account_claim_version(
+            uniffiRustCallStatus,
+        )
+    })
+}
 
 /**
  * Return the core Paykit session capabilities.

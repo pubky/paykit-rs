@@ -162,7 +162,56 @@ object.
   a BIP39 English mnemonic phrase.
 - `pubkyPublicKeyFromSecret(localSecretKey)` — derive a Pubky public key.
 - `parsePubkyAuthUrl(authUrl)` — inspect a Pubky auth URL.
+- `PubkySessionBootstrap.approveAuthWithCompanionClaim(...)` — sign, encrypt,
+  and relay a structured Bitkit watch-only account claim before approving the
+  normal Pubky Auth token.
+- `WatchOnlyAccountClaim` and `WatchOnlyAccountAddressType` — high-level claim
+  input; no channel, signature, nonce, or secretbox primitives cross FFI.
+- `bitkitWatchOnlyAccountClaimType()`,
+  `bitkitWatchOnlyAccountClaimVersion()`, and
+  `bitkitWatchOnlyAccountCapability()` — companion protocol constants.
 - `resolvePubkyUrl(uri)` and `parsePubkyResource(uri)` — Pubky URI helpers.
+
+The companion approval method throws
+`WatchOnlyAccountClaimApprovalError`, whose cases distinguish invalid auth
+URLs, invalid claims or local keys, encryption failure, relay delivery failure,
+and normal authorization failure. Relay delivery completes before normal Auth
+approval begins, so a relay or encryption failure does not authorize the
+requesting server.
+
+Swift integration shape:
+
+```swift
+let claim = WatchOnlyAccountClaim(
+    version: bitkitWatchOnlyAccountClaimVersion(),
+    accountIndex: accountIndex,
+    addressType: .nativeSegwit,
+    accountXpub: accountXpub
+)
+try await bootstrap.approveAuthWithCompanionClaim(
+    authUrl: authUrl,
+    expectedCapabilities: bitkitWatchOnlyAccountCapability(),
+    localSecretKey: identityKey,
+    claim: claim
+)
+```
+
+Kotlin integration shape:
+
+```kotlin
+val claim = WatchOnlyAccountClaim(
+    version = bitkitWatchOnlyAccountClaimVersion(),
+    accountIndex = accountIndex,
+    addressType = WatchOnlyAccountAddressType.NATIVE_SEGWIT,
+    accountXpub = accountXpub,
+)
+bootstrap.approveAuthWithCompanionClaim(
+    authUrl = authUrl,
+    expectedCapabilities = bitkitWatchOnlyAccountCapability(),
+    localSecretKey = identityKey,
+    claim = claim,
+)
+```
 
 ### Profiles and Contacts
 
