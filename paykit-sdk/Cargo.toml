@@ -19,7 +19,6 @@ async-trait = "0.1"
 base64 = "0.22"
 bip39 = { version = "2.2.0", features = ["zeroize"] }
 blake3 = "1"
-bs58 = { version = "0.5", features = ["check"] }
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "serde", "std"] }
 crypto_secretbox = "0.1"
 hex = "0.4"

@@ -53,48 +53,18 @@ fn test_required_capabilities_validate_config() {
     );
 }
 
-#[test]
-fn test_watch_only_account_companion_constants_and_claim_conversion() {
-    assert_eq!(
-        bitkit_watch_only_account_claim_type(),
-        "watch-only-account-v1"
-    );
-    assert_eq!(bitkit_watch_only_account_claim_version(), 1);
-    assert_eq!(
-        bitkit_watch_only_account_capability(),
-        "/pub/paykit/v0/bitkit/server/:rw"
-    );
-
-    let claim = FfiWatchOnlyAccountClaim {
-        version: bitkit_watch_only_account_claim_version(),
-        account_index: 7,
-        address_type: FfiWatchOnlyAccountAddressType::NativeSegwit,
-        account_xpub: "xpub-example".into(),
-    };
-    let sdk_claim: paykit_sdk::WatchOnlyAccountClaim = claim.into();
-
-    assert_eq!(sdk_claim.version, 1);
-    assert_eq!(sdk_claim.account_index, 7);
-    assert_eq!(
-        sdk_claim.address_type,
-        paykit_sdk::WatchOnlyAccountAddressType::NativeSegwit
-    );
-    assert_eq!(sdk_claim.account_xpub, "xpub-example");
-}
-
 #[tokio::test]
-async fn test_watch_only_account_companion_reports_invalid_auth_url() {
+async fn test_pubky_auth_companion_claim_reports_invalid_auth_url() {
     let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
     let error = bootstrap
         .approve_auth_with_companion_claim(
             "https://example.com/not-pubky-auth".into(),
-            bitkit_watch_only_account_capability(),
+            "/pub/example/account/:rw".into(),
             Arc::new(FfiPubkyLocalSecretKey::new(vec![7; 32])),
-            FfiWatchOnlyAccountClaim {
-                version: bitkit_watch_only_account_claim_version(),
-                account_index: 0,
-                address_type: FfiWatchOnlyAccountAddressType::NativeSegwit,
-                account_xpub: "xpub-example".into(),
+            FfiPubkyAuthCompanionClaim {
+                query_parameter: "x-example-claim".into(),
+                claim_type: "account-export-v1".into(),
+                unsigned_payload: vec![1, 2, 3],
             },
         )
         .await
@@ -102,7 +72,30 @@ async fn test_watch_only_account_companion_reports_invalid_auth_url() {
 
     assert!(matches!(
         error,
-        FfiWatchOnlyAccountClaimApprovalError::InvalidAuthUrl { .. }
+        FfiPubkyAuthCompanionClaimApprovalError::InvalidAuthUrl { .. }
+    ));
+}
+
+#[tokio::test]
+async fn test_pubky_auth_companion_claim_reports_invalid_claim() {
+    let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
+    let error = bootstrap
+        .approve_auth_with_companion_claim(
+            "pubkyauth://signin".into(),
+            "/pub/example/account/:rw".into(),
+            Arc::new(FfiPubkyLocalSecretKey::new(vec![7; 32])),
+            FfiPubkyAuthCompanionClaim {
+                query_parameter: "x-example|claim".into(),
+                claim_type: "account-export-v1".into(),
+                unsigned_payload: vec![],
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FfiPubkyAuthCompanionClaimApprovalError::InvalidClaim { .. }
     ));
 }
 

@@ -2,12 +2,11 @@ use std::{fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    PaykitReceiverPath, PaykitSdkError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
-    PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
-    PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionProvider,
-    WatchOnlyAccountAddressType, WatchOnlyAccountClaim, WatchOnlyAccountClaimApprovalError,
-    BITKIT_WATCH_ONLY_ACCOUNT_CAPABILITY, BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_TYPE,
-    BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_VERSION,
+    PaykitReceiverPath, PaykitSdkError, PubkyAuthCompanionClaim,
+    PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest,
+    PubkyAuthRequestKind, PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey,
+    PubkySessionAccess, PubkySessionBootstrap, PubkySessionBootstrapResult,
+    PubkySessionProvider,
 };
 use pubky::{Pubky, PubkyHttpClient, PubkySession};
 use tokio::sync::Mutex as AsyncMutex;
@@ -133,38 +132,29 @@ pub struct FfiPubkyAuthDetails {
     pub homeserver_public_key: Option<String>,
 }
 
-/// Bitcoin address type represented by a watch-only account claim.
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FfiWatchOnlyAccountAddressType {
-    /// BIP84 native SegWit account (`P2WPKH`).
-    NativeSegwit,
-}
-
-/// Structured input for a Bitkit watch-only account companion claim.
+/// Application-defined input for a Pubky Auth companion claim.
 ///
-/// Paykit validates and decodes the xpub, signs the binary claim with the
-/// approving Pubky identity, encrypts it with the auth request secret, and
-/// delivers it before approving normal Pubky Auth.
+/// The application serializes its protocol-specific unsigned payload. Paykit
+/// validates the identifiers, creates the request-bound identity signature,
+/// encrypts the signed payload, and delivers it before normal Pubky Auth.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct FfiWatchOnlyAccountClaim {
-    /// Companion claim protocol version.
-    pub version: u8,
-    /// BIP account index represented by the account xpub.
-    pub account_index: u32,
-    /// Address type used to derive addresses from the account xpub.
-    pub address_type: FfiWatchOnlyAccountAddressType,
-    /// Base58Check-encoded 78-byte serialized account extended public key.
-    pub account_xpub: String,
+pub struct FfiPubkyAuthCompanionClaim {
+    /// Auth URL query parameter that announces the claim.
+    pub query_parameter: String,
+    /// Protocol-specific claim type used for URL validation and relay derivation.
+    pub claim_type: String,
+    /// Protocol-specific unsigned binary payload.
+    pub unsigned_payload: Vec<u8>,
 }
 
 /// Failure returned while approving Pubky Auth with a companion claim.
 #[derive(uniffi::Error, Clone, Debug, thiserror::Error)]
-pub enum FfiWatchOnlyAccountClaimApprovalError {
+pub enum FfiPubkyAuthCompanionClaimApprovalError {
     /// The URL, claim type, secret, relay, or capability request is invalid.
     #[error("invalid Pubky Auth companion request: {reason}")]
     InvalidAuthUrl { reason: String },
-    /// The structured watch-only account claim is invalid.
-    #[error("invalid watch-only account claim: {reason}")]
+    /// The companion claim description is invalid.
+    #[error("invalid Pubky Auth companion claim: {reason}")]
     InvalidClaim { reason: String },
     /// The supplied local Pubky identity key is invalid.
     #[error("invalid local Pubky secret key: {reason}")]
@@ -394,7 +384,7 @@ impl FfiPubkySessionBootstrap {
             .map_err(Into::into)
     }
 
-    /// Deliver a signed Bitkit watch-only account claim, then approve Pubky Auth.
+    /// Deliver a signed application-defined claim, then approve Pubky Auth.
     ///
     /// This high-level operation owns validation, request-bound signing,
     /// channel derivation, encryption, relay delivery, and approval ordering.
@@ -403,20 +393,21 @@ impl FfiPubkySessionBootstrap {
         auth_url: String,
         expected_capabilities: String,
         local_secret_key: Arc<FfiPubkyLocalSecretKey>,
-        claim: FfiWatchOnlyAccountClaim,
-    ) -> Result<(), FfiWatchOnlyAccountClaimApprovalError> {
+        claim: FfiPubkyAuthCompanionClaim,
+    ) -> Result<(), FfiPubkyAuthCompanionClaimApprovalError> {
         let secret = local_secret_from_bytes(local_secret_key.export_bytes()).map_err(|err| {
-            FfiWatchOnlyAccountClaimApprovalError::InvalidLocalSecretKey {
+            FfiPubkyAuthCompanionClaimApprovalError::InvalidLocalSecretKey {
                 reason: err.to_string(),
             }
         })?;
+        let claim = PubkyAuthCompanionClaim::new(
+            claim.query_parameter,
+            claim.claim_type,
+            claim.unsigned_payload,
+        )
+        .map_err(FfiPubkyAuthCompanionClaimApprovalError::from)?;
         self.inner
-            .approve_auth_with_companion_claim(
-                &auth_url,
-                &expected_capabilities,
-                &secret,
-                &claim.into(),
-            )
+            .approve_auth_with_companion_claim(&auth_url, &expected_capabilities, &secret, &claim)
             .await
             .map_err(Into::into)
     }
@@ -517,24 +508,6 @@ pub fn parse_pubky_auth_url(auth_url: String) -> Result<FfiPubkyAuthDetails, Pay
         .map_err(Into::into)
 }
 
-/// Return the query value identifying the Bitkit watch-only account claim.
-#[uniffi::export]
-pub fn bitkit_watch_only_account_claim_type() -> String {
-    BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_TYPE.into()
-}
-
-/// Return the capability required by Bitkit watch-only account setup.
-#[uniffi::export]
-pub fn bitkit_watch_only_account_capability() -> String {
-    BITKIT_WATCH_ONLY_ACCOUNT_CAPABILITY.into()
-}
-
-/// Return the current Bitkit watch-only account companion claim version.
-#[uniffi::export]
-pub fn bitkit_watch_only_account_claim_version() -> u8 {
-    BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_VERSION
-}
-
 /// Resolve a Pubky URI into the transport URL used by Pubky storage.
 #[uniffi::export]
 pub fn resolve_pubky_url(uri: String) -> Result<String, PaykitFfiError> {
@@ -630,41 +603,22 @@ impl From<PubkyAuthDetails> for FfiPubkyAuthDetails {
     }
 }
 
-impl From<FfiWatchOnlyAccountAddressType> for WatchOnlyAccountAddressType {
-    fn from(value: FfiWatchOnlyAccountAddressType) -> Self {
+impl From<PubkyAuthCompanionClaimApprovalError> for FfiPubkyAuthCompanionClaimApprovalError {
+    fn from(value: PubkyAuthCompanionClaimApprovalError) -> Self {
         match value {
-            FfiWatchOnlyAccountAddressType::NativeSegwit => Self::NativeSegwit,
-        }
-    }
-}
-
-impl From<FfiWatchOnlyAccountClaim> for WatchOnlyAccountClaim {
-    fn from(value: FfiWatchOnlyAccountClaim) -> Self {
-        Self::new(
-            value.version,
-            value.account_index,
-            value.address_type.into(),
-            value.account_xpub,
-        )
-    }
-}
-
-impl From<WatchOnlyAccountClaimApprovalError> for FfiWatchOnlyAccountClaimApprovalError {
-    fn from(value: WatchOnlyAccountClaimApprovalError) -> Self {
-        match value {
-            WatchOnlyAccountClaimApprovalError::InvalidAuthUrl { reason } => {
+            PubkyAuthCompanionClaimApprovalError::InvalidAuthUrl { reason } => {
                 Self::InvalidAuthUrl { reason }
             }
-            WatchOnlyAccountClaimApprovalError::InvalidClaim { reason } => {
+            PubkyAuthCompanionClaimApprovalError::InvalidClaim { reason } => {
                 Self::InvalidClaim { reason }
             }
-            WatchOnlyAccountClaimApprovalError::EncryptionFailure { reason } => {
+            PubkyAuthCompanionClaimApprovalError::EncryptionFailure { reason } => {
                 Self::EncryptionFailure { reason }
             }
-            WatchOnlyAccountClaimApprovalError::RelayDeliveryFailure { reason } => {
+            PubkyAuthCompanionClaimApprovalError::RelayDeliveryFailure { reason } => {
                 Self::RelayDeliveryFailure { reason }
             }
-            WatchOnlyAccountClaimApprovalError::AuthorizationFailure { reason } => {
+            PubkyAuthCompanionClaimApprovalError::AuthorizationFailure { reason } => {
                 Self::AuthorizationFailure { reason }
             }
             other => Self::AuthorizationFailure {

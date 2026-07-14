@@ -1,4 +1,4 @@
-//! Bitkit watch-only account companion claims for Pubky Auth approval.
+//! Signed companion claims for Pubky Auth approval.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use crypto_secretbox::{
@@ -12,88 +12,83 @@ use thiserror::Error;
 use url::Url;
 
 use super::{
-    parse_capabilities, validate_auth_url_capabilities, validate_sign_in_or_sign_up_auth_url,
-    PubkySessionBootstrap,
+    validate_auth_url_capabilities, validate_sign_in_or_sign_up_auth_url, PubkySessionBootstrap,
 };
 use crate::PubkyLocalSecretKey;
 
-/// Query value identifying the Bitkit watch-only account companion claim.
-pub const BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_TYPE: &str = "watch-only-account-v1";
-
-/// Exact Pubky capability required by the Bitkit watch-only account setup flow.
-pub const BITKIT_WATCH_ONLY_ACCOUNT_CAPABILITY: &str = "/pub/paykit/v0/bitkit/server/:rw";
-
-/// Binary protocol version for a Bitkit watch-only account companion claim.
-pub const BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_VERSION: u8 = 1;
-
-const BITKIT_CLAIM_QUERY_PARAMETER: &str = "x-bitkit-claim";
-const SIGNATURE_DOMAIN: &[u8] = b"x-bitkit-claim|watch-only-account-v1|";
-const SERIALIZED_ACCOUNT_XPUB_LEN: usize = 78;
 const ED25519_SIGNATURE_LEN: usize = 64;
+const MAX_QUERY_PARAMETER_LEN: usize = 64;
+const MAX_CLAIM_TYPE_LEN: usize = 128;
 
-/// Bitcoin address type represented by a watch-only account claim.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum WatchOnlyAccountAddressType {
-    /// BIP84 native SegWit account (`P2WPKH`).
-    NativeSegwit,
-}
-
-impl WatchOnlyAccountAddressType {
-    const fn wire_code(self) -> u8 {
-        match self {
-            Self::NativeSegwit => 0,
-        }
-    }
-}
-
-/// App-owned account information delivered with a Bitkit Pubky Auth approval.
+/// App-defined data delivered alongside one Pubky Auth approval.
 ///
-/// The SDK validates and Base58Check-decodes `account_xpub`, creates the
-/// request-bound Ed25519 signature, encrypts the resulting binary claim, and
-/// sends it to the companion relay channel. Callers do not handle claim
-/// signatures, nonces, relay channel identifiers, or ciphertext.
+/// The integrating application owns the claim's payload schema and supplies
+/// its unsigned binary representation. Paykit owns request validation,
+/// request-bound identity signing, encryption, relay delivery, and approval
+/// ordering. It does not expose the underlying cryptographic primitives.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WatchOnlyAccountClaim {
-    /// Companion claim protocol version. Version 1 is currently supported.
-    pub version: u8,
-    /// BIP account index represented by the account xpub.
-    pub account_index: u32,
-    /// Address type used to derive addresses from the account xpub.
-    pub address_type: WatchOnlyAccountAddressType,
-    /// Base58Check-encoded 78-byte serialized account extended public key.
-    pub account_xpub: String,
+pub struct PubkyAuthCompanionClaim {
+    query_parameter: String,
+    claim_type: String,
+    unsigned_payload: Vec<u8>,
 }
 
-impl WatchOnlyAccountClaim {
-    /// Create structured watch-only account claim input.
+impl PubkyAuthCompanionClaim {
+    /// Create a validated companion claim description.
+    ///
+    /// `query_parameter` and `claim_type` are protocol identifiers supplied by
+    /// the integrating application. They may contain ASCII letters, digits,
+    /// hyphens, underscores, and dots. `unsigned_payload` is app-defined and is
+    /// not interpreted by Paykit.
     pub fn new(
-        version: u8,
-        account_index: u32,
-        address_type: WatchOnlyAccountAddressType,
-        account_xpub: impl Into<String>,
-    ) -> Self {
-        Self {
-            version,
-            account_index,
-            address_type,
-            account_xpub: account_xpub.into(),
-        }
+        query_parameter: impl Into<String>,
+        claim_type: impl Into<String>,
+        unsigned_payload: Vec<u8>,
+    ) -> Result<Self, PubkyAuthCompanionClaimApprovalError> {
+        let query_parameter = query_parameter.into();
+        validate_protocol_identifier(
+            &query_parameter,
+            "companion query parameter",
+            MAX_QUERY_PARAMETER_LEN,
+        )?;
+        let claim_type = claim_type.into();
+        validate_protocol_identifier(&claim_type, "companion claim type", MAX_CLAIM_TYPE_LEN)?;
+
+        Ok(Self {
+            query_parameter,
+            claim_type,
+            unsigned_payload,
+        })
+    }
+
+    /// Return the auth URL query parameter that announces this claim.
+    pub fn query_parameter(&self) -> &str {
+        &self.query_parameter
+    }
+
+    /// Return the claim type used for URL validation and relay derivation.
+    pub fn claim_type(&self) -> &str {
+        &self.claim_type
+    }
+
+    /// Return the app-defined bytes signed by the approving identity.
+    pub fn unsigned_payload(&self) -> &[u8] {
+        &self.unsigned_payload
     }
 }
 
 /// Failure returned while approving Pubky Auth with a companion claim.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum WatchOnlyAccountClaimApprovalError {
-    /// The URL, claim type, secret, relay, or capability request is invalid.
+pub enum PubkyAuthCompanionClaimApprovalError {
+    /// The URL, claim identifier, secret, relay, or capability request is invalid.
     #[error("invalid Pubky Auth companion request: {reason}")]
     InvalidAuthUrl {
         /// Redacted validation detail.
         reason: String,
     },
-    /// The structured watch-only account claim is invalid.
-    #[error("invalid watch-only account claim: {reason}")]
+    /// The companion claim description is invalid.
+    #[error("invalid Pubky Auth companion claim: {reason}")]
     InvalidClaim {
         /// Claim validation detail.
         reason: String,
@@ -121,37 +116,35 @@ pub enum WatchOnlyAccountClaimApprovalError {
 struct CompanionAuthRequest {
     relay: Url,
     secret: [u8; 32],
-    secret_text: String,
 }
 
 impl PubkySessionBootstrap {
-    /// Deliver a signed Bitkit watch-only account claim, then approve Pubky Auth.
+    /// Deliver a signed application-defined claim, then approve Pubky Auth.
     ///
-    /// The URL must contain exactly one
-    /// `x-bitkit-claim=watch-only-account-v1` parameter and request exactly
-    /// [`BITKIT_WATCH_ONLY_ACCOUNT_CAPABILITY`]. `expected_capabilities` must
-    /// independently name that same capability.
+    /// The URL must contain exactly one query parameter matching the claim's
+    /// `query_parameter` and `claim_type`. Its requested capabilities must
+    /// exactly match `expected_capabilities`.
     ///
-    /// The claim is delivered before the normal `AuthToken`. A relay delivery
-    /// or encryption failure therefore leaves the requesting server
-    /// unauthorized. Pubky client timeout configuration remains the caller's
-    /// responsibility.
+    /// The claim is delivered before the normal `AuthToken`. A claim
+    /// validation, encryption, or relay delivery failure therefore leaves the
+    /// requesting server unauthorized. Pubky client timeout configuration
+    /// remains the caller's responsibility.
     pub async fn approve_auth_with_companion_claim(
         &self,
         auth_url: &str,
         expected_capabilities: &str,
         secret_key: &PubkyLocalSecretKey,
-        claim: &WatchOnlyAccountClaim,
-    ) -> Result<(), WatchOnlyAccountClaimApprovalError> {
-        let request = parse_companion_auth_request(auth_url, expected_capabilities)?;
-        let signed_claim = encode_signed_claim(claim, &request.secret_text, secret_key)?;
+        claim: &PubkyAuthCompanionClaim,
+    ) -> Result<(), PubkyAuthCompanionClaimApprovalError> {
+        let request = parse_companion_auth_request(auth_url, expected_capabilities, claim)?;
+        let signed_claim = encode_signed_claim(claim, &request.secret, secret_key);
         let encrypted_claim = encrypt_claim(&signed_claim, &request.secret)?;
-        self.deliver_companion_claim(&request, &encrypted_claim)
+        self.deliver_companion_claim(&request, claim.claim_type(), &encrypted_claim)
             .await?;
         self.approve_auth(auth_url, expected_capabilities, secret_key)
             .await
             .map_err(
-                |err| WatchOnlyAccountClaimApprovalError::AuthorizationFailure {
+                |err| PubkyAuthCompanionClaimApprovalError::AuthorizationFailure {
                     reason: err.to_string(),
                 },
             )
@@ -160,18 +153,19 @@ impl PubkySessionBootstrap {
     async fn deliver_companion_claim(
         &self,
         request: &CompanionAuthRequest,
+        claim_type: &str,
         encrypted_claim: &[u8],
-    ) -> Result<(), WatchOnlyAccountClaimApprovalError> {
+    ) -> Result<(), PubkyAuthCompanionClaimApprovalError> {
         let channel = HttpRelayInboxChannel::new(
             request.relay.clone(),
-            derive_companion_channel_id(&request.secret),
+            derive_companion_channel_id(claim_type, &request.secret),
         )
         .map_err(invalid_auth_url)?;
         channel
             .produce(self.pubky.client(), encrypted_claim)
             .await
             .map_err(
-                |err| WatchOnlyAccountClaimApprovalError::RelayDeliveryFailure {
+                |err| PubkyAuthCompanionClaimApprovalError::RelayDeliveryFailure {
                     reason: err.to_string(),
                 },
             )
@@ -181,18 +175,20 @@ impl PubkySessionBootstrap {
 fn parse_companion_auth_request(
     auth_url: &str,
     expected_capabilities: &str,
-) -> Result<CompanionAuthRequest, WatchOnlyAccountClaimApprovalError> {
+    claim: &PubkyAuthCompanionClaim,
+) -> Result<CompanionAuthRequest, PubkyAuthCompanionClaimApprovalError> {
     let url = Url::parse(auth_url).map_err(invalid_auth_url)?;
     if url.scheme() != "pubkyauth" {
         return Err(invalid_auth_url("URL scheme must be pubkyauth"));
     }
     validate_sign_in_or_sign_up_auth_url(auth_url).map_err(invalid_auth_url)?;
-    validate_companion_capabilities(auth_url, expected_capabilities)?;
+    validate_auth_url_capabilities(auth_url, expected_capabilities).map_err(invalid_auth_url)?;
 
-    let claim_type = unique_query_value(&url, BITKIT_CLAIM_QUERY_PARAMETER)?;
-    if claim_type != BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_TYPE {
+    let claim_type = unique_query_value(&url, claim.query_parameter())?;
+    if claim_type != claim.claim_type() {
         return Err(invalid_auth_url(format!(
-            "unsupported {BITKIT_CLAIM_QUERY_PARAMETER} value"
+            "{} query parameter does not match the supplied claim type",
+            claim.query_parameter()
         )));
     }
 
@@ -200,32 +196,37 @@ fn parse_companion_auth_request(
     let secret = decode_auth_secret(&secret_text)?;
     let relay_text = unique_query_value(&url, "relay")?;
     let relay = validate_relay_url(&relay_text)?;
-    Ok(CompanionAuthRequest {
-        relay,
-        secret,
-        secret_text,
-    })
+    Ok(CompanionAuthRequest { relay, secret })
 }
 
-fn validate_companion_capabilities(
-    auth_url: &str,
-    expected_capabilities: &str,
-) -> Result<(), WatchOnlyAccountClaimApprovalError> {
-    let expected = parse_capabilities(expected_capabilities).map_err(invalid_auth_url)?;
-    let required =
-        parse_capabilities(BITKIT_WATCH_ONLY_ACCOUNT_CAPABILITY).map_err(invalid_auth_url)?;
-    if expected != required {
-        return Err(invalid_auth_url(format!(
-            "expected capabilities must be {BITKIT_WATCH_ONLY_ACCOUNT_CAPABILITY}"
+fn validate_protocol_identifier(
+    value: &str,
+    label: &str,
+    max_len: usize,
+) -> Result<(), PubkyAuthCompanionClaimApprovalError> {
+    if value.is_empty() {
+        return Err(invalid_claim(format!("{label} must not be empty")));
+    }
+    if value.len() > max_len {
+        return Err(invalid_claim(format!(
+            "{label} must not exceed {max_len} bytes"
         )));
     }
-    validate_auth_url_capabilities(auth_url, expected_capabilities).map_err(invalid_auth_url)
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(invalid_claim(format!(
+            "{label} may contain only ASCII letters, digits, hyphens, underscores, and dots"
+        )));
+    }
+    Ok(())
 }
 
 fn unique_query_value(
     url: &Url,
-    name: &'static str,
-) -> Result<String, WatchOnlyAccountClaimApprovalError> {
+    name: &str,
+) -> Result<String, PubkyAuthCompanionClaimApprovalError> {
     let mut value = None;
     for pair in url.query().unwrap_or_default().split('&') {
         let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -249,8 +250,8 @@ fn unique_query_value(
 
 fn decode_query_component(
     value: &str,
-    parameter_name: &'static str,
-) -> Result<String, WatchOnlyAccountClaimApprovalError> {
+    parameter_name: &str,
+) -> Result<String, PubkyAuthCompanionClaimApprovalError> {
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -278,7 +279,7 @@ fn decode_query_component(
         })
 }
 
-fn decode_auth_secret(secret_text: &str) -> Result<[u8; 32], WatchOnlyAccountClaimApprovalError> {
+fn decode_auth_secret(secret_text: &str) -> Result<[u8; 32], PubkyAuthCompanionClaimApprovalError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(secret_text)
         .map_err(invalid_auth_url)?;
@@ -287,7 +288,7 @@ fn decode_auth_secret(secret_text: &str) -> Result<[u8; 32], WatchOnlyAccountCla
     })
 }
 
-fn validate_relay_url(value: &str) -> Result<Url, WatchOnlyAccountClaimApprovalError> {
+fn validate_relay_url(value: &str) -> Result<Url, PubkyAuthCompanionClaimApprovalError> {
     let relay = Url::parse(value).map_err(invalid_auth_url)?;
     if !matches!(relay.scheme(), "http" | "https") || relay.host_str().is_none() {
         return Err(invalid_auth_url(
@@ -298,64 +299,30 @@ fn validate_relay_url(value: &str) -> Result<Url, WatchOnlyAccountClaimApprovalE
 }
 
 fn encode_signed_claim(
-    claim: &WatchOnlyAccountClaim,
-    auth_secret_text: &str,
+    claim: &PubkyAuthCompanionClaim,
+    auth_secret: &[u8; 32],
     secret_key: &PubkyLocalSecretKey,
-) -> Result<Vec<u8>, WatchOnlyAccountClaimApprovalError> {
-    let unsigned_claim = encode_unsigned_claim(claim)?;
-    let request_secret_hash = Sha256::digest(auth_secret_text.as_bytes());
+) -> Vec<u8> {
+    let signature_domain = format!("{}|{}|", claim.query_parameter(), claim.claim_type());
+    let request_secret_hash = Sha256::digest(auth_secret);
     let mut signable = Vec::with_capacity(
-        SIGNATURE_DOMAIN.len() + request_secret_hash.len() + unsigned_claim.len(),
+        signature_domain.len() + request_secret_hash.len() + claim.unsigned_payload().len(),
     );
-    signable.extend_from_slice(SIGNATURE_DOMAIN);
+    signable.extend_from_slice(signature_domain.as_bytes());
     signable.extend_from_slice(&request_secret_hash);
-    signable.extend_from_slice(&unsigned_claim);
+    signable.extend_from_slice(claim.unsigned_payload());
 
     let signature = secret_key.keypair().sign(&signable);
-    let mut signed_claim = Vec::with_capacity(unsigned_claim.len() + ED25519_SIGNATURE_LEN);
-    signed_claim.extend_from_slice(&unsigned_claim);
+    let mut signed_claim =
+        Vec::with_capacity(claim.unsigned_payload().len() + ED25519_SIGNATURE_LEN);
+    signed_claim.extend_from_slice(claim.unsigned_payload());
     signed_claim.extend_from_slice(&signature.to_bytes());
-    Ok(signed_claim)
+    signed_claim
 }
 
-fn encode_unsigned_claim(
-    claim: &WatchOnlyAccountClaim,
-) -> Result<Vec<u8>, WatchOnlyAccountClaimApprovalError> {
-    if claim.version != BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_VERSION {
-        return Err(invalid_claim(format!(
-            "unsupported protocol version {}",
-            claim.version
-        )));
-    }
-    if claim.account_index > 0x7fff_ffff {
-        return Err(invalid_claim("BIP account index must be below 2^31"));
-    }
-    let account_xpub = decode_account_xpub(&claim.account_xpub)?;
-    let mut bytes = Vec::with_capacity(1 + 4 + 1 + SERIALIZED_ACCOUNT_XPUB_LEN);
-    bytes.push(claim.version);
-    bytes.extend_from_slice(&claim.account_index.to_be_bytes());
-    bytes.push(claim.address_type.wire_code());
-    bytes.extend_from_slice(&account_xpub);
-    Ok(bytes)
-}
-
-fn decode_account_xpub(value: &str) -> Result<Vec<u8>, WatchOnlyAccountClaimApprovalError> {
-    let bytes = bs58::decode(value)
-        .with_check(None)
-        .into_vec()
-        .map_err(|err| invalid_claim(format!("invalid Base58Check account xpub: {err}")))?;
-    if bytes.len() != SERIALIZED_ACCOUNT_XPUB_LEN {
-        return Err(invalid_claim(format!(
-            "serialized account xpub must be {SERIALIZED_ACCOUNT_XPUB_LEN} bytes, got {}",
-            bytes.len()
-        )));
-    }
-    Ok(bytes)
-}
-
-fn derive_companion_channel_id(secret: &[u8; 32]) -> String {
+fn derive_companion_channel_id(claim_type: &str, secret: &[u8; 32]) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_TYPE.as_bytes());
+    hasher.update(claim_type.as_bytes());
     hasher.update(b"|");
     hasher.update(secret);
     URL_SAFE_NO_PAD.encode(hasher.finalize().as_bytes())
@@ -364,11 +331,11 @@ fn derive_companion_channel_id(secret: &[u8; 32]) -> String {
 fn encrypt_claim(
     plaintext: &[u8],
     secret: &[u8; 32],
-) -> Result<Vec<u8>, WatchOnlyAccountClaimApprovalError> {
+) -> Result<Vec<u8>, PubkyAuthCompanionClaimApprovalError> {
     let cipher = XSalsa20Poly1305::new(secret.into());
     let nonce = XSalsa20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher.encrypt(&nonce, plaintext).map_err(|err| {
-        WatchOnlyAccountClaimApprovalError::EncryptionFailure {
+        PubkyAuthCompanionClaimApprovalError::EncryptionFailure {
             reason: err.to_string(),
         }
     })?;
@@ -378,14 +345,14 @@ fn encrypt_claim(
     Ok(encrypted)
 }
 
-fn invalid_auth_url(reason: impl std::fmt::Display) -> WatchOnlyAccountClaimApprovalError {
-    WatchOnlyAccountClaimApprovalError::InvalidAuthUrl {
+fn invalid_auth_url(reason: impl std::fmt::Display) -> PubkyAuthCompanionClaimApprovalError {
+    PubkyAuthCompanionClaimApprovalError::InvalidAuthUrl {
         reason: reason.to_string(),
     }
 }
 
-fn invalid_claim(reason: impl Into<String>) -> WatchOnlyAccountClaimApprovalError {
-    WatchOnlyAccountClaimApprovalError::InvalidClaim {
+fn invalid_claim(reason: impl Into<String>) -> PubkyAuthCompanionClaimApprovalError {
+    PubkyAuthCompanionClaimApprovalError::InvalidClaim {
         reason: reason.into(),
     }
 }

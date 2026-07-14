@@ -173,9 +173,10 @@ session import, capability-checked auth handoff, and `pubky://` normalization.
 Binding helpers should request the capability scope returned by the active
 `PaykitSdkConfig` and validate completed/imported sessions against that same
 scope.
-For Bitkit watch-only account setup, bindings should expose the structured
-companion claim and the single high-level approval operation. Channel
-derivation, account-xpub decoding, identity signatures, nonces, encryption,
+Bindings should expose a generic companion claim containing an integrator-owned
+query parameter, claim type, and unsigned binary payload, plus one high-level
+approval operation. Application-specific serialization stays in the
+integrating app. Channel derivation, identity signatures, nonces, encryption,
 and relay posting remain inside Rust. Binding errors should preserve distinct
 invalid-request, invalid-claim, encryption, relay-delivery, and normal-auth
 failure cases.

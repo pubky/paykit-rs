@@ -169,34 +169,33 @@ object.
 - `pubkyPublicKeyFromSecret(localSecretKey)` — derive a Pubky public key.
 - `parsePubkyAuthUrl(authUrl)` — inspect a Pubky auth URL.
 - `PubkySessionBootstrap.approveAuthWithCompanionClaim(...)` — sign, encrypt,
-  and relay a structured Bitkit watch-only account claim before approving the
-  normal Pubky Auth token.
-- `WatchOnlyAccountClaim` and `WatchOnlyAccountAddressType` — high-level claim
-  input; no channel, signature, nonce, or secretbox primitives cross FFI.
-- `bitkitWatchOnlyAccountClaimType()`,
-  `bitkitWatchOnlyAccountClaimVersion()`, and
-  `bitkitWatchOnlyAccountCapability()` — companion protocol constants.
+  and relay an application-defined companion claim before approving the normal
+  Pubky Auth token.
+- `PubkyAuthCompanionClaim` — integrator-owned query parameter, claim type, and
+  unsigned payload; no channel, signature, nonce, or secretbox primitives cross
+  FFI.
 - `resolvePubkyUrl(uri)` and `parsePubkyResource(uri)` — Pubky URI helpers.
 
 The companion approval method throws
-`WatchOnlyAccountClaimApprovalError`, whose cases distinguish invalid auth
+`PubkyAuthCompanionClaimApprovalError`, whose cases distinguish invalid auth
 URLs, invalid claims or local keys, encryption failure, relay delivery failure,
 and normal authorization failure. Relay delivery completes before normal Auth
 approval begins, so a relay or encryption failure does not authorize the
-requesting server.
+requesting server. The integrating application owns its payload serialization
+and semantic validation; Paykit owns the common cryptographic transport and
+approval ordering.
 
 Swift integration shape:
 
 ```swift
-let claim = WatchOnlyAccountClaim(
-    version: bitkitWatchOnlyAccountClaimVersion(),
-    accountIndex: accountIndex,
-    addressType: .nativeSegwit,
-    accountXpub: accountXpub
+let claim = PubkyAuthCompanionClaim(
+    queryParameter: "x-bitkit-claim",
+    claimType: "watch-only-account-v1",
+    unsignedPayload: bitkitUnsignedClaim
 )
 try await bootstrap.approveAuthWithCompanionClaim(
     authUrl: authUrl,
-    expectedCapabilities: bitkitWatchOnlyAccountCapability(),
+    expectedCapabilities: "/pub/paykit/v0/bitkit/server/:rw",
     localSecretKey: identityKey,
     claim: claim
 )
@@ -205,15 +204,14 @@ try await bootstrap.approveAuthWithCompanionClaim(
 Kotlin integration shape:
 
 ```kotlin
-val claim = WatchOnlyAccountClaim(
-    version = bitkitWatchOnlyAccountClaimVersion(),
-    accountIndex = accountIndex,
-    addressType = WatchOnlyAccountAddressType.NATIVE_SEGWIT,
-    accountXpub = accountXpub,
+val claim = PubkyAuthCompanionClaim(
+    queryParameter = "x-bitkit-claim",
+    claimType = "watch-only-account-v1",
+    unsignedPayload = bitkitUnsignedClaim,
 )
 bootstrap.approveAuthWithCompanionClaim(
     authUrl = authUrl,
-    expectedCapabilities = bitkitWatchOnlyAccountCapability(),
+    expectedCapabilities = "/pub/paykit/v0/bitkit/server/:rw",
     localSecretKey = identityKey,
     claim = claim,
 )
