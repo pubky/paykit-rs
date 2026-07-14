@@ -33,7 +33,7 @@ Implemented in this Rust SDK crate:
 - SDK runtime facade and atomic storage adapter contract
 - Pubky session bootstrap helpers, identity capability tracking, and sign-out
   handling
-- request-bound Bitkit watch-only account companion claims for Pubky Auth
+- request-bound application-defined companion claims for Pubky Auth
 - public Payment Endpoint sync
 - Encrypted Link setup, private stream intake, outbound retries, and recovery
   marker workflows
@@ -112,11 +112,11 @@ Common workflows:
   secrets and auth URLs must be treated as secret material, and session export
   is an explicit call on the bootstrap result
 - use `PubkySessionBootstrap::approve_auth_with_companion_claim` for a
-  `pubkyauth://` request containing
-  `x-bitkit-claim=watch-only-account-v1`; the helper validates the fixed
-  `/pub/paykit/v0/bitkit/server/:rw` scope, signs and encrypts the structured
-  account claim, delivers it to the derived relay channel, and only then
-  approves normal Pubky Auth
+  `pubkyauth://` request carrying an application-defined companion claim; the
+  integrator supplies the query parameter, claim type, exact expected
+  capabilities, and serialized unsigned payload, while the helper signs and
+  encrypts that payload, delivers it to the derived relay channel, and only
+  then approves normal Pubky Auth
 - when deriving a Pubky key from identity seed material, use the Pubky
   Core/Ring-compatible BIP39 seed or mnemonic helpers; app/runtime separation
   should come from receiver folders, Noise keys, and SDK state, not a different

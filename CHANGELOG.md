@@ -10,11 +10,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [0.1.0-rc34] - 2026-07-14
 
 ### Added
-- Added high-level Bitkit watch-only account companion claim approval for
+- Added high-level application-defined companion claim approval for
   `pubkyauth://` requests, including request-bound identity signatures,
   claim-specific relay delivery, and fail-closed AuthToken ordering.
-- Exposed structured watch-only account claims and distinct approval errors in
-  the generated Swift and Kotlin bindings.
+- Exposed generic companion claim inputs and distinct approval errors in the
+  generated Swift and Kotlin bindings, leaving application payload schemas and
+  capability choices to SDK integrators.
 
 ## [0.1.0-rc32] - 2026-07-07
 

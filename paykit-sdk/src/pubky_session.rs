@@ -2,11 +2,7 @@
 
 mod companion_claim;
 
-pub use companion_claim::{
-    WatchOnlyAccountAddressType, WatchOnlyAccountClaim, WatchOnlyAccountClaimApprovalError,
-    BITKIT_WATCH_ONLY_ACCOUNT_CAPABILITY, BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_TYPE,
-    BITKIT_WATCH_ONLY_ACCOUNT_CLAIM_VERSION,
-};
+pub use companion_claim::{PubkyAuthCompanionClaim, PubkyAuthCompanionClaimApprovalError};
 
 use std::{fmt, str::FromStr};
 

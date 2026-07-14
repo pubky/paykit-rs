@@ -312,14 +312,15 @@ stored or displayed only for their intended short-lived flow.
 Bindings should wrap these helpers so mobile apps do not need a second Pubky
 SDK dependency for ordinary Paykit onboarding.
 
-Bitkit watch-only account setup uses the SDK's high-level companion approval
-operation. It accepts structured account metadata and a `pubkyauth://` request
-carrying `x-bitkit-claim=watch-only-account-v1`. The SDK owns request
+Applications can attach an app-defined companion claim to a Pubky Auth
+approval. The integrator supplies the claim query parameter, claim type,
+expected capability, and serialized unsigned payload. The SDK owns request
 validation, request-bound identity signing, companion channel derivation,
 XSalsa20-Poly1305 transport, relay delivery, and normal authorization. The
 companion message must be accepted by the relay before normal Pubky Auth is
-approved. The protocol and binary layout are specified in
-[`bitkit-watch-only-account-claim.md`](bitkit-watch-only-account-claim.md).
+approved. Bitkit's watch-only account claim is one application of this generic
+operation. The shared protocol is specified in
+[`pubky-auth-companion-claims.md`](pubky-auth-companion-claims.md).
 
 ### Paykit Profile And Contact Namespace
 
