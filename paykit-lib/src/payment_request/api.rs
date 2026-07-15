@@ -166,14 +166,34 @@ mod tests {
     // future kind from reaching a panic, so this exercises parse_event directly.
     #[test]
     fn test_parse_event_non_request_kind_rejected() {
+        // Sentinel plaintext standing in for a decrypted private payload. The
+        // non-request arm must reject the kind without ever copying `raw` into
+        // the error context; `build_event_message` renders that context via
+        // `PaykitError::to_string`, so a leak here would surface the plaintext.
+        let raw = "{\"secret\":\"SENTINEL_DECRYPTED_PLAINTEXT\"}";
         for kind in [
             PrivateMessageKind::PrivatePaymentList,
             PrivateMessageKind::ReceiptAccess,
         ] {
-            let result = parse_event(kind, "{}");
+            let result = parse_event(kind, raw);
+            let Err(PaykitError::InvalidData { context, source }) = result else {
+                panic!("expected InvalidData for non-request kind {kind}, got {result:?}");
+            };
+            // The non-request arm sets no source.
             assert!(
-                matches!(result, Err(PaykitError::InvalidData { .. })),
-                "expected InvalidData for non-request kind {kind}",
+                source.is_none(),
+                "expected no source for non-request kind {kind}",
+            );
+            // The decrypted plaintext must never leak into the error context.
+            assert!(
+                !context.contains("SENTINEL_DECRYPTED_PLAINTEXT"),
+                "decrypted raw plaintext leaked into error context for kind {kind}: {context}",
+            );
+            // The context is the exact kind-only string the arm produces.
+            assert_eq!(
+                context,
+                format!("unexpected private message kind for a Payment Request event: {kind}"),
+                "unexpected context for non-request kind {kind}",
             );
         }
     }
