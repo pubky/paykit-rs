@@ -3,7 +3,7 @@ use std::fmt;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::{aead::OsRng, KeyInit, XChaCha20Poly1305};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     validation::validate_uuid_v4, BillingPeriod, EventId, PaykitError, PaymentAmount,
@@ -155,18 +155,29 @@ impl ReceiptDecryptionKey {
 
     /// Validate and construct a Receipt Decryption Key from base64url text.
     pub fn new(key: impl Into<String>) -> Result<Self> {
-        let key = key.into();
-        let mut bytes = URL_SAFE_NO_PAD.decode(&key).map_err(|err| {
-            PaykitError::Validation(format!("Receipt Decryption Key must be base64url: {err}"))
-        })?;
-        let len = bytes.len();
-        // Scrub the decoded key material used only to validate the length.
-        bytes.zeroize();
-        if len != 32 {
+        // AUDITOR NOTE (defense-in-depth for candidate key material): both the
+        // input candidate `String` and the decode buffer are scrubbed on every
+        // return path, not just on success. `Self` is only constructed on
+        // success, so this type's Drop-based zeroization does not cover the
+        // error paths; we scrub `key` explicitly before each early return. The
+        // decoded bytes live in a `Zeroizing` buffer, so any partial prefix a
+        // failing `decode_vec` writes before erroring is scrubbed on drop.
+        let mut key = key.into();
+        let mut decoded: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+        if let Err(err) = URL_SAFE_NO_PAD.decode_vec(&key, &mut decoded) {
+            let message = format!("Receipt Decryption Key must be base64url: {err}");
+            key.zeroize();
+            return Err(PaykitError::Validation(message));
+        }
+        if decoded.len() != 32 {
+            let len = decoded.len();
+            key.zeroize();
             return Err(PaykitError::Validation(format!(
                 "Receipt Decryption Key must decode to 32 bytes, got {len}"
             )));
         }
+        // Move the validated base64url form into the type; its Drop zeroizes it
+        // later. `decoded` scrubs its 32 bytes on drop at end of scope.
         Ok(Self(key))
     }
 
