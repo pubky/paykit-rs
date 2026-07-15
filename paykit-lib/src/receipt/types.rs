@@ -3,6 +3,7 @@ use std::fmt;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::{aead::OsRng, KeyInit, XChaCha20Poly1305};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     validation::validate_uuid_v4, BillingPeriod, EventId, PaykitError, PaymentAmount,
@@ -134,28 +135,49 @@ impl fmt::Debug for Receipt {
 /// The key material is intentionally redacted from [`Debug`](std::fmt::Debug)
 /// and [`Display`](std::fmt::Display). Use [`as_str`](Self::as_str) only when
 /// serializing Receipt Access or storing the key securely.
+///
+/// The in-memory key bytes are zeroized on drop as defense-in-depth. This is
+/// not a complete scrub: the key is serialized verbatim into the Receipt Access
+/// wire message, so copies necessarily exist outside this type.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReceiptDecryptionKey(String);
 
 impl ReceiptDecryptionKey {
     /// Generate a fresh 256-bit Receipt Decryption Key encoded as base64url.
     pub fn generate() -> Self {
-        let key = XChaCha20Poly1305::generate_key(&mut OsRng);
-        Self(URL_SAFE_NO_PAD.encode(key))
+        let mut key = XChaCha20Poly1305::generate_key(&mut OsRng);
+        let encoded = URL_SAFE_NO_PAD.encode(key.as_slice());
+        // Scrub the raw key bytes from the transient buffer; the base64url form
+        // is the only surviving copy, guarded by this type's Drop impl.
+        key.as_mut_slice().zeroize();
+        Self(encoded)
     }
 
     /// Validate and construct a Receipt Decryption Key from base64url text.
     pub fn new(key: impl Into<String>) -> Result<Self> {
-        let key = key.into();
-        let bytes = URL_SAFE_NO_PAD.decode(&key).map_err(|err| {
-            PaykitError::Validation(format!("Receipt Decryption Key must be base64url: {err}"))
-        })?;
-        if bytes.len() != 32 {
+        // AUDITOR NOTE (defense-in-depth for candidate key material): both the
+        // input candidate `String` and the decode buffer are scrubbed on every
+        // return path, not just on success. `Self` is only constructed on
+        // success, so this type's Drop-based zeroization does not cover the
+        // error paths; we scrub `key` explicitly before each early return. The
+        // decoded bytes live in a `Zeroizing` buffer, so any partial prefix a
+        // failing `decode_vec` writes before erroring is scrubbed on drop.
+        let mut key = key.into();
+        let mut decoded: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+        if let Err(err) = URL_SAFE_NO_PAD.decode_vec(&key, &mut decoded) {
+            let message = format!("Receipt Decryption Key must be base64url: {err}");
+            key.zeroize();
+            return Err(PaykitError::Validation(message));
+        }
+        if decoded.len() != 32 {
+            let len = decoded.len();
+            key.zeroize();
             return Err(PaykitError::Validation(format!(
-                "Receipt Decryption Key must decode to 32 bytes, got {}",
-                bytes.len()
+                "Receipt Decryption Key must decode to 32 bytes, got {len}"
             )));
         }
+        // Move the validated base64url form into the type; its Drop zeroizes it
+        // later. `decoded` scrubs its 32 bytes on drop at end of scope.
         Ok(Self(key))
     }
 
@@ -167,21 +189,23 @@ impl ReceiptDecryptionKey {
     }
 
     pub(super) fn bytes(&self) -> Result<[u8; 32]> {
-        let bytes = URL_SAFE_NO_PAD
-            .decode(&self.0)
-            .map_err(|err| PaykitError::InvalidData {
-                context: format!("Receipt Decryption Key is not valid base64url: {err}"),
-                source: Some(err.into()),
-            })?;
-        bytes
-            .try_into()
-            .map_err(|bytes: Vec<u8>| PaykitError::InvalidData {
-                context: format!(
-                    "Receipt Decryption Key must decode to 32 bytes, got {}",
-                    bytes.len()
-                ),
+        let mut decoded =
+            URL_SAFE_NO_PAD
+                .decode(&self.0)
+                .map_err(|err| PaykitError::InvalidData {
+                    context: format!("Receipt Decryption Key is not valid base64url: {err}"),
+                    source: Some(err.into()),
+                })?;
+        let len = decoded.len();
+        let key_bytes =
+            <[u8; 32]>::try_from(decoded.as_slice()).map_err(|_| PaykitError::InvalidData {
+                context: format!("Receipt Decryption Key must decode to 32 bytes, got {len}"),
                 source: None,
-            })
+            });
+        // Scrub the transient decoded buffer; the returned array is the caller's
+        // responsibility and is scrubbed after cipher construction in crypto.rs.
+        decoded.zeroize();
+        key_bytes
     }
 }
 
@@ -200,6 +224,18 @@ impl std::fmt::Debug for ReceiptDecryptionKey {
 impl std::fmt::Display for ReceiptDecryptionKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("[redacted Receipt Decryption Key]")
+    }
+}
+
+// AUDITOR NOTE (defense-in-depth, not a complete scrub): the Receipt Decryption
+// Key is serialized verbatim into the Receipt Access wire JSON (see
+// `receipt/wire.rs`), so copies of this secret necessarily exist outside this
+// type (network buffers, serialized messages, homeserver storage). This Drop
+// only clears the in-memory base64url `String` owned here; clones each zeroize
+// independently. It does not, and cannot, erase the key's full footprint.
+impl Drop for ReceiptDecryptionKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -454,5 +490,48 @@ mod tests {
             assert!(!debug.contains(access.key.as_str()));
             assert!(!debug.contains(&access.location));
         }
+    }
+
+    #[test]
+    fn test_receipt_decryption_key_new_rejects_non_32_byte_material() {
+        // Scrubbing the decoded buffer must not disturb length validation.
+        let short = URL_SAFE_NO_PAD.encode([7u8; 16]);
+        assert!(matches!(
+            ReceiptDecryptionKey::new(short).unwrap_err(),
+            PaykitError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn test_receipt_decryption_key_new_rejects_non_base64url() {
+        assert!(matches!(
+            ReceiptDecryptionKey::new("not valid base64!!").unwrap_err(),
+            PaykitError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn test_receipt_decryption_key_bytes_roundtrip() {
+        // Re-encoding the decoded bytes must reproduce the stored form, proving
+        // the transient-buffer scrub does not corrupt the key.
+        let key = ReceiptDecryptionKey::generate();
+        let bytes = key.bytes().unwrap();
+        assert_eq!(URL_SAFE_NO_PAD.encode(bytes), key.as_str());
+    }
+
+    #[test]
+    fn test_receipt_decryption_key_clone_survives_dropped_original() {
+        // Clones own independent heap buffers, so the original's Drop-time
+        // zeroize must not affect a surviving clone.
+        let expected;
+        let clone;
+        {
+            let original = ReceiptDecryptionKey::generate();
+            expected = original.as_str().to_string();
+            clone = original.clone();
+            // `original` is dropped (and zeroized) at the end of this scope.
+        }
+        assert_eq!(clone.as_str(), expected);
+        assert_eq!(clone.bytes().unwrap().len(), 32);
     }
 }
