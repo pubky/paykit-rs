@@ -61,17 +61,6 @@ impl PrivateMessageKind {
             _ => None,
         }
     }
-
-    pub(crate) fn is_payment_request_event(self) -> bool {
-        matches!(
-            self,
-            Self::PaymentRequest
-                | Self::PaymentRequestAcceptance
-                | Self::PaymentRequestRejection
-                | Self::PaymentRequestCancellation
-                | Self::PaymentProof
-        )
-    }
 }
 
 impl std::fmt::Display for PrivateMessageKind {
