@@ -27,5 +27,6 @@ tracing = "0.1.44"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+proptest = "1"
 pubky-testnet = { version = "0.8.0", features = ["embedded-postgres"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
