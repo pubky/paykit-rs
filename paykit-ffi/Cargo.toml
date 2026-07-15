@@ -15,10 +15,6 @@ path = "src/lib.rs"
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
 
-[features]
-default = ["dev-auth"]
-dev-auth = []
-
 [dependencies]
 paykit-lib = { path = "../paykit-lib" }
 paykit-sdk = { path = "../paykit-sdk" }
