@@ -143,8 +143,8 @@ fn test_ffi_sdk_round_trip_recovers_original_via_downcast() {
 fn test_source_chain_is_not_leaked_into_context() {
     // The `context` field crosses the FFI boundary verbatim into the generated
     // Kotlin/Swift exception message, so the raw anyhow cause chain must NOT be folded
-    // into it. Only the redacted outer label survives; the underlying cause is routed
-    // to `tracing::debug!` instead (developer opt-in), never the user-facing message.
+    // into it. Only the redacted outer label survives; the underlying cause is dropped
+    // entirely (never logged to any subscriber), never reaching the user-facing message.
     let source = anyhow::anyhow!("disk offline").context("open state file");
     let sdk = PaykitSdkError::Storage {
         context: "load state blob".into(),

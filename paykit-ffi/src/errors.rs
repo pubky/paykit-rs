@@ -35,17 +35,17 @@ impl From<PaykitSdkError> for PaykitFfiError {
             PaykitSdkError::Storage { context, source } => callback_ffi_error(source.as_ref())
                 .unwrap_or_else(|| Self::Storage {
                     code: "storage_error".into(),
-                    context: format_context(context, source),
+                    context: format_context(context),
                 }),
             PaykitSdkError::Identity { context, source } => callback_ffi_error(source.as_ref())
                 .unwrap_or_else(|| Self::Identity {
                     code: "identity_error".into(),
-                    context: format_context(context, source),
+                    context: format_context(context),
                 }),
             PaykitSdkError::Transport { context, source } => callback_ffi_error(source.as_ref())
                 .unwrap_or_else(|| Self::Transport {
                     code: "transport_error".into(),
-                    context: format_context(context, source),
+                    context: format_context(context),
                 }),
             PaykitSdkError::NotFound(context) => Self::NotFound {
                 code: "not_found".into(),
@@ -62,7 +62,7 @@ impl From<PaykitSdkError> for PaykitFfiError {
             PaykitSdkError::PaymentAdapter { context, source } => {
                 callback_ffi_error(source.as_ref()).unwrap_or_else(|| Self::PaymentAdapter {
                     code: "payment_adapter_error".into(),
-                    context: format_context(context, source),
+                    context: format_context(context),
                 })
             }
             PaykitSdkError::RecoveryRequired(context) => Self::RecoveryRequired {
@@ -84,19 +84,15 @@ impl From<PaykitSdkError> for PaykitFfiError {
 // `{:#}` alternate form expands the full chain, which for Pubky transport/storage
 // failures can carry the request URL (recovery-marker URLs embed a DH-derived
 // PRIVATE storage path) and a non-2xx HTTP response body. Those are sensitive and
-// must stay out of shipped exception text. Instead we keep only the redacted outer
-// label in `context` and route the full cause chain to `tracing::debug!` — a
-// developer opt-in "debug export" that is not shipped in the user-facing message.
-fn format_context(context: String, source: Option<anyhow::Error>) -> String {
-    if let Some(source) = source {
-        // Debug level is off by default in production builds, so the raw URL / DH
-        // path / response body reaches developers who explicitly enable it but never
-        // leaks into the exception message returned across the FFI boundary.
-        tracing::debug!(
-            cause = %format_args!("{source:#}"),
-            "FFI error cause (redacted from user-facing context)"
-        );
-    }
+// must stay out of shipped exception text.
+//
+// The raw `source` cause is therefore dropped entirely: it is neither folded into
+// `context` nor logged anywhere (no `tracing`/telemetry sink), so an enabled debug
+// subscriber cannot capture the URL / DH path / response body. Only the redacted
+// outer label survives in `context`. The caller retains the original
+// `PaykitSdkError` (with its `source`) at the point of failure if it needs the
+// cause for local, non-shipped handling.
+fn format_context(context: String) -> String {
     context
 }
 
