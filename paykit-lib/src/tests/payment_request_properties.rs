@@ -43,6 +43,47 @@ const PAYMENT_REQUEST_EVENT_KINDS: &[&str] = &[
     "paykit.payment_proof",
 ];
 
+/// Every `PrivateMessageKind` variant, listed once.
+///
+/// This is the fixed input for
+/// `test_payment_request_routing_covers_all_private_message_kinds`, which pushes
+/// each kind through the public Payment Request parser. It intentionally spans
+/// the whole enum, not just the routed kinds in `PAYMENT_REQUEST_EVENT_KINDS`,
+/// so a kind with no `parse_event` arm is still exercised against the
+/// `unreachable!()` invariant. Keep it in sync with
+/// `payment_request_routing_expectation`; the length cross-check in that test
+/// fails if a routed kind is added here without updating
+/// `PAYMENT_REQUEST_EVENT_KINDS`.
+const ALL_PRIVATE_MESSAGE_KINDS: &[PrivateMessageKind] = &[
+    PrivateMessageKind::PrivatePaymentList,
+    PrivateMessageKind::ReceiptAccess,
+    PrivateMessageKind::PaymentRequest,
+    PrivateMessageKind::PaymentRequestAcceptance,
+    PrivateMessageKind::PaymentRequestRejection,
+    PrivateMessageKind::PaymentRequestCancellation,
+    PrivateMessageKind::PaymentProof,
+];
+
+/// Hand-maintained spec for which private message kinds the Payment Request
+/// parser is expected to route (return `Some`) versus ignore (return `None`).
+///
+/// Compile-time exhaustiveness guard: this match has no wildcard arm, so adding
+/// a `PrivateMessageKind` variant fails to compile here until the new variant is
+/// deliberately classified. A variant classified `true` must also gain a
+/// `parse_event` arm in `payment_request::api`; otherwise the dispatcher reaches
+/// `unreachable!()` at runtime, a panic
+/// `test_payment_request_routing_covers_all_private_message_kinds` then catches.
+fn payment_request_routing_expectation(kind: PrivateMessageKind) -> bool {
+    match kind {
+        PrivateMessageKind::PaymentRequest
+        | PrivateMessageKind::PaymentRequestAcceptance
+        | PrivateMessageKind::PaymentRequestRejection
+        | PrivateMessageKind::PaymentRequestCancellation
+        | PrivateMessageKind::PaymentProof => true,
+        PrivateMessageKind::PrivatePaymentList | PrivateMessageKind::ReceiptAccess => false,
+    }
+}
+
 // ---- strategies emitting construction-valid values ----------------------
 
 /// Build a valid RFC3339 UTC timestamp (always `Z`-suffixed).
@@ -329,4 +370,68 @@ proptest! {
     fn kinded_json_never_panics(raw in arb_kinded_json()) {
         exercise(raw);
     }
+}
+
+/// Every `PrivateMessageKind` routes through the public Payment Request parser
+/// without panicking, and the routing decision agrees with both the
+/// hand-maintained spec and `PrivateMessageKind::is_payment_request_event`.
+///
+/// This complements the proptests above, which only sample the five already
+/// routed kind strings in `PAYMENT_REQUEST_EVENT_KINDS`. Because it drives
+/// *all* variants of the enum -- including kinds with no `parse_event` arm -- it
+/// catches a future variant that `is_payment_request_event` starts accepting
+/// while the dispatcher still falls through to `unreachable!()`: that kind would
+/// route here and panic instead of returning `Some`.
+#[test]
+fn test_payment_request_routing_covers_all_private_message_kinds() {
+    let mut routed_kinds = 0;
+
+    for &kind in ALL_PRIVATE_MESSAGE_KINDS {
+        let expected_routed = payment_request_routing_expectation(kind);
+
+        // The parser reads the kind from the raw JSON body via `known_kind`, so
+        // carry it there rather than in the struct's `kind` header field.
+        let message = PrivateApplicationMessage {
+            version: None,
+            kind: None,
+            raw_json: format!(r#"{{"kind":"{}"}}"#, kind.as_str()),
+        };
+
+        // Never-panic: a routed kind reaches `parse_event` (and, for a mis-wired
+        // future variant, its `unreachable!()` arm), so a panic there fails this
+        // test. Touch every accessor for the same reason.
+        let parsed = parse_payment_request_event_message(&message);
+        if let Some(event_message) = &parsed {
+            let _ = event_message.is_valid();
+            let _ = event_message.kind();
+            let _ = event_message.event_id();
+            let _ = event_message.payment_request_id();
+            let _ = event_message.validation_error();
+            let _ = event_message.parsed_event();
+            let _ = format!("{event_message:?}");
+        }
+
+        assert_eq!(
+            parsed.is_some(),
+            expected_routed,
+            "parser routing for {kind} disagreed with the spec"
+        );
+        assert_eq!(
+            kind.is_payment_request_event(),
+            expected_routed,
+            "is_payment_request_event for {kind} disagreed with the spec"
+        );
+
+        if expected_routed {
+            routed_kinds += 1;
+        }
+    }
+
+    // Cross-check the routed set against the proptest kind list, so a newly
+    // routed kind must be reflected in `PAYMENT_REQUEST_EVENT_KINDS` too.
+    assert_eq!(
+        routed_kinds,
+        PAYMENT_REQUEST_EVENT_KINDS.len(),
+        "routed kind count disagreed with PAYMENT_REQUEST_EVENT_KINDS"
+    );
 }
