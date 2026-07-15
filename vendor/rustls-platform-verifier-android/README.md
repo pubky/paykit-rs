@@ -10,6 +10,13 @@ soft failures, as intended by the upstream verifier's
 `PKIXRevocationChecker.Option.SOFT_FAIL` policy. Other unexpected validator
 errors still fail closed.
 
+The missing-CRL check matches the Bouncy Castle message observed on current
+Android releases: `No CRLs found for issuer `. This wording is not a stable
+API. If Android changes it, the exception is returned as `UnknownCert` with
+the original validator message instead of being accepted. The resulting
+fail-closed error should make a future wording change visible without
+weakening certificate validation.
+
 The exact source and test changes are recorded in
 `android-revocation-soft-fail.patch`. Apply that zero-context patch to the
 upstream `v/0.6.2` tag, then run the following from its `android` directory to
