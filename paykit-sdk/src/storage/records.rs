@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Durable Linked Peer state.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkedPeerRecord {
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
@@ -40,6 +40,42 @@ pub struct LinkedPeerRecord {
     pub remote_recovery_attempt_id: Option<String>,
     /// Time the counterparty recovery marker was observed.
     pub remote_recovery_marker_observed_at: Option<DateTime<Utc>>,
+}
+
+impl fmt::Debug for LinkedPeerRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinkedPeerRecord")
+            .field("counterparty", &self.counterparty)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
+            .field("state", &self.state)
+            .field("last_sync_at", &self.last_sync_at)
+            .field("last_private_receive_at", &self.last_private_receive_at)
+            .field("failure_count", &self.failure_count)
+            .field("local_recovery_attempt_id", &self.local_recovery_attempt_id)
+            .field(
+                "local_recovery_marker_created_at",
+                &self.local_recovery_marker_created_at,
+            )
+            .field(
+                "local_recovery_marker_last_error",
+                &self
+                    .local_recovery_marker_last_error
+                    .as_ref()
+                    .map(|error| format!("<redacted:{} bytes>", error.len())),
+            )
+            .field(
+                "remote_recovery_attempt_id",
+                &self.remote_recovery_attempt_id,
+            )
+            .field(
+                "remote_recovery_marker_observed_at",
+                &self.remote_recovery_marker_observed_at,
+            )
+            .finish()
+    }
 }
 
 /// Durable SDK-managed public Payment Endpoint publication record.
@@ -70,7 +106,13 @@ impl fmt::Debug for PublicEndpointRecord {
             )
             .field("status", &self.status)
             .field("updated_at", &self.updated_at)
-            .field("last_error", &self.last_error)
+            .field(
+                "last_error",
+                &self
+                    .last_error
+                    .as_ref()
+                    .map(|error| format!("<redacted:{} bytes>", error.len())),
+            )
             .finish()
     }
 }
@@ -423,7 +465,13 @@ impl fmt::Debug for NewPrivateStreamItem {
             .field("parsed_kind", &self.parsed_kind)
             .field("known_paykit_kind", &self.known_paykit_kind)
             .field("parse_status", &self.parse_status)
-            .field("parse_error", &self.parse_error)
+            .field(
+                "parse_error",
+                &self
+                    .parse_error
+                    .as_ref()
+                    .map(|error| format!("<redacted:{} bytes>", error.len())),
+            )
             .field("received_at", &self.received_at)
             .finish()
     }
@@ -476,7 +524,13 @@ impl fmt::Debug for PrivateStreamItemRecord {
             .field("parsed_kind", &self.parsed_kind)
             .field("known_paykit_kind", &self.known_paykit_kind)
             .field("parse_status", &self.parse_status)
-            .field("parse_error", &self.parse_error)
+            .field(
+                "parse_error",
+                &self
+                    .parse_error
+                    .as_ref()
+                    .map(|error| format!("<redacted:{} bytes>", error.len())),
+            )
             .field("received_at", &self.received_at)
             .finish()
     }
