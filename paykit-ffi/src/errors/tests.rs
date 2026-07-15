@@ -140,10 +140,11 @@ fn test_ffi_sdk_round_trip_recovers_original_via_downcast() {
 }
 
 #[test]
-fn test_source_chain_is_folded_into_context() {
-    // A non-FFI source has its full anyhow cause chain folded into the context so foreign
-    // apps see the underlying cause. Pins F02: the pre-fix code dropped `source` and only
-    // the outer context survived.
+fn test_source_chain_is_not_leaked_into_context() {
+    // The `context` field crosses the FFI boundary verbatim into the generated
+    // Kotlin/Swift exception message, so the raw anyhow cause chain must NOT be folded
+    // into it. Only the redacted outer label survives; the underlying cause is routed
+    // to `tracing::debug!` instead (developer opt-in), never the user-facing message.
     let source = anyhow::anyhow!("disk offline").context("open state file");
     let sdk = PaykitSdkError::Storage {
         context: "load state blob".into(),
@@ -154,16 +155,55 @@ fn test_source_chain_is_folded_into_context() {
     let (variant, code, context) = parts(&ffi);
     assert_eq!(variant, "storage");
     assert_eq!(code, "storage_error");
-    assert!(
-        context.contains("load state blob"),
-        "outer context missing: {context}"
+    assert_eq!(
+        context, "load state blob",
+        "context must carry only the redacted outer label"
     );
     assert!(
-        context.contains("open state file"),
-        "mid-chain cause missing: {context}"
+        !context.contains("open state file"),
+        "mid-chain cause leaked into context: {context}"
     );
     assert!(
-        context.contains("disk offline"),
-        "root cause missing: {context}"
+        !context.contains("disk offline"),
+        "root cause leaked into context: {context}"
     );
+}
+
+#[test]
+fn test_sensitive_source_details_never_reach_context() {
+    // Regression guard: recovery-marker request URLs embed a DH-derived PRIVATE storage
+    // path, and non-2xx HTTP failures can carry a response body. Neither may reach the
+    // FFI `context` (which is rendered into the user-facing Kotlin/Swift exception) nor
+    // the error's Display output. We plant sentinels in the anyhow cause chain and assert
+    // they appear in neither place.
+    const SENTINEL_URL: &str = "https://homeserver.example/pub/paykit/v0/private/SENTINEL_DH_PATH";
+    const SENTINEL_BODY: &str = "SENTINEL_RESPONSE_BODY";
+
+    let source =
+        anyhow::anyhow!("http 502: {SENTINEL_BODY}").context(format!("GET {SENTINEL_URL} failed"));
+    let sdk = PaykitSdkError::Transport {
+        context: "publish recovery marker".into(),
+        source: Some(source),
+    };
+
+    let ffi = PaykitFfiError::from(sdk);
+    let (variant, code, context) = parts(&ffi);
+    assert_eq!(variant, "transport");
+    assert_eq!(code, "transport_error");
+    assert_eq!(
+        context, "publish recovery marker",
+        "context must carry only the redacted outer label"
+    );
+
+    for sentinel in [SENTINEL_URL, SENTINEL_BODY] {
+        assert!(
+            !context.contains(sentinel),
+            "sensitive detail leaked into context: {sentinel}"
+        );
+        let rendered = ffi.to_string();
+        assert!(
+            !rendered.contains(sentinel),
+            "sensitive detail leaked into Display: {rendered}"
+        );
+    }
 }

@@ -77,13 +77,27 @@ impl From<PaykitSdkError> for PaykitFfiError {
     }
 }
 
+// SECURITY / REDACTION: the returned `context` is rendered verbatim into the
+// generated Kotlin/Swift exception message (see the `#[error("...: {context}")]`
+// attributes above), so it crosses the FFI boundary into user-facing app code.
+// We therefore MUST NOT fold the raw `source` cause chain into it: anyhow's
+// `{:#}` alternate form expands the full chain, which for Pubky transport/storage
+// failures can carry the request URL (recovery-marker URLs embed a DH-derived
+// PRIVATE storage path) and a non-2xx HTTP response body. Those are sensitive and
+// must stay out of shipped exception text. Instead we keep only the redacted outer
+// label in `context` and route the full cause chain to `tracing::debug!` — a
+// developer opt-in "debug export" that is not shipped in the user-facing message.
 fn format_context(context: String, source: Option<anyhow::Error>) -> String {
-    match source {
-        // `{:#}` prints the full anyhow cause chain, so diagnostics crossing to
-        // Swift/Kotlin retain the underlying cause instead of only the outer label.
-        Some(source) => format!("{context}: {source:#}"),
-        None => context,
+    if let Some(source) = source {
+        // Debug level is off by default in production builds, so the raw URL / DH
+        // path / response body reaches developers who explicitly enable it but never
+        // leaks into the exception message returned across the FFI boundary.
+        tracing::debug!(
+            cause = %format_args!("{source:#}"),
+            "FFI error cause (redacted from user-facing context)"
+        );
     }
+    context
 }
 
 fn callback_ffi_error(source: Option<&anyhow::Error>) -> Option<PaykitFfiError> {
