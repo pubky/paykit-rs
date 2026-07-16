@@ -105,11 +105,10 @@ impl Receipt {
             || wire.kind != "paykit.receipt.encrypted"
             || wire.algorithm != RECEIPT_ENCRYPTION_ALGORITHM
         {
+            // The offending values are fetched-document content; keep the
+            // context static so they never cross the FFI as exception text.
             return Err(PaykitError::InvalidData {
-                context: format!(
-                    "unsupported encrypted receipt envelope version/kind/algorithm: {}/{}/{}",
-                    wire.version, wire.kind, wire.algorithm
-                ),
+                context: "unsupported encrypted receipt envelope version/kind/algorithm".into(),
                 source: None,
             });
         }

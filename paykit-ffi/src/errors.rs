@@ -124,18 +124,25 @@ pub(crate) fn ffi_error_to_sdk(err: PaykitFfiError, context: &'static str) -> Pa
             context: format!("{context}: {code}"),
             source,
         },
+        // The four string-variant SDK errors have no `source` field to stash
+        // the original FFI error for downcast recovery, so the callback's code
+        // and reason are folded into the string instead. The reason is
+        // app-authored (it already crossed the boundary once), so echoing it
+        // back is not a redaction concern. The custom code survives only as
+        // text: converting back to FFI yields the generic code for the
+        // variant, which the round-trip tests pin.
         PaykitFfiError::NotFound {
             code,
-            context: _reason,
-        } => PaykitSdkError::NotFound(format!("{context}: {code}")),
+            context: reason,
+        } => PaykitSdkError::NotFound(format!("{context}: {code}: {reason}")),
         PaykitFfiError::Protocol {
             code,
-            context: _reason,
-        } => PaykitSdkError::Protocol(format!("{context}: {code}")),
+            context: reason,
+        } => PaykitSdkError::Protocol(format!("{context}: {code}: {reason}")),
         PaykitFfiError::Policy {
             code,
-            context: _reason,
-        } => PaykitSdkError::Policy(format!("{context}: {code}")),
+            context: reason,
+        } => PaykitSdkError::Policy(format!("{context}: {code}: {reason}")),
         PaykitFfiError::PaymentAdapter {
             code,
             context: _reason,
@@ -145,8 +152,8 @@ pub(crate) fn ffi_error_to_sdk(err: PaykitFfiError, context: &'static str) -> Pa
         },
         PaykitFfiError::RecoveryRequired {
             code,
-            context: _reason,
-        } => PaykitSdkError::RecoveryRequired(format!("{context}: {code}")),
+            context: reason,
+        } => PaykitSdkError::RecoveryRequired(format!("{context}: {code}: {reason}")),
     }
 }
 

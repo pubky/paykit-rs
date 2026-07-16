@@ -75,8 +75,13 @@ pub(crate) fn validate_wire_version_kind_str(
     label: &'static str,
 ) -> Result<()> {
     if version != 1 || kind != expected_kind {
+        // SECURITY / REDACTION: every caller validates decrypted
+        // private-message plaintext, and this context can cross the FFI
+        // boundary as exception text. The offending `version`/`kind` values
+        // are decrypted field values and must not be echoed; only the static
+        // label may cross.
         return Err(invalid_data(
-            format!("unsupported {label} version/kind: {version}/{kind}"),
+            format!("unsupported {label} version/kind"),
             None,
         ));
     }

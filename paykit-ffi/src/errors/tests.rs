@@ -140,6 +140,69 @@ fn test_ffi_sdk_round_trip_recovers_original_via_downcast() {
 }
 
 #[test]
+fn test_ffi_sdk_round_trip_string_variants_keep_code_and_reason_in_text() {
+    // The four string-variant SDK errors (NotFound/Protocol/Policy/
+    // RecoveryRequired) have no `source` to stash the original FFI error, so
+    // exact downcast recovery is impossible. This pins the best-effort
+    // contract: the variant is preserved, the callback's code and reason
+    // survive inside the context text, and the machine-readable code degrades
+    // to the variant's generic one.
+    let cases = [
+        (
+            PaykitFfiError::NotFound {
+                code: "record_missing".into(),
+                context: "no such receipt row".into(),
+            },
+            "not_found",
+            "not_found",
+        ),
+        (
+            PaykitFfiError::Protocol {
+                code: "bad_wire".into(),
+                context: "unexpected field".into(),
+            },
+            "protocol",
+            "protocol_error",
+        ),
+        (
+            PaykitFfiError::Policy {
+                code: "spend_limit".into(),
+                context: "daily cap reached".into(),
+            },
+            "policy",
+            "policy_error",
+        ),
+        (
+            PaykitFfiError::RecoveryRequired {
+                code: "state_diverged".into(),
+                context: "manual resync needed".into(),
+            },
+            "recovery_required",
+            "recovery_required",
+        ),
+    ];
+
+    for (original, want_variant, want_generic_code) in cases {
+        let (_, original_code, original_reason) = {
+            let (variant, code, reason) = parts(&original);
+            (variant, code.to_string(), reason.to_string())
+        };
+        let sdk = ffi_error_to_sdk(original, "round trip");
+        let restored = PaykitFfiError::from(sdk);
+        let (variant, code, context) = parts(&restored);
+        assert_eq!(variant, want_variant, "variant must be preserved");
+        assert_eq!(
+            code, want_generic_code,
+            "custom code degrades to the generic code for {want_variant}"
+        );
+        assert!(
+            context.contains(&original_code) && context.contains(&original_reason),
+            "original code and reason must survive in context text, got: {context}"
+        );
+    }
+}
+
+#[test]
 fn test_source_chain_is_not_leaked_into_context() {
     // The `context` field crosses the FFI boundary verbatim into the generated
     // Kotlin/Swift exception message, so the raw anyhow cause chain must NOT be folded
