@@ -816,6 +816,25 @@ fn store_encrypted_receipt_error(_location: &str, source: anyhow::Error) -> Payk
     }
 }
 
+/// Build the transport error returned when an Encrypted Receipt is missing at
+/// its Receipt Location during retrieval.
+///
+/// SECURITY / REDACTION: `location` is the Receipt Location
+/// (`/pub/paykit/v0/private/.../receipts/{id}`), a PRIVATE storage path whose
+/// folder prefix is DH-derived per counterparty. At the FFI boundary this error's
+/// `context` is rendered verbatim into the generated Kotlin/Swift exception
+/// message, so the Receipt Location MUST NOT be embedded in it. The location is
+/// accepted here only to make the redaction explicit and testable; it is
+/// deliberately dropped, leaving a static, non-sensitive label. The Receipt
+/// Access record the caller persists already carries the location as a field
+/// for local diagnostics.
+pub(crate) fn missing_encrypted_receipt_error(_location: &str) -> PaykitSdkError {
+    PaykitSdkError::Transport {
+        context: "encrypted receipt was not found at its receipt location".into(),
+        source: None,
+    }
+}
+
 pub(crate) fn receipt_issuance_record_matches_draft(
     record: &ReceiptIssuanceRecord,
     counterparty_receiver_path: &PaykitReceiverPath,

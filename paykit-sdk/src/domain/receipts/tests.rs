@@ -350,3 +350,40 @@ fn test_store_encrypted_receipt_error_redacts_receipt_location() {
         "Receipt Location leaked into Display: {rendered}"
     );
 }
+
+#[test]
+fn test_missing_encrypted_receipt_error_redacts_receipt_location() {
+    // Regression guard: `missing_encrypted_receipt_error` builds the error
+    // `retrieve_receipt` returns when the Encrypted Receipt is absent at its
+    // Receipt Location. Its `context` is rendered verbatim into the FFI
+    // (Kotlin/Swift) exception message, so the Receipt Location -- a
+    // `/pub/paykit/v0/private/.../receipts/{id}` DH-derived PRIVATE storage path --
+    // must never appear in `context` or in the error's Display output.
+    let location =
+        "/pub/paykit/v0/private/bitkit/wallet/receipts/550e8400-e29b-41d4-a716-446655440000";
+
+    let err = missing_encrypted_receipt_error(location);
+
+    let (context, source) = match &err {
+        PaykitSdkError::Transport { context, source } => (context.clone(), source),
+        other => panic!("expected Transport error, got {other:?}"),
+    };
+    assert_eq!(
+        context,
+        "encrypted receipt was not found at its receipt location"
+    );
+    assert!(
+        source.is_none(),
+        "missing-receipt error must carry no source"
+    );
+    assert!(
+        !context.contains("/pub/paykit/v0/private/"),
+        "private storage path leaked into error context: {context}"
+    );
+    // Display is what the FFI layer renders across the boundary; it too must stay clean.
+    let rendered = err.to_string();
+    assert!(
+        !rendered.contains(location),
+        "Receipt Location leaked into Display: {rendered}"
+    );
+}

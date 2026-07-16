@@ -361,6 +361,13 @@ where
             {
                 Ok(Some(encrypted_json)) => encrypted_json,
                 Ok(None) => {
+                    // The persisted record error may carry the Receipt
+                    // Location: it stays in local storage, is redacted from
+                    // record Debug output, and the record carries the location
+                    // as a field anyway. The error returned to the caller must
+                    // not: it crosses the FFI boundary, where `context` is
+                    // rendered verbatim into the generated Kotlin/Swift
+                    // exception message.
                     let error = format!(
                         "encrypted receipt {} was not found at {}",
                         access.receipt_id, access.location
@@ -369,13 +376,10 @@ where
                         &access,
                         ReceiptRetrievalStatus::NotFound,
                         now,
-                        error.clone(),
+                        error,
                     )
                     .await?;
-                    last_error = Some(PaykitSdkError::Transport {
-                        context: error,
-                        source: None,
-                    });
+                    last_error = Some(missing_encrypted_receipt_error(&access.location));
                     continue;
                 }
                 Err(err) => {
