@@ -4,6 +4,8 @@ use chacha20poly1305::{
     XChaCha20Poly1305,
 };
 
+use zeroize::Zeroize;
+
 use crate::validation::invalid_plaintext_json;
 use crate::{PaykitError, PaykitReceiverPath, Result};
 
@@ -46,8 +48,10 @@ impl Receipt {
                 "Receipt Location does not match Receipt ID".into(),
             ));
         }
-        let key_bytes = key.bytes()?;
+        let mut key_bytes = key.bytes()?;
         let cipher = XChaCha20Poly1305::new((&key_bytes).into());
+        // Scrub the raw key from the stack; the cipher holds its own key schedule.
+        key_bytes.zeroize();
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let plaintext = serde_json::to_vec(&ReceiptWire::from(self)).map_err(|err| {
             PaykitError::InvalidData {
@@ -131,8 +135,10 @@ impl Receipt {
                 source: None,
             });
         }
-        let key_bytes = key.bytes()?;
+        let mut key_bytes = key.bytes()?;
         let cipher = XChaCha20Poly1305::new((&key_bytes).into());
+        // Scrub the raw key from the stack; the cipher holds its own key schedule.
+        key_bytes.zeroize();
         let plaintext = cipher
             .decrypt(
                 nonce.as_slice().into(),

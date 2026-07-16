@@ -6,8 +6,10 @@ use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, Ephemer
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
 mod encrypted_link;
+mod event_id;
 mod payment_endpoint;
 mod payment_request;
+mod payment_request_properties;
 mod private_payment_list;
 mod receipt_access;
 

@@ -17,36 +17,33 @@ use super::{
 
 use crate::PrivateMessageKind;
 
-fn parse_event(kind: PrivateMessageKind, raw: &str) -> Result<PaymentRequestEvent> {
+/// Parse `raw` as the Payment Request protocol event selected by `kind`, or
+/// return `None` when `kind` is not a Payment Request protocol event kind.
+///
+/// Routing and dispatch live in this single `match`, which deliberately has no
+/// wildcard arm: adding a `PrivateMessageKind` variant fails to compile until
+/// it is explicitly routed to a parser or rejected here, so the kind selector
+/// and the per-kind dispatch cannot drift apart.
+fn parse_event(kind: PrivateMessageKind, raw: &str) -> Option<Result<PaymentRequestEvent>> {
     match kind {
         PrivateMessageKind::PaymentRequest => {
-            parse_payment_request_json(raw).map(PaymentRequestEvent::Request)
+            Some(parse_payment_request_json(raw).map(PaymentRequestEvent::Request))
         }
         PrivateMessageKind::PaymentRequestAcceptance => {
-            parse_acceptance_json(raw).map(PaymentRequestEvent::Acceptance)
+            Some(parse_acceptance_json(raw).map(PaymentRequestEvent::Acceptance))
         }
         PrivateMessageKind::PaymentRequestRejection => {
-            parse_rejection_json(raw).map(PaymentRequestEvent::Rejection)
+            Some(parse_rejection_json(raw).map(PaymentRequestEvent::Rejection))
         }
         PrivateMessageKind::PaymentRequestCancellation => {
-            parse_cancellation_json(raw).map(PaymentRequestEvent::Cancellation)
+            Some(parse_cancellation_json(raw).map(PaymentRequestEvent::Cancellation))
         }
         PrivateMessageKind::PaymentProof => {
-            parse_payment_proof_json(raw).map(PaymentRequestEvent::Proof)
+            Some(parse_payment_proof_json(raw).map(PaymentRequestEvent::Proof))
         }
-        _ => unreachable!("only Payment Request event kinds are selected"),
-    }
-}
-
-fn build_event_message(kind: PrivateMessageKind, raw: String) -> PaymentRequestEventMessage {
-    let (event_id, payment_request_id) = parse_event_header_ids(&raw);
-    let event = parse_event(kind, &raw).map_err(|err| err.to_string());
-    PaymentRequestEventMessage {
-        kind,
-        event_id,
-        payment_request_id,
-        raw_json: raw,
-        event,
+        // Non-request kinds are ignored, producing nothing derived from `raw`
+        // (decrypted private payload), so there is no error context to leak.
+        PrivateMessageKind::PrivatePaymentList | PrivateMessageKind::ReceiptAccess => None,
     }
 }
 
@@ -59,8 +56,15 @@ pub fn parse_payment_request_event_message(
     message: &PrivateApplicationMessage,
 ) -> Option<PaymentRequestEventMessage> {
     let kind = message.known_kind()?;
-    kind.is_payment_request_event()
-        .then(|| build_event_message(kind, message.raw_json.clone()))
+    let event = parse_event(kind, &message.raw_json)?.map_err(|err| err.to_string());
+    let (event_id, payment_request_id) = parse_event_header_ids(&message.raw_json);
+    Some(PaymentRequestEventMessage {
+        kind,
+        event_id,
+        payment_request_id,
+        raw_json: message.raw_json.clone(),
+        event,
+    })
 }
 
 /// Serialize a Payment Request protocol Event Message to canonical JSON.
@@ -143,4 +147,30 @@ pub async fn send_payment_proof(link: &mut EncryptedLink, event: &PaymentProof) 
     link.send_payment_proof_message(json.as_bytes())
         .await
         .map_err(|err| map_error("send_payment_proof", err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // parse_event owns both routing and dispatch: non-request kinds must be
+    // ignored (`None`), not parsed and not turned into an error. Returning
+    // `None` means nothing derived from `raw` (decrypted private payload) is
+    // ever produced for these kinds, so there is no error context that could
+    // leak the plaintext. The public parser covers this path via `known_kind`;
+    // this exercises parse_event directly.
+    #[test]
+    fn test_parse_event_non_request_kind_ignored() {
+        // Sentinel plaintext standing in for a decrypted private payload.
+        let raw = "{\"secret\":\"SENTINEL_DECRYPTED_PLAINTEXT\"}";
+        for kind in [
+            PrivateMessageKind::PrivatePaymentList,
+            PrivateMessageKind::ReceiptAccess,
+        ] {
+            assert!(
+                parse_event(kind, raw).is_none(),
+                "expected non-request kind {kind} to be ignored",
+            );
+        }
+    }
 }

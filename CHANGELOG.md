@@ -7,6 +7,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc36] - 2026-07-14
+
+### Fixed
+- Corrected Android certificate verification so unavailable CRL status does
+  not masquerade as explicit certificate revocation during Pubky Auth relay
+  delivery. Explicit revocation and unrelated validation failures remain
+  fail-closed.
+
 ## [0.1.0-rc35] - 2026-07-14
 
 ### Added
@@ -277,7 +285,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc35...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc36...HEAD
+[0.1.0-rc36]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc36
 [0.1.0-rc35]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc35
 [0.1.0-rc33]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc33
 [0.1.0-rc32]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc32

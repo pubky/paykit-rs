@@ -1,0 +1,9 @@
+[package]
+name = "rustls-platform-verifier-android"
+version = "0.1.1"
+edition = "2021"
+description = "Vendored Android support component for rustls-platform-verifier"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rustls/rustls-platform-verifier"
+
+[dependencies]
