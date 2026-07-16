@@ -622,6 +622,63 @@ mod tests {
     }
 
     #[test]
+    fn test_recurrence_inverted_window_currently_accepted() {
+        // Pins current spec-conformant behavior: `specs/payment-requests.md`
+        // requires Recurrence `ends_at` to be null or an RFC3339 UTC timestamp
+        // but sets no ordering rule against `starts_at`, so an inverted window
+        // (`ends_at` before `starts_at`) is accepted by the real parser.
+        // Rejecting it would be a spec change with replay implications:
+        // previously valid stored `paykit.payment_request` events would become
+        // validation errors on durable replay. Tightening requires a spec
+        // amendment with spec-owner sign-off and must show up as a visible
+        // diff against this test.
+        let json = r#"{
+            "version": 1,
+            "kind": "paykit.payment_request",
+            "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+            "request": {
+                "amount": { "value": "0.001", "asset": "btc" },
+                "payment_reference": "invoice-2026-0001",
+                "proposal_expires_at": null,
+                "recurrence": {
+                    "every": 1,
+                    "unit": "month",
+                    "starts_at": "2026-07-01T00:00:00Z",
+                    "anchor": "2026-07-01T00:00:00Z",
+                    "ends_at": "2026-06-01T00:00:00Z"
+                },
+                "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
+                "metadata": {}
+            }
+        }"#;
+
+        let request = super::super::wire::parse_payment_request_json(json)
+            .expect("inverted Recurrence window is currently accepted");
+        let recurrence = request.request.recurrence.expect("Recurrence is present");
+        assert!(recurrence.validate().is_ok());
+        assert_eq!(recurrence.starts_at, "2026-07-01T00:00:00Z");
+        assert_eq!(recurrence.ends_at.as_deref(), Some("2026-06-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn test_billing_period_inverted_rejected() {
+        // Contrast with `test_recurrence_inverted_window_currently_accepted`:
+        // `specs/payment-requests.md` DOES require Billing Period `ends_at` to
+        // be after `starts_at`, and the validator enforces it. The Recurrence
+        // gap pinned above is a genuine spec-level asymmetry between two
+        // distinct validation paths, not an oversight in one shared validator.
+        let period = BillingPeriod {
+            starts_at: "2026-07-01T00:00:00Z".to_string(),
+            ends_at: "2026-06-01T00:00:00Z".to_string(),
+        };
+        let err = period.validate().unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("ends_at must be after starts_at"))
+        );
+    }
+
+    #[test]
     fn payment_reference_is_not_required_to_be_uuid() {
         let terms = request_terms();
         assert_eq!(terms.payment_reference.as_str(), "invoice-2026-0001");
