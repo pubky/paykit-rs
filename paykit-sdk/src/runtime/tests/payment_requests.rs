@@ -338,7 +338,7 @@ async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_pres
     assert!(records
         .iter()
         .any(|record| record.counterparty_receiver_path == other_receiver_path()));
-    assert!(matches!(blocked_result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(blocked_result, Err(PaykitSdkError::Policy { .. })));
 }
 
 #[tokio::test]
@@ -450,7 +450,7 @@ async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
         .accept_payment_request(counterparty, receiver_path(), &request_id)
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     assert!(storage
         .snapshot()
         .unwrap()

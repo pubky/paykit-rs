@@ -93,5 +93,5 @@ async fn test_restore_backup_state_rejects_concurrent_identity_operation() {
 
     let result = sdk.restore_backup_state(empty_backup_state()).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }

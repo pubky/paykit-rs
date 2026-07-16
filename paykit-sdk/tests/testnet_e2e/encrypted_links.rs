@@ -75,7 +75,7 @@ async fn test_advance_link_handshake_without_started_handshake_fails() {
         .await
         .expect_err("advancing without stored handshake state must fail");
     assert!(
-        matches!(err, PaykitSdkError::RecoveryRequired(_)),
+        matches!(err, PaykitSdkError::RecoveryRequired { .. }),
         "unexpected error: {err:?}"
     );
 }

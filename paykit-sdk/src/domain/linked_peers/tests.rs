@@ -124,7 +124,7 @@ async fn test_unleased_recovery_rejects_active_peer_lease() {
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     let peer = load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
@@ -294,7 +294,7 @@ async fn test_save_link_handshake_state_rejects_blocked_peer() {
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }
 
 #[tokio::test]
@@ -441,7 +441,7 @@ async fn test_lease_checked_handshake_save_rejects_stale_lease() {
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     let link_state = load_encrypted_link_state(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();
@@ -511,7 +511,7 @@ async fn test_lease_checked_recovery_rejects_stale_lease() {
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     let peer = load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()

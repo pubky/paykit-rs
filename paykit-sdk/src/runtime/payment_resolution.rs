@@ -44,7 +44,7 @@ where
                 )
                 .await
             {
-                if matches!(err, PaykitSdkError::RecoveryRequired(_)) {
+                if matches!(err, PaykitSdkError::RecoveryRequired { .. }) {
                     private_state = ContactPaymentResolutionPrivateState::RecoveryPending;
                 } else if !request.include_public_endpoints {
                     return Err(err);
@@ -321,7 +321,7 @@ where
             .await
         {
             Ok(()) => Ok(true),
-            Err(PaykitSdkError::RecoveryRequired(_)) => {
+            Err(PaykitSdkError::RecoveryRequired { .. }) => {
                 *private_state = ContactPaymentResolutionPrivateState::RecoveryPending;
                 Ok(false)
             }
@@ -389,13 +389,13 @@ where
                         private_view.as_ref(),
                     )));
                 }
-                Err(PaykitSdkError::Policy(_)) => return Ok(PrivateRecoveryOutcome::Pending),
+                Err(PaykitSdkError::Policy { .. }) => return Ok(PrivateRecoveryOutcome::Pending),
                 Err(PaykitSdkError::Identity { .. }) => {
                     return Ok(PrivateRecoveryOutcome::PublicOnly)
                 }
-                Err(PaykitSdkError::RecoveryRequired(_))
+                Err(PaykitSdkError::RecoveryRequired { .. })
                 | Err(PaykitSdkError::Transport { .. })
-                | Err(PaykitSdkError::Protocol(_)) => {
+                | Err(PaykitSdkError::Protocol { .. }) => {
                     return Ok(PrivateRecoveryOutcome::Pending);
                 }
                 Err(err) => return Err(err),
@@ -597,15 +597,18 @@ pub(super) fn payable_from_batch(
     let mut payable = Vec::with_capacity(selected.len());
     for candidate in selected {
         if !candidates.contains(candidate) {
-            return Err(PaykitSdkError::Protocol(
-                "PaymentAdapter returned a payable endpoint that was not in the candidate batch"
-                    .into(),
-            ));
+            return Err(PaykitSdkError::Protocol {
+                context:
+                    "PaymentAdapter returned a payable endpoint that was not in the candidate batch"
+                        .into(),
+                source: None,
+            });
         }
         if payable.contains(candidate) {
-            return Err(PaykitSdkError::Protocol(
-                "PaymentAdapter returned duplicate payable endpoints".into(),
-            ));
+            return Err(PaykitSdkError::Protocol {
+                context: "PaymentAdapter returned duplicate payable endpoints".into(),
+                source: None,
+            });
         }
         payable.push(candidate.clone());
     }

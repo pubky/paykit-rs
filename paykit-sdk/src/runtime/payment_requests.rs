@@ -290,9 +290,12 @@ where
             })
             .await?;
         if !has_active_link {
-            return Err(PaykitSdkError::RecoveryRequired(format!(
-                "no active Encrypted Link snapshot for counterparty {counterparty}"
-            )));
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "no active Encrypted Link snapshot for counterparty {counterparty}"
+                ),
+                source: None,
+            });
         }
 
         Ok(())
@@ -479,8 +482,9 @@ where
             ],
             "submit Payment Proof",
         )?;
-        let request = request_from_record(&record).ok_or_else(|| {
-            PaykitSdkError::Protocol("Payment Request terms are unavailable".into())
+        let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
+            context: "Payment Request terms are unavailable".into(),
+            source: None,
         })?;
         let event = PaymentProof::new(
             EventId::new_v4(),
@@ -527,11 +531,12 @@ where
         records
             .into_iter()
             .find(|record| record.payment_request_id == payment_request_id.as_str())
-            .ok_or_else(|| {
-                PaykitSdkError::Protocol(format!(
+            .ok_or_else(|| PaykitSdkError::Protocol {
+                context: format!(
                     "Payment Request {} is not known for counterparty {}",
                     payment_request_id, counterparty
-                ))
+                ),
+                source: None,
             })
     }
 
@@ -662,9 +667,10 @@ fn require_payer_role(record: &PaymentRequestRecord, action: &str) -> Result<()>
     if record.local_role == Some(PaymentRequestLocalRole::Payer) {
         Ok(())
     } else {
-        Err(PaykitSdkError::Policy(format!(
-            "cannot {action}: local identity is not the payer"
-        )))
+        Err(PaykitSdkError::Policy {
+            context: format!("cannot {action}: local identity is not the payer"),
+            source: None,
+        })
     }
 }
 
@@ -676,10 +682,13 @@ fn require_state(
     if allowed.contains(&record.state) {
         Ok(())
     } else {
-        Err(PaykitSdkError::Policy(format!(
-            "cannot {action}: Payment Request {} is in state {:?}",
-            record.payment_request_id, record.state
-        )))
+        Err(PaykitSdkError::Policy {
+            context: format!(
+                "cannot {action}: Payment Request {} is in state {:?}",
+                record.payment_request_id, record.state
+            ),
+            source: None,
+        })
     }
 }
 

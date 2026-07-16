@@ -247,16 +247,22 @@ where
                 );
                 if let Some(existing) = existing.as_ref() {
                     if existing.cancellation_started_at.is_some() {
-                        return Err(PaykitSdkError::Policy(format!(
-                            "Payment Endpoint Reservation id '{}' is being canceled",
-                            draft.reservation_id
-                        )));
+                        return Err(PaykitSdkError::Policy {
+                            context: format!(
+                                "Payment Endpoint Reservation id '{}' is being canceled",
+                                draft.reservation_id
+                            ),
+                            source: None,
+                        });
                     }
                     if !draft.matches_existing(existing) {
-                        return Err(PaykitSdkError::Protocol(format!(
-                            "Payment Endpoint Reservation id '{}' already exists with different details",
-                            draft.reservation_id
-                        )));
+                        return Err(PaykitSdkError::Protocol {
+                            context: format!(
+                                "Payment Endpoint Reservation id '{}' already exists with different details",
+                                draft.reservation_id
+                            ),
+                            source: None,
+                        });
                     }
                 }
                 checked_drafts.push((draft, existing));
@@ -340,10 +346,13 @@ fn build_reservation_records(
             .insert(reservation.reservation_id.clone(), ())
             .is_some()
         {
-            return Err(PaykitSdkError::Protocol(format!(
-                "duplicate Payment Endpoint Reservation id '{}'",
-                reservation.reservation_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "duplicate Payment Endpoint Reservation id '{}'",
+                    reservation.reservation_id
+                ),
+                source: None,
+            });
         }
         receiving_details.push(reservation.receiving_detail.clone());
         records.push(record_from_reservation(
@@ -360,19 +369,24 @@ fn build_reservation_records(
 
 pub(crate) fn validate_reservation_id(reservation_id: &str) -> Result<()> {
     if reservation_id.trim().is_empty() {
-        return Err(PaykitSdkError::Protocol(
-            "Payment Endpoint Reservation id must not be empty".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "Payment Endpoint Reservation id must not be empty".into(),
+            source: None,
+        });
     }
     if reservation_id.len() > MAX_RESERVATION_ID_LEN {
-        return Err(PaykitSdkError::Protocol(format!(
-            "Payment Endpoint Reservation id must be at most {MAX_RESERVATION_ID_LEN} bytes"
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "Payment Endpoint Reservation id must be at most {MAX_RESERVATION_ID_LEN} bytes"
+            ),
+            source: None,
+        });
     }
     if reservation_id.chars().any(char::is_control) {
-        return Err(PaykitSdkError::Protocol(
-            "Payment Endpoint Reservation id must not contain control characters".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "Payment Endpoint Reservation id must not contain control characters".into(),
+            source: None,
+        });
     }
     Ok(())
 }

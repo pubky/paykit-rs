@@ -319,9 +319,10 @@ pub(super) fn validate_receiver_marker_capabilities(
     if advertises_private_workflows
         && identity_capability != PubkyIdentityCapability::PrivateLinkCapable
     {
-        return Err(PaykitSdkError::Policy(
-            "receiver marker private capabilities require a local Pubky secret key".into(),
-        ));
+        return Err(PaykitSdkError::Policy {
+            context: "receiver marker private capabilities require a local Pubky secret key".into(),
+            source: None,
+        });
     }
     Ok(())
 }

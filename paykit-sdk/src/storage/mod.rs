@@ -350,10 +350,13 @@ pub(crate) fn require_peer_link_operation_lease(
 ) -> Result<()> {
     match tx.peer_link_operation_lease(&lease.counterparty, &lease.counterparty_receiver_path) {
         Some(active) if active.lease_id == lease.lease_id => Ok(()),
-        _ => Err(PaykitSdkError::Policy(format!(
-            "peer link operation lease {} is no longer active for counterparty {}",
-            lease.lease_id, lease.counterparty
-        ))),
+        _ => Err(PaykitSdkError::Policy {
+            context: format!(
+                "peer link operation lease {} is no longer active for counterparty {}",
+                lease.lease_id, lease.counterparty
+            ),
+            source: None,
+        }),
     }
 }
 

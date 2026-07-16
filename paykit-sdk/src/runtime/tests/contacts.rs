@@ -149,7 +149,7 @@ async fn test_upload_profile_avatar_rejects_unsupported_content_type() {
 
     let result = sdk.upload_profile_avatar(vec![1, 2, 3], "text/plain").await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -235,7 +235,7 @@ async fn test_remove_contact_blocks_when_public_marker_may_exist() {
 
     let result = sdk.remove_contact(&contact_public_key).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }
 
 #[tokio::test]

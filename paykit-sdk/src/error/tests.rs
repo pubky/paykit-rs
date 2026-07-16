@@ -4,16 +4,20 @@ use super::*;
 fn test_paykit_not_found_maps_to_sdk_not_found() {
     let err = PaykitSdkError::from(paykit_lib::PaykitError::NotFound("missing receipt".into()));
 
-    assert!(matches!(err, PaykitSdkError::NotFound(message) if message == "missing receipt"));
+    assert!(
+        matches!(err, PaykitSdkError::NotFound { context, .. } if context == "missing receipt")
+    );
 }
 
 #[test]
 fn test_invalid_data_source_is_not_folded_into_protocol_string() {
-    // Regression guard: `Protocol` is a plain string that crosses the FFI
-    // boundary verbatim (generated Kotlin/Swift exception messages), while
-    // lib-level `InvalidData` sources carry raw parse/decode causes that can
-    // embed network data or decrypted plaintext. The conversion must keep only
-    // the curated static context label and drop the source entirely.
+    // Regression guard: `Protocol.context` crosses the FFI boundary verbatim
+    // (generated Kotlin/Swift exception messages), while lib-level
+    // `InvalidData` sources carry raw parse/decode causes that can embed
+    // network data or decrypted plaintext. The conversion must keep only the
+    // curated static context label in the string; the cause stays structurally
+    // separate in `source` for local diagnostics and is dropped by the FFI
+    // conversion (pinned in paykit-ffi's redaction tests).
     let sentinel = "SENTINEL_RAW_PARSE_CAUSE";
     let err = PaykitSdkError::from(paykit_lib::PaykitError::InvalidData {
         context: "failed to parse receipt plaintext JSON".into(),
@@ -22,14 +26,18 @@ fn test_invalid_data_source_is_not_folded_into_protocol_string() {
         )),
     });
 
-    let message = match &err {
-        PaykitSdkError::Protocol(message) => message.clone(),
+    let (message, source) = match &err {
+        PaykitSdkError::Protocol { context, source } => (context.clone(), source.as_ref()),
         other => panic!("expected Protocol error, got {other:?}"),
     };
     assert_eq!(message, "failed to parse receipt plaintext JSON");
     assert!(
         !message.contains(sentinel),
         "InvalidData source leaked into Protocol string: {message}"
+    );
+    assert!(
+        source.is_some(),
+        "InvalidData source must be retained for local diagnostics"
     );
     let rendered = err.to_string();
     assert!(

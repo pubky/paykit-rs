@@ -760,7 +760,10 @@ fn payment_endpoint_source_tag(source: &PaymentEndpointSource) -> &'static str {
 pub(crate) fn parse_rfc3339_utc(value: String) -> paykit_sdk::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&value)
         .map(|time| time.with_timezone(&Utc))
-        .map_err(|err| paykit_sdk::PaykitSdkError::Protocol(format!("invalid RFC3339 time: {err}")))
+        .map_err(|err| paykit_sdk::PaykitSdkError::Protocol {
+            context: format!("invalid RFC3339 time: {err}"),
+            source: None,
+        })
 }
 
 fn payment_adapter_error(err: PaykitFfiError, context: &'static str) -> paykit_sdk::PaykitSdkError {

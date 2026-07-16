@@ -47,28 +47,33 @@ impl From<PaykitSdkError> for PaykitFfiError {
                     code: "transport_error".into(),
                     context: format_context(context),
                 }),
-            PaykitSdkError::NotFound(context) => Self::NotFound {
-                code: "not_found".into(),
-                context,
-            },
-            PaykitSdkError::Protocol(context) => Self::Protocol {
-                code: "protocol_error".into(),
-                context,
-            },
-            PaykitSdkError::Policy(context) => Self::Policy {
-                code: "policy_error".into(),
-                context,
-            },
+            PaykitSdkError::NotFound { context, source } => callback_ffi_error(source.as_ref())
+                .unwrap_or_else(|| Self::NotFound {
+                    code: "not_found".into(),
+                    context: format_context(context),
+                }),
+            PaykitSdkError::Protocol { context, source } => callback_ffi_error(source.as_ref())
+                .unwrap_or_else(|| Self::Protocol {
+                    code: "protocol_error".into(),
+                    context: format_context(context),
+                }),
+            PaykitSdkError::Policy { context, source } => callback_ffi_error(source.as_ref())
+                .unwrap_or_else(|| Self::Policy {
+                    code: "policy_error".into(),
+                    context: format_context(context),
+                }),
             PaykitSdkError::PaymentAdapter { context, source } => {
                 callback_ffi_error(source.as_ref()).unwrap_or_else(|| Self::PaymentAdapter {
                     code: "payment_adapter_error".into(),
                     context: format_context(context),
                 })
             }
-            PaykitSdkError::RecoveryRequired(context) => Self::RecoveryRequired {
-                code: "recovery_required".into(),
-                context,
-            },
+            PaykitSdkError::RecoveryRequired { context, source } => {
+                callback_ffi_error(source.as_ref()).unwrap_or_else(|| Self::RecoveryRequired {
+                    code: "recovery_required".into(),
+                    context: format_context(context),
+                })
+            }
             other => Self::Protocol {
                 code: "unsupported_sdk_error".into(),
                 context: other.to_string(),
@@ -92,6 +97,17 @@ impl From<PaykitSdkError> for PaykitFfiError {
 // outer label survives in `context`. The caller retains the original
 // `PaykitSdkError` (with its `source`) at the point of failure if it needs the
 // cause for local, non-shipped handling.
+//
+// The single exception is `callback_ffi_error`: when `source` downcasts to a
+// `PaykitFfiError`, that error is returned verbatim so the platform app gets
+// back exactly the error its own callback raised (variant, custom code, and
+// reason). This is safe by provenance, not by redaction: only paykit-ffi's
+// callback plumbing (`ffi_error_to_sdk` and the payment-adapter wrapper)
+// stashes a `PaykitFfiError` in `source`, and those wrap errors the app
+// itself authored, which already crossed the boundary once. paykit-lib and
+// paykit-sdk never construct a `PaykitFfiError`, so network-derived or
+// decrypted-plaintext causes can never satisfy the downcast and are always
+// dropped (pinned by `test_string_variant_sources_never_reach_context`).
 fn format_context(context: String) -> String {
     context
 }
@@ -124,25 +140,32 @@ pub(crate) fn ffi_error_to_sdk(err: PaykitFfiError, context: &'static str) -> Pa
             context: format!("{context}: {code}"),
             source,
         },
-        // The four string-variant SDK errors have no `source` field to stash
-        // the original FFI error for downcast recovery, so the callback's code
-        // and reason are folded into the string instead. The reason is
-        // app-authored (it already crossed the boundary once), so echoing it
-        // back is not a redaction concern. The custom code survives only as
-        // text: converting back to FFI yields the generic code for the
-        // variant, which the round-trip tests pin.
+        // Every arm stashes the original callback error in `source`, so the
+        // reverse conversion recovers the exact variant, custom code, and
+        // reason by downcast. The callback's machine-readable code is never
+        // degraded to the variant's generic one; the round-trip tests pin
+        // lossless recovery for all eight variants.
         PaykitFfiError::NotFound {
             code,
-            context: reason,
-        } => PaykitSdkError::NotFound(format!("{context}: {code}: {reason}")),
+            context: _reason,
+        } => PaykitSdkError::NotFound {
+            context: format!("{context}: {code}"),
+            source,
+        },
         PaykitFfiError::Protocol {
             code,
-            context: reason,
-        } => PaykitSdkError::Protocol(format!("{context}: {code}: {reason}")),
+            context: _reason,
+        } => PaykitSdkError::Protocol {
+            context: format!("{context}: {code}"),
+            source,
+        },
         PaykitFfiError::Policy {
             code,
-            context: reason,
-        } => PaykitSdkError::Policy(format!("{context}: {code}: {reason}")),
+            context: _reason,
+        } => PaykitSdkError::Policy {
+            context: format!("{context}: {code}"),
+            source,
+        },
         PaykitFfiError::PaymentAdapter {
             code,
             context: _reason,
@@ -152,8 +175,11 @@ pub(crate) fn ffi_error_to_sdk(err: PaykitFfiError, context: &'static str) -> Pa
         },
         PaykitFfiError::RecoveryRequired {
             code,
-            context: reason,
-        } => PaykitSdkError::RecoveryRequired(format!("{context}: {code}: {reason}")),
+            context: _reason,
+        } => PaykitSdkError::RecoveryRequired {
+            context: format!("{context}: {code}"),
+            source,
+        },
     }
 }
 

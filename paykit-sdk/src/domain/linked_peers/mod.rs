@@ -98,10 +98,10 @@ pub(crate) fn default_linked_peer(
 
 fn ensure_not_blocked(peer: &LinkedPeerRecord) -> Result<()> {
     if peer.state == LinkedPeerState::Blocked {
-        return Err(PaykitSdkError::Policy(format!(
-            "Linked Peer {} is blocked",
-            peer.counterparty
-        )));
+        return Err(PaykitSdkError::Policy {
+            context: format!("Linked Peer {} is blocked", peer.counterparty),
+            source: None,
+        });
     }
     Ok(())
 }
@@ -115,11 +115,14 @@ fn counterparty_receiver_path_for_operation(
         return Ok(lease.counterparty_receiver_path.clone());
     }
 
-    counterparty_receiver_path.cloned().ok_or_else(|| {
-        PaykitSdkError::Policy(format!(
-            "counterparty {counterparty} receiver path is required for private link state"
-        ))
-    })
+    counterparty_receiver_path
+        .cloned()
+        .ok_or_else(|| PaykitSdkError::Policy {
+            context: format!(
+                "counterparty {counterparty} receiver path is required for private link state"
+            ),
+            source: None,
+        })
 }
 
 fn report_current_link_state(
@@ -228,9 +231,12 @@ where
                     .peer_link_operation_lease(&counterparty, &counterparty_receiver_path)
                     .is_some_and(|active_lease| active_lease.expires_at > now)
             {
-                return Err(PaykitSdkError::Policy(format!(
-                    "peer link operation already in progress for counterparty {counterparty}"
-                )));
+                return Err(PaykitSdkError::Policy {
+                    context: format!(
+                        "peer link operation already in progress for counterparty {counterparty}"
+                    ),
+                    source: None,
+                });
             }
             let mut record = tx
                 .linked_peer(&counterparty, &counterparty_receiver_path)
@@ -238,9 +244,10 @@ where
                     default_linked_peer(counterparty.clone(), counterparty_receiver_path.clone())
                 });
             if record.state == LinkedPeerState::Blocked && state != LinkedPeerState::Blocked {
-                return Err(PaykitSdkError::Policy(format!(
-                    "Linked Peer {counterparty} is blocked"
-                )));
+                return Err(PaykitSdkError::Policy {
+                    context: format!("Linked Peer {counterparty} is blocked"),
+                    source: None,
+                });
             }
             record.state = state;
             record.last_sync_at = Some(now);
@@ -369,10 +376,13 @@ where
                     .peer_link_operation_lease(&counterparty, &counterparty_receiver_path)
                     .is_some_and(|active_lease| active_lease.expires_at > now)
             {
-                return Err(PaykitSdkError::Policy(format!(
-                    "counterparty {counterparty} receiver {} already has an active link operation",
-                    counterparty_receiver_path
-                )));
+                return Err(PaykitSdkError::Policy {
+                    context: format!(
+                        "counterparty {counterparty} receiver {} already has an active link operation",
+                        counterparty_receiver_path
+                    ),
+                    source: None,
+                });
             }
             mark_recovery_required_in_transaction(
                 tx,

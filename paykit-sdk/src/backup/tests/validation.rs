@@ -35,7 +35,7 @@ async fn test_restore_backup_state_rejects_malformed_link_snapshot() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[test]
@@ -283,7 +283,7 @@ async fn test_restore_backup_state_rejects_local_recovery_marker_without_created
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -324,7 +324,7 @@ async fn test_restore_backup_state_rejects_invalid_remote_recovery_attempt_id() 
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -358,7 +358,7 @@ async fn test_restore_backup_state_rejects_records_without_identity() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -393,7 +393,7 @@ async fn test_restore_backup_state_rejects_invalid_public_endpoint_record() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -428,7 +428,7 @@ async fn test_restore_backup_state_rejects_inconsistent_public_endpoint_status()
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -471,7 +471,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_metadata() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -514,7 +514,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_status() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -570,7 +570,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_error() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -621,7 +621,7 @@ async fn test_restore_backup_state_rejects_stale_dedupe_event_header() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -672,7 +672,7 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -739,7 +739,7 @@ async fn test_restore_backup_state_rejects_wrong_receiver_receipt_access_dedupe_
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -857,7 +857,7 @@ async fn test_restore_backup_state_rejects_missing_event_dedupe_index() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -919,7 +919,7 @@ async fn test_restore_backup_state_rejects_missing_receipt_access_index() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -991,7 +991,7 @@ async fn test_restore_backup_state_rejects_receipt_access_context_mismatch() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1068,7 +1068,7 @@ async fn test_restore_backup_state_rejects_receipt_access_receiver_mismatch() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1141,7 +1141,7 @@ async fn test_restore_backup_state_rejects_inconsistent_receipt_access_status() 
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1481,7 +1481,7 @@ async fn test_restore_backup_state_rejects_orphan_endpoint_reservation() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1525,7 +1525,7 @@ async fn test_restore_backup_state_rejects_invalid_endpoint_reservation_id() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1569,7 +1569,7 @@ async fn test_restore_backup_state_rejects_mismatched_endpoint_reservation_paylo
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1633,7 +1633,7 @@ async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1733,7 +1733,7 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1785,7 +1785,7 @@ async fn test_restore_backup_state_rejects_receipt_issuance_access_mismatch() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1836,7 +1836,7 @@ async fn test_restore_backup_state_rejects_receipt_issuance_wrong_local_receiver
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1904,7 +1904,7 @@ async fn test_restore_backup_state_rejects_outbound_receipt_access_wrong_local_r
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -1971,5 +1971,5 @@ async fn test_restore_backup_state_rejects_duplicate_receipt_issuance_ids() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }

@@ -12,9 +12,10 @@ where
         update.validate()?;
         let local_public_key = self.require_initialized_identity("save contact").await?;
         if update.public_key == local_public_key {
-            return Err(PaykitSdkError::Policy(
-                "cannot save the local Paykit identity as a contact".into(),
-            ));
+            return Err(PaykitSdkError::Policy {
+                context: "cannot save the local Paykit identity as a contact".into(),
+                source: None,
+            });
         }
         let now = self.clock.now();
         self.storage
@@ -30,10 +31,13 @@ where
                                 .iter()
                                 .any(|receiver_path| receiver_path == marker_receiver_path)
                         {
-                            return Err(PaykitSdkError::Policy(format!(
+                            return Err(PaykitSdkError::Policy {
+                                context: format!(
                                 "remove public contact marker before removing contact receiver {}/{}",
                                 existing.public_key, marker_receiver_path
-                            )));
+                            ),
+                                source: None,
+                            });
                         }
                     }
                 }
@@ -75,9 +79,12 @@ where
                     return Ok(None);
                 };
                 if !existing.can_remove_locally() {
-                    return Err(PaykitSdkError::Policy(format!(
-                        "remove public contact marker before deleting contact {public_key}"
-                    )));
+                    return Err(PaykitSdkError::Policy {
+                        context: format!(
+                            "remove public contact marker before deleting contact {public_key}"
+                        ),
+                        source: None,
+                    });
                 }
                 Ok(tx.remove_contact_record(public_key))
             })
@@ -123,9 +130,10 @@ where
         if self.config.public_contact_sharing
             != PublicContactSharingPolicy::ConfiguredPublicNamespace
         {
-            return Err(PaykitSdkError::Policy(
-                "public contact sharing is disabled".into(),
-            ));
+            return Err(PaykitSdkError::Policy {
+                context: "public contact sharing is disabled".into(),
+                source: None,
+            });
         }
         let session_access = self
             .load_session_access_for_initialized_identity("publish public contact")
@@ -134,14 +142,18 @@ where
         self.storage
             .transaction(|tx| {
                 let Some(existing) = tx.contact_record(&public_key) else {
-                    return Err(PaykitSdkError::Protocol(format!(
-                        "cannot publish unsaved contact {public_key}"
-                    )));
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!("cannot publish unsaved contact {public_key}"),
+                        source: None,
+                    });
                 };
                 if !existing.contains_receiver_path(&receiver_path) {
-                    return Err(PaykitSdkError::Protocol(format!(
-                        "cannot publish unsaved contact receiver {public_key}/{receiver_path}"
-                    )));
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!(
+                            "cannot publish unsaved contact receiver {public_key}/{receiver_path}"
+                        ),
+                        source: None,
+                    });
                 }
                 tx.save_contact_record(
                     existing
@@ -169,9 +181,12 @@ where
         self.storage
             .transaction(move |tx| {
                 let Some(existing) = tx.contact_record(&public_key) else {
-                    return Err(PaykitSdkError::Protocol(format!(
-                        "contact {public_key} disappeared before public publication was recorded"
-                    )));
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!(
+                            "contact {public_key} disappeared before public publication was recorded"
+                        ),
+                        source: None,
+                    });
                 };
                 let record = existing.mark_public_contact_published(now);
                 tx.save_contact_record(record.clone());
@@ -205,9 +220,12 @@ where
         {
             let marker_receiver_path = marker_receiver_path(existing_record)?;
             if marker_receiver_path != receiver_path {
-                return Err(PaykitSdkError::Policy(format!(
+                return Err(PaykitSdkError::Policy {
+                    context: format!(
                     "public contact marker for {public_key} is tracked under {marker_receiver_path}"
-                )));
+                ),
+                    source: None,
+                });
             }
             let pending_at = self.clock.now();
             self.storage
@@ -343,10 +361,11 @@ fn marker_receiver_path(record: &ContactRecord) -> Result<PaykitReceiverPath> {
     record
         .public_contact_marker_receiver_path
         .clone()
-        .ok_or_else(|| {
-            PaykitSdkError::Protocol(format!(
+        .ok_or_else(|| PaykitSdkError::Protocol {
+            context: format!(
                 "contact {} has no receiver path for public contact marker",
                 record.public_key
-            ))
+            ),
+            source: None,
         })
 }

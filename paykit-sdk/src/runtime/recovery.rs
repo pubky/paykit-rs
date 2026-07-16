@@ -171,9 +171,12 @@ where
                     .encrypted_link_state(counterparty, &lease.counterparty_receiver_path)
                     .is_some();
                 if !can_publish_recovery_marker(existing_peer.as_ref(), has_link_state) {
-                    return Err(PaykitSdkError::Policy(format!(
-                        "cannot publish Encrypted Link recovery marker without existing private link state for counterparty {counterparty}"
-                    )));
+                    return Err(PaykitSdkError::Policy {
+                        context: format!(
+                            "cannot publish Encrypted Link recovery marker without existing private link state for counterparty {counterparty}"
+                        ),
+                        source: None,
+                    });
                 }
                 let mark =
                     mark_recovery_required_for_marker_in_transaction(
@@ -284,17 +287,23 @@ where
                     counterparty_receiver_path.clone(),
                 );
                 if peer.state != LinkedPeerState::RecoveryRequired {
-                    return Err(PaykitSdkError::Policy(format!(
-                        "cannot publish Encrypted Link recovery marker unless counterparty {counterparty} is recovery-required"
-                    )));
+                    return Err(PaykitSdkError::Policy {
+                        context: format!(
+                            "cannot publish Encrypted Link recovery marker unless counterparty {counterparty} is recovery-required"
+                        ),
+                        source: None,
+                    });
                 }
                 let has_link_state = tx
                     .encrypted_link_state(counterparty, counterparty_receiver_path)
                     .is_some();
                 if !can_publish_recovery_marker(Some(&peer), has_link_state) {
-                    return Err(PaykitSdkError::Policy(format!(
-                        "cannot publish Encrypted Link recovery marker without existing private link state for counterparty {counterparty}"
-                    )));
+                    return Err(PaykitSdkError::Policy {
+                        context: format!(
+                            "cannot publish Encrypted Link recovery marker without existing private link state for counterparty {counterparty}"
+                        ),
+                        source: None,
+                    });
                 }
                 let reusable_marker = if !force_new_attempt
                     && peer.state == LinkedPeerState::RecoveryRequired
@@ -509,9 +518,10 @@ where
                     return Ok(false);
                 }
                 if peer.state == LinkedPeerState::Blocked {
-                    return Err(PaykitSdkError::Policy(format!(
-                        "counterparty {counterparty} is blocked"
-                    )));
+                    return Err(PaykitSdkError::Policy {
+                        context: format!("counterparty {counterparty} is blocked"),
+                        source: None,
+                    });
                 }
                 Ok(true)
             })
@@ -575,9 +585,10 @@ where
                     return Ok(false);
                 }
                 if peer.state == LinkedPeerState::Blocked {
-                    return Err(PaykitSdkError::Policy(format!(
-                        "counterparty {counterparty} is blocked"
-                    )));
+                    return Err(PaykitSdkError::Policy {
+                        context: format!("counterparty {counterparty} is blocked"),
+                        source: None,
+                    });
                 }
                 mark_recovery_required_in_transaction(
                     tx,
@@ -716,10 +727,10 @@ fn recovery_marker_error_text(err: &PaykitSdkError) -> String {
         PaykitSdkError::Storage { context, .. } => context.clone(),
         PaykitSdkError::Transport { context, .. } => context.clone(),
         PaykitSdkError::PaymentAdapter { context, .. } => context.clone(),
-        PaykitSdkError::NotFound(_)
-        | PaykitSdkError::Protocol(_)
-        | PaykitSdkError::Policy(_)
-        | PaykitSdkError::RecoveryRequired(_) => err.to_string(),
+        PaykitSdkError::NotFound { .. }
+        | PaykitSdkError::Protocol { .. }
+        | PaykitSdkError::Policy { .. }
+        | PaykitSdkError::RecoveryRequired { .. } => err.to_string(),
     }
 }
 fn recovery_peer_or_default(
@@ -757,8 +768,9 @@ fn can_publish_recovery_marker(peer: Option<&LinkedPeerRecord>, has_link_state: 
 fn parse_recovery_marker_created_at(marker: &EncryptedLinkRecoveryMarker) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(marker.created_at())
         .map(|timestamp| timestamp.with_timezone(&Utc))
-        .map_err(|err| {
-            PaykitSdkError::Protocol(format!("invalid recovery marker timestamp: {err}"))
+        .map_err(|err| PaykitSdkError::Protocol {
+            context: format!("invalid recovery marker timestamp: {err}"),
+            source: None,
         })
 }
 

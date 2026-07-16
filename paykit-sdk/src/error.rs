@@ -35,16 +35,34 @@ pub enum PaykitSdkError {
     },
 
     /// Requested Paykit or Pubky resource was not found.
-    #[error("not found: {0}")]
-    NotFound(String),
+    #[error("not found: {context}")]
+    NotFound {
+        /// Human-readable failure context.
+        context: String,
+        /// Underlying cause, when available.
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 
     /// Paykit protocol data is invalid, conflicting, or unsupported.
-    #[error("protocol error: {0}")]
-    Protocol(String),
+    #[error("protocol error: {context}")]
+    Protocol {
+        /// Human-readable failure context.
+        context: String,
+        /// Underlying cause, when available.
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 
     /// Operation is blocked by configured SDK policy.
-    #[error("policy error: {0}")]
-    Policy(String),
+    #[error("policy error: {context}")]
+    Policy {
+        /// Human-readable failure context.
+        context: String,
+        /// Underlying cause, when available.
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 
     /// Payment adapter failed.
     #[error("payment adapter error: {context}")]
@@ -57,8 +75,14 @@ pub enum PaykitSdkError {
     },
 
     /// Local state needs explicit recovery before automation can continue.
-    #[error("recovery required: {0}")]
-    RecoveryRequired(String),
+    #[error("recovery required: {context}")]
+    RecoveryRequired {
+        /// Human-readable failure context.
+        context: String,
+        /// Underlying cause, when available.
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 }
 
 impl From<paykit_lib::PaykitError> for PaykitSdkError {
@@ -68,15 +92,28 @@ impl From<paykit_lib::PaykitError> for PaykitSdkError {
                 context,
                 source: Some(source),
             },
-            paykit_lib::PaykitError::NotFound(msg) => Self::NotFound(msg),
+            paykit_lib::PaykitError::NotFound(msg) => Self::NotFound {
+                context: msg,
+                source: None,
+            },
             // SECURITY / REDACTION: never fold `source` into the Protocol
-            // string. `Protocol` crosses the FFI boundary verbatim (rendered
-            // into generated Kotlin/Swift exception messages), and lib-level
-            // `InvalidData` sources carry raw parse/decode causes derived from
-            // network data or decrypted plaintext. Only the curated static
-            // `context` label may cross; the cause is deliberately dropped.
-            paykit_lib::PaykitError::InvalidData { context, source: _ } => Self::Protocol(context),
-            paykit_lib::PaykitError::Validation(msg) => Self::Protocol(msg),
+            // `context` string. `context` crosses the FFI boundary verbatim
+            // (rendered into generated Kotlin/Swift exception messages), and
+            // lib-level `InvalidData` sources carry raw parse/decode causes
+            // derived from network data or decrypted plaintext. The cause is
+            // kept structurally separate in `source` for local diagnostics.
+            // The FFI conversion drops every `source` except an app-authored
+            // `PaykitFfiError` recovered by downcast; nothing in paykit-lib
+            // or paykit-sdk constructs one, so causes like this one always
+            // miss the downcast and never cross. Only the curated static
+            // `context` label survives in exception text.
+            paykit_lib::PaykitError::InvalidData { context, source } => {
+                Self::Protocol { context, source }
+            }
+            paykit_lib::PaykitError::Validation(msg) => Self::Protocol {
+                context: msg,
+                source: None,
+            },
         }
     }
 }

@@ -578,7 +578,7 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     let snapshot = storage.snapshot().unwrap();
     assert!(snapshot.private_stream_items.is_empty());
     assert!(snapshot.encrypted_link_states.is_empty());

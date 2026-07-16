@@ -23,5 +23,5 @@ fn test_normalize_receiving_details_rejects_duplicates() {
         },
     ]);
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }

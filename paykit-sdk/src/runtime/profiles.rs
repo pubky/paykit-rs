@@ -125,9 +125,10 @@ where
         content_type: &str,
     ) -> Result<PaykitBlobRecord> {
         if bytes.is_empty() {
-            return Err(PaykitSdkError::Protocol(
-                "profile avatar bytes must not be empty".into(),
-            ));
+            return Err(PaykitSdkError::Protocol {
+                context: "profile avatar bytes must not be empty".into(),
+                source: None,
+            });
         }
         let extension = avatar_extension(content_type)?;
         let digest = Sha256::digest(&bytes);
@@ -179,9 +180,12 @@ where
         let Some(bytes) = self.fetch_pubky_file(uri).await? else {
             return Ok(None);
         };
-        String::from_utf8(bytes).map(Some).map_err(|err| {
-            PaykitSdkError::Protocol(format!("fetch Pubky text: invalid UTF-8: {err}"))
-        })
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|err| PaykitSdkError::Protocol {
+                context: format!("fetch Pubky text: invalid UTF-8: {err}"),
+                source: None,
+            })
     }
 
     /// Fetch a public Pubky app profile.
@@ -294,8 +298,9 @@ fn avatar_extension(content_type: &str) -> Result<&'static str> {
         "image/png" => Ok("png"),
         "image/webp" => Ok("webp"),
         "image/gif" => Ok("gif"),
-        _ => Err(PaykitSdkError::Protocol(format!(
-            "unsupported profile avatar content type: {content_type}"
-        ))),
+        _ => Err(PaykitSdkError::Protocol {
+            context: format!("unsupported profile avatar content type: {content_type}"),
+            source: None,
+        }),
     }
 }

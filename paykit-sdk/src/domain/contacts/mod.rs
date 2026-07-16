@@ -95,9 +95,12 @@ impl PubkyProfile {
         )?;
         if let Some(links) = self.links.as_ref() {
             if links.len() > MAX_PUBKY_PROFILE_LINKS {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "Pubky profile links must not exceed {MAX_PUBKY_PROFILE_LINKS} entries"
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "Pubky profile links must not exceed {MAX_PUBKY_PROFILE_LINKS} entries"
+                    ),
+                    source: None,
+                });
             }
             for link in links {
                 link.validate()?;
@@ -285,13 +288,17 @@ impl PaykitProfile {
             false,
         )?;
         if let Some(extra) = self.extra.as_ref() {
-            let extra_json = serde_json::to_vec(extra).map_err(|err| {
-                PaykitSdkError::Protocol(format!("profile extra must be valid JSON: {err}"))
+            let extra_json = serde_json::to_vec(extra).map_err(|err| PaykitSdkError::Protocol {
+                context: format!("profile extra must be valid JSON: {err}"),
+                source: None,
             })?;
             if extra_json.len() > MAX_PROFILE_EXTRA_BYTES {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "profile extra must not exceed {MAX_PROFILE_EXTRA_BYTES} bytes"
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "profile extra must not exceed {MAX_PROFILE_EXTRA_BYTES} bytes"
+                    ),
+                    source: None,
+                });
             }
         }
         Ok(())
@@ -563,17 +570,19 @@ pub(crate) fn normalized_receiver_paths(
 
 fn validate_receiver_paths(receiver_paths: &[PaykitReceiverPath]) -> Result<()> {
     if receiver_paths.is_empty() {
-        return Err(PaykitSdkError::Protocol(
-            "contact receiver paths must not be empty".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "contact receiver paths must not be empty".into(),
+            source: None,
+        });
     }
     let mut normalized = receiver_paths.to_vec();
     normalized.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     normalized.dedup();
     if normalized.len() != receiver_paths.len() {
-        return Err(PaykitSdkError::Protocol(
-            "contact receiver paths must not contain duplicates".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "contact receiver paths must not contain duplicates".into(),
+            source: None,
+        });
     }
     Ok(())
 }
@@ -601,23 +610,30 @@ pub(crate) fn profile_json(profile: &PaykitProfile) -> Result<String> {
         kind: PROFILE_KIND.into(),
         profile: profile.clone(),
     })
-    .map_err(|err| PaykitSdkError::Protocol(format!("failed to serialize Paykit profile: {err}")))
+    .map_err(|err| PaykitSdkError::Protocol {
+        context: format!("failed to serialize Paykit profile: {err}"),
+        source: None,
+    })
 }
 
 pub(crate) fn parse_profile_json(raw_json: &str) -> Result<PaykitProfile> {
-    let document = serde_json::from_str::<PaykitProfileDocument>(raw_json)
-        .map_err(|err| PaykitSdkError::Protocol(format!("invalid Paykit profile JSON: {err}")))?;
+    let document = serde_json::from_str::<PaykitProfileDocument>(raw_json).map_err(|err| {
+        PaykitSdkError::Protocol {
+            context: format!("invalid Paykit profile JSON: {err}"),
+            source: None,
+        }
+    })?;
     if document.version != PROFILE_VERSION {
-        return Err(PaykitSdkError::Protocol(format!(
-            "unsupported Paykit profile version {}",
-            document.version
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!("unsupported Paykit profile version {}", document.version),
+            source: None,
+        });
     }
     if document.kind != PROFILE_KIND {
-        return Err(PaykitSdkError::Protocol(format!(
-            "unexpected Paykit profile kind '{}'",
-            document.kind
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!("unexpected Paykit profile kind '{}'", document.kind),
+            source: None,
+        });
     }
     document.profile.validate()?;
     Ok(document.profile)
@@ -625,27 +641,32 @@ pub(crate) fn parse_profile_json(raw_json: &str) -> Result<PaykitProfile> {
 
 pub(crate) fn validate_paykit_blob_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(PaykitSdkError::Protocol(
-            "Paykit blob name must not be empty".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "Paykit blob name must not be empty".into(),
+            source: None,
+        });
     }
     if name.len() > MAX_PAYKIT_BLOB_NAME_BYTES {
-        return Err(PaykitSdkError::Protocol(format!(
-            "Paykit blob name must not exceed {MAX_PAYKIT_BLOB_NAME_BYTES} bytes"
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!("Paykit blob name must not exceed {MAX_PAYKIT_BLOB_NAME_BYTES} bytes"),
+            source: None,
+        });
     }
     if name == "." || name == ".." {
-        return Err(PaykitSdkError::Protocol(
-            "Paykit blob name must not be a path traversal segment".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "Paykit blob name must not be a path traversal segment".into(),
+            source: None,
+        });
     }
     if name
         .chars()
         .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_'))
     {
-        return Err(PaykitSdkError::Protocol(
-            "Paykit blob name may only contain ASCII letters, digits, '.', '-' and '_'".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "Paykit blob name may only contain ASCII letters, digits, '.', '-' and '_'"
+                .into(),
+            source: None,
+        });
     }
     Ok(())
 }
@@ -665,14 +686,18 @@ pub(crate) fn paykit_blob_path_from_uri_or_path(
     uri_or_path: &str,
 ) -> Result<String> {
     if uri_or_path.starts_with("pubky://") || uri_or_path.starts_with("pubky") {
-        let resource = uri_or_path
-            .parse::<pubky::PubkyResource>()
-            .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky blob URI: {err}")))?;
+        let resource = uri_or_path.parse::<pubky::PubkyResource>().map_err(|err| {
+            PaykitSdkError::Protocol {
+                context: format!("invalid Pubky blob URI: {err}"),
+                source: None,
+            }
+        })?;
         let owner = PubkyPublicKey::from_public_key(&resource.owner);
         if &owner != public_key {
-            return Err(PaykitSdkError::Protocol(
-                "Paykit blob URI owner does not match local identity".into(),
-            ));
+            return Err(PaykitSdkError::Protocol {
+                context: "Paykit blob URI owner does not match local identity".into(),
+                source: None,
+            });
         }
         return validate_paykit_blob_path(blob_prefix, resource.path.as_str());
     }
@@ -680,16 +705,22 @@ pub(crate) fn paykit_blob_path_from_uri_or_path(
 }
 
 fn validate_paykit_blob_path(blob_prefix: &str, path: &str) -> Result<String> {
-    let name = path.strip_prefix(blob_prefix).ok_or_else(|| {
-        PaykitSdkError::Protocol("Paykit blob path is outside configured blob prefix".into())
-    })?;
+    let name = path
+        .strip_prefix(blob_prefix)
+        .ok_or_else(|| PaykitSdkError::Protocol {
+            context: "Paykit blob path is outside configured blob prefix".into(),
+            source: None,
+        })?;
     validate_paykit_blob_name(name)?;
     Ok(path.to_owned())
 }
 
 pub(crate) fn parse_pubky_profile_json(raw_json: &str) -> Result<PubkyProfile> {
-    let mut profile = serde_json::from_str::<PubkyProfile>(raw_json)
-        .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky profile JSON: {err}")))?;
+    let mut profile =
+        serde_json::from_str::<PubkyProfile>(raw_json).map_err(|err| PaykitSdkError::Protocol {
+            context: format!("invalid Pubky profile JSON: {err}"),
+            source: None,
+        })?;
     profile.drop_invalid_optional_fields();
     profile.validate()?;
     Ok(profile)
@@ -728,8 +759,9 @@ pub(crate) fn public_contact_json(
         public_key: public_key.clone(),
         receiver_path: receiver_path.clone(),
     })
-    .map_err(|err| {
-        PaykitSdkError::Protocol(format!("failed to serialize Paykit public contact: {err}"))
+    .map_err(|err| PaykitSdkError::Protocol {
+        context: format!("failed to serialize Paykit public contact: {err}"),
+        source: None,
     })
 }
 
@@ -851,19 +883,22 @@ fn validate_optional_text(
         return Ok(());
     };
     if !allow_empty && value.trim().is_empty() {
-        return Err(PaykitSdkError::Protocol(format!(
-            "{label} must not be empty"
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{label} must not be empty"),
+            source: None,
+        });
     }
     if value.chars().count() > max_chars {
-        return Err(PaykitSdkError::Protocol(format!(
-            "{label} must not exceed {max_chars} characters"
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{label} must not exceed {max_chars} characters"),
+            source: None,
+        });
     }
     if value.chars().any(char::is_control) {
-        return Err(PaykitSdkError::Protocol(format!(
-            "{label} must not contain control characters"
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{label} must not contain control characters"),
+            source: None,
+        });
     }
     Ok(())
 }

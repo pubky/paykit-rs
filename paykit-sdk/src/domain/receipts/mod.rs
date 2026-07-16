@@ -145,9 +145,10 @@ impl ReceiptDraftBuilder {
     /// Build the Receipt Draft.
     pub fn build(self) -> Result<ReceiptDraft> {
         if self.billing_period.is_some() && self.payment_request_id.is_none() {
-            return Err(PaykitSdkError::Protocol(
-                "Receipt Draft billing_period requires payment_request_id".into(),
-            ));
+            return Err(PaykitSdkError::Protocol {
+                context: "Receipt Draft billing_period requires payment_request_id".into(),
+                source: None,
+            });
         }
         Ok(ReceiptDraft {
             receipt_id: self.receipt_id,
@@ -774,9 +775,11 @@ pub(crate) async fn fetch_encrypted_receipt_json(
                     context: "read encrypted receipt bytes".into(),
                     source: Some(err.into()),
                 })?;
-            let json = String::from_utf8(bytes.to_vec()).map_err(|err| {
-                PaykitSdkError::Protocol(format!("encrypted receipt is not UTF-8: {err}"))
-            })?;
+            let json =
+                String::from_utf8(bytes.to_vec()).map_err(|err| PaykitSdkError::Protocol {
+                    context: format!("encrypted receipt is not UTF-8: {err}"),
+                    source: None,
+                })?;
             Ok(Some(json))
         }
         Err(err) if is_not_found(&err) => Ok(None),
@@ -829,12 +832,16 @@ fn store_encrypted_receipt_error(_location: &str, source: anyhow::Error) -> Payk
 /// message is rendered verbatim into the generated Kotlin/Swift exception, so
 /// the Receipt Location MUST NOT be embedded in it. The location is accepted
 /// here only to make the redaction explicit and testable; it is deliberately
-/// dropped, leaving a static, non-sensitive label. `NotFound` is a plain-string
-/// variant with no `source`, so no cause chain can reintroduce the path. The
-/// Receipt Access record the caller persists already carries the location as a
-/// field for local diagnostics.
+/// dropped, leaving a static, non-sensitive label. `source` is `None`: nothing
+/// sensitive is retained, and the FFI conversion drops every `source` that is
+/// not an app-authored `PaykitFfiError` callback error (pinned by paykit-ffi's
+/// redaction tests). The Receipt Access record the caller persists already
+/// carries the location as a field for local diagnostics.
 pub(crate) fn missing_encrypted_receipt_error(_location: &str) -> PaykitSdkError {
-    PaykitSdkError::NotFound("encrypted receipt was not found at its receipt location".into())
+    PaykitSdkError::NotFound {
+        context: "encrypted receipt was not found at its receipt location".into(),
+        source: None,
+    }
 }
 
 /// Choose which retrieval failure to keep while `retrieve_receipt` walks the
@@ -850,7 +857,7 @@ pub(crate) fn merge_retrieval_error(
     err: PaykitSdkError,
 ) -> PaykitSdkError {
     match (previous, err) {
-        (Some(previous), PaykitSdkError::NotFound(_)) => previous,
+        (Some(previous), PaykitSdkError::NotFound { .. }) => previous,
         (_, err) => err,
     }
 }
@@ -932,9 +939,10 @@ where
     }
     let kind = validate_outbound_private_message(&record.access_json)?;
     if kind != paykit_lib::PrivateMessageKind::ReceiptAccess.as_str() {
-        return Err(PaykitSdkError::Protocol(
-            "receipt issuance access JSON is not Receipt Access".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "receipt issuance access JSON is not Receipt Access".into(),
+            source: None,
+        });
     }
     storage
         .transaction(move |tx| {
@@ -993,38 +1001,43 @@ fn validate_receipt_matches_access(
     expected_recipient: &PubkyPublicKey,
 ) -> Result<()> {
     if receipt.receipt_id.as_str() != access.receipt_id {
-        return Err(PaykitSdkError::Protocol(
-            "decrypted Receipt ID does not match Receipt Access".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "decrypted Receipt ID does not match Receipt Access".into(),
+            source: None,
+        });
     }
     let recipient = PubkyPublicKey::from_public_key(&receipt.recipient_public_key);
     if &recipient != expected_recipient {
-        return Err(PaykitSdkError::Protocol(
-            "decrypted Receipt recipient does not match local identity".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "decrypted Receipt recipient does not match local identity".into(),
+            source: None,
+        });
     }
     if receipt.payment_reference.as_str() != access.payment_reference {
-        return Err(PaykitSdkError::Protocol(
-            "decrypted Receipt Payment Reference does not match Receipt Access".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "decrypted Receipt Payment Reference does not match Receipt Access".into(),
+            source: None,
+        });
     }
     let receipt_payment_request_id = receipt
         .payment_request_id
         .as_ref()
         .map(|id| id.as_str().to_owned());
     if receipt_payment_request_id != access.payment_request_id {
-        return Err(PaykitSdkError::Protocol(
-            "decrypted Receipt Payment Request ID does not match Receipt Access".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "decrypted Receipt Payment Request ID does not match Receipt Access".into(),
+            source: None,
+        });
     }
     let receipt_billing_period = receipt
         .billing_period
         .as_ref()
         .map(BillingPeriodRecord::from);
     if receipt_billing_period != access.billing_period {
-        return Err(PaykitSdkError::Protocol(
-            "decrypted Receipt Billing Period does not match Receipt Access".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "decrypted Receipt Billing Period does not match Receipt Access".into(),
+            source: None,
+        });
     }
     Ok(())
 }

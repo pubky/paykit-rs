@@ -8,7 +8,7 @@ fn test_payable_from_batch_rejects_foreign_candidates() {
 
     let result = payable_from_batch(&[foreign], &[candidate]);
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[test]
@@ -17,7 +17,7 @@ fn test_payable_from_batch_rejects_duplicate_candidates() {
 
     let result = payable_from_batch(&[candidate.clone(), candidate.clone()], &[candidate]);
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[test]

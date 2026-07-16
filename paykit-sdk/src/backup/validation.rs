@@ -83,9 +83,10 @@ where
     for record in records {
         let key = key(&record);
         if keyed.insert(key, record).is_some() {
-            return Err(PaykitSdkError::Protocol(format!(
-                "duplicate {label} backup key"
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!("duplicate {label} backup key"),
+                source: None,
+            });
         }
     }
     Ok(keyed)
@@ -97,10 +98,13 @@ pub(super) fn unique_outbound_messages(
     let mut ids = HashSet::new();
     for record in &records {
         if !ids.insert(record.outbound_message_id) {
-            return Err(PaykitSdkError::Protocol(format!(
-                "duplicate outbound Private Application Message id {}",
-                record.outbound_message_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "duplicate outbound Private Application Message id {}",
+                    record.outbound_message_id
+                ),
+                source: None,
+            });
         }
     }
     records.sort_by_key(|record| record.outbound_message_id);
@@ -113,10 +117,10 @@ pub(super) fn unique_private_stream_items(
     let mut ids = HashSet::new();
     for record in &records {
         if !ids.insert(record.stream_item_id) {
-            return Err(PaykitSdkError::Protocol(format!(
-                "duplicate private stream item id {}",
-                record.stream_item_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!("duplicate private stream item id {}", record.stream_item_id),
+                source: None,
+            });
         }
     }
     records.sort_by_key(|record| record.stream_item_id);
@@ -351,32 +355,35 @@ pub(super) fn validate_encrypted_link_snapshots(
             let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes)
                 .map_err(PaykitSdkError::from)?;
             if snapshot.recipient() != &expected_recipient {
-                return Err(PaykitSdkError::Protocol(format!(
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
                     "Encrypted Link snapshot recipient does not match counterparty {counterparty}"
-                )));
+                ),
+                    source: None,
+                });
             }
             if snapshot.local_receiver_path() != local_receiver_path
                 || snapshot.remote_receiver_path() != counterparty_receiver_path
             {
-                return Err(PaykitSdkError::Protocol(format!(
+                return Err(PaykitSdkError::Protocol { context: format!(
                     "Encrypted Link snapshot receiver paths do not match peer {counterparty}/{counterparty_receiver_path}"
-                )));
+                ), source: None });
             }
         }
         if let Some(snapshot_bytes) = record.handshake_snapshot.as_ref() {
             let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot_bytes)
                 .map_err(PaykitSdkError::from)?;
             if snapshot.recipient() != &expected_recipient {
-                return Err(PaykitSdkError::Protocol(format!(
+                return Err(PaykitSdkError::Protocol { context: format!(
                     "Encrypted Link Handshake snapshot recipient does not match counterparty {counterparty}"
-                )));
+                ), source: None });
             }
             if snapshot.local_receiver_path() != local_receiver_path
                 || snapshot.remote_receiver_path() != counterparty_receiver_path
             {
-                return Err(PaykitSdkError::Protocol(format!(
+                return Err(PaykitSdkError::Protocol { context: format!(
                     "Encrypted Link Handshake snapshot receiver paths do not match peer {counterparty}/{counterparty_receiver_path}"
-                )));
+                ), source: None });
             }
         }
     }
@@ -415,17 +422,16 @@ fn validate_recovery_marker_fields(
                 attempt_id,
                 timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             )
-            .map_err(|err| {
-                PaykitSdkError::Protocol(format!(
-                    "{label} for counterparty {counterparty} is invalid: {err}"
-                ))
+            .map_err(|err| PaykitSdkError::Protocol {
+                context: format!("{label} for counterparty {counterparty} is invalid: {err}"),
+                source: None,
             })?;
         }
         (None, None) => {}
         _ => {
-            return Err(PaykitSdkError::Protocol(format!(
+            return Err(PaykitSdkError::Protocol { context: format!(
                 "{label} for counterparty {counterparty} must store attempt id and timestamp together"
-            )));
+            ), source: None });
         }
     }
     Ok(())
@@ -438,45 +444,63 @@ pub(super) fn validate_public_endpoint_records(
         PaymentEndpointIdentifier::new(&record.identifier)?;
         match record.status {
             PublicationStatus::NotPublished => {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "public endpoint record '{}' cannot be not-published",
-                    record.identifier
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "public endpoint record '{}' cannot be not-published",
+                        record.identifier
+                    ),
+                    source: None,
+                });
             }
             PublicationStatus::PendingPublication | PublicationStatus::Published => {
                 if record.payload.is_none() {
-                    return Err(PaykitSdkError::Protocol(format!(
-                        "public endpoint record '{}' has no payload for status {:?}",
-                        record.identifier, record.status
-                    )));
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!(
+                            "public endpoint record '{}' has no payload for status {:?}",
+                            record.identifier, record.status
+                        ),
+                        source: None,
+                    });
                 }
                 if record.last_error.is_some() {
-                    return Err(PaykitSdkError::Protocol(format!(
-                        "public endpoint record '{}' has an error for status {:?}",
-                        record.identifier, record.status
-                    )));
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!(
+                            "public endpoint record '{}' has an error for status {:?}",
+                            record.identifier, record.status
+                        ),
+                        source: None,
+                    });
                 }
             }
             PublicationStatus::PendingRemoval | PublicationStatus::Removed => {
                 if record.last_error.is_some() {
-                    return Err(PaykitSdkError::Protocol(format!(
-                        "public endpoint record '{}' has an error for status {:?}",
-                        record.identifier, record.status
-                    )));
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!(
+                            "public endpoint record '{}' has an error for status {:?}",
+                            record.identifier, record.status
+                        ),
+                        source: None,
+                    });
                 }
                 if record.status == PublicationStatus::Removed && record.payload.is_some() {
-                    return Err(PaykitSdkError::Protocol(format!(
-                        "removed public endpoint record '{}' still has a payload",
-                        record.identifier
-                    )));
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!(
+                            "removed public endpoint record '{}' still has a payload",
+                            record.identifier
+                        ),
+                        source: None,
+                    });
                 }
             }
             PublicationStatus::Failed => {
                 if record.last_error.is_none() {
-                    return Err(PaykitSdkError::Protocol(format!(
-                        "failed public endpoint record '{}' has no error",
-                        record.identifier
-                    )));
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!(
+                            "failed public endpoint record '{}' has no error",
+                            record.identifier
+                        ),
+                        source: None,
+                    });
                 }
             }
         }
@@ -517,10 +541,13 @@ fn validate_contact_marker_state(record: &ContactRecord) -> Result<()> {
     };
 
     if record.public_contact_published_at.is_some() && record.public_contact_removed_at.is_some() {
-        return Err(PaykitSdkError::Protocol(format!(
-            "local contact {} has inconsistent public contact marker timestamps",
-            record.public_key
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "local contact {} has inconsistent public contact marker timestamps",
+                record.public_key
+            ),
+            source: None,
+        });
     }
 
     let active_marker_receiver = record
@@ -557,10 +584,13 @@ fn validate_contact_marker_state(record: &ContactRecord) -> Result<()> {
         Failed => record.public_contact_last_error.is_none() || !active_marker_receiver,
     };
     if invalid {
-        return Err(PaykitSdkError::Protocol(format!(
-            "local contact {} has inconsistent public contact marker state",
-            record.public_key
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "local contact {} has inconsistent public contact marker state",
+                record.public_key
+            ),
+            source: None,
+        });
     }
     Ok(())
 }
@@ -582,40 +612,51 @@ pub(super) fn validate_payment_endpoint_reservations(
         let identifier = PaymentEndpointIdentifier::new(&record.identifier)?;
         let outbound = outbound_by_id
             .get(&record.outbound_message_id)
-            .ok_or_else(|| {
-                PaykitSdkError::Protocol(format!(
+            .ok_or_else(|| PaykitSdkError::Protocol {
+                context: format!(
                     "Payment Endpoint Reservation '{}' references missing outbound message {}",
                     record.reservation_id, record.outbound_message_id
-                ))
+                ),
+                source: None,
             })?;
         if outbound.counterparty != record.counterparty
             || outbound.counterparty_receiver_path != record.counterparty_receiver_path
         {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Payment Endpoint Reservation '{}' peer does not match outbound message {}",
-                record.reservation_id, record.outbound_message_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Payment Endpoint Reservation '{}' peer does not match outbound message {}",
+                    record.reservation_id, record.outbound_message_id
+                ),
+                source: None,
+            });
         }
         if outbound.kind != PrivateMessageKind::PrivatePaymentList.as_str() {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Payment Endpoint Reservation '{}' references non-list outbound message {}",
-                record.reservation_id, record.outbound_message_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Payment Endpoint Reservation '{}' references non-list outbound message {}",
+                    record.reservation_id, record.outbound_message_id
+                ),
+                source: None,
+            });
         }
-        let private_list = parse_private_payment_list_json(&outbound.raw_json)
-            .map_err(|err| PaykitSdkError::Protocol(err.to_string()))?;
+        let private_list = parse_private_payment_list_json(&outbound.raw_json).map_err(|err| {
+            PaykitSdkError::Protocol {
+                context: err.to_string(),
+                source: None,
+            }
+        })?;
         let payload = private_list.get(&identifier).ok_or_else(|| {
-            PaykitSdkError::Protocol(format!(
+            PaykitSdkError::Protocol { context: format!(
                 "Payment Endpoint Reservation '{}' identifier is missing from outbound Private Payment List {}",
                 record.reservation_id, record.outbound_message_id
-            ))
+            ), source: None }
         })?;
         let payload_hash = reservation_payload_hash(payload.as_str());
         if record.payload_hash != payload_hash {
-            return Err(PaykitSdkError::Protocol(format!(
+            return Err(PaykitSdkError::Protocol { context: format!(
                 "Payment Endpoint Reservation '{}' payload hash does not match outbound Private Payment List {}",
                 record.reservation_id, record.outbound_message_id
-            )));
+            ), source: None });
         }
     }
     Ok(())
@@ -636,13 +677,21 @@ pub(super) fn validate_outbound_private_messages(
         validate_queued_outbound_private_message(record)?;
         let kind = validate_outbound_private_message(&record.raw_json)?;
         if kind == PrivateMessageKind::ReceiptAccess.as_str() {
-            let access = paykit_lib::parse_receipt_access_json(&record.raw_json)
-                .map_err(|err| PaykitSdkError::Protocol(err.to_string()))?;
+            let access =
+                paykit_lib::parse_receipt_access_json(&record.raw_json).map_err(|err| {
+                    PaykitSdkError::Protocol {
+                        context: err.to_string(),
+                        source: None,
+                    }
+                })?;
             if !access.has_location_for_receiver(local_receiver_path) {
-                return Err(PaykitSdkError::Protocol(format!(
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
                     "outbound Receipt Access message {} location does not match local receiver {}",
                     record.outbound_message_id, local_receiver_path
-                )));
+                ),
+                    source: None,
+                });
             }
         }
     }
@@ -683,10 +732,13 @@ fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Re
         }
     };
     if invalid {
-        return Err(PaykitSdkError::Protocol(format!(
-            "outbound Private Application Message {} has inconsistent {:?} status metadata",
-            record.outbound_message_id, record.status
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "outbound Private Application Message {} has inconsistent {:?} status metadata",
+                record.outbound_message_id, record.status
+            ),
+            source: None,
+        });
     }
     Ok(())
 }
@@ -705,41 +757,59 @@ pub(super) fn validate_private_stream_items(records: &[PrivateStreamItemRecord])
             &record.counterparty_receiver_path,
         );
         if record.parsed_version != parsed_version {
-            return Err(PaykitSdkError::Protocol(format!(
-                "private stream item {} has stale parsed version metadata",
-                record.stream_item_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "private stream item {} has stale parsed version metadata",
+                    record.stream_item_id
+                ),
+                source: None,
+            });
         }
         if record.parsed_kind.as_deref() != parsed_kind.as_deref() {
-            return Err(PaykitSdkError::Protocol(format!(
-                "private stream item {} has stale parsed kind metadata",
-                record.stream_item_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "private stream item {} has stale parsed kind metadata",
+                    record.stream_item_id
+                ),
+                source: None,
+            });
         }
         if record.known_paykit_kind.as_deref() != known_kind.map(PrivateMessageKind::as_str) {
-            return Err(PaykitSdkError::Protocol(format!(
-                "private stream item {} has stale known kind metadata",
-                record.stream_item_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "private stream item {} has stale known kind metadata",
+                    record.stream_item_id
+                ),
+                source: None,
+            });
         }
         if record.parse_status != classification.status {
-            return Err(PaykitSdkError::Protocol(format!(
-                "private stream item {} has stale parse status metadata",
-                record.stream_item_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "private stream item {} has stale parse status metadata",
+                    record.stream_item_id
+                ),
+                source: None,
+            });
         }
         if record.parse_error.as_deref() != classification.parse_error.as_deref() {
-            return Err(PaykitSdkError::Protocol(format!(
-                "private stream item {} has stale parse error metadata",
-                record.stream_item_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "private stream item {} has stale parse error metadata",
+                    record.stream_item_id
+                ),
+                source: None,
+            });
         }
         if record.parse_status == PrivateStreamParseStatus::Valid {
             let Some(kind) = known_kind else {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "private stream item {} is marked valid without a recognized Paykit kind",
-                    record.stream_item_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "private stream item {} is marked valid without a recognized Paykit kind",
+                        record.stream_item_id
+                    ),
+                    source: None,
+                });
             };
             validate_valid_private_stream_body(record, kind)?;
         }
@@ -758,41 +828,56 @@ pub(super) fn validate_event_dedup_records(
     for record in records.values() {
         validate_event_dedup_membership(record)?;
         let Some(first) = stream_by_id.get(&record.first_stream_item_id) else {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Event dedupe record '{}' references missing first stream item {}",
-                record.event_id, record.first_stream_item_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Event dedupe record '{}' references missing first stream item {}",
+                    record.event_id, record.first_stream_item_id
+                ),
+                source: None,
+            });
         };
         if first.counterparty != record.counterparty
             || first.counterparty_receiver_path != record.counterparty_receiver_path
         {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Event dedupe record '{}' peer does not match first stream item",
-                record.event_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Event dedupe record '{}' peer does not match first stream item",
+                    record.event_id
+                ),
+                source: None,
+            });
         }
         if payload_hash(&first.raw_json) != record.payload_hash {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Event dedupe record '{}' payload hash does not match first stream item",
-                record.event_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Event dedupe record '{}' payload hash does not match first stream item",
+                    record.event_id
+                ),
+                source: None,
+            });
         }
         validate_event_dedup_stream_item(record, first, EventDedupeItemKind::First)?;
         for stream_item_id in &record.duplicate_stream_item_ids {
             let Some(item) = stream_by_id.get(stream_item_id) else {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "Event dedupe record '{}' references missing stream item {}",
-                    record.event_id, stream_item_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "Event dedupe record '{}' references missing stream item {}",
+                        record.event_id, stream_item_id
+                    ),
+                    source: None,
+                });
             };
             validate_event_dedup_stream_item(record, item, EventDedupeItemKind::Duplicate)?;
         }
         for stream_item_id in &record.conflicting_stream_item_ids {
             let Some(item) = stream_by_id.get(stream_item_id) else {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "Event dedupe record '{}' references missing stream item {}",
-                    record.event_id, stream_item_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "Event dedupe record '{}' references missing stream item {}",
+                        record.event_id, stream_item_id
+                    ),
+                    source: None,
+                });
             };
             validate_event_dedup_stream_item(record, item, EventDedupeItemKind::Conflict)?;
         }
@@ -809,10 +894,13 @@ fn validate_event_dedup_membership(record: &EventDedupRecord) -> Result<()> {
         .chain(record.conflicting_stream_item_ids.iter())
     {
         if !seen.insert(*stream_item_id) {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Event dedupe record '{}' references stream item {} more than once",
-                record.event_id, stream_item_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Event dedupe record '{}' references stream item {} more than once",
+                    record.event_id, stream_item_id
+                ),
+                source: None,
+            });
         }
     }
     Ok(())
@@ -831,16 +919,22 @@ fn validate_event_dedup_stream_item(
     item_kind: EventDedupeItemKind,
 ) -> Result<()> {
     if item.counterparty != record.counterparty {
-        return Err(PaykitSdkError::Protocol(format!(
-            "Event dedupe record '{}' counterparty does not match stream item {}",
-            record.event_id, item.stream_item_id
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "Event dedupe record '{}' counterparty does not match stream item {}",
+                record.event_id, item.stream_item_id
+            ),
+            source: None,
+        });
     }
     if item.counterparty_receiver_path != record.counterparty_receiver_path {
-        return Err(PaykitSdkError::Protocol(format!(
-            "Event dedupe record '{}' counterparty receiver does not match stream item {}",
-            record.event_id, item.stream_item_id
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "Event dedupe record '{}' counterparty receiver does not match stream item {}",
+                record.event_id, item.stream_item_id
+            ),
+            source: None,
+        });
     }
 
     let mut classification =
@@ -851,40 +945,52 @@ fn validate_event_dedup_stream_item(
         ));
     enforce_receipt_access_receiver_scope(&mut classification, &item.counterparty_receiver_path);
     let Some(event) = classification.event else {
-        return Err(PaykitSdkError::Protocol(format!(
-            "Event dedupe record '{}' references non-event stream item {}",
-            record.event_id, item.stream_item_id
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "Event dedupe record '{}' references non-event stream item {}",
+                record.event_id, item.stream_item_id
+            ),
+            source: None,
+        });
     };
     if event.event_id != record.event_id {
-        return Err(PaykitSdkError::Protocol(format!(
-            "Event dedupe record '{}' does not match stream item {} event header",
-            record.event_id, item.stream_item_id
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "Event dedupe record '{}' does not match stream item {} event header",
+                record.event_id, item.stream_item_id
+            ),
+            source: None,
+        });
     }
 
     let item_hash = payload_hash(&item.raw_json);
     match item_kind {
         EventDedupeItemKind::First | EventDedupeItemKind::Duplicate => {
             if event.event_kind != record.event_kind {
-                return Err(PaykitSdkError::Protocol(format!(
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
                     "Event dedupe record '{}' same-payload stream item {} has different event kind",
                     record.event_id, item.stream_item_id
-                )));
+                ),
+                    source: None,
+                });
             }
             if item_hash != record.payload_hash {
-                return Err(PaykitSdkError::Protocol(format!(
+                return Err(PaykitSdkError::Protocol { context: format!(
                     "Event dedupe record '{}' same-payload stream item {} has different payload hash",
                     record.event_id, item.stream_item_id
-                )));
+                ), source: None });
             }
         }
         EventDedupeItemKind::Conflict => {
             if item_hash == record.payload_hash {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "Event dedupe record '{}' conflict stream item {} has same payload hash",
-                    record.event_id, item.stream_item_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "Event dedupe record '{}' conflict stream item {} has same payload hash",
+                        record.event_id, item.stream_item_id
+                    ),
+                    source: None,
+                });
             }
         }
     }
@@ -903,36 +1009,46 @@ pub(super) fn validate_receipt_access_records(
     for record in records.values() {
         validate_receipt_access_retrieval_status(record)?;
         let Some(item) = stream_by_id.get(&record.stream_item_id) else {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt Access record '{}' references missing stream item {}",
-                record.event_id, record.stream_item_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access record '{}' references missing stream item {}",
+                    record.event_id, record.stream_item_id
+                ),
+                source: None,
+            });
         };
         if item.counterparty != record.counterparty
             || item.counterparty_receiver_path != record.counterparty_receiver_path
             || item.receive_batch_id != record.receive_batch_id
             || item.known_paykit_kind.as_deref() != Some(PrivateMessageKind::ReceiptAccess.as_str())
         {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt Access record '{}' does not match its stream item",
-                record.event_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access record '{}' does not match its stream item",
+                    record.event_id
+                ),
+                source: None,
+            });
         }
         let event = paykit_lib::parse_receipt_access_event_message(&private_application_message(
             item,
             PrivateMessageKind::ReceiptAccess,
         ))
-        .ok_or_else(|| {
-            PaykitSdkError::Protocol(format!(
+        .ok_or_else(|| PaykitSdkError::Protocol {
+            context: format!(
                 "Receipt Access record '{}' stream item is not parseable",
                 record.event_id
-            ))
+            ),
+            source: None,
         })?;
         let Some(access) = event.parsed_access() else {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt Access record '{}' stream item is malformed",
-                record.event_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access record '{}' stream item is malformed",
+                    record.event_id
+                ),
+                source: None,
+            });
         };
         if access.event_id.as_str() != record.event_id
             || access.receipt_id.as_str() != record.receipt_id
@@ -950,16 +1066,22 @@ pub(super) fn validate_receipt_access_records(
             || access.location != record.location
             || access.key.as_str() != record.key
         {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt Access record '{}' does not match parsed stream payload",
-                record.event_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access record '{}' does not match parsed stream payload",
+                    record.event_id
+                ),
+                source: None,
+            });
         }
         if !access.has_location_for_receiver(&record.counterparty_receiver_path) {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt Access record '{}' location does not match counterparty receiver {}",
-                record.event_id, record.counterparty_receiver_path
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access record '{}' location does not match counterparty receiver {}",
+                    record.event_id, record.counterparty_receiver_path
+                ),
+                source: None,
+            });
         }
     }
     Ok(())
@@ -972,10 +1094,13 @@ fn validate_receipt_access_retrieval_status(record: &ReceiptAccessRecord) -> Res
                 || record.retrieved_at.is_some()
                 || record.last_retrieval_error.is_some()
             {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "pending Receipt Access record '{}' has retrieval metadata",
-                    record.event_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "pending Receipt Access record '{}' has retrieval metadata",
+                        record.event_id
+                    ),
+                    source: None,
+                });
             }
         }
         ReceiptRetrievalStatus::Retrieved => {
@@ -983,10 +1108,13 @@ fn validate_receipt_access_retrieval_status(record: &ReceiptAccessRecord) -> Res
                 || record.retrieved_at.is_none()
                 || record.last_retrieval_error.is_some()
             {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "retrieved Receipt Access record '{}' has inconsistent retrieval metadata",
-                    record.event_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "retrieved Receipt Access record '{}' has inconsistent retrieval metadata",
+                        record.event_id
+                    ),
+                    source: None,
+                });
             }
         }
         ReceiptRetrievalStatus::NotFound | ReceiptRetrievalStatus::Failed => {
@@ -994,10 +1122,13 @@ fn validate_receipt_access_retrieval_status(record: &ReceiptAccessRecord) -> Res
                 || record.retrieved_at.is_some()
                 || record.last_retrieval_error.is_none()
             {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "failed Receipt Access record '{}' has inconsistent retrieval metadata",
-                    record.event_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "failed Receipt Access record '{}' has inconsistent retrieval metadata",
+                        record.event_id
+                    ),
+                    source: None,
+                });
             }
         }
     }
@@ -1032,25 +1163,34 @@ pub(super) fn validate_required_private_stream_indexes(
             event.event_id.clone(),
         );
         let Some(dedupe) = event_dedup_records.get(&key) else {
-            return Err(PaykitSdkError::Protocol(format!(
-                "private stream item {} is missing required Event dedupe record '{}'",
-                item.stream_item_id, event.event_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "private stream item {} is missing required Event dedupe record '{}'",
+                    item.stream_item_id, event.event_id
+                ),
+                source: None,
+            });
         };
         if !event_dedup_record_contains_stream_event(dedupe, item, &event.event_kind) {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Event dedupe record '{}' does not include private stream item {}",
-                event.event_id, item.stream_item_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Event dedupe record '{}' does not include private stream item {}",
+                    event.event_id, item.stream_item_id
+                ),
+                source: None,
+            });
         }
         if classification.receipt_access.is_some()
             && dedupe.first_stream_item_id == item.stream_item_id
             && !receipt_access_records.contains_key(&key)
         {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt Access event '{}' is missing required Receipt Access record",
-                event.event_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access event '{}' is missing required Receipt Access record",
+                    event.event_id
+                ),
+                source: None,
+            });
         }
     }
     Ok(())
@@ -1089,10 +1229,13 @@ pub(super) fn validate_receipt_records(
         ReceiptId::new(&record.receipt_id)?;
         if let Some(expected_recipient) = expected_recipient {
             if &record.recipient_public_key != expected_recipient {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "Receipt record '{}' recipient does not match backup identity",
-                    record.receipt_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "Receipt record '{}' recipient does not match backup identity",
+                        record.receipt_id
+                    ),
+                    source: None,
+                });
             }
         }
         if let Some(identifier) = record.payment_endpoint_identifier.as_ref() {
@@ -1104,10 +1247,13 @@ pub(super) fn validate_receipt_records(
             record.receipt_access_event_id.clone(),
         );
         let Some(access) = access_records.get(&access_key) else {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt record '{}' references missing Receipt Access event '{}'",
-                record.receipt_id, record.receipt_access_event_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt record '{}' references missing Receipt Access event '{}'",
+                    record.receipt_id, record.receipt_access_event_id
+                ),
+                source: None,
+            });
         };
         if access.receipt_id != record.receipt_id
             || access.payment_reference != record.payment_reference
@@ -1116,10 +1262,13 @@ pub(super) fn validate_receipt_records(
             || access.location != record.location
             || receipt_access_key_hash(&access.key) != record.receipt_access_key_hash
         {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt record '{}' does not match its Receipt Access record",
-                record.receipt_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt record '{}' does not match its Receipt Access record",
+                    record.receipt_id
+                ),
+                source: None,
+            });
         }
     }
     Ok(())
@@ -1138,10 +1287,13 @@ pub(super) fn validate_receipt_issuance_records(
 
     for record in records.values() {
         if !receipt_ids.insert(record.receipt_id.clone()) {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt issuance record '{}' is duplicated across counterparties",
-                record.receipt_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt issuance record '{}' is duplicated across counterparties",
+                    record.receipt_id
+                ),
+                source: None,
+            });
         }
         validate_receipt_issuance_status(record)?;
         ReceiptId::new(&record.receipt_id)?;
@@ -1149,8 +1301,12 @@ pub(super) fn validate_receipt_issuance_records(
             PaymentEndpointIdentifier::new(identifier)?;
         }
 
-        let access = paykit_lib::parse_receipt_access_json(&record.access_json)
-            .map_err(|err| PaykitSdkError::Protocol(err.to_string()))?;
+        let access = paykit_lib::parse_receipt_access_json(&record.access_json).map_err(|err| {
+            PaykitSdkError::Protocol {
+                context: err.to_string(),
+                source: None,
+            }
+        })?;
         if access.event_id.as_str() != record.receipt_access_event_id
             || access.receipt_id.as_str() != record.receipt_id
             || access.payment_reference.as_str() != record.payment_reference
@@ -1166,21 +1322,30 @@ pub(super) fn validate_receipt_issuance_records(
                 != record.billing_period
             || access.location != record.location
         {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt issuance record '{}' does not match Receipt Access payload",
-                record.receipt_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt issuance record '{}' does not match Receipt Access payload",
+                    record.receipt_id
+                ),
+                source: None,
+            });
         }
         if !access.has_location_for_receiver(local_receiver_path) {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt issuance record '{}' location does not match local receiver {}",
-                record.receipt_id, local_receiver_path
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt issuance record '{}' location does not match local receiver {}",
+                    record.receipt_id, local_receiver_path
+                ),
+                source: None,
+            });
         }
 
         let receipt =
             paykit_lib::decrypt_receipt(&record.encrypted_receipt, &access.key, &access.location)
-                .map_err(|err| PaykitSdkError::Protocol(err.to_string()))?;
+                .map_err(|err| PaykitSdkError::Protocol {
+                context: err.to_string(),
+                source: None,
+            })?;
         let recipient = PubkyPublicKey::from_public_key(&receipt.recipient_public_key);
         if recipient != record.counterparty
             || receipt.receipt_id.as_str() != record.receipt_id
@@ -1202,28 +1367,37 @@ pub(super) fn validate_receipt_issuance_records(
                 != record.payment_endpoint_identifier
             || receipt.amount.as_ref().map(AmountRecord::from) != record.amount
         {
-            return Err(PaykitSdkError::Protocol(format!(
-                "Receipt issuance record '{}' does not match encrypted Receipt",
-                record.receipt_id
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt issuance record '{}' does not match encrypted Receipt",
+                    record.receipt_id
+                ),
+                source: None,
+            });
         }
 
         if let Some(outbound_message_id) = record.outbound_message_id {
             let Some(outbound) = outbound_by_id.get(&outbound_message_id) else {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "Receipt issuance record '{}' references missing outbound message {}",
-                    record.receipt_id, outbound_message_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "Receipt issuance record '{}' references missing outbound message {}",
+                        record.receipt_id, outbound_message_id
+                    ),
+                    source: None,
+                });
             };
             if outbound.counterparty != record.counterparty
                 || outbound.counterparty_receiver_path != record.counterparty_receiver_path
                 || outbound.kind != PrivateMessageKind::ReceiptAccess.as_str()
                 || outbound.raw_json != record.access_json
             {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "Receipt issuance record '{}' does not match outbound message {}",
-                    record.receipt_id, outbound_message_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "Receipt issuance record '{}' does not match outbound message {}",
+                        record.receipt_id, outbound_message_id
+                    ),
+                    source: None,
+                });
             }
         }
     }
@@ -1240,10 +1414,13 @@ fn validate_receipt_issuance_status(record: &ReceiptIssuanceRecord) -> Result<()
             .access_queued_at
             .is_some_and(|queued_at| queued_at < record.created_at)
     {
-        return Err(PaykitSdkError::Protocol(format!(
-            "Receipt issuance record '{}' has inconsistent timestamps",
-            record.receipt_id
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "Receipt issuance record '{}' has inconsistent timestamps",
+                record.receipt_id
+            ),
+            source: None,
+        });
     }
 
     let invalid = match record.status {
@@ -1272,10 +1449,13 @@ fn validate_receipt_issuance_status(record: &ReceiptIssuanceRecord) -> Result<()
         }
     };
     if invalid {
-        return Err(PaykitSdkError::Protocol(format!(
-            "Receipt issuance record '{}' has inconsistent {:?} status metadata",
-            record.receipt_id, record.status
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "Receipt issuance record '{}' has inconsistent {:?} status metadata",
+                record.receipt_id, record.status
+            ),
+            source: None,
+        });
     }
     Ok(())
 }
@@ -1312,26 +1492,33 @@ fn validate_valid_private_stream_body(
             let event = paykit_lib::parse_receipt_access_event_message(
                 &private_application_message(record, kind),
             )
-            .ok_or_else(|| {
-                PaykitSdkError::Protocol(format!(
+            .ok_or_else(|| PaykitSdkError::Protocol {
+                context: format!(
                     "private stream item {} Receipt Access payload does not match its kind",
                     record.stream_item_id
-                ))
+                ),
+                source: None,
             })?;
             if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol(error.to_owned()));
+                return Err(PaykitSdkError::Protocol {
+                    context: error.to_owned(),
+                    source: None,
+                });
             }
             let Some(access) = event.parsed_access() else {
-                return Err(PaykitSdkError::Protocol(format!(
-                    "private stream item {} Receipt Access payload is malformed",
-                    record.stream_item_id
-                )));
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "private stream item {} Receipt Access payload is malformed",
+                        record.stream_item_id
+                    ),
+                    source: None,
+                });
             };
             if !access.has_location_for_receiver(&record.counterparty_receiver_path) {
-                return Err(PaykitSdkError::Protocol(format!(
+                return Err(PaykitSdkError::Protocol { context: format!(
                     "private stream item {} Receipt Access location does not match counterparty receiver {}",
                     record.stream_item_id, record.counterparty_receiver_path
-                )));
+                ), source: None });
             }
         }
         PrivateMessageKind::PaymentRequest
@@ -1342,14 +1529,18 @@ fn validate_valid_private_stream_body(
             let event = paykit_lib::parse_payment_request_event_message(
                 &private_application_message(record, kind),
             )
-            .ok_or_else(|| {
-                PaykitSdkError::Protocol(format!(
+            .ok_or_else(|| PaykitSdkError::Protocol {
+                context: format!(
                     "private stream item {} Payment Request payload does not match its kind",
                     record.stream_item_id
-                ))
+                ),
+                source: None,
             })?;
             if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol(error.to_owned()));
+                return Err(PaykitSdkError::Protocol {
+                    context: error.to_owned(),
+                    source: None,
+                });
             }
         }
     }

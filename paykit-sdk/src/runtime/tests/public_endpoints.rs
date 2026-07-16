@@ -50,7 +50,7 @@ async fn test_sync_public_endpoints_rejects_reentrant_call() {
 
     let result = sdk.sync_public_endpoints().await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn test_receiver_marker_capabilities_require_private_identity_for_private_workfl
             &marker_private_capabilities(),
             PubkyIdentityCapability::PublicOnly
         ),
-        Err(PaykitSdkError::Policy(_))
+        Err(PaykitSdkError::Policy { .. })
     ));
     assert!(
         crate::runtime::public_endpoints::validate_receiver_marker_capabilities(
@@ -105,5 +105,5 @@ async fn test_publish_receiver_marker_rejects_private_capabilities_without_local
         .publish_paykit_receiver_marker(marker_private_capabilities())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }

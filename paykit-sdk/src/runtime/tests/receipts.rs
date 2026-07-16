@@ -199,7 +199,7 @@ async fn test_prepare_receipt_issuance_rejects_conflicting_reused_receipt_id() {
         .await;
 
     assert_eq!(first, second);
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -244,7 +244,7 @@ async fn test_prepare_receipt_issuance_rejects_reused_receipt_id_for_other_count
         )
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -286,7 +286,7 @@ async fn test_prepare_receipt_issuance_rejects_reused_receipt_id_for_other_recei
         )
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -306,7 +306,7 @@ async fn test_issue_receipt_requires_retry_safe_receipt_id() {
         .issue_receipt(counterparty, receiver_path(), draft)
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -518,7 +518,7 @@ async fn test_retrieve_receipt_reports_conflicted_access_before_missing_public_s
         .retrieve_receipt(counterparty, receiver_path(), receipt_id)
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -549,7 +549,10 @@ async fn test_retrieve_receipt_reports_missing_access_before_public_storage() {
         .retrieve_receipt(counterparty, receiver_path(), receipt_id)
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
+    assert!(matches!(
+        result,
+        Err(PaykitSdkError::RecoveryRequired { .. })
+    ));
 }
 
 #[tokio::test]
@@ -633,7 +636,7 @@ async fn test_retrieve_receipt_rejects_clean_mismatched_access_for_cached_receip
         .retrieve_receipt(counterparty.clone(), receiver_path(), receipt_id)
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
     let access = storage
         .transaction(|tx| {
             Ok(tx
@@ -686,7 +689,7 @@ async fn test_retrieve_receipt_rejects_conflicted_access_for_cached_receipt() {
         .retrieve_receipt(counterparty, receiver_path(), receipt_id)
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -732,7 +735,7 @@ async fn test_retrieve_receipt_rejects_conflicted_cached_provenance_with_clean_a
         .retrieve_receipt(counterparty, receiver_path(), receipt_id)
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]

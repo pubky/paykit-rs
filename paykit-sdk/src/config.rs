@@ -175,44 +175,52 @@ impl PaykitSdkConfig {
 
 fn validate_profile_namespace(namespace: &str) -> crate::Result<()> {
     if namespace.is_empty() {
-        return Err(crate::PaykitSdkError::Policy(
-            "profile namespace must not be empty".into(),
-        ));
+        return Err(crate::PaykitSdkError::Policy {
+            context: "profile namespace must not be empty".into(),
+            source: None,
+        });
     }
     if namespace.len() > 128 {
-        return Err(crate::PaykitSdkError::Policy(
-            "profile namespace must not exceed 128 bytes".into(),
-        ));
+        return Err(crate::PaykitSdkError::Policy {
+            context: "profile namespace must not exceed 128 bytes".into(),
+            source: None,
+        });
     }
     if namespace.starts_with('.') || namespace.ends_with('.') {
-        return Err(crate::PaykitSdkError::Policy(
-            "profile namespace must not start or end with '.'".into(),
-        ));
+        return Err(crate::PaykitSdkError::Policy {
+            context: "profile namespace must not start or end with '.'".into(),
+            source: None,
+        });
     }
     if namespace == "pubky.app" {
-        return Err(crate::PaykitSdkError::Policy(
-            "profile namespace 'pubky.app' is reserved for Pubky app data".into(),
-        ));
+        return Err(crate::PaykitSdkError::Policy {
+            context: "profile namespace 'pubky.app' is reserved for Pubky app data".into(),
+            source: None,
+        });
     }
     if namespace
         .chars()
         .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_'))
     {
-        return Err(crate::PaykitSdkError::Policy(
-            "profile namespace may only contain ASCII letters, digits, '.', '-' and '_'".into(),
-        ));
+        return Err(crate::PaykitSdkError::Policy {
+            context: "profile namespace may only contain ASCII letters, digits, '.', '-' and '_'"
+                .into(),
+            source: None,
+        });
     }
     Ok(())
 }
 
 fn validate_runtime_duration(label: &str, duration: Duration) -> crate::Result<()> {
     if duration.is_zero() {
-        return Err(crate::PaykitSdkError::Policy(format!(
-            "{label} must be greater than zero"
-        )));
+        return Err(crate::PaykitSdkError::Policy {
+            context: format!("{label} must be greater than zero"),
+            source: None,
+        });
     }
-    chrono::Duration::from_std(duration).map_err(|err| {
-        crate::PaykitSdkError::Policy(format!("{label} must fit SDK runtime duration: {err}"))
+    chrono::Duration::from_std(duration).map_err(|err| crate::PaykitSdkError::Policy {
+        context: format!("{label} must fit SDK runtime duration: {err}"),
+        source: None,
     })?;
     Ok(())
 }

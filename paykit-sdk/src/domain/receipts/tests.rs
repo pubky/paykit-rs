@@ -99,7 +99,7 @@ fn test_receipt_draft_builder_requires_request_id_for_billing_period() {
         })
         .build();
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn test_decrypt_receipt_record_from_access_rejects_mismatch() {
             .unwrap_err();
 
     assert!(
-        matches!(err, PaykitSdkError::Protocol(message) if message.contains("Payment Reference"))
+        matches!(err, PaykitSdkError::Protocol { context: message, .. } if message.contains("Payment Reference"))
     );
 }
 
@@ -315,7 +315,9 @@ fn test_decrypt_receipt_record_from_access_rejects_wrong_recipient() {
         decrypt_receipt_record_from_access(&access, &encrypted, timestamp(), &expected_recipient)
             .unwrap_err();
 
-    assert!(matches!(err, PaykitSdkError::Protocol(message) if message.contains("recipient")));
+    assert!(
+        matches!(err, PaykitSdkError::Protocol { context: message, .. } if message.contains("recipient"))
+    );
 }
 
 #[test]
@@ -374,7 +376,7 @@ fn test_merge_retrieval_error_not_found_does_not_displace_other_errors() {
 fn test_merge_retrieval_error_keeps_not_found_when_only_failure() {
     let kept = merge_retrieval_error(None, missing_encrypted_receipt_error("/loc"));
 
-    assert!(matches!(kept, PaykitSdkError::NotFound(_)));
+    assert!(matches!(kept, PaykitSdkError::NotFound { .. }));
 }
 
 #[test]
@@ -406,7 +408,7 @@ fn test_missing_encrypted_receipt_error_redacts_receipt_location() {
     let err = missing_encrypted_receipt_error(location);
 
     let context = match &err {
-        PaykitSdkError::NotFound(context) => context.clone(),
+        PaykitSdkError::NotFound { context, .. } => context.clone(),
         other => panic!("expected NotFound error, got {other:?}"),
     };
     assert_eq!(

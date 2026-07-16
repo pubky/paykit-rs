@@ -215,7 +215,7 @@ async fn test_publish_recovery_marker_disabled_does_not_mutate_link_state() {
         .publish_encrypted_link_recovery_marker(counterparty.clone(), receiver_path())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()
@@ -358,7 +358,7 @@ async fn test_remote_recovery_marker_observation_rejects_active_peer_lease() {
         )
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     let peer = crate::load_linked_peer(&storage, &counterparty, &receiver_path())
         .await
         .unwrap()

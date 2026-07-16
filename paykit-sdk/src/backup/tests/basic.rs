@@ -68,7 +68,7 @@ async fn test_restore_backup_state_rejects_wrong_local_receiver_path() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -275,7 +275,7 @@ async fn test_restore_backup_state_rejects_inconsistent_contact_marker_state() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -311,7 +311,7 @@ async fn test_restore_backup_state_rejects_dual_contact_marker_timestamps() {
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]

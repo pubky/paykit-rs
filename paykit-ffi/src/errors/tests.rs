@@ -57,19 +57,28 @@ fn test_sdk_error_maps_to_expected_ffi_variant_and_code() {
             "peer offline",
         ),
         (
-            PaykitSdkError::NotFound("missing receipt".into()),
+            PaykitSdkError::NotFound {
+                context: "missing receipt".into(),
+                source: None,
+            },
             "not_found",
             "not_found",
             "missing receipt",
         ),
         (
-            PaykitSdkError::Protocol("malformed wire".into()),
+            PaykitSdkError::Protocol {
+                context: "malformed wire".into(),
+                source: None,
+            },
             "protocol",
             "protocol_error",
             "malformed wire",
         ),
         (
-            PaykitSdkError::Policy("blocked by policy".into()),
+            PaykitSdkError::Policy {
+                context: "blocked by policy".into(),
+                source: None,
+            },
             "policy",
             "policy_error",
             "blocked by policy",
@@ -84,7 +93,10 @@ fn test_sdk_error_maps_to_expected_ffi_variant_and_code() {
             "adapter declined",
         ),
         (
-            PaykitSdkError::RecoveryRequired("run recovery".into()),
+            PaykitSdkError::RecoveryRequired {
+                context: "run recovery".into(),
+                source: None,
+            },
             "recovery_required",
             "recovery_required",
             "run recovery",
@@ -105,10 +117,12 @@ fn test_sdk_error_maps_to_expected_ffi_variant_and_code() {
 
 #[test]
 fn test_ffi_sdk_round_trip_recovers_original_via_downcast() {
-    // The four source-bearing arms wrap the original FFI error in the SDK error's
-    // `source`; converting back must downcast to the exact original (same code +
-    // context), not a re-labelled placeholder. Pins F03: without the PaymentAdapter
-    // `source` passthrough the adapter case regresses to `payment_adapter_error`.
+    // Every arm of `ffi_error_to_sdk` wraps the original FFI error in the SDK
+    // error's `source`; converting back must downcast to the exact original
+    // (same variant, custom code, and reason), not a re-labelled placeholder
+    // with the variant's generic code. This pins the bindings contract that
+    // machine-readable callback error codes survive the round trip losslessly
+    // for all eight variants.
     let originals = [
         PaykitFfiError::Storage {
             code: "atomic_write_failed".into(),
@@ -122,9 +136,25 @@ fn test_ffi_sdk_round_trip_recovers_original_via_downcast() {
             code: "offline".into(),
             context: "network unreachable".into(),
         },
+        PaykitFfiError::NotFound {
+            code: "record_missing".into(),
+            context: "no such receipt row".into(),
+        },
+        PaykitFfiError::Protocol {
+            code: "bad_wire".into(),
+            context: "unexpected field".into(),
+        },
+        PaykitFfiError::Policy {
+            code: "spend_limit".into(),
+            context: "daily cap reached".into(),
+        },
         PaykitFfiError::PaymentAdapter {
             code: "declined".into(),
             context: "insufficient funds".into(),
+        },
+        PaykitFfiError::RecoveryRequired {
+            code: "state_diverged".into(),
+            context: "manual resync needed".into(),
         },
     ];
 
@@ -135,69 +165,6 @@ fn test_ffi_sdk_round_trip_recovers_original_via_downcast() {
             parts(&restored),
             parts(&original),
             "round trip must preserve the original error"
-        );
-    }
-}
-
-#[test]
-fn test_ffi_sdk_round_trip_string_variants_keep_code_and_reason_in_text() {
-    // The four string-variant SDK errors (NotFound/Protocol/Policy/
-    // RecoveryRequired) have no `source` to stash the original FFI error, so
-    // exact downcast recovery is impossible. This pins the best-effort
-    // contract: the variant is preserved, the callback's code and reason
-    // survive inside the context text, and the machine-readable code degrades
-    // to the variant's generic one.
-    let cases = [
-        (
-            PaykitFfiError::NotFound {
-                code: "record_missing".into(),
-                context: "no such receipt row".into(),
-            },
-            "not_found",
-            "not_found",
-        ),
-        (
-            PaykitFfiError::Protocol {
-                code: "bad_wire".into(),
-                context: "unexpected field".into(),
-            },
-            "protocol",
-            "protocol_error",
-        ),
-        (
-            PaykitFfiError::Policy {
-                code: "spend_limit".into(),
-                context: "daily cap reached".into(),
-            },
-            "policy",
-            "policy_error",
-        ),
-        (
-            PaykitFfiError::RecoveryRequired {
-                code: "state_diverged".into(),
-                context: "manual resync needed".into(),
-            },
-            "recovery_required",
-            "recovery_required",
-        ),
-    ];
-
-    for (original, want_variant, want_generic_code) in cases {
-        let (_, original_code, original_reason) = {
-            let (variant, code, reason) = parts(&original);
-            (variant, code.to_string(), reason.to_string())
-        };
-        let sdk = ffi_error_to_sdk(original, "round trip");
-        let restored = PaykitFfiError::from(sdk);
-        let (variant, code, context) = parts(&restored);
-        assert_eq!(variant, want_variant, "variant must be preserved");
-        assert_eq!(
-            code, want_generic_code,
-            "custom code degrades to the generic code for {want_variant}"
-        );
-        assert!(
-            context.contains(&original_code) && context.contains(&original_reason),
-            "original code and reason must survive in context text, got: {context}"
         );
     }
 }
@@ -267,6 +234,61 @@ fn test_sensitive_source_details_never_reach_context() {
         assert!(
             !rendered.contains(sentinel),
             "sensitive detail leaked into Display: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn test_string_variant_sources_never_reach_context() {
+    // NotFound/Protocol/Policy/RecoveryRequired used to be plain-string
+    // variants, so no cause chain could smuggle sensitive data across the FFI
+    // through them. Now that they carry `source` for round-trip downcast
+    // recovery, the FFI conversion is the guard: it must drop `source`
+    // entirely, exactly like the other four arms. We plant a private-path
+    // sentinel in each variant's cause chain and assert it reaches neither
+    // `context` nor `Display`.
+    const SENTINEL: &str = "/pub/paykit/v0/private/SENTINEL_DH_PATH/receipts/rcpt-1";
+
+    type MakeSdkError = fn(String, Option<anyhow::Error>) -> PaykitSdkError;
+    let cases: [(MakeSdkError, &str, &str); 4] = [
+        (
+            |context, source| PaykitSdkError::NotFound { context, source },
+            "not_found",
+            "not_found",
+        ),
+        (
+            |context, source| PaykitSdkError::Protocol { context, source },
+            "protocol",
+            "protocol_error",
+        ),
+        (
+            |context, source| PaykitSdkError::Policy { context, source },
+            "policy",
+            "policy_error",
+        ),
+        (
+            |context, source| PaykitSdkError::RecoveryRequired { context, source },
+            "recovery_required",
+            "recovery_required",
+        ),
+    ];
+
+    for (make, want_variant, want_code) in cases {
+        let source = anyhow::anyhow!("GET {SENTINEL} failed");
+        let sdk = make("redacted label".into(), Some(source));
+
+        let ffi = PaykitFfiError::from(sdk);
+        let (variant, code, context) = parts(&ffi);
+        assert_eq!(variant, want_variant);
+        assert_eq!(code, want_code);
+        assert_eq!(
+            context, "redacted label",
+            "context must carry only the redacted outer label"
+        );
+        let rendered = ffi.to_string();
+        assert!(
+            !rendered.contains(SENTINEL),
+            "private path leaked into Display: {rendered}"
         );
     }
 }

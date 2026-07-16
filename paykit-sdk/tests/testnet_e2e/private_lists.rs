@@ -77,7 +77,7 @@ async fn test_enqueue_private_payment_list_without_link_fails() {
         .await
         .expect_err("enqueue without an Encrypted Link must fail");
     assert!(
-        matches!(err, PaykitSdkError::RecoveryRequired(_)),
+        matches!(err, PaykitSdkError::RecoveryRequired { .. }),
         "unexpected error: {err:?}"
     );
 }
