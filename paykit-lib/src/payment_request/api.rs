@@ -41,6 +41,8 @@ fn parse_event(kind: PrivateMessageKind, raw: &str) -> Option<Result<PaymentRequ
         PrivateMessageKind::PaymentProof => {
             Some(parse_payment_proof_json(raw).map(PaymentRequestEvent::Proof))
         }
+        // Non-request kinds are ignored, producing nothing derived from `raw`
+        // (decrypted private payload), so there is no error context to leak.
         PrivateMessageKind::PrivatePaymentList | PrivateMessageKind::ReceiptAccess => None,
     }
 }
@@ -145,4 +147,30 @@ pub async fn send_payment_proof(link: &mut EncryptedLink, event: &PaymentProof) 
     link.send_payment_proof_message(json.as_bytes())
         .await
         .map_err(|err| map_error("send_payment_proof", err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // parse_event owns both routing and dispatch: non-request kinds must be
+    // ignored (`None`), not parsed and not turned into an error. Returning
+    // `None` means nothing derived from `raw` (decrypted private payload) is
+    // ever produced for these kinds, so there is no error context that could
+    // leak the plaintext. The public parser covers this path via `known_kind`;
+    // this exercises parse_event directly.
+    #[test]
+    fn test_parse_event_non_request_kind_ignored() {
+        // Sentinel plaintext standing in for a decrypted private payload.
+        let raw = "{\"secret\":\"SENTINEL_DECRYPTED_PLAINTEXT\"}";
+        for kind in [
+            PrivateMessageKind::PrivatePaymentList,
+            PrivateMessageKind::ReceiptAccess,
+        ] {
+            assert!(
+                parse_event(kind, raw).is_none(),
+                "expected non-request kind {kind} to be ignored",
+            );
+        }
+    }
 }

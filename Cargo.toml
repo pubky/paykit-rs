@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["paykit-lib", "paykit-ffi", "paykit-sdk"]
+
+[patch.crates-io]
+rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }

@@ -1,5 +1,7 @@
 //! Encrypted Link recovery marker state.
 
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +12,12 @@ use crate::{
 };
 
 /// Public recovery marker state tracked for one Linked Peer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `local_marker_last_error` mirrors the raw publish/remove failure string from
+/// the durable Linked Peer record, which can embed private storage paths or
+/// payload material. `Debug` redacts it to length only, matching the
+/// `LinkedPeerRecord` idiom, so `format!("{report:?}")` cannot leak it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedLinkRecoveryMarkerReport {
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
@@ -30,6 +37,31 @@ pub struct EncryptedLinkRecoveryMarkerReport {
     pub remote_marker_observed_at: Option<DateTime<Utc>>,
     /// Whether this operation observed a new counterparty marker.
     pub remote_marker_changed: bool,
+}
+
+impl fmt::Debug for EncryptedLinkRecoveryMarkerReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptedLinkRecoveryMarkerReport")
+            .field("counterparty", &self.counterparty)
+            .field(
+                "counterparty_receiver_path",
+                &self.counterparty_receiver_path,
+            )
+            .field("state", &self.state)
+            .field("local_attempt_id", &self.local_attempt_id)
+            .field("local_marker_created_at", &self.local_marker_created_at)
+            .field(
+                "local_marker_last_error",
+                &self
+                    .local_marker_last_error
+                    .as_ref()
+                    .map(|error| format!("<redacted:{} bytes>", error.len())),
+            )
+            .field("remote_attempt_id", &self.remote_attempt_id)
+            .field("remote_marker_observed_at", &self.remote_marker_observed_at)
+            .field("remote_marker_changed", &self.remote_marker_changed)
+            .finish()
+    }
 }
 
 impl EncryptedLinkRecoveryMarkerReport {
@@ -64,4 +96,46 @@ where
                 .map(|peer| EncryptedLinkRecoveryMarkerReport::from_peer(peer, false)))
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn counterparty() -> PubkyPublicKey {
+        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
+    }
+
+    fn receiver_path() -> PaykitReceiverPath {
+        PaykitReceiverPath::new("bitkit/wallet").unwrap()
+    }
+
+    #[test]
+    fn test_recovery_marker_report_debug_redacts_local_marker_error() {
+        // The sentinel stands in for a raw publish/remove failure string that may
+        // embed private storage paths or payload material. It must never survive
+        // into Debug output, including via the `from_peer` copy path.
+        let sentinel = "recovery-marker-error-secret";
+        let peer = LinkedPeerRecord {
+            counterparty: counterparty(),
+            counterparty_receiver_path: receiver_path(),
+            state: LinkedPeerState::Linked,
+            last_sync_at: None,
+            last_private_receive_at: None,
+            failure_count: 0,
+            local_recovery_attempt_id: None,
+            local_recovery_marker_created_at: None,
+            local_recovery_marker_last_error: Some(sentinel.to_string()),
+            remote_recovery_attempt_id: None,
+            remote_recovery_marker_observed_at: None,
+        };
+
+        let report = EncryptedLinkRecoveryMarkerReport::from_peer(&peer, true);
+        // The raw error is retained on the value (only Debug redacts it).
+        assert_eq!(report.local_marker_last_error.as_deref(), Some(sentinel));
+
+        let debug = format!("{report:?}");
+        assert!(!debug.contains(sentinel));
+        assert!(debug.contains("<redacted:"));
+    }
 }

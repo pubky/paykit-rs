@@ -1,0 +1,91 @@
+diff --git a/android/rustls-platform-verifier/src/main/java/org/rustls/platformverifier/CertificateVerifier.kt b/android/rustls-platform-verifier/src/main/java/org/rustls/platformverifier/CertificateVerifier.kt
+index febbcfd..1669773 100644
+--- a/android/rustls-platform-verifier/src/main/java/org/rustls/platformverifier/CertificateVerifier.kt
++++ b/android/rustls-platform-verifier/src/main/java/org/rustls/platformverifier/CertificateVerifier.kt
+@@ -50,0 +51,13 @@ private class VerificationResult(
++internal fun isExplicitlyRevoked(error: CertPathValidatorException): Boolean =
++    error.reason == CertPathValidatorException.BasicReason.REVOKED
++
++internal fun isRevocationStatusUnavailable(error: CertPathValidatorException): Boolean {
++    if (error.reason == CertPathValidatorException.BasicReason.UNDETERMINED_REVOCATION_STATUS) {
++        return true
++    }
++
++    return error.reason == CertPathValidatorException.BasicReason.UNSPECIFIED &&
++        generateSequence<Throwable>(error) { it.cause }
++            .any { it.message?.startsWith("No CRLs found for issuer ") == true }
++}
++
+@@ -360,6 +373,2 @@ internal object CertificateVerifier {
+-                // LetsEncrypt no longer include OCSP information (as OCSP is being deprecated) which Android is not
+-                // happy with since it *only* tries OCSP by default. We aren't 100% decided on how to fix this yet for real
+-                // (see https://github.com/rustls/rustls-platform-verifier/pull/179) so for now we implement an out for
+-                // tests to allow regular maintenance to proceed.
+-                if (BuildConfig.TEST && e.reason == CertPathValidatorException.BasicReason.UNSPECIFIED) {
+-                    return VerificationResult(StatusCode.Ok)
++                if (isExplicitlyRevoked(e)) {
++                    return VerificationResult(StatusCode.Revoked, e.toString())
+@@ -368 +377,5 @@ internal object CertificateVerifier {
+-                return VerificationResult(StatusCode.Revoked, e.toString())
++                if (isRevocationStatusUnavailable(e)) {
++                    Log.w(TAG, "certificate revocation status unavailable: $e")
++                } else {
++                    return VerificationResult(StatusCode.UnknownCert, e.toString())
++                }
+diff --git a/android/rustls-platform-verifier/src/test/java/org/rustls/platformverifier/CertificateVerifierUnitTests.kt b/android/rustls-platform-verifier/src/test/java/org/rustls/platformverifier/CertificateVerifierUnitTests.kt
+new file mode 100644
+index 0000000..5110984
+--- /dev/null
++++ b/android/rustls-platform-verifier/src/test/java/org/rustls/platformverifier/CertificateVerifierUnitTests.kt
+@@ -0,0 +1,51 @@
++package org.rustls.platformverifier
++
++import java.security.cert.CertPathValidatorException
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class CertificateVerifierUnitTests {
++    @Test
++    fun explicitRevocationFailsClosed() {
++        assertTrue(isExplicitlyRevoked(exception(CertPathValidatorException.BasicReason.REVOKED)))
++    }
++
++    @Test
++    fun unavailableRevocationStatusSoftFails() {
++        assertTrue(
++            isRevocationStatusUnavailable(
++                exception(
++                    CertPathValidatorException.BasicReason.UNDETERMINED_REVOCATION_STATUS
++                )
++            )
++        )
++    }
++
++    @Test
++    fun missingCrlSoftFails() {
++        assertTrue(
++            isRevocationStatusUnavailable(
++                exception(
++                    CertPathValidatorException.BasicReason.UNSPECIFIED,
++                    "No CRLs found for issuer cn=YE2,o=Let's Encrypt,c=US"
++                )
++            )
++        )
++    }
++
++    @Test
++    fun unrelatedValidatorFailureFailsClosed() {
++        assertFalse(
++            isRevocationStatusUnavailable(
++                exception(CertPathValidatorException.BasicReason.UNSPECIFIED)
++            )
++        )
++    }
++
++    private fun exception(
++        reason: CertPathValidatorException.Reason,
++        message: String = "test"
++    ): CertPathValidatorException =
++        CertPathValidatorException(message, null, null, -1, reason)
++}
