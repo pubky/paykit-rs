@@ -391,6 +391,16 @@ fn test_payment_request_routing_covers_all_private_message_kinds() {
             raw_json: format!(r#"{{"kind":"{}"}}"#, kind.as_str()),
         };
 
+        // Pin the as_str -> parse round-trip before checking routing. Without
+        // this, an ignored kind missing from `PrivateMessageKind::parse` also
+        // makes the parser return `None`, and the routing assertion below
+        // passes without ever exercising that variant.
+        assert_eq!(
+            message.known_kind(),
+            Some(kind),
+            "PrivateMessageKind::parse does not round-trip {kind}"
+        );
+
         // Touch every accessor so a panic anywhere downstream fails this test.
         let parsed = parse_payment_request_event_message(&message);
         if let Some(event_message) = &parsed {
