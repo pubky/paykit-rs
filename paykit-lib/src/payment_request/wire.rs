@@ -839,4 +839,131 @@ mod tests {
         let err = serialize_payment_request_json(&event).unwrap_err();
         assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("kind")));
     }
+
+    /// Build Payment Request JSON that is valid except for the caller-chosen
+    /// `proposal_expires_at` and `recurrence` JSON fragments, so each
+    /// value-level test below varies exactly one field.
+    fn payment_request_json_with(proposal_expires_at: &str, recurrence: &str) -> String {
+        format!(
+            r#"{{
+            "version": 1,
+            "kind": "paykit.payment_request",
+            "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+            "request": {{
+                "amount": {{ "value": "0.001", "asset": "btc" }},
+                "payment_reference": "invoice-2026-0001",
+                "proposal_expires_at": {proposal_expires_at},
+                "recurrence": {recurrence},
+                "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
+                "metadata": {{}}
+            }}
+        }}"#
+        )
+    }
+
+    // The four tests below pin the value-level Validation -> InvalidData remap
+    // (`invalid_wire`) for network-delivered Payment Request JSON: each payload
+    // is structurally valid JSON whose failure is in a field value, and the
+    // parser must surface `PaykitError::InvalidData` because the data arrived
+    // from the network (see CLAUDE.md, Error Handling).
+
+    #[test]
+    fn test_payment_request_rejects_zero_recurrence_every() {
+        let json = payment_request_json_with(
+            "null",
+            r#"{
+                "every": 0,
+                "unit": "month",
+                "starts_at": "2026-06-01T00:00:00Z",
+                "anchor": "2026-06-01T00:00:00Z",
+                "ends_at": null
+            }"#,
+        );
+
+        let err = parse_payment_request_json(&json).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("Recurrence every must be a positive integer"))
+        );
+    }
+
+    #[test]
+    fn test_payment_request_rejects_unsupported_recurrence_unit() {
+        let json = payment_request_json_with(
+            "null",
+            r#"{
+                "every": 1,
+                "unit": "fortnight",
+                "starts_at": "2026-06-01T00:00:00Z",
+                "anchor": "2026-06-01T00:00:00Z",
+                "ends_at": null
+            }"#,
+        );
+
+        let err = parse_payment_request_json(&json).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported Recurrence unit"))
+        );
+    }
+
+    #[test]
+    fn test_payment_request_rejects_unparseable_recurrence_timestamp() {
+        // Z-suffixed so it passes the UTC-suffix gate and fails inside the
+        // chrono RFC3339 parse (month 13 is out of range).
+        let json = payment_request_json_with(
+            "null",
+            r#"{
+                "every": 1,
+                "unit": "month",
+                "starts_at": "2026-13-01T00:00:00Z",
+                "anchor": "2026-06-01T00:00:00Z",
+                "ends_at": null
+            }"#,
+        );
+
+        let err = parse_payment_request_json(&json).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("Recurrence starts_at must be a valid RFC3339 timestamp"))
+        );
+    }
+
+    #[test]
+    fn test_payment_request_rejects_malformed_proposal_expires_at() {
+        // Exercises the missing-Z branch of parse_utc_timestamp; the
+        // unparseable-recurrence test above covers the chrono branch.
+        let json = payment_request_json_with(r#""not-a-timestamp""#, "null");
+
+        let err = parse_payment_request_json(&json).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("proposal_expires_at must be an RFC3339 UTC timestamp"))
+        );
+    }
+
+    /// Deterministic wire-level positive guard so the value-level rejection
+    /// tests above cannot pass vacuously. Complements the probabilistic
+    /// `valid_event_round_trips` proptest and the networked
+    /// `recurring_payment_request_and_proof_with_billing_period_round_trip`
+    /// test, neither of which pins this seam deterministically offline.
+    #[test]
+    fn test_payment_request_round_trips_fully_valid_recurrence() {
+        let event = PaymentRequest::new(
+            EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101").unwrap(),
+            PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap(),
+            PaymentRequestTerms {
+                proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
+                recurrence: Some(Recurrence {
+                    every: 3,
+                    unit: RecurrenceUnit::Week,
+                    starts_at: "2026-06-01T00:00:00Z".to_string(),
+                    anchor: "2026-06-01T00:00:00Z".to_string(),
+                    ends_at: Some("2026-12-01T00:00:00Z".to_string()),
+                }),
+                ..request_terms()
+            },
+        );
+
+        let json = serialize_payment_request_json(&event).unwrap();
+        let parsed = parse_payment_request_json(&json).unwrap();
+        assert_eq!(parsed, event);
+    }
 }
