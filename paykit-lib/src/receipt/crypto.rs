@@ -4,6 +4,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305,
 };
 
+use crate::validation::invalid_plaintext_json;
 use crate::{PaykitError, PaykitReceiverPath, Result};
 
 use super::{
@@ -89,9 +90,11 @@ impl Receipt {
         key: &ReceiptDecryptionKey,
         location: &str,
     ) -> Result<Self> {
+        // The serde error can embed fragments of the fetched document; keep the
+        // context static and leave the detail in `source`, which stays local.
         let wire: EncryptedReceiptWire =
             serde_json::from_str(encrypted_json).map_err(|err| PaykitError::InvalidData {
-                context: format!("failed to parse encrypted receipt JSON: {err}"),
+                context: "failed to parse encrypted receipt JSON".into(),
                 source: Some(err.into()),
             })?;
         if wire.version != 1
@@ -142,11 +145,12 @@ impl Receipt {
                 context: format!("failed to decrypt receipt: {err}"),
                 source: None,
             })?;
-        let receipt_wire: ReceiptWire =
-            serde_json::from_slice(&plaintext).map_err(|err| PaykitError::InvalidData {
-                context: format!("failed to parse receipt plaintext JSON: {err}"),
-                source: Some(err.into()),
-            })?;
+        // SECURITY / REDACTION: the serde error is derived from DECRYPTED
+        // receipt plaintext (its Display embeds field values on type
+        // mismatches), so it must not be folded into the context or kept as
+        // `source` -- this error crosses the FFI boundary as exception text.
+        let receipt_wire: ReceiptWire = serde_json::from_slice(&plaintext)
+            .map_err(|_| invalid_plaintext_json("failed to parse receipt plaintext JSON"))?;
         let receipt = Self::try_from(receipt_wire)?;
         if !ReceiptAccess::location_matches_receipt_id(location, &receipt.receipt_id) {
             return Err(PaykitError::InvalidData {

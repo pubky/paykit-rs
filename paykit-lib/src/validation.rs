@@ -22,6 +22,22 @@ pub(crate) fn invalid_data(
     }
 }
 
+/// Build the `InvalidData` error for JSON that was decrypted from private
+/// plaintext (an Encrypted Receipt payload or a private message body).
+///
+/// SECURITY / REDACTION: serde_json's error `Display` embeds verbatim document
+/// fragments on type mismatches (e.g. `invalid type: string "<field value>"`).
+/// The document here is decrypted plaintext, so the parse error must reach no
+/// sink: the context stays a static label and the serde cause is deliberately
+/// dropped (no `source`), keeping plaintext out of error chains, logs, and the
+/// FFI-facing strings derived from this error.
+pub(crate) fn invalid_plaintext_json(context: &'static str) -> PaykitError {
+    PaykitError::InvalidData {
+        context: context.into(),
+        source: None,
+    }
+}
+
 pub(crate) fn invalid_wire(err: PaykitError, label: &'static str) -> PaykitError {
     match err {
         PaykitError::Validation(msg) => invalid_data(format!("{label}: {msg}"), None),

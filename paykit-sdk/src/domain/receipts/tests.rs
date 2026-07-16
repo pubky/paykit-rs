@@ -352,29 +352,66 @@ fn test_store_encrypted_receipt_error_redacts_receipt_location() {
 }
 
 #[test]
+fn test_merge_retrieval_error_not_found_does_not_displace_other_errors() {
+    // A confirmed 404 for one Receipt Location must not mask a transport
+    // failure from another (often newer) location: transport failures signal
+    // the receipt may still be retrievable on retry, while `not_found` crosses
+    // the FFI as definitive absence.
+    let transport = PaykitSdkError::Transport {
+        context: "fetch encrypted receipt".into(),
+        source: None,
+    };
+
+    let kept = merge_retrieval_error(Some(transport), missing_encrypted_receipt_error("/loc"));
+
+    assert!(
+        matches!(kept, PaykitSdkError::Transport { .. }),
+        "NotFound displaced an earlier transport error: {kept:?}"
+    );
+}
+
+#[test]
+fn test_merge_retrieval_error_keeps_not_found_when_only_failure() {
+    let kept = merge_retrieval_error(None, missing_encrypted_receipt_error("/loc"));
+
+    assert!(matches!(kept, PaykitSdkError::NotFound(_)));
+}
+
+#[test]
+fn test_merge_retrieval_error_non_not_found_displaces_previous() {
+    let not_found = missing_encrypted_receipt_error("/loc");
+    let transport = PaykitSdkError::Transport {
+        context: "fetch encrypted receipt".into(),
+        source: None,
+    };
+
+    let kept = merge_retrieval_error(Some(not_found), transport);
+
+    assert!(matches!(kept, PaykitSdkError::Transport { .. }));
+}
+
+#[test]
 fn test_missing_encrypted_receipt_error_redacts_receipt_location() {
     // Regression guard: `missing_encrypted_receipt_error` builds the error
     // `retrieve_receipt` returns when the Encrypted Receipt is absent at its
-    // Receipt Location. Its `context` is rendered verbatim into the FFI
-    // (Kotlin/Swift) exception message, so the Receipt Location -- a
+    // Receipt Location. Its message is rendered verbatim into the FFI
+    // (Kotlin/Swift) exception, so the Receipt Location -- a
     // `/pub/paykit/v0/private/.../receipts/{id}` DH-derived PRIVATE storage path --
-    // must never appear in `context` or in the error's Display output.
+    // must never appear in it. The variant is pinned to `NotFound`: the branch
+    // only runs after a confirmed 404/GONE, and generated clients must receive
+    // the `not_found` code, not `transport_error`.
     let location =
         "/pub/paykit/v0/private/bitkit/wallet/receipts/550e8400-e29b-41d4-a716-446655440000";
 
     let err = missing_encrypted_receipt_error(location);
 
-    let (context, source) = match &err {
-        PaykitSdkError::Transport { context, source } => (context.clone(), source),
-        other => panic!("expected Transport error, got {other:?}"),
+    let context = match &err {
+        PaykitSdkError::NotFound(context) => context.clone(),
+        other => panic!("expected NotFound error, got {other:?}"),
     };
     assert_eq!(
         context,
         "encrypted receipt was not found at its receipt location"
-    );
-    assert!(
-        source.is_none(),
-        "missing-receipt error must carry no source"
     );
     assert!(
         !context.contains("/pub/paykit/v0/private/"),

@@ -365,9 +365,9 @@ where
                     // Location: it stays in local storage, is redacted from
                     // record Debug output, and the record carries the location
                     // as a field anyway. The error returned to the caller must
-                    // not: it crosses the FFI boundary, where `context` is
+                    // not: it crosses the FFI boundary, where its message is
                     // rendered verbatim into the generated Kotlin/Swift
-                    // exception message.
+                    // exception.
                     let error = format!(
                         "encrypted receipt {} was not found at {}",
                         access.receipt_id, access.location
@@ -379,7 +379,10 @@ where
                         error,
                     )
                     .await?;
-                    last_error = Some(missing_encrypted_receipt_error(&access.location));
+                    last_error = Some(merge_retrieval_error(
+                        last_error.take(),
+                        missing_encrypted_receipt_error(&access.location),
+                    ));
                     continue;
                 }
                 Err(err) => {

@@ -298,6 +298,97 @@ mod tests {
     }
 
     #[test]
+    fn test_decrypt_receipt_plaintext_parse_error_redacts_plaintext() {
+        // Regression guard: serde_json errors embed verbatim document fragments
+        // on type mismatches (`invalid type: string "<value>", expected u8`).
+        // The document here is DECRYPTED receipt plaintext and this error's
+        // context reaches the FFI (Kotlin/Swift) exception message via
+        // PaykitSdkError::Protocol, so neither the context, the source chain,
+        // nor Display/Debug output may carry plaintext fragments.
+        let receipt_id = ReceiptId::new("450e8400-e29b-41d4-a716-446655440000").unwrap();
+        let sentinel = "SENTINEL_DECRYPTED_PLAINTEXT";
+        // A string where ReceiptWire expects `version: u8` makes serde quote
+        // the value verbatim in its error message.
+        let plaintext = serde_json::to_vec(&json!({
+            "version": sentinel,
+            "kind": "paykit.receipt",
+        }))
+        .unwrap();
+        let location = ReceiptAccess::location(&receiver_path(), &receipt_id);
+        let key = ReceiptDecryptionKey::generate();
+        let encrypted = encrypt_receipt_plaintext_for_test_location(&plaintext, &key, &location);
+
+        let err = decrypt_receipt(&encrypted, &key, &location).unwrap_err();
+
+        let (context, source) = match &err {
+            PaykitError::InvalidData { context, source } => (context.clone(), source),
+            other => panic!("expected InvalidData error, got {other:?}"),
+        };
+        assert_eq!(context, "failed to parse receipt plaintext JSON");
+        assert!(
+            source.is_none(),
+            "plaintext parse error must carry no source"
+        );
+        let rendered = format!("{err} / {err:?}");
+        assert!(
+            !rendered.contains(sentinel),
+            "decrypted plaintext leaked into error output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn test_parse_receipt_access_json_parse_error_redacts_plaintext() {
+        // Regression guard: Receipt Access JSON is decrypted private-message
+        // plaintext carrying the Receipt Decryption Key and Receipt Location.
+        // Its parse error can cross the FFI boundary as exception text, so it
+        // must stay a static label with no serde detail attached.
+        let sentinel = "SENTINEL_RECEIPT_ACCESS_PLAINTEXT";
+        let json = format!("{{\"version\":\"{sentinel}\"}}");
+
+        let err = parse_receipt_access_json(&json).unwrap_err();
+
+        let (context, source) = match &err {
+            PaykitError::InvalidData { context, source } => (context.clone(), source),
+            other => panic!("expected InvalidData error, got {other:?}"),
+        };
+        assert_eq!(context, "failed to parse Receipt Access JSON");
+        assert!(
+            source.is_none(),
+            "Receipt Access parse error must carry no source"
+        );
+        let rendered = format!("{err} / {err:?}");
+        assert!(
+            !rendered.contains(sentinel),
+            "decrypted plaintext leaked into error output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn test_store_prepared_receipt_error_redacts_receipt_location() {
+        // Regression guard: mirrors the paykit-sdk constructor-seam tests. The
+        // Receipt Location is a DH-derived PRIVATE storage path and must never
+        // appear in the error context or Display output.
+        let location =
+            "/pub/paykit/v0/private/bitkit/wallet/receipts/550e8400-e29b-41d4-a716-446655440000";
+
+        let err = super::access::store_prepared_receipt_error(
+            location,
+            anyhow::anyhow!("homeserver rejected put"),
+        );
+
+        let context = match &err {
+            PaykitError::Transport { context, .. } => context.clone(),
+            other => panic!("expected Transport error, got {other:?}"),
+        };
+        assert_eq!(context, "failed to store encrypted receipt");
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains(location),
+            "Receipt Location leaked into Display: {rendered}"
+        );
+    }
+
+    #[test]
     fn test_parse_receipt_access_json_rejects_location_that_does_not_match_receipt_id() {
         let receipt_id = ReceiptId::new("450e8400-e29b-41d4-a716-446655440000").unwrap();
         let other_receipt_id = ReceiptId::new("650e8400-e29b-41d4-a716-446655440000").unwrap();
@@ -405,9 +496,12 @@ mod tests {
         let json = serde_json::to_string(&value).unwrap();
 
         let err = wire::parse_receipt_access_json(&json).unwrap_err();
+        // The serde detail ("unknown field `unexpected`") is deliberately
+        // redacted: the parse error must stay a static label because the input
+        // is decrypted plaintext. Rejection itself is what this test pins.
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field") && context.contains("unexpected")),
-            "expected unknown field error, got: {err}"
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Receipt Access JSON"),
+            "expected Receipt Access parse error, got: {err}"
         );
     }
 
@@ -431,9 +525,12 @@ mod tests {
         let json = serde_json::to_string(&value).unwrap();
 
         let err = wire::parse_receipt_access_json(&json).unwrap_err();
+        // The serde detail ("invalid type: null") is deliberately redacted:
+        // the parse error must stay a static label because the input is
+        // decrypted plaintext. Rejection itself is what this test pins.
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid type: null")),
-            "expected null Payment Request ID parse error, got: {err}"
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Receipt Access JSON"),
+            "expected Receipt Access parse error, got: {err}"
         );
     }
 

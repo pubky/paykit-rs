@@ -816,22 +816,42 @@ fn store_encrypted_receipt_error(_location: &str, source: anyhow::Error) -> Payk
     }
 }
 
-/// Build the transport error returned when an Encrypted Receipt is missing at
+/// Build the not-found error returned when an Encrypted Receipt is missing at
 /// its Receipt Location during retrieval.
+///
+/// This branch only runs after `fetch_encrypted_receipt_json` confirms a
+/// 404/GONE, so the error is `PaykitSdkError::NotFound` (mapped to the
+/// `not_found` FFI code), not `Transport`.
 ///
 /// SECURITY / REDACTION: `location` is the Receipt Location
 /// (`/pub/paykit/v0/private/.../receipts/{id}`), a PRIVATE storage path whose
 /// folder prefix is DH-derived per counterparty. At the FFI boundary this error's
-/// `context` is rendered verbatim into the generated Kotlin/Swift exception
-/// message, so the Receipt Location MUST NOT be embedded in it. The location is
-/// accepted here only to make the redaction explicit and testable; it is
-/// deliberately dropped, leaving a static, non-sensitive label. The Receipt
-/// Access record the caller persists already carries the location as a field
-/// for local diagnostics.
+/// message is rendered verbatim into the generated Kotlin/Swift exception, so
+/// the Receipt Location MUST NOT be embedded in it. The location is accepted
+/// here only to make the redaction explicit and testable; it is deliberately
+/// dropped, leaving a static, non-sensitive label. `NotFound` is a plain-string
+/// variant with no `source`, so no cause chain can reintroduce the path. The
+/// Receipt Access record the caller persists already carries the location as a
+/// field for local diagnostics.
 pub(crate) fn missing_encrypted_receipt_error(_location: &str) -> PaykitSdkError {
-    PaykitSdkError::Transport {
-        context: "encrypted receipt was not found at its receipt location".into(),
-        source: None,
+    PaykitSdkError::NotFound("encrypted receipt was not found at its receipt location".into())
+}
+
+/// Choose which retrieval failure to keep while `retrieve_receipt` walks the
+/// candidate Receipt Locations (newest Receipt Access first).
+///
+/// `NotFound` is the weakest signal: it is definitive absence for one location
+/// only, and must not mask a transport or decrypt failure from another (often
+/// newer) location that suggests the Encrypted Receipt may still be
+/// retrievable on retry. A confirmed 404 therefore only surfaces when it is
+/// the only kind of failure seen; any other error kind displaces it.
+pub(crate) fn merge_retrieval_error(
+    previous: Option<PaykitSdkError>,
+    err: PaykitSdkError,
+) -> PaykitSdkError {
+    match (previous, err) {
+        (Some(previous), PaykitSdkError::NotFound(_)) => previous,
+        (_, err) => err,
     }
 }
 

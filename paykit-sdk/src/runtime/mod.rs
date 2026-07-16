@@ -88,7 +88,7 @@ use crate::{
     domain::publication::PublicationStatus,
     domain::receipts::{
         decrypt_receipt_record_from_access, enqueue_receipt_access_for_issuance,
-        fetch_encrypted_receipt_json, missing_encrypted_receipt_error,
+        fetch_encrypted_receipt_json, merge_retrieval_error, missing_encrypted_receipt_error,
         receipt_issuance_record as load_receipt_issuance_record,
         receipt_issuance_record_by_receipt_id as load_receipt_issuance_record_by_receipt_id,
         receipt_issuance_record_matches_draft,

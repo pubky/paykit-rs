@@ -69,11 +69,13 @@ impl From<paykit_lib::PaykitError> for PaykitSdkError {
                 source: Some(source),
             },
             paykit_lib::PaykitError::NotFound(msg) => Self::NotFound(msg),
-            paykit_lib::PaykitError::InvalidData { context, source } => Self::Protocol(
-                source
-                    .map(|source| format!("{context}: {source}"))
-                    .unwrap_or(context),
-            ),
+            // SECURITY / REDACTION: never fold `source` into the Protocol
+            // string. `Protocol` crosses the FFI boundary verbatim (rendered
+            // into generated Kotlin/Swift exception messages), and lib-level
+            // `InvalidData` sources carry raw parse/decode causes derived from
+            // network data or decrypted plaintext. Only the curated static
+            // `context` label may cross; the cause is deliberately dropped.
+            paykit_lib::PaykitError::InvalidData { context, source: _ } => Self::Protocol(context),
             paykit_lib::PaykitError::Validation(msg) => Self::Protocol(msg),
         }
     }
