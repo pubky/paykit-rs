@@ -173,4 +173,143 @@ mod tests {
             );
         }
     }
+
+    use crate::{EventId, PaymentRequestId};
+
+    fn event_id() -> EventId {
+        EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d201").expect("hard-coded UUID v4 is valid")
+    }
+
+    fn request_id() -> PaymentRequestId {
+        PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33")
+            .expect("hard-coded UUID v4 is valid")
+    }
+
+    // Build a received message whose header `kind` field claims
+    // `paykit.payment_request` regardless of the raw JSON payload, so every
+    // caller below also pins that routing never falls back to the header.
+    fn message_with_request_header(raw_json: &str) -> PrivateApplicationMessage {
+        PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some(PrivateMessageKind::PaymentRequest.as_str().to_string()),
+            raw_json: raw_json.to_string(),
+        }
+    }
+
+    // Serialize `event`, wrap it as a received Private Application Message,
+    // and parse it back through the public entry point, asserting structural
+    // equality and the parsed header ids.
+    fn assert_serialize_round_trip(event: PaymentRequestEvent) {
+        let serialized = serialize_payment_request_event(&event)
+            .expect("construction-valid event must serialize");
+        let message = PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some(event.kind().as_str().to_string()),
+            raw_json: serialized,
+        };
+        let parsed = parse_payment_request_event_message(&message)
+            .expect("serialized Payment Request event kind must be routed");
+        assert!(
+            parsed.is_valid(),
+            "round-tripped event must stay valid: {:?}",
+            parsed.validation_error()
+        );
+        assert_eq!(parsed.kind(), event.kind());
+        assert_eq!(parsed.event_id(), Some(event.event_id()));
+        assert_eq!(
+            parsed.payment_request_id(),
+            Some(event.payment_request_id())
+        );
+        assert_eq!(parsed.parsed_event(), Some(&event));
+    }
+
+    // Mirror of `payment_request_event_parser_uses_raw_json_kind` in
+    // `crate::tests::payment_request`, which pins a stale ReceiptAccess header
+    // routing a payment-request raw payload. Here the header claims
+    // `paykit.payment_request` while the raw JSON kind is
+    // `paykit.receipt_access`: the raw JSON kind wins, the message is not a
+    // Payment Request protocol event, and the parser must return `None`.
+    #[test]
+    fn test_parse_payment_request_event_message_raw_json_kind_wins_over_header() {
+        let message =
+            message_with_request_header(r#"{"version":1,"kind":"paykit.receipt_access"}"#);
+        assert!(parse_payment_request_event_message(&message).is_none());
+    }
+
+    // Pins current behavior for unroutable raw payloads: a missing,
+    // non-string, or unrecognized raw JSON `kind` yields `None` (not an
+    // error), even when the message header claims a request kind.
+    #[test]
+    fn test_parse_payment_request_event_message_unusable_raw_json_kind_is_none() {
+        for raw_json in [
+            r#"{"version":1}"#,
+            r#"{"version":1,"kind":42}"#,
+            r#"{"version":1,"kind":null}"#,
+            r#"{"version":1,"kind":true}"#,
+            r#"{"version":1,"kind":["paykit.payment_request"]}"#,
+            r#"{"version":1,"kind":{"kind":"paykit.payment_request"}}"#,
+            r#"{"version":1,"kind":"paykit.unknown_kind"}"#,
+        ] {
+            let message = message_with_request_header(raw_json);
+            assert!(
+                parse_payment_request_event_message(&message).is_none(),
+                "expected None for raw JSON {raw_json}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_payment_request_acceptance_serialize_round_trip() {
+        assert_serialize_round_trip(PaymentRequestEvent::Acceptance(
+            PaymentRequestAcceptance::new(event_id(), request_id()),
+        ));
+    }
+
+    #[test]
+    fn test_payment_request_rejection_serialize_round_trip_covers_reason_presence() {
+        assert_serialize_round_trip(PaymentRequestEvent::Rejection(
+            PaymentRequestRejection::new(
+                event_id(),
+                request_id(),
+                Some("amount no longer payable".to_string()),
+            ),
+        ));
+
+        let without_reason = PaymentRequestEvent::Rejection(PaymentRequestRejection::new(
+            event_id(),
+            request_id(),
+            None,
+        ));
+        let serialized = serialize_payment_request_event(&without_reason)
+            .expect("construction-valid event must serialize");
+        assert!(
+            !serialized.contains("\"reason\""),
+            "a None reason must be omitted from the wire JSON"
+        );
+        assert_serialize_round_trip(without_reason);
+    }
+
+    #[test]
+    fn test_payment_request_cancellation_serialize_round_trip_covers_reason_presence() {
+        assert_serialize_round_trip(PaymentRequestEvent::Cancellation(
+            PaymentRequestCancellation::new(
+                event_id(),
+                request_id(),
+                Some("request superseded".to_string()),
+            ),
+        ));
+
+        let without_reason = PaymentRequestEvent::Cancellation(PaymentRequestCancellation::new(
+            event_id(),
+            request_id(),
+            None,
+        ));
+        let serialized = serialize_payment_request_event(&without_reason)
+            .expect("construction-valid event must serialize");
+        assert!(
+            !serialized.contains("\"reason\""),
+            "a None reason must be omitted from the wire JSON"
+        );
+        assert_serialize_round_trip(without_reason);
+    }
 }
