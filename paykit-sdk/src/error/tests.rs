@@ -15,9 +15,10 @@ fn test_invalid_data_source_is_not_folded_into_protocol_string() {
     // (generated Kotlin/Swift exception messages), while lib-level
     // `InvalidData` sources carry raw parse/decode causes that can embed
     // network data or decrypted plaintext. The conversion must keep only the
-    // curated static context label in the string; the cause stays structurally
-    // separate in `source` for local diagnostics and is dropped by the FFI
-    // conversion (pinned in paykit-ffi's redaction tests).
+    // curated static context label and drop the cause entirely:
+    // `PaykitSdkError` derives field-wise `Debug`, so a retained `source`
+    // would surface in `format!("{err:?}")` and structured Rust logs even
+    // though the FFI conversion never forwards it.
     let sentinel = "SENTINEL_RAW_PARSE_CAUSE";
     let err = PaykitSdkError::from(paykit_lib::PaykitError::InvalidData {
         context: "failed to parse receipt plaintext JSON".into(),
@@ -36,12 +37,12 @@ fn test_invalid_data_source_is_not_folded_into_protocol_string() {
         "InvalidData source leaked into Protocol string: {message}"
     );
     assert!(
-        source.is_some(),
-        "InvalidData source must be retained for local diagnostics"
+        source.is_none(),
+        "InvalidData source must be dropped; derived Debug would render it"
     );
-    let rendered = err.to_string();
+    let rendered = format!("{err} / {err:?}");
     assert!(
         !rendered.contains(sentinel),
-        "InvalidData source leaked into Display: {rendered}"
+        "InvalidData source leaked into Display/Debug: {rendered}"
     );
 }

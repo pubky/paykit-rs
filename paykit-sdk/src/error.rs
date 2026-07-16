@@ -96,20 +96,19 @@ impl From<paykit_lib::PaykitError> for PaykitSdkError {
                 context: msg,
                 source: None,
             },
-            // SECURITY / REDACTION: never fold `source` into the Protocol
-            // `context` string. `context` crosses the FFI boundary verbatim
-            // (rendered into generated Kotlin/Swift exception messages), and
-            // lib-level `InvalidData` sources carry raw parse/decode causes
-            // derived from network data or decrypted plaintext. The cause is
-            // kept structurally separate in `source` for local diagnostics.
-            // The FFI conversion drops every `source` except an app-authored
-            // `PaykitFfiError` recovered by downcast; nothing in paykit-lib
-            // or paykit-sdk constructs one, so causes like this one always
-            // miss the downcast and never cross. Only the curated static
-            // `context` label survives in exception text.
-            paykit_lib::PaykitError::InvalidData { context, source } => {
-                Self::Protocol { context, source }
-            }
+            // SECURITY / REDACTION: drop lib `InvalidData` sources entirely.
+            // They carry raw parse/decode causes derived from network data or
+            // decrypted plaintext. A retained cause would stay out of FFI
+            // exception text (the conversion drops every `source` that is not
+            // an app-authored `PaykitFfiError` recovered by downcast), but
+            // `PaykitSdkError` derives field-wise `Debug`, so it would still
+            // surface in `format!("{err:?}")` and structured Rust logs.
+            // Dropping it keeps that local logging channel structurally
+            // closed; only the lib-supplied `context` string survives.
+            paykit_lib::PaykitError::InvalidData { context, source: _ } => Self::Protocol {
+                context,
+                source: None,
+            },
             paykit_lib::PaykitError::Validation(msg) => Self::Protocol {
                 context: msg,
                 source: None,

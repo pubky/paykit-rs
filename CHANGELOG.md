@@ -7,6 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Changed
+- **Breaking (Rust API):** `PaykitSdkError::NotFound`, `Protocol`, `Policy`,
+  and `RecoveryRequired` changed from tuple variants (`NotFound(String)`) to
+  struct variants (`NotFound { context: String, source: Option<anyhow::Error> }`),
+  matching the other four variants. Update constructions to
+  `NotFound { context: msg, source: None }` and patterns to
+  `NotFound { context, .. }`. The generated Swift/Kotlin error shape is
+  unchanged.
+- A missing Encrypted Receipt during `retrieve_receipt` now surfaces as the
+  `not_found` FFI error code instead of `transport_error`.
+- FFI exception messages are redacted: anyhow cause chains (which can carry
+  request URLs and response bodies) are dropped at the FFI boundary, Receipt
+  Locations no longer appear in storage/retrieval error messages, and
+  Receipt, Receipt Access, and private-message version/kind errors use
+  static labels so decrypted plaintext never reaches generated Swift/Kotlin
+  exception text.
+
+### Fixed
+- Platform callback errors now survive the FFI -> SDK -> FFI round trip
+  losslessly for all eight error variants: the original variant, custom
+  machine-readable code, and reason are recovered by downcast instead of
+  degrading to the variant's generic code.
+
 ## [0.1.0-rc36] - 2026-07-14
 
 ### Fixed
