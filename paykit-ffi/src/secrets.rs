@@ -1,5 +1,7 @@
 use std::fmt;
 
+use zeroize::Zeroize;
+
 /// SDK state blob owned by platform storage.
 #[derive(uniffi::Object)]
 pub struct FfiSdkStateBlob {
@@ -62,6 +64,12 @@ pub struct FfiPubkyLocalSecretKey {
 #[derive(uniffi::Object)]
 pub struct FfiReceiverNoiseSecretKey {
     pub(crate) bytes: Vec<u8>,
+}
+
+impl Drop for FfiReceiverNoiseSecretKey {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
 }
 
 impl fmt::Debug for FfiReceiverNoiseSecretKey {

@@ -140,9 +140,15 @@ impl PubkyAuthRequest {
     }
 
     /// Wait for auth approval and validate the resulting session capabilities.
+    ///
+    /// Reuse the receiver's persisted Noise key when reauthenticating. Passing
+    /// a new key rotates its public marker key and invalidates existing private
+    /// path and Encrypted Link state. Pass `None` for public-only access when
+    /// the persisted key is unavailable.
     pub async fn complete(
         self,
         local_secret_key: Option<PubkyLocalSecretKey>,
+        receiver_noise_secret_key: Option<crate::ReceiverNoiseSecretKey>,
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         validate_auth_url_capabilities(&self.authorization_url, required_capabilities)?;
@@ -156,7 +162,7 @@ impl PubkyAuthRequest {
             session,
             self.pubky,
             local_secret_key,
-            crate::ReceiverNoiseSecretKey::random(),
+            receiver_noise_secret_key,
             required_capabilities,
         )
     }
@@ -191,9 +197,13 @@ impl PubkySessionBootstrap {
     }
 
     /// Sign up on a homeserver and return validated session access.
+    ///
+    /// Generate the receiver Noise key once for this receiver and persist it
+    /// with the returned session access, or pass `None` for public-only access.
     pub async fn sign_up(
         &self,
         secret_key: &PubkyLocalSecretKey,
+        receiver_noise_secret_key: Option<crate::ReceiverNoiseSecretKey>,
         homeserver_public_key: &PubkyPublicKey,
         signup_code: Option<&str>,
         required_capabilities: &str,
@@ -209,15 +219,21 @@ impl PubkySessionBootstrap {
             session,
             self.pubky.clone(),
             Some(secret_key.clone()),
-            crate::ReceiverNoiseSecretKey::random(),
+            receiver_noise_secret_key,
             required_capabilities,
         )
     }
 
     /// Sign in with a local Pubky secret key and return validated session access.
+    ///
+    /// Reuse the receiver's persisted Noise key when reauthenticating. Passing
+    /// a new key rotates its public marker key and invalidates existing private
+    /// path and Encrypted Link state. Pass `None` for public-only access when
+    /// the persisted key is unavailable.
     pub async fn sign_in(
         &self,
         secret_key: &PubkyLocalSecretKey,
+        receiver_noise_secret_key: Option<crate::ReceiverNoiseSecretKey>,
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         let session = self
@@ -230,7 +246,7 @@ impl PubkySessionBootstrap {
             session,
             self.pubky.clone(),
             Some(secret_key.clone()),
-            crate::ReceiverNoiseSecretKey::random(),
+            receiver_noise_secret_key,
             required_capabilities,
         )
     }
@@ -238,13 +254,14 @@ impl PubkySessionBootstrap {
     /// Import an exported Pubky session secret and validate its capabilities.
     ///
     /// Pass the same persisted receiver Noise key returned with the original
-    /// session access. Generating a replacement rotates the public key and
+    /// session access. If it is unavailable, the imported session remains
+    /// public-only. Generating a replacement rotates the public key and
     /// invalidates existing private path and Encrypted Link state.
     pub async fn import_session(
         &self,
         session_secret: &str,
         local_secret_key: Option<PubkyLocalSecretKey>,
-        receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
+        receiver_noise_secret_key: Option<crate::ReceiverNoiseSecretKey>,
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         let session =
@@ -385,7 +402,7 @@ fn session_result(
     session: PubkySession,
     outbox_client: Pubky,
     local_secret_key: Option<PubkyLocalSecretKey>,
-    receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
+    receiver_noise_secret_key: Option<crate::ReceiverNoiseSecretKey>,
     required_capabilities: &str,
 ) -> Result<PubkySessionBootstrapResult> {
     let local_secret_key = validate_local_secret_for_session(&session, local_secret_key)?;
@@ -393,7 +410,7 @@ fn session_result(
         session,
         outbox_client,
         local_secret_key,
-        receiver_noise_secret_key: Some(receiver_noise_secret_key),
+        receiver_noise_secret_key,
     };
     let public_key = access.public_key()?;
     let capability = access.capability_for_capabilities(required_capabilities)?;

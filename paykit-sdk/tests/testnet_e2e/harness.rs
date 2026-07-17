@@ -13,7 +13,7 @@ use paykit_sdk::{
     InMemoryStorage, LinkedPeerState, PaykitReceiverCapabilities, PaykitReceiverPath, PaykitSdk,
     PaykitSdkConfig, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointSelectionRequest,
     PaymentTarget, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
-    PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, Result,
+    PubkySessionProvider, ReceiverNoiseSecretKey, ReceivingDetail, ReceivingDetailScope, Result,
 };
 use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
@@ -183,15 +183,27 @@ impl TestUser {
         let bootstrap =
             PubkySessionBootstrap::with_pubky(testnet.sdk().expect("testnet Pubky client"));
         let config = PaykitSdkConfig::new(receiver_path.clone());
+        let receiver_noise_secret_key = ReceiverNoiseSecretKey::random();
+        let receiver_noise_public_key = receiver_noise_secret_key.public_key();
         let result = bootstrap
             .sign_up(
                 &secret_key,
+                Some(receiver_noise_secret_key),
                 &homeserver_public_key,
                 None,
                 &config.required_session_capabilities(),
             )
             .await
             .expect("testnet sign-up should succeed");
+        assert_eq!(
+            result
+                .access
+                .receiver_noise_secret_key
+                .as_ref()
+                .expect("bootstrap should retain the supplied receiver Noise key")
+                .public_key(),
+            receiver_noise_public_key
+        );
         let mut access = result.access;
         if !retain_identity_secret {
             access.local_secret_key = None;

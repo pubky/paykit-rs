@@ -1836,7 +1836,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url() != 7484.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 26526.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 21927.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_export_bytes() != 58726.toShort()) {
@@ -1845,7 +1845,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_local_secret_key() != 61849.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_receiver_noise_secret_key() != 4431.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_receiver_noise_secret_key() != 20963.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 4660.toShort()) {
@@ -1857,16 +1857,16 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 6650.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 18060.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 30513.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 45596.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 15662.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 27768.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 31538.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 25568.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 47023.toShort()) {
@@ -1941,7 +1941,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 5869.toShort()) {
+        if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 59742.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 44998.toShort()) {
@@ -3090,6 +3090,7 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipubkyauthrequest_complete(
         `ptr`: Pointer?,
         `localSecretKey`: RustBufferByValue,
+        `receiverNoiseSecretKey`: RustBufferByValue,
         `requiredCapabilities`: RustBufferByValue,
     ): Long
     @JvmStatic
@@ -3126,7 +3127,7 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_constructor_ffipubkysessionaccess_new(
         `sessionSecret`: RustBufferByValue,
         `localSecretKey`: RustBufferByValue,
-        `receiverNoiseSecretKey`: Pointer?,
+        `receiverNoiseSecretKey`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Pointer?
     @JvmStatic
@@ -3138,7 +3139,7 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipubkysessionaccess_export_receiver_noise_secret_key(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
-    ): Pointer?
+    ): RustBufferByValue
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipubkysessionaccess_export_session_secret(
         `ptr`: Pointer?,
@@ -3183,7 +3184,7 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
         `sessionSecret`: RustBufferByValue,
         `localSecretKey`: RustBufferByValue,
-        `receiverNoiseSecretKey`: Pointer?,
+        `receiverNoiseSecretKey`: RustBufferByValue,
         `requiredCapabilities`: RustBufferByValue,
     ): Long
     @JvmStatic
@@ -3196,12 +3197,14 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_in(
         `ptr`: Pointer?,
         `localSecretKey`: Pointer?,
+        `receiverNoiseSecretKey`: RustBufferByValue,
         `requiredCapabilities`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_up(
         `ptr`: Pointer?,
         `localSecretKey`: Pointer?,
+        `receiverNoiseSecretKey`: RustBufferByValue,
         `homeserverPublicKey`: RustBufferByValue,
         `signupCode`: RustBufferByValue,
         `requiredCapabilities`: RustBufferByValue,
@@ -7018,15 +7021,16 @@ public open class PubkyAuthRequest: Disposable, PubkyAuthRequestInterface {
     }
 
     /**
-     * Wait for auth approval and validate the resulting session capabilities.
+     * Wait for auth approval using the receiver's persisted Noise key, if available.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
+    public override suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipubkyauthrequest_complete(
                     thisPtr,
                     FfiConverterOptionalTypeFfiPubkyLocalSecretKey.lower(`localSecretKey`),
+                    FfiConverterOptionalTypeFfiReceiverNoiseSecretKey.lower(`receiverNoiseSecretKey`),
                     FfiConverterString.lower(`requiredCapabilities`),
                 )
             },
@@ -7263,12 +7267,12 @@ public open class PubkySessionAccess: Disposable, PubkySessionAccessInterface {
     /**
      * Create session access material from platform secure storage.
      */
-    public constructor(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey) : this(
+    public constructor(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey?) : this(
         uniffiRustCall { uniffiRustCallStatus ->
             UniffiLib.uniffi_paykit_fn_constructor_ffipubkysessionaccess_new(
                 FfiConverterString.lower(`sessionSecret`),
                 FfiConverterOptionalTypeFfiPubkyLocalSecretKey.lower(`localSecretKey`),
-                FfiConverterTypeReceiverNoiseSecretKey.lower(`receiverNoiseSecretKey`),
+                FfiConverterOptionalTypeFfiReceiverNoiseSecretKey.lower(`receiverNoiseSecretKey`),
                 uniffiRustCallStatus,
             )
         }!!
@@ -7362,16 +7366,16 @@ public open class PubkySessionAccess: Disposable, PubkySessionAccessInterface {
     }
 
     /**
-     * Export the receiver Noise secret key for platform secure storage.
+     * Export the receiver Noise secret key for platform secure storage, when available.
      */
-    public override fun `exportReceiverNoiseSecretKey`(): ReceiverNoiseSecretKey {
-        return FfiConverterTypeReceiverNoiseSecretKey.lift(callWithPointer {
+    public override fun `exportReceiverNoiseSecretKey`(): ReceiverNoiseSecretKey? {
+        return FfiConverterOptionalTypeFfiReceiverNoiseSecretKey.lift(callWithPointer {
             uniffiRustCall { uniffiRustCallStatus ->
                 UniffiLib.uniffi_paykit_fn_method_ffipubkysessionaccess_export_receiver_noise_secret_key(
                     it,
                     uniffiRustCallStatus,
                 )
-            }!!
+            }
         })
     }
 
@@ -7590,17 +7594,17 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     }
 
     /**
-     * Import an exported Pubky session secret with its persisted receiver Noise key.
+     * Import an exported Pubky session secret and its persisted receiver Noise key, if available.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
+    public override suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipubkysessionbootstrap_import_session(
                     thisPtr,
                     FfiConverterString.lower(`sessionSecret`),
                     FfiConverterOptionalTypeFfiPubkyLocalSecretKey.lower(`localSecretKey`),
-                    FfiConverterTypeReceiverNoiseSecretKey.lower(`receiverNoiseSecretKey`),
+                    FfiConverterOptionalTypeFfiReceiverNoiseSecretKey.lower(`receiverNoiseSecretKey`),
                     FfiConverterString.lower(`requiredCapabilities`),
                 )
             },
@@ -7640,15 +7644,16 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     }
 
     /**
-     * Sign in with a local Pubky secret key and return session access material.
+     * Sign in with the receiver's persisted Noise key, if available.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
+    public override suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_in(
                     thisPtr,
                     FfiConverterTypePubkyLocalSecretKey.lower(`localSecretKey`),
+                    FfiConverterOptionalTypeFfiReceiverNoiseSecretKey.lower(`receiverNoiseSecretKey`),
                     FfiConverterString.lower(`requiredCapabilities`),
                 )
             },
@@ -7664,15 +7669,16 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     }
 
     /**
-     * Sign up on a homeserver and return session access material.
+     * Sign up on a homeserver with the receiver-owned Noise key, if available.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
+    public override suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey?, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_up(
                     thisPtr,
                     FfiConverterTypePubkyLocalSecretKey.lower(`localSecretKey`),
+                    FfiConverterOptionalTypeFfiReceiverNoiseSecretKey.lower(`receiverNoiseSecretKey`),
                     FfiConverterString.lower(`homeserverPublicKey`),
                     FfiConverterOptionalString.lower(`signupCode`),
                     FfiConverterString.lower(`requiredCapabilities`),
@@ -12284,6 +12290,35 @@ public object FfiConverterOptionalTypeFfiPubkySessionAccess: FfiConverterRustBuf
         } else {
             buf.put(1)
             FfiConverterTypePubkySessionAccess.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiReceiverNoiseSecretKey: FfiConverterRustBuffer<ReceiverNoiseSecretKey?> {
+    override fun read(buf: ByteBuffer): ReceiverNoiseSecretKey? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeReceiverNoiseSecretKey.read(buf)
+    }
+
+    override fun allocationSize(value: ReceiverNoiseSecretKey?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeReceiverNoiseSecretKey.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ReceiverNoiseSecretKey?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeReceiverNoiseSecretKey.write(value, buf)
         }
     }
 }

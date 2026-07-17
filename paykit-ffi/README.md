@@ -246,8 +246,10 @@ app-specific public profile fields without exposing an FFI JSON value model.
 - `SdkBackupBlob` — SDK backup/export payload for app-controlled
   backup flows.
 - `PubkyLocalSecretKey` — local Pubky secret key bytes.
-- `ReceiverNoiseSecretKey` — receiver-scoped Noise secret key bytes. Persist it
-  with session access and reuse it when importing that session.
+- `ReceiverNoiseSecretKey` — receiver-scoped Noise secret key bytes. Generate
+  it once per receiver, persist it with session access, and reuse it when
+  signing in, completing auth, or importing that session. Omit it only for
+  public-only access.
 
 `PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.

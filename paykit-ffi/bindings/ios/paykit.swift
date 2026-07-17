@@ -3511,9 +3511,9 @@ public protocol PubkyAuthRequestProtocol: AnyObject, Sendable {
     func authorizationUrl() async throws  -> String
 
     /**
-     * Wait for auth approval and validate the resulting session capabilities.
+     * Wait for auth approval using the receiver's persisted Noise key, if available.
      */
-    func complete(localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
+    func complete(localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
 }
 /**
@@ -3592,15 +3592,15 @@ open func authorizationUrl()async throws  -> String  {
 }
 
     /**
-     * Wait for auth approval and validate the resulting session capabilities.
+     * Wait for auth approval using the receiver's persisted Noise key, if available.
      */
-open func complete(localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
+open func complete(localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkyauthrequest_complete(
                     self.uniffiClonePointer(),
-                    FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),FfiConverterString.lower(requiredCapabilities)
+                    FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),FfiConverterOptionTypeReceiverNoiseSecretKey.lower(receiverNoiseSecretKey),FfiConverterString.lower(requiredCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -3825,9 +3825,9 @@ public protocol PubkySessionAccessProtocol: AnyObject, Sendable {
     func exportLocalSecretKey()  -> PubkyLocalSecretKey?
 
     /**
-     * Export the receiver Noise secret key for platform secure storage.
+     * Export the receiver Noise secret key for platform secure storage, when available.
      */
-    func exportReceiverNoiseSecretKey()  -> ReceiverNoiseSecretKey
+    func exportReceiverNoiseSecretKey()  -> ReceiverNoiseSecretKey?
 
     /**
      * Export the Pubky session bearer secret for platform secure storage.
@@ -3880,13 +3880,13 @@ open class PubkySessionAccess: PubkySessionAccessProtocol, @unchecked Sendable {
     /**
      * Create session access material from platform secure storage.
      */
-public convenience init(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey) {
+public convenience init(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey?) {
     let pointer =
         try! rustCall() {
     uniffi_paykit_fn_constructor_ffipubkysessionaccess_new(
         FfiConverterString.lower(sessionSecret),
         FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),
-        FfiConverterTypeReceiverNoiseSecretKey_lower(receiverNoiseSecretKey),$0
+        FfiConverterOptionTypeReceiverNoiseSecretKey.lower(receiverNoiseSecretKey),$0
     )
 }
     self.init(unsafeFromRawPointer: pointer)
@@ -3914,10 +3914,10 @@ open func exportLocalSecretKey() -> PubkyLocalSecretKey?  {
 }
 
     /**
-     * Export the receiver Noise secret key for platform secure storage.
+     * Export the receiver Noise secret key for platform secure storage, when available.
      */
-open func exportReceiverNoiseSecretKey() -> ReceiverNoiseSecretKey  {
-    return try!  FfiConverterTypeReceiverNoiseSecretKey_lift(try! rustCall() {
+open func exportReceiverNoiseSecretKey() -> ReceiverNoiseSecretKey?  {
+    return try!  FfiConverterOptionTypeReceiverNoiseSecretKey.lift(try! rustCall() {
     uniffi_paykit_fn_method_ffipubkysessionaccess_export_receiver_noise_secret_key(self.uniffiClonePointer(),$0
     )
 })
@@ -4010,9 +4010,9 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey, claim: PubkyAuthCompanionClaim) async throws
 
     /**
-     * Import an exported Pubky session secret with its persisted receiver Noise key.
+     * Import an exported Pubky session secret and its persisted receiver Noise key, if available.
      */
-    func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
+    func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
      * Resume a short-lived auth flow from its authorization URL.
@@ -4020,14 +4020,14 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     func resumeAuth(authorizationUrl: String, expectedCapabilities: String) async throws  -> PubkyAuthRequest
 
     /**
-     * Sign in with a local Pubky secret key and return session access material.
+     * Sign in with the receiver's persisted Noise key, if available.
      */
-    func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
+    func signIn(localSecretKey: PubkyLocalSecretKey, receiverNoiseSecretKey: ReceiverNoiseSecretKey?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
-     * Sign up on a homeserver and return session access material.
+     * Sign up on a homeserver with the receiver-owned Noise key, if available.
      */
-    func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
+    func signUp(localSecretKey: PubkyLocalSecretKey, receiverNoiseSecretKey: ReceiverNoiseSecretKey?, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
      * Start a sign-in auth flow for an external signer.
@@ -4160,15 +4160,15 @@ open func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: S
 }
 
     /**
-     * Import an exported Pubky session secret with its persisted receiver Noise key.
+     * Import an exported Pubky session secret and its persisted receiver Noise key, if available.
      */
-open func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
+open func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkysessionbootstrap_import_session(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(sessionSecret),FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),FfiConverterTypeReceiverNoiseSecretKey_lower(receiverNoiseSecretKey),FfiConverterString.lower(requiredCapabilities)
+                    FfiConverterString.lower(sessionSecret),FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),FfiConverterOptionTypeReceiverNoiseSecretKey.lower(receiverNoiseSecretKey),FfiConverterString.lower(requiredCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -4200,15 +4200,15 @@ open func resumeAuth(authorizationUrl: String, expectedCapabilities: String)asyn
 }
 
     /**
-     * Sign in with a local Pubky secret key and return session access material.
+     * Sign in with the receiver's persisted Noise key, if available.
      */
-open func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
+open func signIn(localSecretKey: PubkyLocalSecretKey, receiverNoiseSecretKey: ReceiverNoiseSecretKey?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_in(
                     self.uniffiClonePointer(),
-                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterString.lower(requiredCapabilities)
+                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterOptionTypeReceiverNoiseSecretKey.lower(receiverNoiseSecretKey),FfiConverterString.lower(requiredCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -4220,15 +4220,15 @@ open func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: Stri
 }
 
     /**
-     * Sign up on a homeserver and return session access material.
+     * Sign up on a homeserver with the receiver-owned Noise key, if available.
      */
-open func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
+open func signUp(localSecretKey: PubkyLocalSecretKey, receiverNoiseSecretKey: ReceiverNoiseSecretKey?, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_up(
                     self.uniffiClonePointer(),
-                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterString.lower(homeserverPublicKey),FfiConverterOptionString.lower(signupCode),FfiConverterString.lower(requiredCapabilities)
+                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterOptionTypeReceiverNoiseSecretKey.lower(receiverNoiseSecretKey),FfiConverterString.lower(homeserverPublicKey),FfiConverterOptionString.lower(signupCode),FfiConverterString.lower(requiredCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -16179,6 +16179,30 @@ fileprivate struct FfiConverterOptionTypePubkySessionAccess: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeReceiverNoiseSecretKey: FfiConverterRustBuffer {
+    typealias SwiftType = ReceiverNoiseSecretKey?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeReceiverNoiseSecretKey.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeReceiverNoiseSecretKey.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeBillingPeriod: FfiConverterRustBuffer {
     typealias SwiftType = BillingPeriod?
 
@@ -17997,7 +18021,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url() != 7484) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 26526) {
+    if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 21927) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_export_bytes() != 58726) {
@@ -18006,7 +18030,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_local_secret_key() != 61849) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_receiver_noise_secret_key() != 4431) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_receiver_noise_secret_key() != 20963) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 4660) {
@@ -18018,16 +18042,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 6650) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 18060) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 30513) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 45596) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 15662) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 27768) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 31538) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 25568) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 47023) {
@@ -18102,7 +18126,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 5869) {
+    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 59742) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 44998) {

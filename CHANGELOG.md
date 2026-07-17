@@ -20,6 +20,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   and receiver-pair domain separation.
 - Encrypted Link snapshots now include the counterparty receiver Noise public
   key so existing links can be restored without repeating public discovery.
+- Session signup, signin, auth completion, and import accept the receiver Noise
+  key explicitly so reauthentication can reuse it; session access without that
+  key remains public-only.
 
 ## [0.1.0-rc36] - 2026-07-14
 

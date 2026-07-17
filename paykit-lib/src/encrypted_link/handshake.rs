@@ -118,9 +118,9 @@ pub enum HandshakeProgress {
 ///
 /// `receiver_pubkey` identifies the counterparty homeserver. The separate
 /// `receiver_noise_public_key` is discovered from that receiver's public
-/// [`PaykitReceiverMarker`](crate::PaykitReceiverMarker) and is used with
-/// `sender_noise_secret_key` for private path derivation and the Noise static
-/// key.
+/// [`PaykitReceiverMarker`](crate::PaykitReceiverMarker) and pairs with
+/// `sender_noise_secret_key` for private path derivation. The local secret is
+/// also used as this side's Noise static key.
 ///
 /// Call [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
 #[instrument(skip(session, sender_noise_secret_key, outbox_client))]
@@ -210,9 +210,9 @@ fn initiate_encrypted_link_with_paths(
 ///
 /// `sender_pubkey` identifies the counterparty homeserver. The separate
 /// `sender_noise_public_key` is discovered from that receiver's public
-/// [`PaykitReceiverMarker`](crate::PaykitReceiverMarker) and is used with
-/// `receiver_noise_secret_key` for private path derivation and the Noise static
-/// key.
+/// [`PaykitReceiverMarker`](crate::PaykitReceiverMarker) and pairs with
+/// `receiver_noise_secret_key` for private path derivation. The local secret is
+/// also used as this side's Noise static key.
 ///
 /// Call [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
 #[instrument(skip(session, receiver_noise_secret_key, outbox_client))]

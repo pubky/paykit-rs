@@ -322,7 +322,10 @@ runtime auth should use `config.required_session_capabilities()` as the expected
 scope for auth start/resume/approve, completion, and session import. The
 required scope covers this runtime's receiver-scoped public and private Paykit
 paths; it adds the configured profile/contact namespace only when that namespace
-is outside the receiver-scoped Paykit default.
+is outside the receiver-scoped Paykit default. The app generates one
+`ReceiverNoiseSecretKey` per receiver and supplies that same persisted key to
+signup, signin, auth completion, and session import. Passing no key produces
+public-only session access; reauthentication must not silently rotate it.
 `PubkyLocalSecretKey` also provides Pubky Core-compatible BIP39 seed and
 mnemonic helpers plus public-key-from-secret helpers. Apps that intentionally
 share the same Pubky identity material should derive the same Pubky key; app

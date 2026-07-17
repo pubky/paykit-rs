@@ -40,10 +40,12 @@ profile helpers do not publish it automatically.
 
 The Receiver Marker also publishes that receiver's Noise public key. Its
 public visibility is intentional: it cannot decrypt messages or derive the
-pairwise DH secret without the receiver Noise secret. Apps must persist the
-receiver Noise secret returned in `PubkySessionAccess` alongside session
-access and reuse it after restart. It is independent of the Pubky identity
-secret, so Ring- or server-owned identities remain private-link-capable.
+pairwise DH secret without the receiver Noise secret. Apps generate that
+secret once per receiver, supply it when creating or importing session access,
+persist it alongside that access, and reuse it after restart or
+reauthentication. It is independent of the Pubky identity secret, so Ring- or
+server-owned identities remain private-link-capable. When the receiver key is
+unavailable, session bootstrap can omit it and retain public-only access.
 
 ## Current Scope
 

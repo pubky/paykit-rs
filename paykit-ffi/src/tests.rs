@@ -445,6 +445,7 @@ fn test_blob_debug_redacts_bytes() {
     let state = FfiSdkStateBlob::new(vec![1, 2, 3]);
     let backup = FfiSdkBackupBlob::new(vec![4, 5, 6, 7]);
     let secret = FfiPubkyLocalSecretKey::new(vec![8; 32]);
+    let receiver_noise_secret = FfiReceiverNoiseSecretKey::random();
     let payment_payload = FfiPaymentPayload::new("bc1qexample".into());
     let attribution = FfiReservationAttribution::new(HashMap::from([(
         "backend_reference".into(),
@@ -460,6 +461,11 @@ fn test_blob_debug_redacts_bytes() {
         format!("{secret:?}"),
         "FfiPubkyLocalSecretKey(<redacted:32 bytes>)"
     );
+    assert_eq!(receiver_noise_secret.export_bytes().len(), 32);
+    assert_eq!(
+        format!("{receiver_noise_secret:?}"),
+        "FfiReceiverNoiseSecretKey(<redacted:32 bytes>)"
+    );
     assert_eq!(
         format!("{payment_payload:?}"),
         "FfiPaymentPayload(<redacted:11 bytes>)"
@@ -468,6 +474,13 @@ fn test_blob_debug_redacts_bytes() {
         format!("{attribution:?}"),
         "FfiReservationAttribution(<redacted:1 fields>)"
     );
+}
+
+#[test]
+fn test_session_access_allows_missing_receiver_noise_secret_key() {
+    let access = FfiPubkySessionAccess::new("session-secret".into(), None, None);
+
+    assert!(access.export_receiver_noise_secret_key().is_none());
 }
 
 #[test]
@@ -540,11 +553,16 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
     }
 
     let secret = FfiPubkyLocalSecretKey::new(vec![8; 32]);
+    let receiver_noise_secret = FfiReceiverNoiseSecretKey::random();
     let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
     let config = default_config("bitkit/wallet".into()).unwrap();
     let capabilities = required_session_capabilities(config.clone()).unwrap();
     let result = bootstrap
-        .sign_in(Arc::new(secret), capabilities)
+        .sign_in(
+            Arc::new(secret),
+            Some(Arc::new(receiver_noise_secret)),
+            capabilities,
+        )
         .await
         .unwrap();
     let store = Arc::new(MemoryStore::default());
