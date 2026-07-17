@@ -19,6 +19,11 @@ Payment execution, settlement detection, balances, route policy, product UI,
 and app backup transport stay outside the SDK and are provided by application
 or payment-adapter code.
 
+See [State Updates](STATE_UPDATES.md) for Mermaid diagrams showing SDK-local
+durable records, process state, and homeserver data changed by the supported
+identity, profile, contact, payment, private messaging, receipt, recovery, and
+backup workflows.
+
 The SDK is designed around an app-owned Paykit runtime model. One SDK runtime
 represents one app or receiver runtime with its own Paykit state: Encrypted
 Links, private stream checkpoints, outbound queues, receipts, requests,

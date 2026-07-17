@@ -4,6 +4,10 @@ Stateless Rust crate that implements Paykit Library functionality on [Pubky](htt
 
 Pubky is the only supported network/storage backend for this crate. The former generic transport traits and `pubky` feature flag have been removed; Pubky dependencies are unconditional.
 
+See [State Updates](STATE_UPDATES.md) for Mermaid diagrams showing the
+caller-owned in-memory state and homeserver data changed by each supported
+public, private, Payment Request, Receipt, and recovery workflow.
+
 ## Quick Start
 
 Add `paykit-lib` to your `Cargo.toml`.
