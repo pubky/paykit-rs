@@ -29,7 +29,7 @@ use crate::{
 };
 
 const RECOVERY_MARKER_KIND: &str = "paykit.encrypted_link_recovery";
-const RECOVERY_MARKER_PATH_DOMAIN: &[u8] = b"paykit-link-recovery-v1";
+const RECOVERY_MARKER_PATH_DOMAIN: &[u8] = b"paykit-link-recovery-v0";
 
 /// Minimal public marker that asks a counterparty to relink an Encrypted Link.
 #[derive(Clone, Debug, PartialEq, Eq)]

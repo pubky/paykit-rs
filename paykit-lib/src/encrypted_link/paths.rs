@@ -7,7 +7,7 @@ use crate::{
 ///
 /// Keeps Paykit private paths separate from other pubky-noise users that share
 /// the same key material.
-pub(super) const PAYKIT_PATH_DOMAIN: &[u8] = b"paykit-path-v1";
+pub(super) const PAYKIT_PATH_DOMAIN: &[u8] = b"paykit-path-v0";
 
 /// Computes the write and read path components for private payment storage.
 ///

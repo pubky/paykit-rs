@@ -12,7 +12,7 @@ use crate::{
 };
 
 const RECEIVER_MARKER_KIND: &str = "paykit.receiver";
-const RECEIVER_MARKER_VERSION: u8 = 2;
+const RECEIVER_MARKER_VERSION: u8 = 1;
 
 /// Public capabilities advertised by a Paykit receiver marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,7 +199,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&json).unwrap(),
             json!({
-                "version": 2,
+                "version": 1,
                 "kind": "paykit.receiver",
                 "receiver_path": "bitkit/server",
                 "capabilities": {
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn test_receiver_marker_rejects_wrong_version_or_kind() {
         let raw = json!({
-            "version": 1,
+            "version": 2,
             "kind": "paykit.receiver",
             "receiver_path": "bitkit/server",
             "capabilities": {
@@ -234,7 +234,7 @@ mod tests {
         ));
 
         let raw = json!({
-            "version": 2,
+            "version": 1,
             "kind": "paykit.other",
             "receiver_path": "bitkit/server",
             "capabilities": {
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn test_receiver_marker_rejects_unknown_capability_fields() {
         let raw = json!({
-            "version": 2,
+            "version": 1,
             "kind": "paykit.receiver",
             "receiver_path": "bitkit/server",
             "capabilities": {
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn test_receiver_marker_rejects_unknown_top_level_fields() {
         let raw = json!({
-            "version": 2,
+            "version": 1,
             "kind": "paykit.receiver",
             "receiver_path": "bitkit/server",
             "capabilities": {
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn test_receiver_marker_rejects_missing_noise_public_key() {
         let raw = json!({
-            "version": 2,
+            "version": 1,
             "kind": "paykit.receiver",
             "receiver_path": "bitkit/server",
             "capabilities": {

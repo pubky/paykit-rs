@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PaykitError, PaykitReceiverPath, PublicKey, Result};
 
-const SNAPSHOT_WIRE_VERSION: u32 = 2;
+const SNAPSHOT_WIRE_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 struct SnapshotWire {
