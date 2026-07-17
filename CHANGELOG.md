@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc37] - 2026-07-17
+
 ### Added
 - Receiver Markers now publish a receiver-scoped Noise public key. The SDK
   discovers that key before establishing an Encrypted Link, so private path
@@ -302,7 +304,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc36...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc37...HEAD
+[0.1.0-rc37]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc37
 [0.1.0-rc36]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc36
 [0.1.0-rc35]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc35
 [0.1.0-rc33]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc33
