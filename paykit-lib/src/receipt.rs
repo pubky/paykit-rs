@@ -374,7 +374,7 @@ mod tests {
         let err = decrypt_receipt(&tampered, &prepared.access.key, &prepared.access.location)
             .unwrap_err();
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("nonce must be 24 bytes")),
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context == "encrypted receipt nonce must be 24 bytes"),
             "expected short-nonce rejection, got: {err}"
         );
     }
@@ -399,7 +399,7 @@ mod tests {
         let err = decrypt_receipt(&tampered, &prepared.access.key, &prepared.access.location)
             .unwrap_err();
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("nonce must be 24 bytes")),
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context == "encrypted receipt nonce must be 24 bytes"),
             "expected overlong-nonce rejection, got: {err}"
         );
     }
@@ -417,7 +417,7 @@ mod tests {
         let err = decrypt_receipt(&tampered, &prepared.access.key, &prepared.access.location)
             .unwrap_err();
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("ciphertext is not valid base64url")),
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context == "encrypted receipt ciphertext is not valid base64url"),
             "expected non-base64url ciphertext rejection, got: {err}"
         );
     }
@@ -435,8 +435,24 @@ mod tests {
         let err = decrypt_receipt(&tampered, &prepared.access.key, &prepared.access.location)
             .unwrap_err();
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("nonce is not valid base64url")),
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context == "encrypted receipt nonce is not valid base64url"),
             "expected non-base64url nonce rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_receipt_decryption_key_validation_messages_are_static() {
+        // The base64 DecodeError names the offending byte of the candidate key
+        // text; these messages are key-material adjacent and must stay static.
+        let err = ReceiptDecryptionKey::new("not*base64url").unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg == "Receipt Decryption Key must be base64url"),
+            "expected static base64 validation message, got: {err}"
+        );
+        let err = ReceiptDecryptionKey::new(URL_SAFE_NO_PAD.encode([0u8; 16])).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg == "Receipt Decryption Key must decode to 32 bytes"),
+            "expected static length validation message, got: {err}"
         );
     }
 

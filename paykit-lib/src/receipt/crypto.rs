@@ -112,25 +112,26 @@ impl Receipt {
                 source: None,
             });
         }
+        // base64 DecodeError Display renders the offending byte and offset of
+        // the fetched document; keep these contexts static and leave the
+        // detail in `source`, which stays local. The nonce-length echo is
+        // likewise fetched-document derived, so it stays static too.
         let nonce = URL_SAFE_NO_PAD
             .decode(wire.nonce)
             .map_err(|err| PaykitError::InvalidData {
-                context: format!("encrypted receipt nonce is not valid base64url: {err}"),
+                context: "encrypted receipt nonce is not valid base64url".into(),
                 source: Some(err.into()),
             })?;
         let ciphertext =
             URL_SAFE_NO_PAD
                 .decode(wire.ciphertext)
                 .map_err(|err| PaykitError::InvalidData {
-                    context: format!("encrypted receipt ciphertext is not valid base64url: {err}"),
+                    context: "encrypted receipt ciphertext is not valid base64url".into(),
                     source: Some(err.into()),
                 })?;
         if nonce.len() != 24 {
             return Err(PaykitError::InvalidData {
-                context: format!(
-                    "encrypted receipt nonce must be 24 bytes, got {}",
-                    nonce.len()
-                ),
+                context: "encrypted receipt nonce must be 24 bytes".into(),
                 source: None,
             });
         }

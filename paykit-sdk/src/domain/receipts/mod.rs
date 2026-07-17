@@ -775,11 +775,12 @@ pub(crate) async fn fetch_encrypted_receipt_json(
                     context: "read encrypted receipt bytes".into(),
                     source: Some(err.into()),
                 })?;
-            let json =
-                String::from_utf8(bytes.to_vec()).map_err(|err| PaykitSdkError::Protocol {
-                    context: format!("encrypted receipt is not UTF-8: {err}"),
-                    source: None,
-                })?;
+            let json = String::from_utf8(bytes.to_vec()).map_err(|_| PaykitSdkError::Protocol {
+                // FromUtf8Error detail describes the fetched body; keep the
+                // context static so none of it crosses the FFI.
+                context: "encrypted receipt is not valid UTF-8".into(),
+                source: None,
+            })?;
             Ok(Some(json))
         }
         Err(err) if is_not_found(&err) => Ok(None),

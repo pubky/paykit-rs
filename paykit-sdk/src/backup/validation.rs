@@ -1342,8 +1342,12 @@ pub(super) fn validate_receipt_issuance_records(
 
         let receipt =
             paykit_lib::decrypt_receipt(&record.encrypted_receipt, &access.key, &access.location)
-                .map_err(|err| PaykitSdkError::Protocol {
-                context: err.to_string(),
+                .map_err(|_| PaykitSdkError::Protocol {
+                // The lib error can describe the stored encrypted receipt
+                // (and its `source` can carry envelope parse detail), and
+                // this context crosses the FFI from backup restore; keep it
+                // static and drop the cause.
+                context: "stored encrypted receipt failed to decrypt".into(),
                 source: None,
             })?;
         let recipient = PubkyPublicKey::from_public_key(&receipt.recipient_public_key);
