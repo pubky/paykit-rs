@@ -792,6 +792,40 @@ mod tests {
         );
     }
 
+    fn recurrence_with_ends_at(ends_at: &str) -> Recurrence {
+        Recurrence {
+            every: 1,
+            unit: RecurrenceUnit::Month,
+            starts_at: "2026-07-01T00:00:00Z".to_string(),
+            anchor: "2026-07-01T00:00:00Z".to_string(),
+            ends_at: Some(ends_at.to_string()),
+        }
+    }
+
+    #[test]
+    fn payment_request_rejects_outgoing_recurrence_ends_at_before_starts_at() {
+        let mut terms = request_terms();
+        terms.recurrence = Some(recurrence_with_ends_at("2026-06-01T00:00:00Z"));
+        let event = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
+
+        let err = serialize_payment_request_json(&event).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("ends_at must be after starts_at"))
+        );
+    }
+
+    #[test]
+    fn payment_request_rejects_outgoing_recurrence_ends_at_equal_to_starts_at() {
+        let mut terms = request_terms();
+        terms.recurrence = Some(recurrence_with_ends_at("2026-07-01T00:00:00Z"));
+        let event = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
+
+        let err = serialize_payment_request_json(&event).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("ends_at must be after starts_at"))
+        );
+    }
+
     #[test]
     fn acceptance_reason_is_invalid_when_present() {
         let json = r#"{
