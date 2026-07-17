@@ -20,9 +20,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - FFI exception messages are redacted: anyhow cause chains (which can carry
   request URLs and response bodies) are dropped at the FFI boundary, Receipt
   Locations no longer appear in storage/retrieval error messages, and
-  Receipt, Receipt Access, and private-message version/kind errors use
-  static labels so decrypted plaintext never reaches generated Swift/Kotlin
-  exception text.
+  Receipt, Receipt Access, and private-message version/kind parse and
+  validation errors use static labels, so Receipt, Receipt Access, and
+  version/kind values no longer reach generated Swift/Kotlin exception text.
+- Rust SDK errors converted from `paykit_lib::PaykitError::InvalidData` no
+  longer retain the underlying cause: the lib-to-SDK conversion drops the
+  source before the FFI boundary, so `Error::source()` returns `None` and
+  `Debug` output no longer includes the parse/decode cause for these errors.
 
 ### Fixed
 - Platform callback errors now survive the FFI -> SDK -> FFI round trip
