@@ -34,12 +34,9 @@ pub(crate) struct PaymentAmountWire {
     pub(crate) asset: String,
 }
 
-// audit: this conversion is intentionally unvalidated so wire deserialization
-// can carry raw strings across the parse boundary. Every caller revalidates
-// the resulting PaymentAmount: payment_request/wire.rs runs
-// PaymentRequestTerms::validate() right after the conversion, and
-// receipt/wire.rs calls validate_with_label("Receipt amount") immediately
-// after mapping. Keep it that way if new callers are added.
+// Intentionally performs no validation so deserialization can carry raw wire
+// strings across the parse boundary. Callers must validate the resulting
+// `PaymentAmount` before treating it as well-formed.
 impl From<PaymentAmountWire> for PaymentAmount {
     fn from(wire: PaymentAmountWire) -> Self {
         Self {
