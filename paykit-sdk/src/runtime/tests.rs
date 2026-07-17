@@ -661,7 +661,6 @@ async fn seed_private_capable_identity_and_link(
                 &pubky::Keypair::random().public_key(),
             )),
             capability: PubkyIdentityCapability::PrivateLinkCapable,
-            local_secret_available: true,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -694,7 +693,6 @@ async fn seed_private_capable_identity_and_handshake(
                 &pubky::Keypair::random().public_key(),
             )),
             capability: PubkyIdentityCapability::PrivateLinkCapable,
-            local_secret_available: true,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })

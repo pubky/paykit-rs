@@ -974,7 +974,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
 }
 
 #[tokio::test]
-async fn test_current_private_payment_list_reads_cached_view_for_public_only_identity() {
+async fn test_current_private_payment_list_reads_cached_view_without_live_session() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -983,8 +983,7 @@ async fn test_current_private_payment_list_reads_cached_view_for_public_only_ide
                 public_key: Some(PubkyPublicKey::from_public_key(
                     &pubky::Keypair::random().public_key(),
                 )),
-                capability: PubkyIdentityCapability::PublicOnly,
-                local_secret_available: false,
+                capability: PubkyIdentityCapability::PrivateLinkCapable,
                 initialized_at: FixedClock.now(),
                 sign_out_generation: 0,
             });

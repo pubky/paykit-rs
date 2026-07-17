@@ -44,8 +44,9 @@ pairwise DH secret without the receiver Noise secret. Apps generate that
 secret once per receiver, supply it when creating or importing session access,
 persist it alongside that access, and reuse it after restart or
 reauthentication. It is independent of the Pubky identity secret, so Ring- or
-server-owned identities remain private-link-capable. When the receiver key is
-unavailable, session bootstrap can omit it and retain public-only access.
+server-owned identities remain private-link-capable. Session creation and
+restore require this receiver key even when the Pubky identity secret remains
+in an external signer.
 
 ## Current Scope
 

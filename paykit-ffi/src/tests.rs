@@ -165,7 +165,6 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
         identity_state: Some(IdentityState {
             public_key: Some(local_key),
             capability: PubkyIdentityCapability::PrivateLinkCapable,
-            local_secret_available: true,
             initialized_at: now,
             sign_out_generation: 0,
         }),
@@ -477,10 +476,16 @@ fn test_blob_debug_redacts_bytes() {
 }
 
 #[test]
-fn test_session_access_allows_missing_receiver_noise_secret_key() {
-    let access = FfiPubkySessionAccess::new("session-secret".into(), None, None);
+fn test_session_access_exports_receiver_noise_secret_key() {
+    let receiver_noise_secret_key = Arc::new(FfiReceiverNoiseSecretKey::random());
+    let expected = receiver_noise_secret_key.export_bytes();
+    let access =
+        FfiPubkySessionAccess::new("session-secret".into(), None, receiver_noise_secret_key);
 
-    assert!(access.export_receiver_noise_secret_key().is_none());
+    assert_eq!(
+        access.export_receiver_noise_secret_key().export_bytes(),
+        expected
+    );
 }
 
 #[test]
@@ -560,7 +565,7 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
     let result = bootstrap
         .sign_in(
             Arc::new(secret),
-            Some(Arc::new(receiver_noise_secret)),
+            Arc::new(receiver_noise_secret),
             capabilities,
         )
         .await

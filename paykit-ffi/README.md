@@ -248,8 +248,8 @@ app-specific public profile fields without exposing an FFI JSON value model.
 - `PubkyLocalSecretKey` — local Pubky secret key bytes.
 - `ReceiverNoiseSecretKey` — receiver-scoped Noise secret key bytes. Generate
   it once per receiver, persist it with session access, and reuse it when
-  signing in, completing auth, or importing that session. Omit it only for
-  public-only access.
+  signing in, completing auth, or importing that session. It remains required
+  when an external signer owns the Pubky identity secret.
 
 `PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.
@@ -278,10 +278,10 @@ sdk.initialize()
 status = sdk.identityStatus()
 ```
 
-Use `identityStatus` to gate product actions. Public-only sessions can still
-publish public Payment Endpoints and resolve public fallback when requested, but
-apps should not offer Private Payment List publication or private-link setup
-unless the current identity is private-link-capable.
+Use `identityStatus` to gate product actions. A persisted identity can remain
+visible while live session access is unavailable, but authenticated Paykit
+sessions are always private-link-capable because they include the receiver
+Noise secret key.
 
 `SdkStateBlobStore` must persist every blob save atomically. If the app stores
 the SDK blob inside a larger app backup record, compare `stateRevision`

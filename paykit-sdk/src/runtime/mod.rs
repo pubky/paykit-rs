@@ -296,7 +296,6 @@ where
                 tx.clear_identity_scoped_state();
                 let state = IdentityState {
                     public_key: None,
-                    local_secret_available: false,
                     capability: PubkyIdentityCapability::SignedOut,
                     initialized_at: now,
                     sign_out_generation: generation,
@@ -325,7 +324,6 @@ where
 
                     let state = IdentityState {
                         public_key: None,
-                        local_secret_available: false,
                         capability: PubkyIdentityCapability::SignedOut,
                         initialized_at: now,
                         sign_out_generation: 0,
@@ -365,8 +363,6 @@ where
 
                 let state = IdentityState {
                     public_key,
-                    local_secret_available: capability
-                        == PubkyIdentityCapability::PrivateLinkCapable,
                     capability,
                     initialized_at: now,
                     sign_out_generation: generation,

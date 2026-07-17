@@ -84,21 +84,12 @@ where
         capabilities: PaykitReceiverCapabilities,
     ) -> Result<PaykitReceiverMarker> {
         let _identity_guard = self.claim_identity_operation("publish Paykit receiver marker")?;
-        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        validate_receiver_marker_capabilities(&capabilities, identity.capability)?;
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let noise_public_key = session_access
-            .receiver_noise_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context: "receiver Noise secret key is unavailable for receiver marker publication"
-                    .into(),
-                source: None,
-            })?
-            .public_key();
+        let noise_public_key = session_access.receiver_noise_secret_key.public_key();
         let marker = PaykitReceiverMarker::new(
             self.config.receiver_path.clone(),
             capabilities,
@@ -348,20 +339,4 @@ where
 
         Ok(report)
     }
-}
-
-pub(super) fn validate_receiver_marker_capabilities(
-    capabilities: &PaykitReceiverCapabilities,
-    identity_capability: PubkyIdentityCapability,
-) -> Result<()> {
-    let advertises_private_workflows =
-        capabilities.private_payments || capabilities.payment_requests || capabilities.receipts;
-    if advertises_private_workflows
-        && identity_capability != PubkyIdentityCapability::PrivateLinkCapable
-    {
-        return Err(PaykitSdkError::Policy(
-            "receiver marker private capabilities require a receiver Noise secret key".into(),
-        ));
-    }
-    Ok(())
 }

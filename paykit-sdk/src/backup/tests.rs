@@ -38,7 +38,6 @@ fn identity(public_key: PubkyPublicKey) -> IdentityState {
     IdentityState {
         public_key: Some(public_key),
         capability: PubkyIdentityCapability::PrivateLinkCapable,
-        local_secret_available: true,
         initialized_at: timestamp(),
         sign_out_generation: 0,
     }
@@ -48,7 +47,6 @@ fn signed_out_identity(sign_out_generation: u64) -> IdentityState {
     IdentityState {
         public_key: None,
         capability: PubkyIdentityCapability::SignedOut,
-        local_secret_available: false,
         initialized_at: timestamp(),
         sign_out_generation,
     }

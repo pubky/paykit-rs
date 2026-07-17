@@ -103,10 +103,6 @@ impl From<PubkyPublicKey> for String {
 pub enum PubkyIdentityCapability {
     /// No Pubky identity is initialized, or explicit sign-out completed.
     SignedOut,
-    /// Public Pubky operations may work, but private links cannot be established.
-    ///
-    /// Private Link workflows require `PrivateLinkCapable`.
-    PublicOnly,
     /// Public operations and Encrypted Links can work.
     PrivateLinkCapable,
 }
@@ -280,7 +276,7 @@ pub struct PubkySessionAccess {
     /// Local Pubky identity secret key, when available.
     pub local_secret_key: Option<PubkyLocalSecretKey>,
     /// Receiver-scoped Noise secret key required for Encrypted Links.
-    pub receiver_noise_secret_key: Option<ReceiverNoiseSecretKey>,
+    pub receiver_noise_secret_key: ReceiverNoiseSecretKey,
 }
 
 impl PubkySessionAccess {
@@ -320,11 +316,7 @@ impl PubkySessionAccess {
         required_capabilities: &str,
     ) -> crate::Result<PubkyIdentityCapability> {
         self.validate_for_capabilities(required_capabilities)?;
-        Ok(if self.private_link_capable_unchecked() {
-            PubkyIdentityCapability::PrivateLinkCapable
-        } else {
-            PubkyIdentityCapability::PublicOnly
-        })
+        Ok(PubkyIdentityCapability::PrivateLinkCapable)
     }
 
     /// Report whether this validated access can establish Encrypted Links.
@@ -333,11 +325,7 @@ impl PubkySessionAccess {
         required_capabilities: &str,
     ) -> crate::Result<bool> {
         self.validate_for_capabilities(required_capabilities)?;
-        Ok(self.private_link_capable_unchecked())
-    }
-
-    fn private_link_capable_unchecked(&self) -> bool {
-        self.receiver_noise_secret_key.is_some()
+        Ok(true)
     }
 }
 
@@ -402,11 +390,6 @@ pub struct IdentityState {
     pub public_key: Option<PubkyPublicKey>,
     /// Current Pubky capability.
     pub capability: PubkyIdentityCapability,
-    /// Whether the local receiver Noise secret key is available to the SDK.
-    ///
-    /// The field name is retained for storage compatibility; it does not refer
-    /// to the optional Pubky identity secret key.
-    pub local_secret_available: bool,
     /// Last successful initialization time.
     pub initialized_at: DateTime<Utc>,
     /// Monotonic generation used to separate state across sign-outs.

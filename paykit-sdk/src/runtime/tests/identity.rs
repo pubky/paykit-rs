@@ -20,7 +20,6 @@ async fn test_initialize_persists_signed_out_identity() {
     let stored = storage.snapshot().unwrap().identity_state.unwrap();
     assert!(stored.public_key.is_none());
     assert_eq!(stored.capability, PubkyIdentityCapability::SignedOut);
-    assert!(!stored.local_secret_available);
     assert_eq!(stored.initialized_at, FixedClock.now());
 }
 
@@ -35,7 +34,6 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
                 tx.save_identity_state(IdentityState {
                     public_key: Some(counterparty.clone()),
                     capability: PubkyIdentityCapability::PrivateLinkCapable,
-                    local_secret_available: true,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
                 });
@@ -120,7 +118,6 @@ async fn test_identity_status_cached_capability_requires_live_session() {
         .save_identity_state(IdentityState {
             public_key: Some(local_public_key),
             capability: PubkyIdentityCapability::PrivateLinkCapable,
-            local_secret_available: true,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -155,7 +152,6 @@ async fn test_sign_out_clears_identity_scoped_state() {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(counterparty.clone()),
                     capability: PubkyIdentityCapability::PrivateLinkCapable,
-                    local_secret_available: true,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
                 });
@@ -257,7 +253,6 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(counterparty.clone()),
                     capability: PubkyIdentityCapability::PrivateLinkCapable,
-                    local_secret_available: true,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
                 });

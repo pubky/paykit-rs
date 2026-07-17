@@ -30,8 +30,7 @@ async fn test_restore_backup_state_requires_active_identity() {
     storage
         .save_identity_state(IdentityState {
             public_key: Some(existing_public_key),
-            capability: PubkyIdentityCapability::PublicOnly,
-            local_secret_available: false,
+            capability: PubkyIdentityCapability::PrivateLinkCapable,
             initialized_at: FixedClock.now(),
             sign_out_generation: 7,
         })
@@ -44,7 +43,6 @@ async fn test_restore_backup_state_requires_active_identity() {
         identity_state: Some(IdentityState {
             public_key: Some(backup_public_key),
             capability: PubkyIdentityCapability::PrivateLinkCapable,
-            local_secret_available: true,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         }),
@@ -76,7 +74,10 @@ async fn test_restore_backup_state_requires_active_identity() {
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     let identity = storage.snapshot().unwrap().identity_state.unwrap();
     assert_eq!(identity.sign_out_generation, 7);
-    assert_eq!(identity.capability, PubkyIdentityCapability::PublicOnly);
+    assert_eq!(
+        identity.capability,
+        PubkyIdentityCapability::PrivateLinkCapable
+    );
 }
 
 #[tokio::test]

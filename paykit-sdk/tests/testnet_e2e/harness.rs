@@ -188,7 +188,7 @@ impl TestUser {
         let result = bootstrap
             .sign_up(
                 &secret_key,
-                Some(receiver_noise_secret_key),
+                receiver_noise_secret_key,
                 &homeserver_public_key,
                 None,
                 &config.required_session_capabilities(),
@@ -196,12 +196,7 @@ impl TestUser {
             .await
             .expect("testnet sign-up should succeed");
         assert_eq!(
-            result
-                .access
-                .receiver_noise_secret_key
-                .as_ref()
-                .expect("bootstrap should retain the supplied receiver Noise key")
-                .public_key(),
+            result.access.receiver_noise_secret_key.public_key(),
             receiver_noise_public_key
         );
         let mut access = result.access;

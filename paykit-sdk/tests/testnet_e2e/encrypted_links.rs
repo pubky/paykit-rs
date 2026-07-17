@@ -71,7 +71,6 @@ async fn test_link_handshake_works_without_local_identity_secret() {
         TestUser::sign_up_with_server_owned_identity(&testnet, receiver_path("bitkit/server"))
             .await;
     assert!(bob.access.local_secret_key.is_none());
-    assert!(bob.access.receiver_noise_secret_key.is_some());
 
     alice
         .sdk

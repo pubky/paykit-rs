@@ -72,13 +72,7 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     // on the homeserver before removal. This also validates the fetch
     // arguments themselves, so the post-removal `None` below is meaningful.
     let storage = pair.bob.access.outbox_client.public_storage();
-    let bob_secret_key = pair
-        .bob
-        .access
-        .receiver_noise_secret_key
-        .as_ref()
-        .expect("bob's session should retain a receiver Noise secret key")
-        .as_bytes();
+    let bob_secret_key = pair.bob.access.receiver_noise_secret_key.as_bytes();
     let bob_public_key = pair
         .bob
         .public_key
@@ -89,13 +83,7 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         .public_key
         .to_public_key()
         .expect("public key conversion should succeed");
-    let alice_noise_public_key = pair
-        .alice
-        .access
-        .receiver_noise_secret_key
-        .as_ref()
-        .expect("alice's session should retain a receiver Noise secret key")
-        .public_key();
+    let alice_noise_public_key = pair.alice.access.receiver_noise_secret_key.public_key();
     let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
         &storage,
         bob_secret_key,

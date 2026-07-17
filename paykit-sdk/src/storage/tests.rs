@@ -148,7 +148,6 @@ async fn test_storage_adapter_supports_erased_transactions() {
     let saved_identity = crate::IdentityState {
         public_key: Some(identity_public_key.clone()),
         capability: crate::PubkyIdentityCapability::PrivateLinkCapable,
-        local_secret_available: true,
         initialized_at: timestamp(),
         sign_out_generation: 0,
     };
@@ -758,7 +757,6 @@ async fn test_clear_identity_scoped_state_preserves_identity_only() {
     let identity = IdentityState {
         public_key: Some(counterparty.clone()),
         capability: crate::PubkyIdentityCapability::PrivateLinkCapable,
-        local_secret_available: true,
         initialized_at: timestamp(),
         sign_out_generation: 1,
     };
@@ -830,7 +828,6 @@ async fn test_clear_private_identity_scoped_state_preserves_public_endpoints() {
     let identity = IdentityState {
         public_key: Some(counterparty.clone()),
         capability: crate::PubkyIdentityCapability::PrivateLinkCapable,
-        local_secret_available: true,
         initialized_at: timestamp(),
         sign_out_generation: 1,
     };

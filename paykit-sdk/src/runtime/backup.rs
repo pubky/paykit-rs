@@ -21,10 +21,6 @@ where
             if let Some(identity_state) = backup.identity_state.as_mut() {
                 identity_state.capability = session_access
                     .capability_for_capabilities(&self.config.required_session_capabilities())?;
-                identity_state.local_secret_available = session_access
-                    .private_link_capable_for_capabilities(
-                        &self.config.required_session_capabilities(),
-                    )?;
             }
             trusted_identity = Some(self.restore_validation_identity(&session_access).await?);
         }
@@ -80,8 +76,6 @@ where
         let public_key = session_access.public_key()?;
         let required_capabilities = self.config.required_session_capabilities();
         let capability = session_access.capability_for_capabilities(&required_capabilities)?;
-        let local_secret_available =
-            session_access.private_link_capable_for_capabilities(&required_capabilities)?;
         let initialized_at = self.clock.now();
         self.storage
             .transaction(move |tx| {
@@ -93,7 +87,6 @@ where
                 Ok(IdentityState {
                     public_key: Some(public_key),
                     capability,
-                    local_secret_available,
                     initialized_at,
                     sign_out_generation: 0,
                 })

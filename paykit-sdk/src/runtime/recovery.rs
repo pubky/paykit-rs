@@ -267,16 +267,7 @@ where
                 .await;
         }
 
-        let secret_key = session_access
-            .receiver_noise_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context:
-                    "receiver Noise secret key is unavailable for Encrypted Link recovery markers"
-                        .into(),
-                source: None,
-            })?
-            .as_bytes();
+        let secret_key = session_access.receiver_noise_secret_key.as_bytes();
         let remote_public_key = counterparty.to_public_key()?;
         let remote_noise_public_key = self
             .receiver_noise_public_key(counterparty, counterparty_receiver_path)
@@ -420,16 +411,7 @@ where
                     context: "no Pubky public storage available for recovery marker lookup".into(),
                     source: None,
                 })?;
-        let secret_key = session_access
-            .receiver_noise_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context:
-                    "receiver Noise secret key is unavailable for Encrypted Link recovery markers"
-                        .into(),
-                source: None,
-            })?
-            .as_bytes();
+        let secret_key = session_access.receiver_noise_secret_key.as_bytes();
         let remote_public_key = counterparty.to_public_key()?;
         let remote_noise_public_key = self
             .receiver_noise_public_key(counterparty, counterparty_receiver_path)

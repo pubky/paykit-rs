@@ -270,7 +270,7 @@ pub trait PubkySessionProvider {
 
 `PubkySessionAccess` provides the live authenticated `PubkySession`, Pubky
 client for counterparty homeserver access, an optional `PubkyLocalSecretKey`
-for local identity operations, and an independent optional
+for local identity operations, and an independent required
 `ReceiverNoiseSecretKey` for Encrypted Links. The provider must persist the
 receiver Noise secret with session access and reuse it after restart. The SDK
 derives and persists public `IdentityState` from that access during
@@ -297,17 +297,14 @@ public-storage client when only unauthenticated reads are available.
 The SDK derives Paykit capability from the session access:
 
 - `SignedOut`: no identity is initialized, or explicit sign-out completed.
-- `PublicOnly`: public Pubky operations may work, but Encrypted Links cannot be
-  established because the receiver Noise secret key is unavailable.
 - `PrivateLinkCapable`: public operations and Encrypted Links can work.
 
 Ring- or server-authenticated sessions can remain `PrivateLinkCapable` without
-exposing the Pubky identity secret as long as the receiver Noise secret is
-available locally. The SDK should surface a missing receiver Noise key as a
-clear `PublicOnly` state instead of retrying private operations that cannot
-succeed. A same-identity transition from `PrivateLinkCapable` to `PublicOnly`
-must preserve private SDK state; only explicit sign-out, identity change, or an
-explicit key-loss/key-rotation operation should delete it.
+exposing the Pubky identity secret because the independent receiver Noise
+secret remains local. Session access cannot be constructed without that key.
+Temporary absence of live session access must preserve private SDK state; only
+explicit sign-out, identity change, or an explicit key-loss/key-rotation
+operation should delete it.
 
 The SDK should provide high-level initialization, backup/export/restore, and
 sign-out APIs itself. The provider is the narrow platform hook for secure
@@ -324,8 +321,8 @@ required scope covers this runtime's receiver-scoped public and private Paykit
 paths; it adds the configured profile/contact namespace only when that namespace
 is outside the receiver-scoped Paykit default. The app generates one
 `ReceiverNoiseSecretKey` per receiver and supplies that same persisted key to
-signup, signin, auth completion, and session import. Passing no key produces
-public-only session access; reauthentication must not silently rotate it.
+signup, signin, auth completion, and session import. The key is required;
+reauthentication must not silently rotate it.
 `PubkyLocalSecretKey` also provides Pubky Core-compatible BIP39 seed and
 mnemonic helpers plus public-key-from-secret helpers. Apps that intentionally
 share the same Pubky identity material should derive the same Pubky key; app
@@ -545,8 +542,6 @@ Tracks local Pubky identity state:
 
 - local public key
 - capability state
-- whether the receiver Noise secret key is available (`local_secret_available`
-  is retained as the stored field name)
 - last successful initialization time
 - sign-out generation
 
@@ -844,7 +839,7 @@ public endpoint sync with their own process or storage lock.
 1. Load SDK config.
 2. Load identity state from storage.
 3. Load Pubky session access through `PubkySessionProvider`.
-4. Derive signed-out, public-only, or private-link-capable state.
+4. Derive signed-out or private-link-capable state.
 5. Load peer records and recovery markers.
 6. Start optional retry workers only after storage is ready.
 7. Return an initialization report with cached capability, recovery state, and
@@ -855,7 +850,8 @@ public endpoint sync with their own process or storage lock.
 1. Acquire identity lock.
 2. Import or restore the Pubky session through SDK-owned Pubky logic.
 3. Persist resulting session access through SDK storage/session hooks.
-4. Detect capability: public-only or private-link-capable.
+4. Validate private-link-capable session access, including its receiver Noise
+   key.
 5. Persist identity state and capability.
 6. If identity changed, mark old peer/link state inactive instead of silently
    reusing it.
@@ -993,7 +989,6 @@ Flow:
    - `Available`
    - `NoPrivateEndpoint`
    - `RecoveryPending`
-   - `PublicOnlySession`
 
 When the result is `Payable`, it includes ordered payable Payment Endpoints.
 Each entry contains the Payment Endpoint and adapter-built `PaymentTarget` for
@@ -1001,10 +996,9 @@ that endpoint. Payment execution can try the entries in order until one
 succeeds.
 
 `status` answers whether the wallet has a payable endpoint now. `private_state`
-answers whether private payment details were available, missing, blocked by
-recovery, or unavailable because the session is public-only. For example, public
-fallback can make the result `Payable` while `private_state` is
-`RecoveryPending`.
+answers whether private payment details were available, missing, or blocked by
+recovery. For example, public fallback can make the result `Payable` while
+`private_state` is `RecoveryPending`.
 
 The SDK should not wait inside payment resolution for private linking/recovery
 to complete. Apps can retry receive/resolve from their own workflow when they
@@ -1248,7 +1242,7 @@ Additional policy configuration can add:
 These are good candidates to move into Paykit SDK:
 
 - Pubky session capability tracking for Paykit workflows
-- public-only versus private-link-capable state
+- live-session availability and private-link-capable state
 - public Payment Endpoint sync and stale endpoint cleanup
 - Private Payment List publish/fetch/cache
 - Encrypted Link snapshot and handshake runtime
@@ -1286,7 +1280,9 @@ Core tests:
 - Private Payment List latest valid message wins
 - stale private link reports recovery or uses public endpoints only when the
   resolution request includes them
-- public-only identity blocks private link operations clearly
+- session construction requires the receiver Noise secret key
+- missing live session access blocks private operations without clearing cached
+  private state
 - outbound retries reuse exact Event ID and payload
 - Payment Request role/lifecycle checks
 - Receipt Access dedupe and receipt retrieval

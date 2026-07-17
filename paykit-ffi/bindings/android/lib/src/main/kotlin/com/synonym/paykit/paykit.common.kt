@@ -739,10 +739,10 @@ public interface PubkyAuthRequestInterface {
     public suspend fun `authorizationUrl`(): kotlin.String
 
     /**
-     * Wait for auth approval using the receiver's persisted Noise key, if available.
+     * Wait for auth approval using the receiver's persisted Noise key.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     public companion object
 }
@@ -777,9 +777,9 @@ public interface PubkySessionAccessInterface {
     public fun `exportLocalSecretKey`(): PubkyLocalSecretKey?
 
     /**
-     * Export the receiver Noise secret key for platform secure storage, when available.
+     * Export the receiver Noise secret key for platform secure storage.
      */
-    public fun `exportReceiverNoiseSecretKey`(): ReceiverNoiseSecretKey?
+    public fun `exportReceiverNoiseSecretKey`(): ReceiverNoiseSecretKey
 
     /**
      * Export the Pubky session bearer secret for platform secure storage.
@@ -813,10 +813,10 @@ public interface PubkySessionBootstrapInterface {
     public suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: PubkyAuthCompanionClaim)
 
     /**
-     * Import an exported Pubky session secret and its persisted receiver Noise key, if available.
+     * Import an exported Pubky session secret and its persisted receiver Noise key.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
      * Resume a short-lived auth flow from its authorization URL.
@@ -825,16 +825,16 @@ public interface PubkySessionBootstrapInterface {
     public suspend fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): PubkyAuthRequest
 
     /**
-     * Sign in with the receiver's persisted Noise key, if available.
+     * Sign in with the receiver's persisted Noise key.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
-     * Sign up on a homeserver with the receiver-owned Noise key, if available.
+     * Sign up on a homeserver with the receiver-owned Noise key.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey?, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
      * Start a sign-in auth flow for an external signer.
@@ -3551,10 +3551,6 @@ public enum class ContactPaymentResolutionPrivateState {
      */
     RECOVERY_PENDING,
     /**
-     * The local identity cannot establish private links.
-     */
-    PUBLIC_ONLY_SESSION,
-    /**
      * SDK returned a value this binding version does not understand.
      */
     UNKNOWN;
@@ -4023,10 +4019,6 @@ public enum class PubkyIdentityCapability {
      * No Pubky identity is initialized, or explicit sign-out completed.
      */
     SIGNED_OUT,
-    /**
-     * Public Pubky operations may work, but private links cannot be established.
-     */
-    PUBLIC_ONLY,
     /**
      * Public operations and Encrypted Links can work.
      */

@@ -154,7 +154,6 @@ install or authorize through another app first.
 The platform session provider should return one of:
 
 - no live session access
-- public-only session access
 - private-link-capable session access
 
 `None` or `null` means no live session is currently available. It does not mean
@@ -201,11 +200,13 @@ The session provider should expose only the platform state the SDK needs:
 - current local Pubky public key
 - session material or opaque handle needed to build authenticated Pubky writes
 - public storage configuration needed to build unauthenticated reads
-- local secret-key access when Encrypted Links are available
+- optional local Pubky identity secret-key access
+- required receiver Noise secret-key access
 - session clear operation for sign-out
 
-Platform APIs should surface capability status in app-facing records so product
-code can distinguish public-only mode from private-link-capable mode.
+Platform APIs should surface live-session availability and capability status in
+app-facing records so product code can distinguish signed-out or temporarily
+unavailable access from private-link-capable access.
 
 ## Payment Adapter Binding Shape
 
@@ -369,8 +370,8 @@ Bindings should expose high-level workflows before low-level records:
   workflow: ensure private state when possible, drain currently available
   private send/receive work for the peer, then resolve private-first with
   optional public fallback
-- resolve contact payment with lower-level private-only and public-only helpers
-  for apps that need explicit source control
+- resolve contact payment with lower-level private-endpoint-only and
+  public-endpoint-only helpers for apps that need explicit source control
 - queue and list Payment Requests
 - submit Payment Proofs with caller-supplied proof data
 - retrieve Receipts
@@ -382,9 +383,9 @@ stream handling.
 Private-derived app records should carry enough source and freshness context for
 mobile UI and payment logic. Where applicable, expose fields such as source
 (`fresh_private`, `cached_private`, or `public`), `received_at`,
-`verified_with_private_link`, `recovery_required`, and `public_only_session`.
-Apps should not have to infer whether a cached Private Payment List is current
-from unrelated identity status fields.
+`verified_with_private_link`, and `recovery_required`. Apps should not have to
+infer whether a cached Private Payment List is current from unrelated identity
+status fields.
 
 ## Testing Expectations
 
@@ -394,7 +395,8 @@ Binding tests should cover:
 - atomic save failure preserving the previous blob
 - stale state blob revision conflicts
 - session capability transitions
-- public-only behavior preserving cached private state
+- missing live session access preserving cached private state
+- required receiver Noise key round trips
 - payment adapter batch selection and reservation release
 - candidate ID mapping across payment adapter callbacks
 - structured error mapping
