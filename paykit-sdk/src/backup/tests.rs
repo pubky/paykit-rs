@@ -3,8 +3,7 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     domain::outbound_private::OutboundPrivateMessageStatus,
-    domain::private_stream::PrivateStreamParseStatus, identity::PubkyIdentityCapability,
-    storage::InMemoryStorage,
+    domain::private_stream::PrivateStreamParseStatus, storage::InMemoryStorage,
 };
 
 fn timestamp() -> chrono::DateTime<Utc> {
@@ -37,7 +36,6 @@ fn recovery_required_peer(public_key: &PubkyPublicKey) -> RestoreRecoveryRequire
 fn identity(public_key: PubkyPublicKey) -> IdentityState {
     IdentityState {
         public_key: Some(public_key),
-        capability: PubkyIdentityCapability::PrivateLinkCapable,
         initialized_at: timestamp(),
         sign_out_generation: 0,
     }
@@ -46,7 +44,6 @@ fn identity(public_key: PubkyPublicKey) -> IdentityState {
 fn signed_out_identity(sign_out_generation: u64) -> IdentityState {
     IdentityState {
         public_key: None,
-        capability: PubkyIdentityCapability::SignedOut,
         initialized_at: timestamp(),
         sign_out_generation,
     }

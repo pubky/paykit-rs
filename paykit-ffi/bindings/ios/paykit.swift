@@ -7067,41 +7067,25 @@ public func FfiConverterTypeEventIdConflict_lower(_ value: EventIdConflict) -> R
  */
 public struct IdentityStatus {
     /**
-     * Current local public key, when signed in.
+     * Persisted local public key, or `None` after explicit sign-out.
      */
     public var publicKey: String?
-    /**
-     * Current Pubky capability.
-     */
-    public var capability: PubkyIdentityCapability
     /**
      * Whether live Pubky session access is available for this identity.
      */
     public var liveSessionAvailable: Bool
-    /**
-     * Whether private Paykit workflows can run with the live session.
-     */
-    public var privateLinkCapable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
-         * Current local public key, when signed in.
+         * Persisted local public key, or `None` after explicit sign-out.
          */publicKey: String?,
         /**
-         * Current Pubky capability.
-         */capability: PubkyIdentityCapability,
-        /**
          * Whether live Pubky session access is available for this identity.
-         */liveSessionAvailable: Bool,
-        /**
-         * Whether private Paykit workflows can run with the live session.
-         */privateLinkCapable: Bool) {
+         */liveSessionAvailable: Bool) {
         self.publicKey = publicKey
-        self.capability = capability
         self.liveSessionAvailable = liveSessionAvailable
-        self.privateLinkCapable = privateLinkCapable
     }
 }
 
@@ -7115,13 +7099,7 @@ extension IdentityStatus: Equatable, Hashable {
         if lhs.publicKey != rhs.publicKey {
             return false
         }
-        if lhs.capability != rhs.capability {
-            return false
-        }
         if lhs.liveSessionAvailable != rhs.liveSessionAvailable {
-            return false
-        }
-        if lhs.privateLinkCapable != rhs.privateLinkCapable {
             return false
         }
         return true
@@ -7129,9 +7107,7 @@ extension IdentityStatus: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(publicKey)
-        hasher.combine(capability)
         hasher.combine(liveSessionAvailable)
-        hasher.combine(privateLinkCapable)
     }
 }
 
@@ -7147,17 +7123,13 @@ public struct FfiConverterTypeIdentityStatus: FfiConverterRustBuffer {
         return
             try IdentityStatus(
                 publicKey: FfiConverterOptionString.read(from: &buf),
-                capability: FfiConverterTypePubkyIdentityCapability.read(from: &buf),
-                liveSessionAvailable: FfiConverterBool.read(from: &buf),
-                privateLinkCapable: FfiConverterBool.read(from: &buf)
+                liveSessionAvailable: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: IdentityStatus, into buf: inout [UInt8]) {
         FfiConverterOptionString.write(value.publicKey, into: &buf)
-        FfiConverterTypePubkyIdentityCapability.write(value.capability, into: &buf)
         FfiConverterBool.write(value.liveSessionAvailable, into: &buf)
-        FfiConverterBool.write(value.privateLinkCapable, into: &buf)
     }
 }
 
@@ -7185,22 +7157,14 @@ public struct InitializationReport {
      * Last persisted identity status.
      */
     public var identity: IdentityStatus
-    /**
-     * Whether live Pubky session access was available during startup.
-     */
-    public var liveSessionAvailable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * Last persisted identity status.
-         */identity: IdentityStatus,
-        /**
-         * Whether live Pubky session access was available during startup.
-         */liveSessionAvailable: Bool) {
+         */identity: IdentityStatus) {
         self.identity = identity
-        self.liveSessionAvailable = liveSessionAvailable
     }
 }
 
@@ -7214,15 +7178,11 @@ extension InitializationReport: Equatable, Hashable {
         if lhs.identity != rhs.identity {
             return false
         }
-        if lhs.liveSessionAvailable != rhs.liveSessionAvailable {
-            return false
-        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(identity)
-        hasher.combine(liveSessionAvailable)
     }
 }
 
@@ -7237,14 +7197,12 @@ public struct FfiConverterTypeInitializationReport: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InitializationReport {
         return
             try InitializationReport(
-                identity: FfiConverterTypeIdentityStatus.read(from: &buf),
-                liveSessionAvailable: FfiConverterBool.read(from: &buf)
+                identity: FfiConverterTypeIdentityStatus.read(from: &buf)
         )
     }
 
     public static func write(_ value: InitializationReport, into buf: inout [UInt8]) {
         FfiConverterTypeIdentityStatus.write(value.identity, into: &buf)
-        FfiConverterBool.write(value.liveSessionAvailable, into: &buf)
     }
 }
 
@@ -11815,10 +11773,6 @@ public struct PubkySessionBootstrapResult {
      * Local Pubky public key.
      */
     public var publicKey: String
-    /**
-     * Capability implied by the session and receiver Noise key availability.
-     */
-    public var capability: PubkyIdentityCapability
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -11828,13 +11782,9 @@ public struct PubkySessionBootstrapResult {
          */sessionAccess: PubkySessionAccess,
         /**
          * Local Pubky public key.
-         */publicKey: String,
-        /**
-         * Capability implied by the session and receiver Noise key availability.
-         */capability: PubkyIdentityCapability) {
+         */publicKey: String) {
         self.sessionAccess = sessionAccess
         self.publicKey = publicKey
-        self.capability = capability
     }
 }
 
@@ -11852,15 +11802,13 @@ public struct FfiConverterTypePubkySessionBootstrapResult: FfiConverterRustBuffe
         return
             try PubkySessionBootstrapResult(
                 sessionAccess: FfiConverterTypePubkySessionAccess.read(from: &buf),
-                publicKey: FfiConverterString.read(from: &buf),
-                capability: FfiConverterTypePubkyIdentityCapability.read(from: &buf)
+                publicKey: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: PubkySessionBootstrapResult, into buf: inout [UInt8]) {
         FfiConverterTypePubkySessionAccess.write(value.sessionAccess, into: &buf)
         FfiConverterString.write(value.publicKey, into: &buf)
-        FfiConverterTypePubkyIdentityCapability.write(value.capability, into: &buf)
     }
 }
 
@@ -15074,97 +15022,6 @@ public func FfiConverterTypePubkyAuthRequestKind_lower(_ value: PubkyAuthRequest
 extension PubkyAuthRequestKind: Equatable, Hashable {}
 
 extension PubkyAuthRequestKind: Codable {}
-
-
-
-
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-/**
- * Pubky capability state for one app-owned Paykit runtime.
- */
-
-public enum PubkyIdentityCapability {
-
-    /**
-     * No Pubky identity is initialized, or explicit sign-out completed.
-     */
-    case signedOut
-    /**
-     * Public operations and Encrypted Links can work.
-     */
-    case privateLinkCapable
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    case unknown
-}
-
-
-#if compiler(>=6)
-extension PubkyIdentityCapability: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypePubkyIdentityCapability: FfiConverterRustBuffer {
-    typealias SwiftType = PubkyIdentityCapability
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyIdentityCapability {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-
-        case 1: return .signedOut
-
-        case 2: return .privateLinkCapable
-
-        case 3: return .unknown
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: PubkyIdentityCapability, into buf: inout [UInt8]) {
-        switch value {
-
-
-        case .signedOut:
-            writeInt(&buf, Int32(1))
-
-
-        case .privateLinkCapable:
-            writeInt(&buf, Int32(2))
-
-
-        case .unknown:
-            writeInt(&buf, Int32(3))
-
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePubkyIdentityCapability_lift(_ buf: RustBuffer) throws -> PubkyIdentityCapability {
-    return try FfiConverterTypePubkyIdentityCapability.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePubkyIdentityCapability_lower(_ value: PubkyIdentityCapability) -> RustBuffer {
-    return FfiConverterTypePubkyIdentityCapability.lower(value)
-}
-
-
-extension PubkyIdentityCapability: Equatable, Hashable {}
-
-extension PubkyIdentityCapability: Codable {}
 
 
 

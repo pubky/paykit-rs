@@ -1440,7 +1440,7 @@ async fn test_restore_identity_less_backup_preserves_signed_out_generation() {
     restore_backup_state(&storage, backup).await.unwrap();
 
     let identity = storage.snapshot().unwrap().identity_state.unwrap();
-    assert_eq!(identity.capability, PubkyIdentityCapability::SignedOut);
+    assert!(identity.public_key.is_none());
     assert_eq!(identity.sign_out_generation, 7);
 }
 

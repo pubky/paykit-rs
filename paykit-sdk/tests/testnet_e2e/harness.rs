@@ -214,8 +214,7 @@ impl TestUser {
             .initialize()
             .await
             .expect("SDK initialization should succeed");
-        assert!(report.live_session_available);
-        assert!(report.identity.private_link_capable);
+        assert!(report.identity.live_session_available);
         sdk.publish_paykit_receiver_marker(PaykitReceiverCapabilities {
             private_payments: true,
             payment_requests: true,

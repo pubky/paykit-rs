@@ -9,7 +9,6 @@ async fn test_prepare_receipt_issuance_persists_pending_record() {
     storage
         .save_identity_state(IdentityState {
             public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -75,7 +74,6 @@ async fn test_receipt_listing_helpers_match_record_views() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -158,7 +156,6 @@ async fn test_prepare_receipt_issuance_rejects_conflicting_reused_receipt_id() {
     storage
         .save_identity_state(IdentityState {
             public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -210,7 +207,6 @@ async fn test_prepare_receipt_issuance_rejects_reused_receipt_id_for_other_count
     storage
         .save_identity_state(IdentityState {
             public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -251,7 +247,6 @@ async fn test_prepare_receipt_issuance_rejects_reused_receipt_id_for_other_recei
     storage
         .save_identity_state(IdentityState {
             public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -312,7 +307,6 @@ async fn test_process_receipt_issuance_without_session_preserves_prepared_record
     storage
         .save_identity_state(IdentityState {
             public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -402,7 +396,6 @@ async fn test_receipt_access_records_allow_identity_without_live_session() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -444,7 +437,6 @@ async fn test_receipt_access_records_hide_conflicted_event_ids() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -485,7 +477,6 @@ async fn test_retrieve_receipt_reports_conflicted_access_before_missing_public_s
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -521,7 +512,6 @@ async fn test_retrieve_receipt_reports_missing_access_before_public_storage() {
     storage
         .save_identity_state(IdentityState {
             public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -555,7 +545,6 @@ async fn test_retrieve_receipt_returns_cached_record_without_live_session() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -594,7 +583,6 @@ async fn test_retrieve_receipt_rejects_clean_mismatched_access_for_cached_receip
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -648,7 +636,6 @@ async fn test_retrieve_receipt_rejects_conflicted_access_for_cached_receipt() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -689,7 +676,6 @@ async fn test_retrieve_receipt_rejects_conflicted_cached_provenance_with_clean_a
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -735,7 +721,6 @@ async fn test_receipt_records_filter_recipient_identity() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -779,7 +764,6 @@ async fn test_receipt_records_hide_conflicted_receipt_access_provenance() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -820,7 +804,6 @@ async fn test_retrieve_receipt_requires_public_storage_when_uncached() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });

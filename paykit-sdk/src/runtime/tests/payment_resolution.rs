@@ -255,7 +255,6 @@ async fn test_resolve_contact_payment_uses_cached_private_list_without_live_sess
                 public_key: Some(PubkyPublicKey::from_public_key(
                     &pubky::Keypair::random().public_key(),
                 )),
-                capability: PubkyIdentityCapability::PrivateLinkCapable,
                 initialized_at: FixedClock.now(),
                 sign_out_generation: 0,
             });
@@ -315,7 +314,6 @@ async fn test_resolve_private_contact_payment_uses_private_candidates_only() {
                 public_key: Some(PubkyPublicKey::from_public_key(
                     &pubky::Keypair::random().public_key(),
                 )),
-                capability: PubkyIdentityCapability::PrivateLinkCapable,
                 initialized_at: FixedClock.now(),
                 sign_out_generation: 0,
             });
@@ -365,7 +363,6 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
                     public_key: Some(PubkyPublicKey::from_public_key(
                         &pubky::Keypair::random().public_key(),
                     )),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -438,7 +435,6 @@ async fn test_recover_private_candidates_reports_pending_for_linking_peer() {
                     public_key: Some(PubkyPublicKey::from_public_key(
                         &pubky::Keypair::random().public_key(),
                     )),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });

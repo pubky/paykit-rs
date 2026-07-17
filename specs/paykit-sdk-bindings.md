@@ -137,13 +137,13 @@ that reserve receiving details outside the SDK callback:
   have to merge queue reports with outbound-send reports manually
 
 The app-facing contact payment preparation helper must document its sequence:
-refresh live session capability, ensure or advance the private link when
+refresh live session access, ensure or advance the private link when
 possible, drain currently available private send/receive work for the peer,
 then resolve endpoints private-first with optional public fallback.
 
 ## Pubky Session Binding Shape
 
-Bindings should make session capability explicit.
+Bindings should make identity and live-session availability explicit.
 
 The session binding is the boundary where the app exposes live Pubky access to
 its own Paykit runtime. It should not be modeled as a global identity
@@ -154,7 +154,7 @@ install or authorize through another app first.
 The platform session provider should return one of:
 
 - no live session access
-- private-link-capable session access
+- live session access with its required receiver Noise key
 
 `None` or `null` means no live session is currently available. It does not mean
 explicit sign-out. Explicit sign-out should be a separate SDK call that clears
@@ -204,9 +204,10 @@ The session provider should expose only the platform state the SDK needs:
 - required receiver Noise secret-key access
 - session clear operation for sign-out
 
-Platform APIs should surface live-session availability and capability status in
-app-facing records so product code can distinguish signed-out or temporarily
-unavailable access from private-link-capable access.
+Platform identity status should contain an optional public key and a
+`live_session_available` boolean. No public key means explicit sign-out. A
+public key without live session access means the identity is remembered while
+Pubky-backed workflows are temporarily unavailable.
 
 ## Payment Adapter Binding Shape
 
@@ -394,7 +395,7 @@ Binding tests should cover:
 - SDK state blob load/save behavior
 - atomic save failure preserving the previous blob
 - stale state blob revision conflicts
-- session capability transitions
+- identity and live-session availability transitions
 - missing live session access preserving cached private state
 - required receiver Noise key round trips
 - payment adapter batch selection and reservation release

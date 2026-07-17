@@ -25,6 +25,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Session signup, signin, auth completion, and import require the receiver Noise
   key explicitly so reauthentication can reuse it. Ring- or server-owned Pubky
   identities remain private-link-capable without exposing the identity secret.
+- Identity status now reports the optional persisted public key and live-session
+  availability directly, removing redundant capability enums and flags.
 
 ## [0.1.0-rc36] - 2026-07-14
 

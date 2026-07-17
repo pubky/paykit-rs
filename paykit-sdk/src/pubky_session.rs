@@ -15,7 +15,7 @@ use url::Url;
 use zeroize::Zeroize;
 
 use crate::{
-    identity::{PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey},
+    identity::{PubkyLocalSecretKey, PubkyPublicKey},
     PaykitSdkError, Result,
 };
 
@@ -105,8 +105,6 @@ pub struct PubkySessionBootstrapResult {
     pub access: crate::PubkySessionAccess,
     /// Local public key for the session.
     pub public_key: PubkyPublicKey,
-    /// Capability implied by the session and receiver Noise key availability.
-    pub capability: PubkyIdentityCapability,
 }
 
 impl fmt::Debug for PubkySessionBootstrapResult {
@@ -114,7 +112,6 @@ impl fmt::Debug for PubkySessionBootstrapResult {
         f.debug_struct("PubkySessionBootstrapResult")
             .field("access", &"<redacted>")
             .field("public_key", &self.public_key)
-            .field("capability", &self.capability)
             .finish()
     }
 }
@@ -410,12 +407,8 @@ fn session_result(
         receiver_noise_secret_key,
     };
     let public_key = access.public_key()?;
-    let capability = access.capability_for_capabilities(required_capabilities)?;
-    Ok(PubkySessionBootstrapResult {
-        access,
-        public_key,
-        capability,
-    })
+    access.validate_for_capabilities(required_capabilities)?;
+    Ok(PubkySessionBootstrapResult { access, public_key })
 }
 
 pub(crate) fn parse_capabilities(value: &str) -> Result<Capabilities> {

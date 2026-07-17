@@ -97,7 +97,7 @@ use crate::{
         ReceiptRetrievalStatus,
     },
     domain::recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
-    identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
+    identity::{IdentityState, IdentityStatus},
     storage::{
         outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
         OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
@@ -142,8 +142,6 @@ impl Clock for SystemClock {
 pub struct InitializationReport {
     /// Last persisted identity status.
     pub identity: IdentityStatus,
-    /// Whether the provider returned live Pubky session access during startup.
-    pub live_session_available: bool,
 }
 
 /// Stateful Paykit SDK runtime for one app-owned local Paykit runtime.
@@ -244,20 +242,9 @@ where
         let _identity_guard = self.claim_identity_operation("initialize")?;
         let (session, state) = self.load_session_access_and_refresh_identity().await?;
         let live_session_available = session.is_some();
-        let required_capabilities = self.config.required_session_capabilities();
-        let private_link_capable = session
-            .as_ref()
-            .map(|session| session.private_link_capable_for_capabilities(&required_capabilities))
-            .transpose()?
-            .unwrap_or(false);
 
         Ok(InitializationReport {
-            identity: IdentityStatus::from_state(
-                &state,
-                live_session_available,
-                private_link_capable,
-            ),
-            live_session_available,
+            identity: IdentityStatus::from_state(&state, live_session_available),
         })
     }
 
@@ -283,10 +270,9 @@ where
                     .as_ref()
                     .map(|state| state.sign_out_generation)
                     .unwrap_or_default();
-                let was_signed_in = previous.as_ref().is_some_and(|state| {
-                    state.public_key.is_some()
-                        || state.capability != PubkyIdentityCapability::SignedOut
-                });
+                let was_signed_in = previous
+                    .as_ref()
+                    .is_some_and(|state| state.public_key.is_some());
                 let generation = if was_signed_in {
                     previous_generation.saturating_add(1)
                 } else {
@@ -296,7 +282,6 @@ where
                 tx.clear_identity_scoped_state();
                 let state = IdentityState {
                     public_key: None,
-                    capability: PubkyIdentityCapability::SignedOut,
                     initialized_at: now,
                     sign_out_generation: generation,
                 };
@@ -305,7 +290,7 @@ where
             })
             .await?;
 
-        Ok(IdentityStatus::from_state(&state, false, false))
+        Ok(IdentityStatus::from_state(&state, false))
     }
 
     async fn load_session_access_and_refresh_identity(
@@ -324,7 +309,6 @@ where
 
                     let state = IdentityState {
                         public_key: None,
-                        capability: PubkyIdentityCapability::SignedOut,
                         initialized_at: now,
                         sign_out_generation: 0,
                     };
@@ -338,7 +322,7 @@ where
 
         let required_capabilities = self.config.required_session_capabilities();
         let public_key = Some(session_access.public_key()?);
-        let capability = session_access.capability_for_capabilities(&required_capabilities)?;
+        session_access.validate_for_capabilities(&required_capabilities)?;
         let state = self
             .storage
             .transaction(move |tx| {
@@ -363,7 +347,6 @@ where
 
                 let state = IdentityState {
                     public_key,
-                    capability,
                     initialized_at: now,
                     sign_out_generation: generation,
                 };
@@ -427,14 +410,12 @@ where
         let matching_session = session
             .as_ref()
             .filter(|session| session.public_key().ok().as_ref() == state.public_key.as_ref());
-        let private_link_capable = matching_session
-            .map(|session| session.private_link_capable_for_capabilities(&required_capabilities))
-            .transpose()?
-            .unwrap_or(false);
+        if let Some(session) = matching_session {
+            session.validate_for_capabilities(&required_capabilities)?;
+        }
         Ok(Some(IdentityStatus::from_state(
             &state,
             matching_session.is_some(),
-            private_link_capable,
         )))
     }
 

@@ -264,9 +264,9 @@ where
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
+        if identity.public_key.is_none() {
             return Err(PaykitSdkError::Identity {
-                context: "local Pubky identity is not private-link-capable".into(),
+                context: "local Pubky identity is not initialized".into(),
                 source: None,
             });
         }

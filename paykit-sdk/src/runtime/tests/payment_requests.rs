@@ -11,7 +11,6 @@ async fn test_payment_requests_with_allows_identity_without_live_session() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -63,7 +62,6 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -133,7 +131,6 @@ async fn test_list_payment_requests_filters_across_counterparties() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -238,7 +235,6 @@ async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_pres
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -346,7 +342,6 @@ async fn test_active_recurring_payment_requests_filters_accepted_recurring_reque
     storage
         .save_identity_state(IdentityState {
             public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -392,7 +387,7 @@ async fn test_active_recurring_payment_requests_filters_accepted_recurring_reque
 }
 
 #[tokio::test]
-async fn test_enqueue_payment_request_event_requires_private_capable_identity() {
+async fn test_enqueue_payment_request_event_requires_initialized_identity() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let sdk = PaykitSdk::with_clock(

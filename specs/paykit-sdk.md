@@ -98,7 +98,7 @@ The current Rust SDK implementation covers:
 
 - the `PaykitSdk` runtime facade
 - the storage adapter contract and in-memory test storage
-- Pubky identity capability tracking and explicit sign-out
+- Pubky identity status tracking and explicit sign-out
 - public Payment Endpoint sync
 - Encrypted Link setup, private stream intake, outbound private queueing,
   retries, and recovery marker workflows
@@ -176,7 +176,7 @@ Module responsibilities:
   validation.
 - `config`: product-neutral policy knobs such as recovery behavior, endpoint
   publication scope, and retry limits.
-- `identity`: SDK-owned Pubky session capability state, identity refresh state,
+- `identity`: SDK-owned Pubky identity and live-session state,
   and local Pubky key helpers.
 - `pubky_session`: Pubky signup, signin, session import, auth handoff, and
   `pubky://` normalization helpers.
@@ -294,17 +294,15 @@ without requiring authenticated session access. Implementations can reuse the
 Pubky client from `PubkySessionAccess` when they have one, or provide a separate
 public-storage client when only unauthenticated reads are available.
 
-The SDK derives Paykit capability from the session access:
-
-- `SignedOut`: no identity is initialized, or explicit sign-out completed.
-- `PrivateLinkCapable`: public operations and Encrypted Links can work.
-
-Ring- or server-authenticated sessions can remain `PrivateLinkCapable` without
-exposing the Pubky identity secret because the independent receiver Noise
-secret remains local. Session access cannot be constructed without that key.
-Temporary absence of live session access must preserve private SDK state; only
-explicit sign-out, identity change, or an explicit key-loss/key-rotation
-operation should delete it.
+Identity status reports the persisted public key and live-session availability
+directly. No public key means explicit sign-out. A public key with no live
+session means the identity remains initialized but Pubky-backed workflows must
+wait. A matching live session can run public operations and Encrypted Links
+because session access always includes the independent receiver Noise secret.
+This lets Ring- or server-authenticated sessions work without exposing the
+Pubky identity secret. Temporary absence of live session access must preserve
+private SDK state; only explicit sign-out, identity change, or an explicit
+key-loss/key-rotation operation should delete it.
 
 The SDK should provide high-level initialization, backup/export/restore, and
 sign-out APIs itself. The provider is the narrow platform hook for secure
@@ -541,7 +539,6 @@ records should be stable.
 Tracks local Pubky identity state:
 
 - local public key
-- capability state
 - last successful initialization time
 - sign-out generation
 
@@ -805,7 +802,7 @@ the same durable state.
 
 Recommended locks:
 
-- identity lock: serializes import/export/sign-out and capability refresh.
+- identity lock: serializes import/export/sign-out and session refresh.
 - public endpoint lock: serializes publication and cleanup of local public
   Payment Endpoints.
 - storage-backed peer link operation lease: serializes Encrypted Link restore,
@@ -839,20 +836,19 @@ public endpoint sync with their own process or storage lock.
 1. Load SDK config.
 2. Load identity state from storage.
 3. Load Pubky session access through `PubkySessionProvider`.
-4. Derive signed-out or private-link-capable state.
+4. Record whether the stored identity has matching live session access.
 5. Load peer records and recovery markers.
 6. Start optional retry workers only after storage is ready.
-7. Return an initialization report with cached capability, recovery state, and
-   whether live Pubky session access was available.
+7. Return an initialization report with the persisted public key and whether
+   live Pubky session access was available.
 
 ### Import Or Restore Pubky Session
 
 1. Acquire identity lock.
 2. Import or restore the Pubky session through SDK-owned Pubky logic.
 3. Persist resulting session access through SDK storage/session hooks.
-4. Validate private-link-capable session access, including its receiver Noise
-   key.
-5. Persist identity state and capability.
+4. Validate session access, including its required receiver Noise key.
+5. Persist identity state.
 6. If identity changed, mark old peer/link state inactive instead of silently
    reusing it.
 7. Return current identity status.
@@ -873,7 +869,7 @@ configured to manage the whole Paykit public namespace.
 
 ### Establish Encrypted Link
 
-1. Ensure the identity is private-link-capable.
+1. Ensure matching live session access is available.
 2. Fetch the counterparty Receiver Marker from its Pubky identity homeserver
    and read its receiver Noise public key.
 3. Start an initiator or responder Encrypted Link Handshake through
@@ -908,13 +904,13 @@ Marker privacy rules:
 
 SDK behavior:
 
-1. Publish a local marker when a link is marked recovery-required and the local
-   identity is private-link-capable.
+1. Publish a local marker when a link is marked recovery-required and matching
+   live session access is available.
 2. Observe the counterparty marker before trusting cached private payment state
-   when the local identity is currently private-link-capable. Cached state can
-   still be listed for the same identity when only public session access is
-   available, but it should be treated as previously received local state rather
-   than freshly verified private state.
+   when matching live session access is available. Cached state can still be
+   listed for the same persisted identity without live session access, but it
+   should be treated as previously received local state rather than freshly
+   verified private state.
 3. If a new counterparty attempt ID is observed, mark the peer
    recovery-required, clear active link/handshake snapshots, and pause private
    automation.
@@ -925,7 +921,7 @@ SDK behavior:
 
 ### Publish Private Payment List
 
-1. Ensure the identity is private-link-capable.
+1. Ensure matching live session access is available.
 2. Ensure the counterparty has an active Encrypted Link snapshot.
 3. Ask `PaymentAdapter` for Private Payment List reservations.
 4. If reservations are returned, build the complete Private Payment List and
@@ -1090,7 +1086,7 @@ receipt after a partial failure.
 Backup should include SDK-managed state:
 
 - local receiver/runtime path
-- public identity/capability state
+- public identity state
 - peer records
 - Encrypted Link snapshots
 - handshake snapshots
@@ -1241,8 +1237,7 @@ Additional policy configuration can add:
 
 These are good candidates to move into Paykit SDK:
 
-- Pubky session capability tracking for Paykit workflows
-- live-session availability and private-link-capable state
+- Pubky identity and live-session tracking for Paykit workflows
 - public Payment Endpoint sync and stale endpoint cleanup
 - Private Payment List publish/fetch/cache
 - Encrypted Link snapshot and handshake runtime

@@ -14,7 +14,7 @@ pub(super) fn preserve_current_sign_out_generation(
                 .max(current_identity.sign_out_generation);
         }
         (backup_identity @ None, Some(current_identity))
-            if current_identity.capability == PubkyIdentityCapability::SignedOut =>
+            if current_identity.public_key.is_none() =>
         {
             *backup_identity = Some(current_identity.clone());
         }

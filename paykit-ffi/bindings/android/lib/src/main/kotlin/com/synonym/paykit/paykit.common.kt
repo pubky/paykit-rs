@@ -1365,21 +1365,13 @@ public data class EventIdConflict (
 @kotlinx.serialization.Serializable
 public data class IdentityStatus (
     /**
-     * Current local public key, when signed in.
+     * Persisted local public key, or `None` after explicit sign-out.
      */
     val `publicKey`: kotlin.String?,
     /**
-     * Current Pubky capability.
-     */
-    val `capability`: PubkyIdentityCapability,
-    /**
      * Whether live Pubky session access is available for this identity.
      */
-    val `liveSessionAvailable`: kotlin.Boolean,
-    /**
-     * Whether private Paykit workflows can run with the live session.
-     */
-    val `privateLinkCapable`: kotlin.Boolean
+    val `liveSessionAvailable`: kotlin.Boolean
 ) {
     public companion object
 }
@@ -1394,11 +1386,7 @@ public data class InitializationReport (
     /**
      * Last persisted identity status.
      */
-    val `identity`: IdentityStatus,
-    /**
-     * Whether live Pubky session access was available during startup.
-     */
-    val `liveSessionAvailable`: kotlin.Boolean
+    val `identity`: IdentityStatus
 ) {
     public companion object
 }
@@ -2859,17 +2847,12 @@ public data class PubkySessionBootstrapResult (
     /**
      * Local Pubky public key.
      */
-    val `publicKey`: kotlin.String,
-    /**
-     * Capability implied by the session and receiver Noise key availability.
-     */
-    val `capability`: PubkyIdentityCapability
+    val `publicKey`: kotlin.String
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
             this.`sessionAccess`,
             this.`publicKey`,
-            this.`capability`,
         )
     }
     public companion object
@@ -3996,33 +3979,6 @@ public enum class PubkyAuthRequestKind {
      * Export a secret from a signer.
      */
     SECRET_EXPORT,
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    UNKNOWN;
-    public companion object
-}
-
-
-
-
-
-
-/**
- * Pubky capability state for one app-owned Paykit runtime.
- */
-
-@kotlinx.serialization.Serializable
-public enum class PubkyIdentityCapability {
-
-    /**
-     * No Pubky identity is initialized, or explicit sign-out completed.
-     */
-    SIGNED_OUT,
-    /**
-     * Public operations and Encrypted Links can work.
-     */
-    PRIVATE_LINK_CAPABLE,
     /**
      * SDK returned a value this binding version does not understand.
      */

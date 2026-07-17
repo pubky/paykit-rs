@@ -97,16 +97,6 @@ impl From<PubkyPublicKey> for String {
     }
 }
 
-/// Pubky capability state for one app-owned Paykit runtime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum PubkyIdentityCapability {
-    /// No Pubky identity is initialized, or explicit sign-out completed.
-    SignedOut,
-    /// Public operations and Encrypted Links can work.
-    PrivateLinkCapable,
-}
-
 /// Local Pubky identity secret key used for Pubky session and auth operations.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PubkyLocalSecretKey([u8; 32]);
@@ -309,24 +299,6 @@ impl PubkySessionAccess {
         self.validate()?;
         validate_session_capabilities(self.session.info().capabilities(), required_capabilities)
     }
-
-    /// Return the Paykit capability implied by this access and capability scope.
-    pub fn capability_for_capabilities(
-        &self,
-        required_capabilities: &str,
-    ) -> crate::Result<PubkyIdentityCapability> {
-        self.validate_for_capabilities(required_capabilities)?;
-        Ok(PubkyIdentityCapability::PrivateLinkCapable)
-    }
-
-    /// Report whether this validated access can establish Encrypted Links.
-    pub fn private_link_capable_for_capabilities(
-        &self,
-        required_capabilities: &str,
-    ) -> crate::Result<bool> {
-        self.validate_for_capabilities(required_capabilities)?;
-        Ok(true)
-    }
 }
 
 fn validate_session_capabilities(
@@ -386,10 +358,8 @@ impl fmt::Debug for PubkySessionAccess {
 /// Durable identity state tracked by one SDK runtime.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityState {
-    /// Current local public key, when signed in.
+    /// Persisted local public key, or `None` after explicit sign-out.
     pub public_key: Option<PubkyPublicKey>,
-    /// Current Pubky capability.
-    pub capability: PubkyIdentityCapability,
     /// Last successful initialization time.
     pub initialized_at: DateTime<Utc>,
     /// Monotonic generation used to separate state across sign-outs.
@@ -399,27 +369,17 @@ pub struct IdentityState {
 /// Current identity status returned to apps.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityStatus {
-    /// Current local public key, when signed in.
+    /// Persisted local public key, or `None` after explicit sign-out.
     pub public_key: Option<PubkyPublicKey>,
-    /// Current Pubky capability.
-    pub capability: PubkyIdentityCapability,
     /// Whether live Pubky session access is available for this identity.
     pub live_session_available: bool,
-    /// Whether private Paykit workflows can run with the live session.
-    pub private_link_capable: bool,
 }
 
 impl IdentityStatus {
-    pub(crate) fn from_state(
-        state: &IdentityState,
-        live_session_available: bool,
-        private_link_capable: bool,
-    ) -> Self {
+    pub(crate) fn from_state(state: &IdentityState, live_session_available: bool) -> Self {
         Self {
             public_key: state.public_key.clone(),
-            capability: state.capability,
             live_session_available,
-            private_link_capable,
         }
     }
 }

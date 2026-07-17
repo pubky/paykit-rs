@@ -21,8 +21,7 @@ where
     ) -> Result<ContactPaymentResolution> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         let mut private_allowed = identity.public_key.is_some();
-        let private_capable = identity.capability == PubkyIdentityCapability::PrivateLinkCapable;
-        let private_live = session_access.is_some() && private_capable;
+        let private_live = session_access.is_some();
         let mut private_state = ContactPaymentResolutionPrivateState::NoPrivateEndpoint;
         if private_allowed {
             private_allowed = if private_live {
@@ -297,9 +296,8 @@ where
     }
 
     async fn private_payment_preparation_is_available(&self) -> Result<bool> {
-        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        Ok(session_access.is_some()
-            && identity.capability == PubkyIdentityCapability::PrivateLinkCapable)
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        Ok(session_access.is_some())
     }
 
     async fn private_resolution_allowed_for_peer(
@@ -355,7 +353,7 @@ where
         let Some(identity) = self.storage.load_identity_state().await? else {
             return Ok(PrivateRecoveryOutcome::NotNeeded);
         };
-        if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
+        if identity.public_key.is_none() {
             return Ok(PrivateRecoveryOutcome::NotNeeded);
         }
 

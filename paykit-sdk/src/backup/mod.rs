@@ -24,7 +24,7 @@ use crate::{
         ReceiptRecord, ReceiptRetrievalStatus,
     },
     domain::records::{AmountRecord, BillingPeriodRecord},
-    identity::{IdentityState, PubkyIdentityCapability, PubkyPublicKey},
+    identity::{IdentityState, PubkyPublicKey},
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
         PaymentEndpointReservationRecord, PrivateStreamItemRecord, PublicEndpointRecord,
@@ -635,18 +635,6 @@ impl SdkBackupState {
         !self.linked_peers.is_empty()
             || !self.contact_records.is_empty()
             || !self.public_endpoint_records.is_empty()
-            || !self.payment_endpoint_reservations.is_empty()
-            || !self.encrypted_link_states.is_empty()
-            || !self.outbound_private_messages.is_empty()
-            || !self.private_stream_items.is_empty()
-            || !self.event_dedup_records.is_empty()
-            || !self.receipt_access_records.is_empty()
-            || !self.receipt_records.is_empty()
-            || !self.receipt_issuance_records.is_empty()
-    }
-
-    pub(crate) fn has_private_identity_scoped_state(&self) -> bool {
-        !self.linked_peers.is_empty()
             || !self.payment_endpoint_reservations.is_empty()
             || !self.encrypted_link_states.is_empty()
             || !self.outbound_private_messages.is_empty()

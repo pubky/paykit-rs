@@ -241,7 +241,6 @@ async fn test_publish_recovery_marker_without_live_session_does_not_mutate_link_
                     public_key: Some(PubkyPublicKey::from_public_key(
                         &pubky::Keypair::random().public_key(),
                     )),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });

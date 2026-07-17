@@ -9642,24 +9642,18 @@ public object FfiConverterTypeIdentityStatus: FfiConverterRustBuffer<IdentitySta
     override fun read(buf: ByteBuffer): IdentityStatus {
         return IdentityStatus(
             FfiConverterOptionalString.read(buf),
-            FfiConverterTypePubkyIdentityCapability.read(buf),
-            FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: IdentityStatus): ULong = (
             FfiConverterOptionalString.allocationSize(value.`publicKey`) +
-            FfiConverterTypePubkyIdentityCapability.allocationSize(value.`capability`) +
-            FfiConverterBoolean.allocationSize(value.`liveSessionAvailable`) +
-            FfiConverterBoolean.allocationSize(value.`privateLinkCapable`)
+            FfiConverterBoolean.allocationSize(value.`liveSessionAvailable`)
     )
 
     override fun write(value: IdentityStatus, buf: ByteBuffer) {
         FfiConverterOptionalString.write(value.`publicKey`, buf)
-        FfiConverterTypePubkyIdentityCapability.write(value.`capability`, buf)
         FfiConverterBoolean.write(value.`liveSessionAvailable`, buf)
-        FfiConverterBoolean.write(value.`privateLinkCapable`, buf)
     }
 }
 
@@ -9670,18 +9664,15 @@ public object FfiConverterTypeInitializationReport: FfiConverterRustBuffer<Initi
     override fun read(buf: ByteBuffer): InitializationReport {
         return InitializationReport(
             FfiConverterTypeIdentityStatus.read(buf),
-            FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: InitializationReport): ULong = (
-            FfiConverterTypeIdentityStatus.allocationSize(value.`identity`) +
-            FfiConverterBoolean.allocationSize(value.`liveSessionAvailable`)
+            FfiConverterTypeIdentityStatus.allocationSize(value.`identity`)
     )
 
     override fun write(value: InitializationReport, buf: ByteBuffer) {
         FfiConverterTypeIdentityStatus.write(value.`identity`, buf)
-        FfiConverterBoolean.write(value.`liveSessionAvailable`, buf)
     }
 }
 
@@ -10944,20 +10935,17 @@ public object FfiConverterTypePubkySessionBootstrapResult: FfiConverterRustBuffe
         return PubkySessionBootstrapResult(
             FfiConverterTypePubkySessionAccess.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterTypePubkyIdentityCapability.read(buf),
         )
     }
 
     override fun allocationSize(value: PubkySessionBootstrapResult): ULong = (
             FfiConverterTypePubkySessionAccess.allocationSize(value.`sessionAccess`) +
-            FfiConverterString.allocationSize(value.`publicKey`) +
-            FfiConverterTypePubkyIdentityCapability.allocationSize(value.`capability`)
+            FfiConverterString.allocationSize(value.`publicKey`)
     )
 
     override fun write(value: PubkySessionBootstrapResult, buf: ByteBuffer) {
         FfiConverterTypePubkySessionAccess.write(value.`sessionAccess`, buf)
         FfiConverterString.write(value.`publicKey`, buf)
-        FfiConverterTypePubkyIdentityCapability.write(value.`capability`, buf)
     }
 }
 
@@ -11808,24 +11796,6 @@ public object FfiConverterTypePubkyAuthRequestKind: FfiConverterRustBuffer<Pubky
     override fun allocationSize(value: PubkyAuthRequestKind): ULong = 4UL
 
     override fun write(value: PubkyAuthRequestKind, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-public object FfiConverterTypePubkyIdentityCapability: FfiConverterRustBuffer<PubkyIdentityCapability> {
-    override fun read(buf: ByteBuffer): PubkyIdentityCapability = try {
-        PubkyIdentityCapability.entries[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: PubkyIdentityCapability): ULong = 4UL
-
-    override fun write(value: PubkyIdentityCapability, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }

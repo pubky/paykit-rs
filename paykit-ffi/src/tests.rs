@@ -10,8 +10,8 @@ use paykit_sdk::storage::{StorageAdapter, StorageState};
 use paykit_sdk::PaykitSdkConfig;
 use paykit_sdk::{
     ContactRecord, EncryptedLinkHandshakeRole, IdentityState, LinkedPeerState,
-    OutboundPrivateMessageStatus, PaykitProfile, PrivateStreamParseStatus, PubkyIdentityCapability,
-    PubkyPublicKey, PublicationStatus,
+    OutboundPrivateMessageStatus, PaykitProfile, PrivateStreamParseStatus, PubkyPublicKey,
+    PublicationStatus,
 };
 
 use crate::errors::storage_error;
@@ -164,7 +164,6 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     let mut state = StorageState {
         identity_state: Some(IdentityState {
             public_key: Some(local_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
             initialized_at: now,
             sign_out_generation: 0,
         }),
@@ -586,6 +585,6 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
     for _ in 0..5 {
         let status = sdk.identity_status().await.unwrap().unwrap();
         assert_eq!(status.public_key, Some(result.public_key.clone()));
-        assert!(status.private_link_capable);
+        assert!(status.live_session_available);
     }
 }

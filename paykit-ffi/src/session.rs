@@ -4,9 +4,8 @@ use async_trait::async_trait;
 use paykit_sdk::{
     PaykitReceiverPath, PaykitSdkError, PubkyAuthCompanionClaim,
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
-    PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
-    PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionProvider,
-    ReceiverNoiseSecretKey,
+    PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
+    PubkySessionBootstrapResult, PubkySessionProvider, ReceiverNoiseSecretKey,
 };
 use pubky::{Pubky, PubkyHttpClient, PubkySession};
 use tokio::sync::Mutex as AsyncMutex;
@@ -30,17 +29,6 @@ pub(crate) fn app_public_key(value: &PubkyPublicKey) -> String {
 
 pub(crate) fn raw_public_key(value: &PubkyPublicKey) -> String {
     value.as_str().to_owned()
-}
-
-/// Pubky capability state for one app-owned Paykit runtime.
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FfiPubkyIdentityCapability {
-    /// No Pubky identity is initialized, or explicit sign-out completed.
-    SignedOut,
-    /// Public operations and Encrypted Links can work.
-    PrivateLinkCapable,
-    /// SDK returned a value this binding version does not understand.
-    Unknown,
 }
 
 /// Kind of Pubky auth request represented by a deep link.
@@ -128,8 +116,6 @@ pub struct FfiPubkySessionBootstrapResult {
     pub session_access: Arc<FfiPubkySessionAccess>,
     /// Local Pubky public key.
     pub public_key: String,
-    /// Capability implied by the session and receiver Noise key availability.
-    pub capability: FfiPubkyIdentityCapability,
 }
 
 /// Public details parsed from a Pubky auth deep link.
@@ -647,17 +633,6 @@ fn bootstrap_result_to_ffi(
             live_access: Some(live_access),
         }),
         public_key: app_public_key(&result.public_key),
-        capability: result.capability.into(),
-    }
-}
-
-impl From<PubkyIdentityCapability> for FfiPubkyIdentityCapability {
-    fn from(value: PubkyIdentityCapability) -> Self {
-        match value {
-            PubkyIdentityCapability::SignedOut => Self::SignedOut,
-            PubkyIdentityCapability::PrivateLinkCapable => Self::PrivateLinkCapable,
-            _ => Self::Unknown,
-        }
     }
 }
 

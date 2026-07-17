@@ -13,15 +13,11 @@ where
     }
 
     /// Restore SDK-managed backup state.
-    pub async fn restore_backup_state(&self, mut backup: SdkBackupState) -> Result<RestoreReport> {
+    pub async fn restore_backup_state(&self, backup: SdkBackupState) -> Result<RestoreReport> {
         let _identity_guard = self.claim_identity_operation("restore backup")?;
         let mut trusted_identity = None;
         if backup.identity_public_key().is_some() || backup.has_identity_scoped_state() {
             let session_access = self.validate_backup_restore_session(&backup).await?;
-            if let Some(identity_state) = backup.identity_state.as_mut() {
-                identity_state.capability = session_access
-                    .capability_for_capabilities(&self.config.required_session_capabilities())?;
-            }
             trusted_identity = Some(self.restore_validation_identity(&session_access).await?);
         }
         restore_sdk_backup_state(
@@ -56,16 +52,6 @@ where
         }
         let required_capabilities = self.config.required_session_capabilities();
         session_access.validate_for_capabilities(&required_capabilities)?;
-        if backup.has_private_identity_scoped_state()
-            && session_access.capability_for_capabilities(&required_capabilities)?
-                != PubkyIdentityCapability::PrivateLinkCapable
-        {
-            return Err(PaykitSdkError::Identity {
-                context: "cannot restore private Paykit state without private-link capability"
-                    .into(),
-                source: None,
-            });
-        }
         Ok(session_access)
     }
 
@@ -75,7 +61,7 @@ where
     ) -> Result<IdentityState> {
         let public_key = session_access.public_key()?;
         let required_capabilities = self.config.required_session_capabilities();
-        let capability = session_access.capability_for_capabilities(&required_capabilities)?;
+        session_access.validate_for_capabilities(&required_capabilities)?;
         let initialized_at = self.clock.now();
         self.storage
             .transaction(move |tx| {
@@ -86,7 +72,6 @@ where
                 }
                 Ok(IdentityState {
                     public_key: Some(public_key),
-                    capability,
                     initialized_at,
                     sign_out_generation: 0,
                 })

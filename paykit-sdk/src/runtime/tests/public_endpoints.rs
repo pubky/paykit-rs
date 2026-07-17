@@ -52,7 +52,6 @@ async fn test_publish_receiver_marker_requires_live_session() {
             public_key: Some(PubkyPublicKey::from_public_key(
                 &pubky::Keypair::random().public_key(),
             )),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })

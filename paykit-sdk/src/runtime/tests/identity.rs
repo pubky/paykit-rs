@@ -14,12 +14,9 @@ async fn test_initialize_persists_signed_out_identity() {
 
     let report = sdk.initialize().await.unwrap();
 
-    assert!(!report.live_session_available);
     assert!(!report.identity.live_session_available);
-    assert!(!report.identity.private_link_capable);
     let stored = storage.snapshot().unwrap().identity_state.unwrap();
     assert!(stored.public_key.is_none());
-    assert_eq!(stored.capability, PubkyIdentityCapability::SignedOut);
     assert_eq!(stored.initialized_at, FixedClock.now());
 }
 
@@ -33,7 +30,6 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(counterparty.clone()),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
                 });
@@ -95,14 +91,8 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
 
     let snapshot = storage.snapshot().unwrap();
     let identity = snapshot.identity_state.unwrap();
-    assert!(!report.live_session_available);
     assert!(!report.identity.live_session_available);
-    assert!(!report.identity.private_link_capable);
     assert_eq!(identity.public_key.as_ref(), Some(&counterparty));
-    assert_eq!(
-        identity.capability,
-        PubkyIdentityCapability::PrivateLinkCapable
-    );
     assert_eq!(identity.sign_out_generation, 3);
     assert_eq!(snapshot.linked_peers.len(), 1);
     assert_eq!(snapshot.contact_records.len(), 1);
@@ -111,13 +101,12 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
 }
 
 #[tokio::test]
-async fn test_identity_status_cached_capability_requires_live_session() {
+async fn test_identity_status_cached_identity_requires_live_session() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
+            public_key: Some(local_public_key.clone()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -133,12 +122,8 @@ async fn test_identity_status_cached_capability_requires_live_session() {
 
     let status = sdk.identity_status().await.unwrap().unwrap();
 
-    assert_eq!(
-        status.capability,
-        PubkyIdentityCapability::PrivateLinkCapable
-    );
+    assert_eq!(status.public_key, Some(local_public_key));
     assert!(!status.live_session_available);
-    assert!(!status.private_link_capable);
 }
 
 #[tokio::test]
@@ -151,7 +136,6 @@ async fn test_sign_out_clears_identity_scoped_state() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(counterparty.clone()),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
                 });
@@ -211,14 +195,12 @@ async fn test_sign_out_clears_identity_scoped_state() {
 
     let status = sdk.sign_out().await.unwrap();
 
-    assert_eq!(status.capability, PubkyIdentityCapability::SignedOut);
+    assert!(status.public_key.is_none());
     assert!(!status.live_session_available);
-    assert!(!status.private_link_capable);
     let snapshot = storage.snapshot().unwrap();
     let identity = snapshot.identity_state.unwrap();
     assert_eq!(identity.sign_out_generation, 4);
     assert!(identity.public_key.is_none());
-    assert_eq!(identity.capability, PubkyIdentityCapability::SignedOut);
     assert!(snapshot.linked_peers.is_empty());
     assert!(snapshot.contact_records.is_empty());
     assert!(snapshot.public_endpoint_records.is_empty());
@@ -252,7 +234,6 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
             move |tx| {
                 tx.save_identity_state(IdentityState {
                     public_key: Some(counterparty.clone()),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
                 });
@@ -289,9 +270,6 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
     let snapshot = storage.snapshot().unwrap();
     let identity = snapshot.identity_state.unwrap();
     assert_eq!(identity.sign_out_generation, 3);
-    assert_eq!(
-        identity.capability,
-        PubkyIdentityCapability::PrivateLinkCapable
-    );
+    assert!(identity.public_key.is_some());
     assert_eq!(snapshot.contact_records.len(), 1);
 }
