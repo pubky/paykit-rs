@@ -60,6 +60,28 @@ fn test_pubky_local_secret_key_returns_public_key() {
 }
 
 #[test]
+fn test_receiver_noise_secret_key_debug_is_redacted() {
+    let key = ReceiverNoiseSecretKey::new([7; 32]);
+
+    assert_eq!(format!("{key:?}"), "ReceiverNoiseSecretKey(<redacted>)");
+}
+
+#[test]
+fn test_receiver_noise_secret_key_returns_independent_public_key() {
+    let receiver_key = ReceiverNoiseSecretKey::new([7; 32]);
+    let identity_key = PubkyLocalSecretKey::new([8; 32]);
+
+    assert_eq!(
+        receiver_key.public_key(),
+        pubky::Keypair::from_secret(&[7; 32]).public_key()
+    );
+    assert_ne!(
+        PubkyPublicKey::from_public_key(&receiver_key.public_key()),
+        identity_key.public_key()
+    );
+}
+
+#[test]
 fn test_session_capabilities_cover_required_paykit_scopes() {
     let root = pubky::Capabilities::builder()
         .read_write("/")

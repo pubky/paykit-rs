@@ -82,7 +82,11 @@ async fn endpoint_round_trip_and_update() {
 #[tokio::test]
 async fn receiver_marker_round_trip_and_discovery() {
     let setup = TestSetup::new().await;
-    let marker = PaykitReceiverMarker::new(server_receiver_path(), receiver_capabilities());
+    let marker = PaykitReceiverMarker::new(
+        server_receiver_path(),
+        receiver_capabilities(),
+        Keypair::random().public_key(),
+    );
 
     publish_paykit_receiver_marker(&setup.session, &marker)
         .await

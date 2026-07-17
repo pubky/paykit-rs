@@ -220,15 +220,20 @@ async fn test_parallel_writer_reader_happy_path() {
         .await
         .unwrap();
     let reader_pubkey = reader_session.info().public_key().clone();
+    let writer_noise_keypair = Keypair::random();
+    let reader_noise_keypair = Keypair::random();
+    let writer_noise_pubkey = writer_noise_keypair.public_key();
 
     let w_session = writer_session.clone();
     let w_reader_pubkey = reader_pubkey;
+    let w_reader_noise_pubkey = reader_noise_keypair.public_key();
 
     let writer_handle = tokio::spawn(async move {
         let handshake = initiate_encrypted_link(
             w_session.clone(),
-            writer_keypair.secret_key(),
+            writer_noise_keypair.secret_key(),
             &w_reader_pubkey,
+            &w_reader_noise_pubkey,
             &receiver_path(),
             &receiver_path(),
             writer_sdk,
@@ -256,12 +261,14 @@ async fn test_parallel_writer_reader_happy_path() {
 
     let r_session = reader_session.clone();
     let r_writer_pubkey = writer_pubkey;
+    let r_writer_noise_pubkey = writer_noise_pubkey;
 
     let reader_handle = tokio::spawn(async move {
         let handshake = accept_encrypted_link(
             r_session.clone(),
-            reader_keypair.secret_key(),
+            reader_noise_keypair.secret_key(),
             &r_writer_pubkey,
+            &r_writer_noise_pubkey,
             &receiver_path(),
             &receiver_path(),
             reader_sdk,

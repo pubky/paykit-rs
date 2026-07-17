@@ -6,6 +6,7 @@ use paykit_sdk::{
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
     PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
     PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionProvider,
+    ReceiverNoiseSecretKey,
 };
 use pubky::{Pubky, PubkyHttpClient, PubkySession};
 use tokio::sync::Mutex as AsyncMutex;
@@ -13,7 +14,7 @@ use zeroize::Zeroizing;
 
 use crate::config::{default_pubky_client_config, FfiPubkyClientConfig};
 use crate::errors::{ffi_error_to_sdk, identity_error, validation_error, PaykitFfiError};
-use crate::secrets::FfiPubkyLocalSecretKey;
+use crate::secrets::{FfiPubkyLocalSecretKey, FfiReceiverNoiseSecretKey};
 
 pub(crate) fn parse_public_key(value: String) -> Result<PubkyPublicKey, PaykitFfiError> {
     PubkyPublicKey::from_raw_or_app_key(value).map_err(Into::into)
@@ -62,6 +63,7 @@ pub enum FfiPubkyAuthRequestKind {
 pub struct FfiPubkySessionAccess {
     pub(crate) session_secret: String,
     pub(crate) local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
+    pub(crate) receiver_noise_secret_key: Arc<FfiReceiverNoiseSecretKey>,
     pub(crate) live_access: Option<PubkySessionAccess>,
 }
 
@@ -76,6 +78,13 @@ impl fmt::Debug for FfiPubkySessionAccess {
                     .as_ref()
                     .map(|key| format!("<redacted:{} bytes>", key.bytes.len())),
             )
+            .field(
+                "receiver_noise_secret_key",
+                &format_args!(
+                    "<redacted:{} bytes>",
+                    self.receiver_noise_secret_key.bytes.len()
+                ),
+            )
             .field("live_access", &self.live_access.as_ref().map(|_| "<live>"))
             .finish()
     }
@@ -88,10 +97,12 @@ impl FfiPubkySessionAccess {
     pub fn new(
         session_secret: String,
         local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
+        receiver_noise_secret_key: Arc<FfiReceiverNoiseSecretKey>,
     ) -> Self {
         Self {
             session_secret,
             local_secret_key,
+            receiver_noise_secret_key,
             live_access: None,
         }
     }
@@ -105,6 +116,11 @@ impl FfiPubkySessionAccess {
     pub fn export_local_secret_key(&self) -> Option<Arc<FfiPubkyLocalSecretKey>> {
         self.local_secret_key.clone()
     }
+
+    /// Export the receiver Noise secret key for platform secure storage.
+    pub fn export_receiver_noise_secret_key(&self) -> Arc<FfiReceiverNoiseSecretKey> {
+        self.receiver_noise_secret_key.clone()
+    }
 }
 
 /// Result of creating or importing a Pubky session.
@@ -114,7 +130,7 @@ pub struct FfiPubkySessionBootstrapResult {
     pub session_access: Arc<FfiPubkySessionAccess>,
     /// Local Pubky public key.
     pub public_key: String,
-    /// Capability implied by the session and optional local secret key.
+    /// Capability implied by the session and receiver Noise key availability.
     pub capability: FfiPubkyIdentityCapability,
 }
 
@@ -235,10 +251,14 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
             .map(|key| local_secret_from_bytes(key.export_bytes()))
             .transpose()
             .map_err(|err| ffi_error_to_sdk(err, "load local Pubky secret key"))?;
+        let receiver_noise_secret_key =
+            receiver_noise_secret_from_bytes(access.receiver_noise_secret_key.export_bytes())
+                .map_err(|err| ffi_error_to_sdk(err, "load receiver Noise secret key"))?;
 
         if let Some(live_access) = &access.live_access {
             let mut live_access = live_access.clone();
             live_access.local_secret_key = local_secret_key;
+            live_access.receiver_noise_secret_key = Some(receiver_noise_secret_key);
             return Ok(Some(live_access));
         }
 
@@ -254,6 +274,7 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
             session,
             outbox_client: self.pubky.clone(),
             local_secret_key,
+            receiver_noise_secret_key: Some(receiver_noise_secret_key),
         }))
     }
 
@@ -329,19 +350,27 @@ impl FfiPubkySessionBootstrap {
         Ok(bootstrap_result_to_ffi(result, Some(secret)))
     }
 
-    /// Import an exported Pubky session secret.
+    /// Import an exported Pubky session secret with its persisted receiver Noise key.
     pub async fn import_session(
         &self,
         session_secret: String,
         local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
+        receiver_noise_secret_key: Arc<FfiReceiverNoiseSecretKey>,
         required_capabilities: String,
     ) -> Result<FfiPubkySessionBootstrapResult, PaykitFfiError> {
         let secret = local_secret_key
             .map(|key| local_secret_from_bytes(key.export_bytes()))
             .transpose()?;
+        let receiver_noise_secret_key =
+            receiver_noise_secret_from_bytes(receiver_noise_secret_key.export_bytes())?;
         let result = self
             .inner
-            .import_session(&session_secret, secret.clone(), &required_capabilities)
+            .import_session(
+                &session_secret,
+                secret.clone(),
+                receiver_noise_secret_key,
+                &required_capabilities,
+            )
             .await?;
         Ok(bootstrap_result_to_ffi(result, secret))
     }
@@ -571,16 +600,38 @@ pub(crate) fn secret_to_ffi(secret: &PubkyLocalSecretKey) -> Arc<FfiPubkyLocalSe
     Arc::new(FfiPubkyLocalSecretKey::new(secret.as_bytes().to_vec()))
 }
 
+fn receiver_noise_secret_from_bytes(
+    bytes: Vec<u8>,
+) -> Result<ReceiverNoiseSecretKey, PaykitFfiError> {
+    let bytes: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+        validation_error(format!(
+            "receiver Noise secret key must be 32 bytes, got {}",
+            bytes.len()
+        ))
+    })?;
+    Ok(ReceiverNoiseSecretKey::new(bytes))
+}
+
+fn receiver_noise_secret_to_ffi(secret: &ReceiverNoiseSecretKey) -> Arc<FfiReceiverNoiseSecretKey> {
+    Arc::new(FfiReceiverNoiseSecretKey::new(secret.as_bytes().to_vec()))
+}
+
 fn bootstrap_result_to_ffi(
     result: PubkySessionBootstrapResult,
     local_secret_key: Option<PubkyLocalSecretKey>,
 ) -> FfiPubkySessionBootstrapResult {
     let session_secret = result.export_session_secret().into_inner();
+    let receiver_noise_secret_key = result
+        .access
+        .receiver_noise_secret_key
+        .as_ref()
+        .expect("Pubky session bootstrap always creates a receiver Noise secret key");
     let live_access = result.access.clone();
     FfiPubkySessionBootstrapResult {
         session_access: Arc::new(FfiPubkySessionAccess {
             session_secret,
             local_secret_key: local_secret_key.as_ref().map(secret_to_ffi),
+            receiver_noise_secret_key: receiver_noise_secret_to_ffi(receiver_noise_secret_key),
             live_access: Some(live_access),
         }),
         public_key: app_public_key(&result.public_key),

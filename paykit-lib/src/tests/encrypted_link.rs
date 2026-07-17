@@ -24,6 +24,11 @@ async fn test_handshake_snapshot_serialize_roundtrip() {
         "recipient public key should survive serialize/deserialize"
     );
     assert_eq!(
+        restored_snapshot.remote_noise_public_key(),
+        snapshot.remote_noise_public_key(),
+        "receiver Noise public key should survive serialize/deserialize"
+    );
+    assert_eq!(
         restored_snapshot.local_receiver_path(),
         snapshot.local_receiver_path(),
         "local receiver path should survive serialize/deserialize"
@@ -334,6 +339,11 @@ async fn test_encrypted_link_snapshot_serialize_roundtrip() {
         "recipient public key should survive serialize/deserialize"
     );
     assert_eq!(
+        restored_snapshot.remote_noise_public_key(),
+        snapshot.remote_noise_public_key(),
+        "receiver Noise public key should survive serialize/deserialize"
+    );
+    assert_eq!(
         restored_snapshot.local_receiver_path(),
         snapshot.local_receiver_path(),
         "local receiver path should survive serialize/deserialize"
@@ -614,7 +624,7 @@ fn test_encrypted_link_snapshot_deserialize_rejects_unsupported_wire_version() {
     let state = transport_snapshot_state_with_nonces(0, 0);
     let mut wire: serde_json::Value =
         serde_json::from_slice(&scoped_snapshot_bytes(state)).unwrap();
-    wire["version"] = serde_json::json!(2);
+    wire["version"] = serde_json::json!(3);
     let bytes = serde_json::to_vec(&wire).unwrap();
 
     let result = EncryptedLinkSnapshot::deserialize(&bytes);
@@ -664,9 +674,10 @@ fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
 
 fn scoped_snapshot_bytes(state: pubky_noise::serializer::PubkyNoiseSessionState) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
-        "version": 1,
+        "version": 2,
         "local_receiver_path": "bitkit/wallet",
         "remote_receiver_path": "tether/wallet",
+        "remote_noise_public_key": Keypair::from_secret(&[42; 32]).public_key(),
         "state": state.serialize(),
     }))
     .unwrap()

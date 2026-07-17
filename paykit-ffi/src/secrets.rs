@@ -58,6 +58,46 @@ pub struct FfiPubkyLocalSecretKey {
     pub(crate) bytes: Vec<u8>,
 }
 
+/// Receiver-scoped Noise secret key bytes supplied by platform secure storage.
+#[derive(uniffi::Object)]
+pub struct FfiReceiverNoiseSecretKey {
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl fmt::Debug for FfiReceiverNoiseSecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "FfiReceiverNoiseSecretKey(<redacted:{} bytes>)",
+            self.bytes.len()
+        )
+    }
+}
+
+#[uniffi::export]
+impl FfiReceiverNoiseSecretKey {
+    /// Create a receiver Noise secret key from platform secure storage bytes.
+    #[uniffi::constructor]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+
+    /// Generate a fresh receiver Noise secret key.
+    #[uniffi::constructor]
+    pub fn random() -> Self {
+        Self {
+            bytes: paykit_sdk::ReceiverNoiseSecretKey::random()
+                .as_bytes()
+                .to_vec(),
+        }
+    }
+
+    /// Export the raw bytes for platform secure storage.
+    pub fn export_bytes(&self) -> Vec<u8> {
+        self.bytes.clone()
+    }
+}
+
 impl fmt::Debug for FfiPubkyLocalSecretKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

@@ -250,10 +250,10 @@ where
         session_access: &PubkySessionAccess,
     ) -> Result<(paykit_lib::EncryptedLink, EncryptedLinkStateRecord)> {
         let secret_key = *session_access
-            .local_secret_key
+            .receiver_noise_secret_key
             .as_ref()
             .ok_or_else(|| PaykitSdkError::Identity {
-                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
+                context: "receiver Noise secret key is unavailable for Encrypted Links".into(),
                 source: None,
             })?
             .as_bytes();

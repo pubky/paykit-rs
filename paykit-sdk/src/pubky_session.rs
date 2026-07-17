@@ -105,7 +105,7 @@ pub struct PubkySessionBootstrapResult {
     pub access: crate::PubkySessionAccess,
     /// Local public key for the session.
     pub public_key: PubkyPublicKey,
-    /// Capability implied by the session and optional local secret key.
+    /// Capability implied by the session and receiver Noise key availability.
     pub capability: PubkyIdentityCapability,
 }
 
@@ -152,7 +152,13 @@ impl PubkyAuthRequest {
             .await
             .map_err(|err| map_pubky_identity_error("complete Pubky auth flow", err))?;
         validate_session_exact_capabilities(&session, required_capabilities)?;
-        session_result(session, self.pubky, local_secret_key, required_capabilities)
+        session_result(
+            session,
+            self.pubky,
+            local_secret_key,
+            crate::ReceiverNoiseSecretKey::random(),
+            required_capabilities,
+        )
     }
 }
 
@@ -203,6 +209,7 @@ impl PubkySessionBootstrap {
             session,
             self.pubky.clone(),
             Some(secret_key.clone()),
+            crate::ReceiverNoiseSecretKey::random(),
             required_capabilities,
         )
     }
@@ -223,15 +230,21 @@ impl PubkySessionBootstrap {
             session,
             self.pubky.clone(),
             Some(secret_key.clone()),
+            crate::ReceiverNoiseSecretKey::random(),
             required_capabilities,
         )
     }
 
     /// Import an exported Pubky session secret and validate its capabilities.
+    ///
+    /// Pass the same persisted receiver Noise key returned with the original
+    /// session access. Generating a replacement rotates the public key and
+    /// invalidates existing private path and Encrypted Link state.
     pub async fn import_session(
         &self,
         session_secret: &str,
         local_secret_key: Option<PubkyLocalSecretKey>,
+        receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         let session =
@@ -242,6 +255,7 @@ impl PubkySessionBootstrap {
             session,
             self.pubky.clone(),
             local_secret_key,
+            receiver_noise_secret_key,
             required_capabilities,
         )
     }
@@ -371,6 +385,7 @@ fn session_result(
     session: PubkySession,
     outbox_client: Pubky,
     local_secret_key: Option<PubkyLocalSecretKey>,
+    receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
     required_capabilities: &str,
 ) -> Result<PubkySessionBootstrapResult> {
     let local_secret_key = validate_local_secret_for_session(&session, local_secret_key)?;
@@ -378,6 +393,7 @@ fn session_result(
         session,
         outbox_client,
         local_secret_key,
+        receiver_noise_secret_key: Some(receiver_noise_secret_key),
     };
     let public_key = access.public_key()?;
     let capability = access.capability_for_capabilities(required_capabilities)?;

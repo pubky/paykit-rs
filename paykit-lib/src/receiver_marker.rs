@@ -12,6 +12,7 @@ use crate::{
 };
 
 const RECEIVER_MARKER_KIND: &str = "paykit.receiver";
+const RECEIVER_MARKER_VERSION: u8 = 2;
 
 /// Public capabilities advertised by a Paykit receiver marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,8 @@ pub struct PaykitReceiverMarker {
     pub receiver_path: PaykitReceiverPath,
     /// Public receiver capabilities.
     pub capabilities: PaykitReceiverCapabilities,
+    /// Receiver-scoped public key used to derive private Encrypted Link paths.
+    pub noise_public_key: PublicKey,
 }
 
 impl PaykitReceiverMarker {
@@ -41,10 +44,12 @@ impl PaykitReceiverMarker {
     pub fn new(
         receiver_path: PaykitReceiverPath,
         capabilities: PaykitReceiverCapabilities,
+        noise_public_key: PublicKey,
     ) -> Self {
         Self {
             receiver_path,
             capabilities,
+            noise_public_key,
         }
     }
 }
@@ -56,15 +61,17 @@ struct ReceiverMarkerWire {
     kind: String,
     receiver_path: PaykitReceiverPath,
     capabilities: PaykitReceiverCapabilities,
+    noise_public_key: String,
 }
 
 impl From<&PaykitReceiverMarker> for ReceiverMarkerWire {
     fn from(marker: &PaykitReceiverMarker) -> Self {
         Self {
-            version: 1,
+            version: RECEIVER_MARKER_VERSION,
             kind: RECEIVER_MARKER_KIND.into(),
             receiver_path: marker.receiver_path.clone(),
             capabilities: marker.capabilities,
+            noise_public_key: marker.noise_public_key.z32(),
         }
     }
 }
@@ -73,7 +80,7 @@ impl TryFrom<ReceiverMarkerWire> for PaykitReceiverMarker {
     type Error = PaykitError;
 
     fn try_from(wire: ReceiverMarkerWire) -> Result<Self> {
-        if wire.version != 1 || wire.kind != RECEIVER_MARKER_KIND {
+        if wire.version != RECEIVER_MARKER_VERSION || wire.kind != RECEIVER_MARKER_KIND {
             return Err(invalid_data(
                 format!(
                     "unsupported Paykit receiver marker version/kind: {}/{}",
@@ -82,7 +89,17 @@ impl TryFrom<ReceiverMarkerWire> for PaykitReceiverMarker {
                 None,
             ));
         }
-        Ok(Self::new(wire.receiver_path, wire.capabilities))
+        let noise_public_key = PublicKey::try_from_z32(&wire.noise_public_key).map_err(|err| {
+            invalid_data(
+                format!("Paykit receiver marker Noise public key is invalid: {err}"),
+                Some(err.into()),
+            )
+        })?;
+        Ok(Self::new(
+            wire.receiver_path,
+            wire.capabilities,
+            noise_public_key,
+        ))
     }
 }
 
@@ -167,9 +184,13 @@ mod tests {
         }
     }
 
+    fn noise_public_key() -> PublicKey {
+        pubky::Keypair::from_secret(&[7; 32]).public_key()
+    }
+
     #[test]
     fn test_receiver_marker_json_round_trips() {
-        let marker = PaykitReceiverMarker::new(receiver_path(), capabilities());
+        let marker = PaykitReceiverMarker::new(receiver_path(), capabilities(), noise_public_key());
 
         let json = serialize_paykit_receiver_marker(&marker).unwrap();
         let parsed = parse_paykit_receiver_marker_json(&json, &receiver_path()).unwrap();
@@ -178,7 +199,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&json).unwrap(),
             json!({
-                "version": 1,
+                "version": 2,
                 "kind": "paykit.receiver",
                 "receiver_path": "bitkit/server",
                 "capabilities": {
@@ -186,7 +207,8 @@ mod tests {
                     "payment_requests": true,
                     "receipts": true,
                     "outgoing_payments": false
-                }
+                },
+                "noise_public_key": noise_public_key().z32()
             })
         );
     }
@@ -194,7 +216,7 @@ mod tests {
     #[test]
     fn test_receiver_marker_rejects_wrong_version_or_kind() {
         let raw = json!({
-            "version": 2,
+            "version": 1,
             "kind": "paykit.receiver",
             "receiver_path": "bitkit/server",
             "capabilities": {
@@ -202,7 +224,8 @@ mod tests {
                 "payment_requests": true,
                 "receipts": true,
                 "outgoing_payments": false
-            }
+            },
+            "noise_public_key": noise_public_key().z32()
         })
         .to_string();
         assert!(matches!(
@@ -211,7 +234,7 @@ mod tests {
         ));
 
         let raw = json!({
-            "version": 1,
+            "version": 2,
             "kind": "paykit.other",
             "receiver_path": "bitkit/server",
             "capabilities": {
@@ -219,7 +242,8 @@ mod tests {
                 "payment_requests": true,
                 "receipts": true,
                 "outgoing_payments": false
-            }
+            },
+            "noise_public_key": noise_public_key().z32()
         })
         .to_string();
         assert!(matches!(
@@ -230,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_receiver_marker_rejects_path_mismatch() {
-        let marker = PaykitReceiverMarker::new(receiver_path(), capabilities());
+        let marker = PaykitReceiverMarker::new(receiver_path(), capabilities(), noise_public_key());
         let raw = serialize_paykit_receiver_marker(&marker).unwrap();
         let expected = PaykitReceiverPath::new("bitkit/wallet").unwrap();
 
@@ -243,7 +267,7 @@ mod tests {
     #[test]
     fn test_receiver_marker_rejects_unknown_capability_fields() {
         let raw = json!({
-            "version": 1,
+            "version": 2,
             "kind": "paykit.receiver",
             "receiver_path": "bitkit/server",
             "capabilities": {
@@ -252,7 +276,8 @@ mod tests {
                 "receipts": true,
                 "outgoing_payments": false,
                 "extra": true
-            }
+            },
+            "noise_public_key": noise_public_key().z32()
         })
         .to_string();
 
@@ -265,7 +290,7 @@ mod tests {
     #[test]
     fn test_receiver_marker_rejects_unknown_top_level_fields() {
         let raw = json!({
-            "version": 1,
+            "version": 2,
             "kind": "paykit.receiver",
             "receiver_path": "bitkit/server",
             "capabilities": {
@@ -274,7 +299,29 @@ mod tests {
                 "receipts": true,
                 "outgoing_payments": false
             },
+            "noise_public_key": noise_public_key().z32(),
             "extra": true
+        })
+        .to_string();
+
+        assert!(matches!(
+            parse_paykit_receiver_marker_json(&raw, &receiver_path()),
+            Err(PaykitError::InvalidData { .. })
+        ));
+    }
+
+    #[test]
+    fn test_receiver_marker_rejects_missing_noise_public_key() {
+        let raw = json!({
+            "version": 2,
+            "kind": "paykit.receiver",
+            "receiver_path": "bitkit/server",
+            "capabilities": {
+                "private_payments": true,
+                "payment_requests": true,
+                "receipts": true,
+                "outgoing_payments": false
+            }
         })
         .to_string();
 

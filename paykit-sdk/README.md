@@ -38,6 +38,13 @@ still discoverable from the Pubky identity. Marker publication is explicit
 because it makes the receiver publicly discoverable; SDK setup, auth, and
 profile helpers do not publish it automatically.
 
+The Receiver Marker also publishes that receiver's Noise public key. Its
+public visibility is intentional: it cannot decrypt messages or derive the
+pairwise DH secret without the receiver Noise secret. Apps must persist the
+receiver Noise secret returned in `PubkySessionAccess` alongside session
+access and reuse it after restart. It is independent of the Pubky identity
+secret, so Ring- or server-owned identities remain private-link-capable.
+
 ## Current Scope
 
 Implemented in this Rust SDK crate:

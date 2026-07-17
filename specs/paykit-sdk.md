@@ -42,7 +42,8 @@ Receiver Marker or at least one public Payment Endpoint. Receivers that want to
 be discoverable without public Payment Endpoints can publish a small marker at
 `/pub/paykit/v0/{receiver_path}/receiver.json`. Publishing or removing that
 marker is an explicit app decision, not an automatic SDK setup, auth, or profile
-side effect.
+side effect. The marker also supplies the receiver Noise public key required
+before an Encrypted Link Handshake can start.
 
 ## Design Principles
 
@@ -268,11 +269,14 @@ pub trait PubkySessionProvider {
 ```
 
 `PubkySessionAccess` provides the live authenticated `PubkySession`, Pubky
-client for counterparty homeserver access, and optional `PubkyLocalSecretKey`
-needed for Encrypted Links. The SDK derives and persists public `IdentityState`
-from that access during initialization. The provider is the narrow boundary
-where the app or bindings expose current session access; it is not a Ring
-dependency or a shared identity/runtime coordinator.
+client for counterparty homeserver access, an optional `PubkyLocalSecretKey`
+for local identity operations, and an independent optional
+`ReceiverNoiseSecretKey` for Encrypted Links. The provider must persist the
+receiver Noise secret with session access and reuse it after restart. The SDK
+derives and persists public `IdentityState` from that access during
+initialization. The provider is the narrow boundary where the app or bindings
+expose current session access; it is not a Ring dependency or a shared
+identity/runtime coordinator.
 
 If `load_session_access` returns `None`, no live session access is currently
 available. Ordinary refreshes must preserve the last identity-scoped state and
@@ -294,11 +298,13 @@ The SDK derives Paykit capability from the session access:
 
 - `SignedOut`: no identity is initialized, or explicit sign-out completed.
 - `PublicOnly`: public Pubky operations may work, but Encrypted Links cannot be
-  established because the local secret key is unavailable.
+  established because the receiver Noise secret key is unavailable.
 - `PrivateLinkCapable`: public operations and Encrypted Links can work.
 
-Ring-authenticated sessions often produce the `PublicOnly` case. The SDK should
-surface this as a clear state instead of retrying private operations that cannot
+Ring- or server-authenticated sessions can remain `PrivateLinkCapable` without
+exposing the Pubky identity secret as long as the receiver Noise secret is
+available locally. The SDK should surface a missing receiver Noise key as a
+clear `PublicOnly` state instead of retrying private operations that cannot
 succeed. A same-identity transition from `PrivateLinkCapable` to `PublicOnly`
 must preserve private SDK state; only explicit sign-out, identity change, or an
 explicit key-loss/key-rotation operation should delete it.
@@ -352,7 +358,9 @@ Public Payment Endpoints for the same receiver are stored under
 `/pub/paykit/v0/{receiver_path}/endpoints/...`, so SDK profile paths do
 not collide with Payment Endpoint Identifier files. Public receiver discovery
 markers are stored at `/pub/paykit/v0/{receiver_path}/receiver.json`; they
-advertise only the receiver path and coarse capabilities, not payment details.
+advertise the receiver path, coarse capabilities, and receiver Noise public
+key, not payment details. The public key is safe and necessary to publish; the
+corresponding receiver Noise secret remains in platform secure storage.
 Marker parsing is strict. Future marker wire changes should use a new version;
 older clients ignore unsupported marker data during receiver-path discovery
 unless the receiver also publishes public Payment Endpoints.
@@ -534,7 +542,8 @@ Tracks local Pubky identity state:
 
 - local public key
 - capability state
-- whether local secret key is available
+- whether the receiver Noise secret key is available (`local_secret_available`
+  is retained as the stored field name)
 - last successful initialization time
 - sign-out generation
 
@@ -866,14 +875,16 @@ configured to manage the whole Paykit public namespace.
 ### Establish Encrypted Link
 
 1. Ensure the identity is private-link-capable.
-2. Start an initiator or responder Encrypted Link Handshake through
+2. Fetch the counterparty Receiver Marker from its Pubky identity homeserver
+   and read its receiver Noise public key.
+3. Start an initiator or responder Encrypted Link Handshake through
    `paykit-lib`.
-3. Persist the handshake snapshot, role, and `linking` peer state.
-4. Advance the stored handshake on retry/poll cycles.
-5. When the handshake is pending, replace the stored handshake snapshot.
-6. When the handshake completes, persist the active link snapshot, clear the
+4. Persist the handshake snapshot, role, and `linking` peer state.
+5. Advance the stored handshake on retry/poll cycles.
+6. When the handshake is pending, replace the stored handshake snapshot.
+7. When the handshake completes, persist the active link snapshot, clear the
    handshake snapshot/role, and mark the peer `linked`.
-7. If the stored handshake or link snapshot cannot be restored, mark the peer
+8. If the stored handshake or link snapshot cannot be restored, mark the peer
    recovery-required and stop private automation for that peer. If a restored
    handshake fails to advance, keep the peer `linking` and retry later.
 
@@ -886,8 +897,9 @@ minimal public signal that the counterparty should relink.
 
 Marker privacy rules:
 
-- derive marker paths per peer pair from local secret material and the
-  counterparty public key
+- derive marker paths per Paykit Receiver Reference pair from the local
+  receiver Noise secret key and the counterparty receiver Noise public key;
+  retain both Pubky identity keys in the path domain
 - keep marker payloads minimal: version, kind, recovery attempt ID, and creation
   time
 - do not include Payment Endpoints, Payment References, message counts, peer

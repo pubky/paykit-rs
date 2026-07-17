@@ -111,11 +111,14 @@ impl InProgressHandshakeSetup {
 
         let initiator_public_key = initiator_session.info().public_key();
         let responder_public_key = responder_session.info().public_key();
+        let initiator_noise_keypair = Keypair::random();
+        let responder_noise_keypair = Keypair::random();
 
         let initiator_handshake = initiate_encrypted_link(
             initiator_session.clone(),
-            initiator_keypair.secret_key(),
+            initiator_noise_keypair.secret_key(),
             responder_public_key,
+            &responder_noise_keypair.public_key(),
             &receiver_path(),
             &receiver_path(),
             initiator_sdk,
@@ -124,8 +127,9 @@ impl InProgressHandshakeSetup {
 
         let responder_handshake = accept_encrypted_link(
             responder_session.clone(),
-            responder_keypair.secret_key(),
+            responder_noise_keypair.secret_key(),
             initiator_public_key,
+            &initiator_noise_keypair.public_key(),
             &receiver_path(),
             &receiver_path(),
             responder_sdk,
@@ -210,12 +214,15 @@ impl PrivateTestSetup {
 
         let sender_public_key = sender_session.info().public_key();
         let receiver_public_key = receiver_session.info().public_key();
+        let sender_noise_keypair = Keypair::random();
+        let receiver_noise_keypair = Keypair::random();
 
         // Initiate handshake from sender side.
         let sender_handshake = initiate_encrypted_link(
             sender_session.clone(),
-            sender_keypair.secret_key(),
+            sender_noise_keypair.secret_key(),
             receiver_public_key,
+            &receiver_noise_keypair.public_key(),
             &receiver_path(),
             &receiver_path(),
             sender_sdk,
@@ -225,8 +232,9 @@ impl PrivateTestSetup {
         // Accept handshake from receiver side.
         let receiver_handshake = accept_encrypted_link(
             receiver_session.clone(),
-            receiver_keypair.secret_key(),
+            receiver_noise_keypair.secret_key(),
             sender_public_key,
+            &sender_noise_keypair.public_key(),
             &receiver_path(),
             &receiver_path(),
             receiver_sdk,

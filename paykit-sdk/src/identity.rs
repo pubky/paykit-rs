@@ -111,7 +111,7 @@ pub enum PubkyIdentityCapability {
     PrivateLinkCapable,
 }
 
-/// Local Pubky secret key used for Pubky sessions and Encrypted Links.
+/// Local Pubky identity secret key used for Pubky session and auth operations.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PubkyLocalSecretKey([u8; 32]);
 
@@ -215,18 +215,72 @@ impl From<[u8; 32]> for PubkyLocalSecretKey {
     }
 }
 
+/// Receiver-scoped secret key used for Noise handshakes and private path derivation.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReceiverNoiseSecretKey([u8; 32]);
+
+impl ReceiverNoiseSecretKey {
+    /// Generate a new receiver-scoped Noise secret key.
+    pub fn random() -> Self {
+        Self(pubky::Keypair::random().secret())
+    }
+
+    /// Wrap a 32-byte receiver Noise secret key.
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the secret key bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Return the public key published in this receiver's Receiver Marker.
+    pub fn public_key(&self) -> PublicKey {
+        pubky::Keypair::from_secret(&self.0).public_key()
+    }
+
+    /// Consume the wrapper and return the secret key bytes.
+    pub fn into_inner(mut self) -> [u8; 32] {
+        let bytes = self.0;
+        self.0.zeroize();
+        bytes
+    }
+}
+
+impl fmt::Debug for ReceiverNoiseSecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ReceiverNoiseSecretKey(<redacted>)")
+    }
+}
+
+impl Drop for ReceiverNoiseSecretKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl From<[u8; 32]> for ReceiverNoiseSecretKey {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self::new(bytes)
+    }
+}
+
 /// Live Pubky access used by one SDK runtime for Pubky storage or links.
 ///
-/// The SDK validates that a present local secret key belongs to the session
-/// public key before using it for private-link capability.
+/// The SDK validates that a present local identity secret belongs to the
+/// session public key. Encrypted Links instead use the independent,
+/// receiver-scoped Noise secret key.
 #[derive(Clone)]
 pub struct PubkySessionAccess {
     /// Authenticated Pubky session for local homeserver writes.
     pub session: pubky::PubkySession,
     /// Pubky client used for counterparty homeserver access.
     pub outbox_client: pubky::Pubky,
-    /// Local secret key required for Encrypted Links, when available.
+    /// Local Pubky identity secret key, when available.
     pub local_secret_key: Option<PubkyLocalSecretKey>,
+    /// Receiver-scoped Noise secret key required for Encrypted Links.
+    pub receiver_noise_secret_key: Option<ReceiverNoiseSecretKey>,
 }
 
 impl PubkySessionAccess {
@@ -283,7 +337,7 @@ impl PubkySessionAccess {
     }
 
     fn private_link_capable_unchecked(&self) -> bool {
-        self.local_secret_key.is_some()
+        self.receiver_noise_secret_key.is_some()
     }
 }
 
@@ -336,6 +390,7 @@ impl fmt::Debug for PubkySessionAccess {
             .field("session", &"<redacted>")
             .field("outbox_client", &self.outbox_client)
             .field("local_secret_key", &self.local_secret_key)
+            .field("receiver_noise_secret_key", &self.receiver_noise_secret_key)
             .finish()
     }
 }
@@ -347,7 +402,10 @@ pub struct IdentityState {
     pub public_key: Option<PubkyPublicKey>,
     /// Current Pubky capability.
     pub capability: PubkyIdentityCapability,
-    /// Whether the local secret key is available to the SDK.
+    /// Whether the local receiver Noise secret key is available to the SDK.
+    ///
+    /// The field name is retained for storage compatibility; it does not refer
+    /// to the optional Pubky identity secret key.
     pub local_secret_available: bool,
     /// Last successful initialization time.
     pub initialized_at: DateTime<Utc>,

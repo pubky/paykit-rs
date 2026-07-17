@@ -78,7 +78,7 @@ pub use error::PaykitSdkError;
 #[doc(inline)]
 pub use identity::{
     IdentityState, IdentityStatus, PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey,
-    PubkySessionAccess,
+    PubkySessionAccess, ReceiverNoiseSecretKey,
 };
 #[doc(inline)]
 pub use paykit_lib::{PaykitReceiverCapabilities, PaykitReceiverMarker, PaykitReceiverPath};
