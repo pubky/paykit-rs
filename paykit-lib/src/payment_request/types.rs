@@ -96,7 +96,8 @@ pub struct Recurrence {
     pub starts_at: String,
     /// RFC3339 UTC timestamp using `Z`.
     pub anchor: String,
-    /// Optional RFC3339 UTC timestamp using `Z`.
+    /// Optional RFC3339 UTC timestamp using `Z`, after `starts_at` when
+    /// present.
     pub ends_at: Option<String>,
 }
 
@@ -527,16 +528,23 @@ impl PaymentRequestEventMessage {
 }
 
 impl Recurrence {
+    /// Check `every`, timestamp formats, and that a non-null `ends_at` is
+    /// after `starts_at`. `anchor` ordering is not constrained.
     pub(super) fn validate(&self) -> Result<()> {
         if self.every == 0 {
             return Err(PaykitError::Validation(
                 "Recurrence every must be a positive integer".into(),
             ));
         }
-        parse_utc_timestamp(&self.starts_at, "Recurrence starts_at")?;
+        let starts_at = parse_utc_timestamp(&self.starts_at, "Recurrence starts_at")?;
         parse_utc_timestamp(&self.anchor, "Recurrence anchor")?;
         if let Some(ends_at) = &self.ends_at {
-            parse_utc_timestamp(ends_at, "Recurrence ends_at")?;
+            let ends_at = parse_utc_timestamp(ends_at, "Recurrence ends_at")?;
+            if ends_at <= starts_at {
+                return Err(PaykitError::Validation(
+                    "Recurrence ends_at must be after starts_at".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -621,61 +629,39 @@ mod tests {
         assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("Z suffix")));
     }
 
-    #[test]
-    fn test_recurrence_inverted_window_currently_accepted() {
-        // Pins current spec-conformant behavior: `specs/payment-requests.md`
-        // requires Recurrence `ends_at` to be null or an RFC3339 UTC timestamp
-        // but sets no ordering rule against `starts_at`, so an inverted window
-        // (`ends_at` before `starts_at`) is accepted by the real parser.
-        // Rejecting it would be a spec change with replay implications:
-        // previously valid stored `paykit.payment_request` events would become
-        // validation errors on durable replay. Tightening requires a spec
-        // amendment with spec-owner sign-off and must show up as a visible
-        // diff against this test.
-        let json = r#"{
-            "version": 1,
-            "kind": "paykit.payment_request",
-            "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
-            "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
-            "request": {
-                "amount": { "value": "0.001", "asset": "btc" },
-                "payment_reference": "invoice-2026-0001",
-                "proposal_expires_at": null,
-                "recurrence": {
-                    "every": 1,
-                    "unit": "month",
-                    "starts_at": "2026-07-01T00:00:00Z",
-                    "anchor": "2026-07-01T00:00:00Z",
-                    "ends_at": "2026-06-01T00:00:00Z"
-                },
-                "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
-                "metadata": {}
-            }
-        }"#;
-
-        let request = super::super::wire::parse_payment_request_json(json)
-            .expect("inverted Recurrence window is currently accepted");
-        let recurrence = request.request.recurrence.expect("Recurrence is present");
-        assert!(recurrence.validate().is_ok());
-        assert_eq!(recurrence.starts_at, "2026-07-01T00:00:00Z");
-        assert_eq!(recurrence.ends_at.as_deref(), Some("2026-06-01T00:00:00Z"));
+    fn recurrence_with_ends_at(ends_at: Option<&str>) -> Recurrence {
+        Recurrence {
+            every: 1,
+            unit: RecurrenceUnit::Month,
+            starts_at: "2026-07-01T00:00:00Z".to_string(),
+            anchor: "2026-07-01T00:00:00Z".to_string(),
+            ends_at: ends_at.map(str::to_string),
+        }
     }
 
     #[test]
-    fn test_billing_period_inverted_rejected() {
-        // Contrast with `test_recurrence_inverted_window_currently_accepted`:
-        // `specs/payment-requests.md` DOES require Billing Period `ends_at` to
-        // be after `starts_at`, and the validator enforces it. The Recurrence
-        // gap pinned above is a genuine spec-level asymmetry between two
-        // distinct validation paths, not an oversight in one shared validator.
-        let period = BillingPeriod {
-            starts_at: "2026-07-01T00:00:00Z".to_string(),
-            ends_at: "2026-06-01T00:00:00Z".to_string(),
-        };
-        let err = period.validate().unwrap_err();
+    fn recurrence_rejects_ends_at_before_starts_at() {
+        // specs/payment-requests.md: non-null ends_at MUST be after starts_at.
+        let recurrence = recurrence_with_ends_at(Some("2026-06-01T00:00:00Z"));
+        let err = recurrence.validate().unwrap_err();
         assert!(
             matches!(err, PaykitError::Validation(ref msg) if msg.contains("ends_at must be after starts_at"))
         );
+    }
+
+    #[test]
+    fn recurrence_rejects_ends_at_equal_to_starts_at() {
+        let recurrence = recurrence_with_ends_at(Some("2026-07-01T00:00:00Z"));
+        let err = recurrence.validate().unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("ends_at must be after starts_at"))
+        );
+    }
+
+    #[test]
+    fn recurrence_accepts_ends_at_after_starts_at() {
+        let recurrence = recurrence_with_ends_at(Some("2026-08-01T00:00:00Z"));
+        recurrence.validate().unwrap();
     }
 
     #[test]

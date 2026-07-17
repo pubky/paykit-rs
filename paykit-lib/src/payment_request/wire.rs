@@ -764,6 +764,35 @@ mod tests {
     }
 
     #[test]
+    fn payment_request_rejects_invalid_recurrence_window_order() {
+        let json = r#"{
+            "version": 1,
+            "kind": "paykit.payment_request",
+            "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+            "request": {
+                "amount": { "value": "0.001", "asset": "btc" },
+                "payment_reference": "invoice-2026-0001",
+                "proposal_expires_at": null,
+                "recurrence": {
+                    "every": 1,
+                    "unit": "month",
+                    "starts_at": "2026-07-01T00:00:00Z",
+                    "anchor": "2026-07-01T00:00:00Z",
+                    "ends_at": "2026-06-01T00:00:00Z"
+                },
+                "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
+                "metadata": {}
+            }
+        }"#;
+
+        let err = parse_payment_request_json(json).unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("ends_at must be after starts_at"))
+        );
+    }
+
+    #[test]
     fn acceptance_reason_is_invalid_when_present() {
         let json = r#"{
             "version": 1,

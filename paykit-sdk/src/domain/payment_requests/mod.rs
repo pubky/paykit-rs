@@ -137,7 +137,8 @@ pub struct PaymentRequestRecurrenceRecord {
     pub starts_at: String,
     /// RFC3339 UTC timestamp using `Z`.
     pub anchor: String,
-    /// Optional RFC3339 UTC timestamp using `Z`.
+    /// Optional RFC3339 UTC timestamp using `Z`, after `starts_at` when
+    /// present.
     pub ends_at: Option<String>,
 }
 
