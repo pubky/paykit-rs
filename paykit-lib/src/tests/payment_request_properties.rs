@@ -166,6 +166,30 @@ fn recurrence_unit() -> impl Strategy<Value = RecurrenceUnit> {
     ]
 }
 
+/// Build a valid Recurrence window: the optional `ends_at` is the `starts_at`
+/// instant shifted a whole number of years forward, so it is always strictly
+/// after `starts_at` as the validator requires.
+///
+/// NARROWER THAN THE DOMAIN: `ends_at` shares the month/day/time of
+/// `starts_at`; the validator accepts any strictly later timestamp.
+fn recurrence_window() -> impl Strategy<Value = (String, Option<String>)> {
+    (
+        2000u32..2050,
+        1u32..=12,
+        1u32..=28,
+        0u32..=23,
+        0u32..=59,
+        0u32..=59,
+        proptest::option::of(1u32..=50),
+    )
+        .prop_map(|(y, mo, d, h, mi, s, end_year_offset)| {
+            let starts_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+            let ends_at = end_year_offset
+                .map(|offset| format!("{:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z", y + offset));
+            (starts_at, ends_at)
+        })
+}
+
 /// Build a valid `Recurrence`.
 ///
 /// NARROWER THAN THE DOMAIN: `every` is capped at 1_000; the type allows any
@@ -174,11 +198,10 @@ fn recurrence() -> impl Strategy<Value = Recurrence> {
     (
         1u32..=1000,
         recurrence_unit(),
+        recurrence_window(),
         utc_timestamp(),
-        utc_timestamp(),
-        proptest::option::of(utc_timestamp()),
     )
-        .prop_map(|(every, unit, starts_at, anchor, ends_at)| Recurrence {
+        .prop_map(|(every, unit, (starts_at, ends_at), anchor)| Recurrence {
             every,
             unit,
             starts_at,
