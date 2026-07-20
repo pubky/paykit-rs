@@ -34,6 +34,9 @@ pub(crate) struct PaymentAmountWire {
     pub(crate) asset: String,
 }
 
+// Intentionally performs no validation so deserialization can carry raw wire
+// strings across the parse boundary. Callers must validate the resulting
+// `PaymentAmount` before treating it as well-formed.
 impl From<PaymentAmountWire> for PaymentAmount {
     fn from(wire: PaymentAmountWire) -> Self {
         Self {

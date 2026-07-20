@@ -84,4 +84,34 @@ mod tests {
         let err = PaymentAmount::new("10.00", "").unwrap_err();
         assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("must not be empty")));
     }
+
+    #[test]
+    fn payment_amount_rejects_control_character_asset() {
+        let err = PaymentAmount::new("10.00", "usd\n").unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("control characters")));
+    }
+
+    #[test]
+    fn payment_amount_rejects_multiple_decimal_points() {
+        let err = PaymentAmount::new("1.2.3", "usd").unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("decimal string")));
+    }
+
+    #[test]
+    fn payment_amount_rejects_lone_decimal_point() {
+        let err = PaymentAmount::new(".", "usd").unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("at least one digit")));
+    }
+
+    // Pin of currently-accepted behavior: values with a bare leading or
+    // trailing decimal point (".5", "10.") pass validation today. Tightening
+    // this is a protocol decision; this test makes any such change a visible
+    // diff rather than a silent one.
+    #[test]
+    fn test_payment_amount_bare_decimal_point_currently_accepted() {
+        let leading = PaymentAmount::new(".5", "usd").unwrap();
+        assert_eq!(leading.value, ".5");
+        let trailing = PaymentAmount::new("10.", "usd").unwrap();
+        assert_eq!(trailing.value, "10.");
+    }
 }
