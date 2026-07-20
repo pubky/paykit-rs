@@ -30,6 +30,7 @@ async fn test_restore_backup_state_requires_active_identity() {
     storage
         .save_identity_state(IdentityState {
             public_key: Some(existing_public_key.clone()),
+            receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 7,
         })
@@ -41,6 +42,7 @@ async fn test_restore_backup_state_requires_active_identity() {
         local_receiver_path: receiver_path(),
         identity_state: Some(IdentityState {
             public_key: Some(backup_public_key),
+            receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         }),

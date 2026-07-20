@@ -50,6 +50,13 @@ where
                 source: None,
             });
         }
+        let receiver_noise_public_key = session_access.receiver_noise_public_key();
+        if backup.identity_receiver_noise_public_key() != Some(&receiver_noise_public_key) {
+            return Err(PaykitSdkError::Identity {
+                context: "backup receiver Noise key does not match active receiver".into(),
+                source: None,
+            });
+        }
         let required_capabilities = self.config.required_session_capabilities();
         session_access.validate_for_capabilities(&required_capabilities)?;
         Ok(session_access)
@@ -60,18 +67,23 @@ where
         session_access: &PubkySessionAccess,
     ) -> Result<IdentityState> {
         let public_key = session_access.public_key()?;
+        let receiver_noise_public_key = session_access.receiver_noise_public_key();
         let required_capabilities = self.config.required_session_capabilities();
         session_access.validate_for_capabilities(&required_capabilities)?;
         let initialized_at = self.clock.now();
         self.storage
             .transaction(move |tx| {
                 if let Some(identity) = tx.load_identity_state() {
-                    if identity.public_key.as_ref() == Some(&public_key) {
+                    if identity.public_key.as_ref() == Some(&public_key)
+                        && identity.receiver_noise_public_key.as_ref()
+                            == Some(&receiver_noise_public_key)
+                    {
                         return Ok(identity);
                     }
                 }
                 Ok(IdentityState {
                     public_key: Some(public_key),
+                    receiver_noise_public_key: Some(receiver_noise_public_key),
                     initialized_at,
                     sign_out_generation: 0,
                 })

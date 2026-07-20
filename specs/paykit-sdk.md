@@ -539,6 +539,7 @@ records should be stable.
 Tracks local Pubky identity state:
 
 - local public key
+- receiver-scoped Noise public key
 - last successful initialization time
 - sign-out generation
 

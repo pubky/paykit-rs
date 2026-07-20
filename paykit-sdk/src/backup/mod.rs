@@ -612,6 +612,21 @@ impl SdkBackupState {
             }
         }
 
+        if let Some(current_receiver_noise_public_key) =
+            current_identity.and_then(|state| state.receiver_noise_public_key.as_ref())
+        {
+            let backup_receiver_noise_public_key = self
+                .identity_state
+                .as_ref()
+                .and_then(|state| state.receiver_noise_public_key.as_ref());
+            if backup_receiver_noise_public_key != Some(current_receiver_noise_public_key) {
+                return Err(PaykitSdkError::Identity {
+                    context: "backup receiver Noise key does not match current receiver".into(),
+                    source: None,
+                });
+            }
+        }
+
         let backup_public_key = self
             .identity_state
             .as_ref()
@@ -629,6 +644,12 @@ impl SdkBackupState {
         self.identity_state
             .as_ref()
             .and_then(|state| state.public_key.as_ref())
+    }
+
+    pub(crate) fn identity_receiver_noise_public_key(&self) -> Option<&PubkyPublicKey> {
+        self.identity_state
+            .as_ref()
+            .and_then(|state| state.receiver_noise_public_key.as_ref())
     }
 
     pub(crate) fn has_identity_scoped_state(&self) -> bool {

@@ -18,6 +18,10 @@ use crate::errors::storage_error;
 use crate::storage::{decode_storage_state, encode_storage_state, FfiSdkStorage};
 use crate::*;
 
+fn receiver_noise_public_key() -> PubkyPublicKey {
+    PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[7; 32]).public_key())
+}
+
 #[test]
 fn test_default_config_round_trips_to_sdk_config() {
     let ffi = default_config("bitkit/wallet".into()).unwrap();
@@ -164,6 +168,7 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     let mut state = StorageState {
         identity_state: Some(IdentityState {
             public_key: Some(local_key),
+            receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: now,
             sign_out_generation: 0,
         }),

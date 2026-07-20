@@ -277,6 +277,11 @@ impl PubkySessionAccess {
         ))
     }
 
+    /// Return the receiver-scoped Noise public key.
+    pub(crate) fn receiver_noise_public_key(&self) -> PubkyPublicKey {
+        PubkyPublicKey::from_public_key(&self.receiver_noise_secret_key.public_key())
+    }
+
     /// Validate that the local secret key, when present, belongs to the session.
     pub fn validate(&self) -> crate::Result<()> {
         let Some(local_secret_key) = &self.local_secret_key else {
@@ -360,6 +365,8 @@ impl fmt::Debug for PubkySessionAccess {
 pub struct IdentityState {
     /// Persisted local public key, or `None` after explicit sign-out.
     pub public_key: Option<PubkyPublicKey>,
+    /// Persisted receiver-scoped Noise public key, or `None` after sign-out.
+    pub receiver_noise_public_key: Option<PubkyPublicKey>,
     /// Last successful initialization time.
     pub initialized_at: DateTime<Utc>,
     /// Monotonic generation used to separate state across sign-outs.

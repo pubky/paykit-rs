@@ -14,6 +14,10 @@ fn public_key() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
+fn receiver_noise_public_key() -> PubkyPublicKey {
+    PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[7; 32]).public_key())
+}
+
 fn receiver_path() -> paykit_lib::PaykitReceiverPath {
     paykit_lib::PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
@@ -36,6 +40,7 @@ fn recovery_required_peer(public_key: &PubkyPublicKey) -> RestoreRecoveryRequire
 fn identity(public_key: PubkyPublicKey) -> IdentityState {
     IdentityState {
         public_key: Some(public_key),
+        receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 0,
     }
@@ -44,6 +49,7 @@ fn identity(public_key: PubkyPublicKey) -> IdentityState {
 fn signed_out_identity(sign_out_generation: u64) -> IdentityState {
     IdentityState {
         public_key: None,
+        receiver_noise_public_key: None,
         initialized_at: timestamp(),
         sign_out_generation,
     }

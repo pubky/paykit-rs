@@ -282,6 +282,7 @@ where
                 tx.clear_identity_scoped_state();
                 let state = IdentityState {
                     public_key: None,
+                    receiver_noise_public_key: None,
                     initialized_at: now,
                     sign_out_generation: generation,
                 };
@@ -309,6 +310,7 @@ where
 
                     let state = IdentityState {
                         public_key: None,
+                        receiver_noise_public_key: None,
                         initialized_at: now,
                         sign_out_generation: 0,
                     };
@@ -321,38 +323,14 @@ where
         };
 
         let required_capabilities = self.config.required_session_capabilities();
-        let public_key = Some(session_access.public_key()?);
+        let active_identity = ActiveReceiverIdentity {
+            public_key: session_access.public_key()?,
+            receiver_noise_public_key: session_access.receiver_noise_public_key(),
+        };
         session_access.validate_for_capabilities(&required_capabilities)?;
         let state = self
             .storage
-            .transaction(move |tx| {
-                let previous = tx.load_identity_state();
-                let identity_missing = previous.is_none();
-                let previous_generation = previous
-                    .as_ref()
-                    .map(|state| state.sign_out_generation)
-                    .unwrap_or_default();
-                let identity_changed = previous
-                    .as_ref()
-                    .is_some_and(|state| state.public_key != public_key);
-                let generation = if identity_changed {
-                    previous_generation.saturating_add(1)
-                } else {
-                    previous_generation
-                };
-
-                if identity_missing || identity_changed {
-                    tx.clear_identity_scoped_state();
-                }
-
-                let state = IdentityState {
-                    public_key,
-                    initialized_at: now,
-                    sign_out_generation: generation,
-                };
-                tx.save_identity_state(state.clone());
-                Ok(state)
-            })
+            .transaction(move |tx| Ok(refresh_active_identity(tx, active_identity, now)))
             .await?;
 
         Ok((session, state))
@@ -459,6 +437,70 @@ where
             Ok(())
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActiveReceiverIdentity {
+    public_key: PubkyPublicKey,
+    receiver_noise_public_key: PubkyPublicKey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdentityTransition {
+    Initial,
+    PubkyIdentityChanged,
+    ReceiverNoiseKeyChanged,
+    Unchanged,
+}
+
+fn refresh_active_identity(
+    tx: &mut dyn StorageTransaction,
+    active: ActiveReceiverIdentity,
+    initialized_at: DateTime<Utc>,
+) -> IdentityState {
+    let previous = tx.load_identity_state();
+    let transition = identity_transition(previous.as_ref(), &active);
+    let previous_generation = previous
+        .as_ref()
+        .map(|state| state.sign_out_generation)
+        .unwrap_or_default();
+
+    match transition {
+        IdentityTransition::Initial | IdentityTransition::PubkyIdentityChanged => {
+            tx.clear_identity_scoped_state();
+        }
+        IdentityTransition::ReceiverNoiseKeyChanged => tx.clear_private_identity_scoped_state(),
+        IdentityTransition::Unchanged => {}
+    }
+
+    let sign_out_generation = match transition {
+        IdentityTransition::PubkyIdentityChanged => previous_generation.saturating_add(1),
+        _ => previous_generation,
+    };
+    let state = IdentityState {
+        public_key: Some(active.public_key),
+        receiver_noise_public_key: Some(active.receiver_noise_public_key),
+        initialized_at,
+        sign_out_generation,
+    };
+    tx.save_identity_state(state.clone());
+    state
+}
+
+fn identity_transition(
+    previous: Option<&IdentityState>,
+    active: &ActiveReceiverIdentity,
+) -> IdentityTransition {
+    let Some(previous) = previous else {
+        return IdentityTransition::Initial;
+    };
+    if previous.public_key.as_ref() != Some(&active.public_key) {
+        return IdentityTransition::PubkyIdentityChanged;
+    }
+    if previous.receiver_noise_public_key.as_ref() != Some(&active.receiver_noise_public_key) {
+        return IdentityTransition::ReceiverNoiseKeyChanged;
+    }
+    IdentityTransition::Unchanged
 }
 
 async fn fetch_public_text(

@@ -651,6 +651,10 @@ fn other_receiver_path() -> PaykitReceiverPath {
     PaykitReceiverPath::new("tether/wallet").unwrap()
 }
 
+fn receiver_noise_public_key() -> PubkyPublicKey {
+    PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[7; 32]).public_key())
+}
+
 async fn seed_initialized_identity_and_link(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,
@@ -660,6 +664,7 @@ async fn seed_initialized_identity_and_link(
             public_key: Some(PubkyPublicKey::from_public_key(
                 &pubky::Keypair::random().public_key(),
             )),
+            receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -691,6 +696,7 @@ async fn seed_initialized_identity_and_handshake(
             public_key: Some(PubkyPublicKey::from_public_key(
                 &pubky::Keypair::random().public_key(),
             )),
+            receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })

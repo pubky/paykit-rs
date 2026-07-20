@@ -983,6 +983,7 @@ async fn test_current_private_payment_list_reads_cached_view_without_live_sessio
                 public_key: Some(PubkyPublicKey::from_public_key(
                     &pubky::Keypair::random().public_key(),
                 )),
+                receiver_noise_public_key: Some(receiver_noise_public_key()),
                 initialized_at: FixedClock.now(),
                 sign_out_generation: 0,
             });

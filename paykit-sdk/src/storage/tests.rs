@@ -19,6 +19,10 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
+fn receiver_noise_public_key() -> PubkyPublicKey {
+    PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[7; 32]).public_key())
+}
+
 fn receiver_path() -> PaykitReceiverPath {
     PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
@@ -147,6 +151,7 @@ async fn test_storage_adapter_supports_erased_transactions() {
     let identity_public_key = counterparty();
     let saved_identity = crate::IdentityState {
         public_key: Some(identity_public_key.clone()),
+        receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 0,
     };
@@ -755,6 +760,7 @@ async fn test_clear_identity_scoped_state_preserves_identity_only() {
     let counterparty = counterparty();
     let identity = IdentityState {
         public_key: Some(counterparty.clone()),
+        receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 1,
     };
@@ -825,6 +831,7 @@ async fn test_clear_private_identity_scoped_state_preserves_public_endpoints() {
     let counterparty = counterparty();
     let identity = IdentityState {
         public_key: Some(counterparty.clone()),
+        receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 1,
     };
