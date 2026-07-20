@@ -8,14 +8,17 @@ use std::{
 
 use super::*;
 use super::{
-    payment_resolution::{payable_from_batch, prefer_private_endpoints, PrivateRecoveryOutcome},
+    payment_resolution::{
+        private_payable_from_batch, public_payable_from_batch, PrivateRecoveryOutcome,
+    },
     recovery::{local_recovery_marker_belongs_to_current_episode, RecoveryRequiredUpdate},
 };
 use crate::{
     domain::adapters::{
-        PaymentEndpointCandidate, PaymentEndpointReservation,
-        PaymentEndpointReservationCancellation, PaymentEndpointSelectionRequest, PaymentTarget,
-        ReceivingDetail, ReceivingDetailScope,
+        PaymentTarget, PrivatePaymentEndpointCandidate, PrivatePaymentEndpointReservation,
+        PrivatePaymentEndpointReservationCancellation, PrivatePaymentEndpointSelectionRequest,
+        PrivateReceivingDetail, PublicPaymentEndpointCandidate,
+        PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
     },
     domain::endpoint_reservations::queue_private_payment_list_with_reservations,
     domain::private_stream::persist_private_stream_batch,
@@ -92,30 +95,44 @@ struct TestPaymentAdapter;
 
 #[async_trait]
 impl PaymentAdapter for TestPaymentAdapter {
-    async fn current_receiving_details(
-        &self,
-        _scope: ReceivingDetailScope,
-    ) -> Result<Vec<ReceivingDetail>> {
+    async fn current_public_receiving_details(&self) -> Result<Vec<PublicReceivingDetail>> {
         Ok(Vec::new())
     }
 
-    async fn cancel_receiving_detail_reservation(
+    async fn current_private_receiving_details(
         &self,
-        _release: &PaymentEndpointReservationCancellation,
-    ) -> Result<()> {
-        Ok(())
+        _counterparty: &PubkyPublicKey,
+        _counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Result<Vec<PrivateReceivingDetail>> {
+        Ok(Vec::new())
     }
 
-    async fn select_payment_endpoints(
+    async fn select_public_payment_endpoints(
         &self,
-        request: &PaymentEndpointSelectionRequest,
-    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        request: &PublicPaymentEndpointSelectionRequest,
+    ) -> Result<Vec<PublicPaymentEndpointCandidate>> {
         Ok(request.candidates.clone())
     }
 
-    async fn build_payment_target(
+    async fn build_public_payment_target(
         &self,
-        endpoint: &PaymentEndpointCandidate,
+        endpoint: &PublicPaymentEndpointCandidate,
+    ) -> Result<PaymentTarget> {
+        Ok(PaymentTarget {
+            payload: endpoint.payload.clone(),
+        })
+    }
+
+    async fn select_private_payment_endpoints(
+        &self,
+        request: &PrivatePaymentEndpointSelectionRequest,
+    ) -> Result<Vec<PrivatePaymentEndpointCandidate>> {
+        Ok(request.candidates.clone())
+    }
+
+    async fn build_private_payment_target(
+        &self,
+        endpoint: &PrivatePaymentEndpointCandidate,
     ) -> Result<PaymentTarget> {
         Ok(PaymentTarget {
             payload: endpoint.payload.clone(),
@@ -127,38 +144,22 @@ struct PrivateListPaymentAdapter;
 
 #[async_trait]
 impl PaymentAdapter for PrivateListPaymentAdapter {
-    async fn current_receiving_details(
+    async fn current_private_receiving_details(
         &self,
-        scope: ReceivingDetailScope,
-    ) -> Result<Vec<ReceivingDetail>> {
-        assert!(matches!(scope, ReceivingDetailScope::Private { .. }));
-        Ok(vec![ReceivingDetail {
+        _counterparty: &PubkyPublicKey,
+        _counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Result<Vec<PrivateReceivingDetail>> {
+        Ok(vec![PrivateReceivingDetail {
             identifier: "btc-lightning-bolt11".into(),
             payload: "ln-private".into(),
         }])
     }
 
-    async fn cancel_receiving_detail_reservation(
+    async fn cancel_private_receiving_detail_reservation(
         &self,
-        _release: &PaymentEndpointReservationCancellation,
+        _release: &PrivatePaymentEndpointReservationCancellation,
     ) -> Result<()> {
         Ok(())
-    }
-
-    async fn select_payment_endpoints(
-        &self,
-        _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<Vec<PaymentEndpointCandidate>> {
-        Ok(Vec::new())
-    }
-
-    async fn build_payment_target(
-        &self,
-        endpoint: &PaymentEndpointCandidate,
-    ) -> Result<PaymentTarget> {
-        Ok(PaymentTarget {
-            payload: endpoint.payload.clone(),
-        })
     }
 }
 
@@ -166,22 +167,15 @@ struct ReservedPrivateListPaymentAdapter;
 
 #[async_trait]
 impl PaymentAdapter for ReservedPrivateListPaymentAdapter {
-    async fn current_receiving_details(
-        &self,
-        _scope: ReceivingDetailScope,
-    ) -> Result<Vec<ReceivingDetail>> {
-        panic!("reservation-capable adapter should not use fallback details");
-    }
-
-    async fn reserve_receiving_details(
+    async fn reserve_private_receiving_details(
         &self,
         counterparty: &PubkyPublicKey,
         _counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
+    ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>> {
         assert!(!counterparty.as_str().is_empty());
-        Ok(Some(vec![PaymentEndpointReservation {
+        Ok(Some(vec![PrivatePaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "ln-reserved".into(),
             },
@@ -190,27 +184,11 @@ impl PaymentAdapter for ReservedPrivateListPaymentAdapter {
         }]))
     }
 
-    async fn cancel_receiving_detail_reservation(
+    async fn cancel_private_receiving_detail_reservation(
         &self,
-        _release: &PaymentEndpointReservationCancellation,
+        _release: &PrivatePaymentEndpointReservationCancellation,
     ) -> Result<()> {
         Ok(())
-    }
-
-    async fn select_payment_endpoints(
-        &self,
-        request: &PaymentEndpointSelectionRequest,
-    ) -> Result<Vec<PaymentEndpointCandidate>> {
-        Ok(request.candidates.clone())
-    }
-
-    async fn build_payment_target(
-        &self,
-        endpoint: &PaymentEndpointCandidate,
-    ) -> Result<PaymentTarget> {
-        Ok(PaymentTarget {
-            payload: endpoint.payload.clone(),
-        })
     }
 }
 
@@ -220,31 +198,24 @@ struct InvalidReservedPrivateListPaymentAdapter {
 
 #[async_trait]
 impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
-    async fn current_receiving_details(
-        &self,
-        _scope: ReceivingDetailScope,
-    ) -> Result<Vec<ReceivingDetail>> {
-        panic!("reservation-capable adapter should not use fallback details");
-    }
-
-    async fn reserve_receiving_details(
+    async fn reserve_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
         _counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
+    ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>> {
         Ok(Some(vec![
-            PaymentEndpointReservation {
+            PrivatePaymentEndpointReservation {
                 reservation_id: "reservation-1".into(),
-                receiving_detail: ReceivingDetail {
+                receiving_detail: PrivateReceivingDetail {
                     identifier: "btc-lightning-bolt11".into(),
                     payload: "one".into(),
                 },
                 expires_at: None,
                 attribution: HashMap::new(),
             },
-            PaymentEndpointReservation {
+            PrivatePaymentEndpointReservation {
                 reservation_id: "reservation-2".into(),
-                receiving_detail: ReceivingDetail {
+                receiving_detail: PrivateReceivingDetail {
                     identifier: "btc-lightning-bolt11".into(),
                     payload: "two".into(),
                 },
@@ -254,9 +225,9 @@ impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
         ]))
     }
 
-    async fn cancel_receiving_detail_reservation(
+    async fn cancel_private_receiving_detail_reservation(
         &self,
-        cancellation: &PaymentEndpointReservationCancellation,
+        cancellation: &PrivatePaymentEndpointReservationCancellation,
     ) -> Result<()> {
         self.canceled
             .lock()
@@ -264,66 +235,19 @@ impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
             .push(cancellation.reservation_id.clone());
         Ok(())
     }
-
-    async fn select_payment_endpoints(
-        &self,
-        _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<Vec<PaymentEndpointCandidate>> {
-        Ok(Vec::new())
-    }
-
-    async fn build_payment_target(
-        &self,
-        endpoint: &PaymentEndpointCandidate,
-    ) -> Result<PaymentTarget> {
-        Ok(PaymentTarget {
-            payload: endpoint.payload.clone(),
-        })
-    }
 }
 
 struct FailingCancellationPaymentAdapter;
 
 #[async_trait]
 impl PaymentAdapter for FailingCancellationPaymentAdapter {
-    async fn current_receiving_details(
+    async fn cancel_private_receiving_detail_reservation(
         &self,
-        _scope: ReceivingDetailScope,
-    ) -> Result<Vec<ReceivingDetail>> {
-        Ok(Vec::new())
-    }
-
-    async fn reserve_receiving_details(
-        &self,
-        _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
-        Ok(None)
-    }
-
-    async fn cancel_receiving_detail_reservation(
-        &self,
-        _release: &PaymentEndpointReservationCancellation,
+        _release: &PrivatePaymentEndpointReservationCancellation,
     ) -> Result<()> {
         Err(PaykitSdkError::PaymentAdapter {
             context: "cancellation failed".into(),
             source: None,
-        })
-    }
-
-    async fn select_payment_endpoints(
-        &self,
-        _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<Vec<PaymentEndpointCandidate>> {
-        Ok(Vec::new())
-    }
-
-    async fn build_payment_target(
-        &self,
-        endpoint: &PaymentEndpointCandidate,
-    ) -> Result<PaymentTarget> {
-        Ok(PaymentTarget {
-            payload: endpoint.payload.clone(),
         })
     }
 }
@@ -336,24 +260,9 @@ struct LeaseChangingCancellationPaymentAdapter {
 
 #[async_trait]
 impl PaymentAdapter for LeaseChangingCancellationPaymentAdapter {
-    async fn current_receiving_details(
+    async fn cancel_private_receiving_detail_reservation(
         &self,
-        _scope: ReceivingDetailScope,
-    ) -> Result<Vec<ReceivingDetail>> {
-        Ok(Vec::new())
-    }
-
-    async fn reserve_receiving_details(
-        &self,
-        _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
-        Ok(None)
-    }
-
-    async fn cancel_receiving_detail_reservation(
-        &self,
-        cancellation: &PaymentEndpointReservationCancellation,
+        cancellation: &PrivatePaymentEndpointReservationCancellation,
     ) -> Result<()> {
         self.storage
             .transaction({
@@ -375,22 +284,6 @@ impl PaymentAdapter for LeaseChangingCancellationPaymentAdapter {
             .push(cancellation.reservation_id.clone());
         Ok(())
     }
-
-    async fn select_payment_endpoints(
-        &self,
-        _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<Vec<PaymentEndpointCandidate>> {
-        Ok(Vec::new())
-    }
-
-    async fn build_payment_target(
-        &self,
-        endpoint: &PaymentEndpointCandidate,
-    ) -> Result<PaymentTarget> {
-        Ok(PaymentTarget {
-            payload: endpoint.payload.clone(),
-        })
-    }
 }
 
 struct LeaseChangingInvalidReservedPrivateListPaymentAdapter {
@@ -401,18 +294,11 @@ struct LeaseChangingInvalidReservedPrivateListPaymentAdapter {
 
 #[async_trait]
 impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
-    async fn current_receiving_details(
-        &self,
-        _scope: ReceivingDetailScope,
-    ) -> Result<Vec<ReceivingDetail>> {
-        panic!("reservation-capable adapter should not use fallback details");
-    }
-
-    async fn reserve_receiving_details(
+    async fn reserve_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
         _counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
+    ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>> {
         self.storage
             .transaction({
                 let counterparty = self.counterparty.clone();
@@ -428,18 +314,18 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
             })
             .await?;
         Ok(Some(vec![
-            PaymentEndpointReservation {
+            PrivatePaymentEndpointReservation {
                 reservation_id: "reservation-1".into(),
-                receiving_detail: ReceivingDetail {
+                receiving_detail: PrivateReceivingDetail {
                     identifier: "btc-lightning-bolt11".into(),
                     payload: "one".into(),
                 },
                 expires_at: None,
                 attribution: HashMap::new(),
             },
-            PaymentEndpointReservation {
+            PrivatePaymentEndpointReservation {
                 reservation_id: "reservation-2".into(),
-                receiving_detail: ReceivingDetail {
+                receiving_detail: PrivateReceivingDetail {
                     identifier: "btc-onchain-address".into(),
                     payload: "two".into(),
                 },
@@ -449,31 +335,15 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
         ]))
     }
 
-    async fn cancel_receiving_detail_reservation(
+    async fn cancel_private_receiving_detail_reservation(
         &self,
-        cancellation: &PaymentEndpointReservationCancellation,
+        cancellation: &PrivatePaymentEndpointReservationCancellation,
     ) -> Result<()> {
         self.canceled
             .lock()
             .unwrap()
             .push(cancellation.reservation_id.clone());
         Ok(())
-    }
-
-    async fn select_payment_endpoints(
-        &self,
-        _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<Vec<PaymentEndpointCandidate>> {
-        Ok(Vec::new())
-    }
-
-    async fn build_payment_target(
-        &self,
-        endpoint: &PaymentEndpointCandidate,
-    ) -> Result<PaymentTarget> {
-        Ok(PaymentTarget {
-            payload: endpoint.payload.clone(),
-        })
     }
 }
 
@@ -483,31 +353,24 @@ struct MixedExistingReservedPrivateListPaymentAdapter {
 
 #[async_trait]
 impl PaymentAdapter for MixedExistingReservedPrivateListPaymentAdapter {
-    async fn current_receiving_details(
-        &self,
-        _scope: ReceivingDetailScope,
-    ) -> Result<Vec<ReceivingDetail>> {
-        panic!("reservation-capable adapter should not use fallback details");
-    }
-
-    async fn reserve_receiving_details(
+    async fn reserve_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
         _counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Result<Option<Vec<PaymentEndpointReservation>>> {
+    ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>> {
         Ok(Some(vec![
-            PaymentEndpointReservation {
+            PrivatePaymentEndpointReservation {
                 reservation_id: "existing-reservation".into(),
-                receiving_detail: ReceivingDetail {
+                receiving_detail: PrivateReceivingDetail {
                     identifier: "btc-lightning-bolt11".into(),
                     payload: "existing".into(),
                 },
                 expires_at: None,
                 attribution: HashMap::new(),
             },
-            PaymentEndpointReservation {
+            PrivatePaymentEndpointReservation {
                 reservation_id: "conflicting-reservation".into(),
-                receiving_detail: ReceivingDetail {
+                receiving_detail: PrivateReceivingDetail {
                     identifier: "btc-lightning-bolt11".into(),
                     payload: "conflict".into(),
                 },
@@ -517,31 +380,15 @@ impl PaymentAdapter for MixedExistingReservedPrivateListPaymentAdapter {
         ]))
     }
 
-    async fn cancel_receiving_detail_reservation(
+    async fn cancel_private_receiving_detail_reservation(
         &self,
-        cancellation: &PaymentEndpointReservationCancellation,
+        cancellation: &PrivatePaymentEndpointReservationCancellation,
     ) -> Result<()> {
         self.canceled
             .lock()
             .unwrap()
             .push(cancellation.reservation_id.clone());
         Ok(())
-    }
-
-    async fn select_payment_endpoints(
-        &self,
-        _request: &PaymentEndpointSelectionRequest,
-    ) -> Result<Vec<PaymentEndpointCandidate>> {
-        Ok(Vec::new())
-    }
-
-    async fn build_payment_target(
-        &self,
-        endpoint: &PaymentEndpointCandidate,
-    ) -> Result<PaymentTarget> {
-        Ok(PaymentTarget {
-            payload: endpoint.payload.clone(),
-        })
     }
 }
 
@@ -616,11 +463,19 @@ fn conflicted_event_dedup_record(access: &ReceiptAccessRecord) -> EventDedupReco
     }
 }
 
-fn endpoint_candidate(payload: &str) -> PaymentEndpointCandidate {
-    PaymentEndpointCandidate {
+fn private_endpoint_candidate(payload: &str) -> PrivatePaymentEndpointCandidate {
+    PrivatePaymentEndpointCandidate {
         counterparty: PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
         counterparty_receiver_path: receiver_path(),
-        source: PaymentEndpointSource::PrivatePaymentList,
+        identifier: "btc-lightning-bolt11".into(),
+        payload: payload.into(),
+    }
+}
+
+fn public_endpoint_candidate(payload: &str) -> PublicPaymentEndpointCandidate {
+    PublicPaymentEndpointCandidate {
+        counterparty: PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
+        counterparty_receiver_path: receiver_path(),
         identifier: "btc-lightning-bolt11".into(),
         payload: payload.into(),
     }

@@ -61,7 +61,7 @@ where
         &self,
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
-        receiving_details: Vec<ReceivingDetail>,
+        receiving_details: Vec<PrivateReceivingDetail>,
     ) -> Result<OutboundPrivateMessageRecord> {
         let lease = self
             .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
@@ -94,7 +94,7 @@ where
         &self,
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
-        reservations: Vec<PaymentEndpointReservation>,
+        reservations: Vec<PrivatePaymentEndpointReservation>,
     ) -> Result<OutboundPrivateMessageRecord> {
         let cancellations = reservations
             .iter()
@@ -612,7 +612,7 @@ where
     ) -> Result<OutboundPrivateMessageRecord> {
         if let Some(reservations) = self
             .payment
-            .reserve_receiving_details(&counterparty, &lease.counterparty_receiver_path)
+            .reserve_private_receiving_details(&counterparty, &lease.counterparty_receiver_path)
             .await?
         {
             let cancellations = reservations
@@ -668,7 +668,7 @@ where
 
     async fn cancel_reservations_after_queue_error(
         &self,
-        cancellations: &[PaymentEndpointReservationCancellation],
+        cancellations: &[PrivatePaymentEndpointReservationCancellation],
         counterparty: &PubkyPublicKey,
     ) -> Result<()> {
         let mut cancellation_errors = Vec::new();
@@ -699,7 +699,7 @@ where
             }
             if let Err(err) = self
                 .payment
-                .cancel_receiving_detail_reservation(cancellation)
+                .cancel_private_receiving_detail_reservation(cancellation)
                 .await
             {
                 cancellation_errors.push(format!("{}: {err}", cancellation.reservation_id));
@@ -720,7 +720,7 @@ where
 
     async fn cancel_reservations_and_return_queue_error<T>(
         &self,
-        cancellations: &[PaymentEndpointReservationCancellation],
+        cancellations: &[PrivatePaymentEndpointReservationCancellation],
         counterparty: &PubkyPublicKey,
         err: PaykitSdkError,
     ) -> Result<T> {
@@ -824,7 +824,7 @@ where
             }
             match self
                 .payment
-                .cancel_receiving_detail_reservation(&cancellation)
+                .cancel_private_receiving_detail_reservation(&cancellation)
                 .await
             {
                 Ok(()) => {
@@ -875,7 +875,7 @@ where
 
     async fn claim_reservation_cancellation(
         &self,
-        cancellation: &PaymentEndpointReservationCancellation,
+        cancellation: &PrivatePaymentEndpointReservationCancellation,
         outbound_message_id: u64,
         lease: Option<&PeerLinkOperationLease>,
         now: DateTime<Utc>,
@@ -913,12 +913,9 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Result<Vec<ReceivingDetail>> {
+    ) -> Result<Vec<PrivateReceivingDetail>> {
         self.payment
-            .current_receiving_details(ReceivingDetailScope::Private {
-                counterparty: counterparty.clone(),
-                counterparty_receiver_path: counterparty_receiver_path.clone(),
-            })
+            .current_private_receiving_details(counterparty, counterparty_receiver_path)
             .await
     }
 }
@@ -953,9 +950,9 @@ fn linked_private_counterparties_not_in_storage_state(
 fn reservation_cancellation(
     counterparty: &PubkyPublicKey,
     counterparty_receiver_path: &PaykitReceiverPath,
-    reservation: &PaymentEndpointReservation,
-) -> PaymentEndpointReservationCancellation {
-    PaymentEndpointReservationCancellation {
+    reservation: &PrivatePaymentEndpointReservation,
+) -> PrivatePaymentEndpointReservationCancellation {
+    PrivatePaymentEndpointReservationCancellation {
         reservation_id: reservation.reservation_id.clone(),
         counterparty: counterparty.clone(),
         counterparty_receiver_path: counterparty_receiver_path.clone(),

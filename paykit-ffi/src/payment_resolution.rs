@@ -1,72 +1,67 @@
 use std::sync::Arc;
 
 use paykit_sdk::{
-    ContactPaymentResolution, ContactPaymentResolutionPrivateState,
-    ContactPaymentResolutionRequest, ContactPaymentResolutionStatus, PaymentTarget,
-    PreparedContactPayment, ResolvedPaymentEndpoint,
+    PaymentTarget, PreparedPrivateContactPayment, PrivateContactPaymentResolution,
+    PrivatePaymentResolutionState, PrivatePaymentResolutionStatus, PublicContactPaymentResolution,
+    PublicPaymentResolutionStatus, ResolvedPrivatePaymentEndpoint, ResolvedPublicPaymentEndpoint,
 };
 
 use crate::{
-    payment_adapter::{
-        FfiPaymentAmountContext, FfiPaymentEndpointSource, FfiPaymentPayload, FfiPaymentTarget,
-    },
+    payment_adapter::{FfiPaymentAmountContext, FfiPaymentPayload, FfiPaymentTarget},
     private_links::{
-        FfiLinkedPeerHandshakeReport, FfiOutboundPrivateSendReport, FfiPrivateOperationError,
-        FfiPrivateStreamIntakeReport,
+        FfiLinkedPeerHandshakeReport, FfiOutboundPrivateSendReport, FfiPrivateStreamIntakeReport,
     },
     sdk::FfiPaykitSdk,
     session::{app_public_key, parse_public_key, parse_receiver_path},
     PaykitFfiError,
 };
 
-/// Result category for contact payment resolution.
+/// Result category for public Payment Endpoint resolution.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FfiContactPaymentResolutionStatus {
-    /// A payable endpoint was found.
+pub enum FfiPublicPaymentResolutionStatus {
+    /// A payable public Payment Endpoint was found.
     Payable,
-    /// No endpoint was found.
+    /// No public Payment Endpoint was found.
     NoEndpoint,
-    /// Endpoints exist but are unsupported.
+    /// Public Payment Endpoints exist but are unsupported.
     UnsupportedEndpoint,
     /// SDK returned a value this binding version does not understand.
     Unknown,
 }
 
-/// Private-payment state observed while resolving a contact payment.
+/// Result category for private Payment Endpoint resolution.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FfiContactPaymentResolutionPrivateState {
+pub enum FfiPrivatePaymentResolutionStatus {
+    /// A payable private Payment Endpoint was found.
+    Payable,
+    /// No private Payment Endpoint was found.
+    NoEndpoint,
+    /// Private Payment Endpoints exist but are unsupported.
+    UnsupportedEndpoint,
+    /// SDK returned a value this binding version does not understand.
+    Unknown,
+}
+
+/// Encrypted Link and Private Payment List state observed during resolution.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiPrivatePaymentResolutionState {
     /// Private Payment List candidates were available for resolution.
     Available,
     /// No Private Payment List candidate was available.
     NoPrivateEndpoint,
-    /// Private payment state is blocked by link recovery.
+    /// Private payment state is blocked by Encrypted Link recovery.
     RecoveryPending,
     /// SDK returned a value this binding version does not understand.
     Unknown,
 }
 
-/// Request to resolve payable endpoints for one counterparty.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct FfiContactPaymentResolutionRequest {
-    /// Counterparty to pay.
-    pub counterparty: String,
-    /// Counterparty Paykit receiver path.
-    pub counterparty_receiver_path: String,
-    /// Optional amount context used by the payment adapter.
-    pub amount: Option<FfiPaymentAmountContext>,
-    /// Include public Payment Endpoints after private candidates.
-    pub include_public_endpoints: bool,
-}
-
-/// Payment Endpoint paired with the target needed to pay through it.
+/// Public Payment Endpoint paired with its adapter-built payment target.
 #[derive(uniffi::Record, Clone, Debug)]
-pub struct FfiResolvedPaymentEndpoint {
+pub struct FfiResolvedPublicPaymentEndpoint {
     /// Counterparty that published the endpoint.
     pub counterparty: String,
     /// Counterparty Paykit receiver path.
     pub counterparty_receiver_path: String,
-    /// Where the endpoint was discovered.
-    pub source: FfiPaymentEndpointSource,
     /// Payment Endpoint Identifier string.
     pub identifier: String,
     /// Serialized endpoint payload.
@@ -75,53 +70,63 @@ pub struct FfiResolvedPaymentEndpoint {
     pub target: FfiPaymentTarget,
 }
 
-/// Result of resolving contact Payment Endpoints.
+/// Private Payment Endpoint paired with its adapter-built payment target.
 #[derive(uniffi::Record, Clone, Debug)]
-pub struct FfiContactPaymentResolution {
-    /// General payment resolution outcome.
-    pub status: FfiContactPaymentResolutionStatus,
-    /// Private-payment-specific state for this resolution.
-    pub private_state: FfiContactPaymentResolutionPrivateState,
-    /// Payable Payment Endpoints in adapter-preferred order.
-    pub payable_endpoints: Vec<FfiResolvedPaymentEndpoint>,
+pub struct FfiResolvedPrivatePaymentEndpoint {
+    /// Counterparty that privately shared the endpoint.
+    pub counterparty: String,
+    /// Counterparty Paykit receiver path.
+    pub counterparty_receiver_path: String,
+    /// Payment Endpoint Identifier string.
+    pub identifier: String,
+    /// Serialized endpoint payload.
+    pub payload: Arc<FfiPaymentPayload>,
+    /// Adapter-built target for executing payment through this endpoint.
+    pub target: FfiPaymentTarget,
 }
 
-/// Result of preparing a contact payment and resolving payable endpoints.
+/// Result of resolving public Payment Endpoints for one counterparty.
 #[derive(uniffi::Record, Clone, Debug)]
-pub struct FfiPreparedContactPayment {
-    /// Endpoint resolution after preparation.
-    pub resolution: FfiContactPaymentResolution,
-    /// Link handshake/advance report when the SDK attempted private setup.
+pub struct FfiPublicContactPaymentResolution {
+    /// Public payment resolution outcome.
+    pub status: FfiPublicPaymentResolutionStatus,
+    /// Payable public Payment Endpoints in adapter-preferred order.
+    pub payable_endpoints: Vec<FfiResolvedPublicPaymentEndpoint>,
+}
+
+/// Result of resolving a Private Payment List for one counterparty.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPrivateContactPaymentResolution {
+    /// Private payment resolution outcome.
+    pub status: FfiPrivatePaymentResolutionStatus,
+    /// Encrypted Link and Private Payment List state observed during resolution.
+    pub state: FfiPrivatePaymentResolutionState,
+    /// Payable private Payment Endpoints in adapter-preferred order.
+    pub payable_endpoints: Vec<FfiResolvedPrivatePaymentEndpoint>,
+}
+
+/// Result of preparing private contact state and resolving private endpoints.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPreparedPrivateContactPayment {
+    /// Private endpoint resolution after preparation.
+    pub resolution: FfiPrivateContactPaymentResolution,
+    /// Encrypted Link handshake/advance report, when setup was attempted.
     pub link_report: Option<FfiLinkedPeerHandshakeReport>,
-    /// Private receive report when the SDK refreshed the private stream.
+    /// Private stream receive report, when messages were refreshed.
     pub receive_report: Option<FfiPrivateStreamIntakeReport>,
-    /// Outbound send report when the SDK processed pending private messages.
+    /// Outbound private send report, when queued messages were processed.
     pub outbound_report: Option<FfiOutboundPrivateSendReport>,
-    /// Private preparation error when public fallback was allowed.
-    pub private_error: Option<Arc<FfiPrivateOperationError>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
-    /// Resolve payable endpoints for one counterparty.
-    pub async fn resolve_contact_payment(
-        &self,
-        request: FfiContactPaymentResolutionRequest,
-    ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
-        self.runtime
-            .resolve_contact_payment(request.try_into()?)
-            .await
-            .map(Into::into)
-            .map_err(Into::into)
-    }
-
     /// Resolve payable private endpoints for one counterparty.
     pub async fn resolve_private_contact_payment(
         &self,
         counterparty: String,
         counterparty_receiver_path: String,
         amount: Option<FfiPaymentAmountContext>,
-    ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
+    ) -> Result<FfiPrivateContactPaymentResolution, PaykitFfiError> {
         self.runtime
             .resolve_private_contact_payment(
                 parse_public_key(counterparty)?,
@@ -133,13 +138,13 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Resolve payable public endpoints for one counterparty.
+    /// Resolve payable public Payment Endpoints for one counterparty.
     pub async fn resolve_public_contact_payment(
         &self,
         counterparty: String,
         counterparty_receiver_path: String,
         amount: Option<FfiPaymentAmountContext>,
-    ) -> Result<FfiContactPaymentResolution, PaykitFfiError> {
+    ) -> Result<FfiPublicContactPaymentResolution, PaykitFfiError> {
         self.runtime
             .resolve_public_contact_payment(
                 parse_public_key(counterparty)?,
@@ -151,26 +156,19 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Prepare private contact state, then resolve payable endpoints.
-    ///
-    /// The SDK refreshes live session capability, ensures or advances the
-    /// private link when possible, drains currently available private
-    /// send/receive work for the peer, then resolves endpoints private-first.
-    /// Public endpoints are included only when requested.
-    pub async fn prepare_and_resolve_contact_payment(
+    /// Prepare private contact state, then resolve private endpoints.
+    pub async fn prepare_and_resolve_private_contact_payment(
         &self,
         counterparty: String,
         counterparty_receiver_path: String,
         amount: Option<FfiPaymentAmountContext>,
-        include_public_endpoints: bool,
         max_advance_steps: u32,
-    ) -> Result<FfiPreparedContactPayment, PaykitFfiError> {
+    ) -> Result<FfiPreparedPrivateContactPayment, PaykitFfiError> {
         self.runtime
-            .prepare_and_resolve_contact_payment(
+            .prepare_and_resolve_private_contact_payment(
                 parse_public_key(counterparty)?,
                 parse_receiver_path(counterparty_receiver_path)?,
                 amount.map(Into::into),
-                include_public_endpoints,
                 max_advance_steps,
             )
             .await
@@ -179,57 +177,47 @@ impl FfiPaykitSdk {
     }
 }
 
-impl From<ContactPaymentResolutionStatus> for FfiContactPaymentResolutionStatus {
-    fn from(value: ContactPaymentResolutionStatus) -> Self {
+impl From<PublicPaymentResolutionStatus> for FfiPublicPaymentResolutionStatus {
+    fn from(value: PublicPaymentResolutionStatus) -> Self {
         match value {
-            ContactPaymentResolutionStatus::Payable => Self::Payable,
-            ContactPaymentResolutionStatus::NoEndpoint => Self::NoEndpoint,
-            ContactPaymentResolutionStatus::UnsupportedEndpoint => Self::UnsupportedEndpoint,
+            PublicPaymentResolutionStatus::Payable => Self::Payable,
+            PublicPaymentResolutionStatus::NoEndpoint => Self::NoEndpoint,
+            PublicPaymentResolutionStatus::UnsupportedEndpoint => Self::UnsupportedEndpoint,
             _ => Self::Unknown,
         }
     }
 }
 
-impl From<ContactPaymentResolutionPrivateState> for FfiContactPaymentResolutionPrivateState {
-    fn from(value: ContactPaymentResolutionPrivateState) -> Self {
+impl From<PrivatePaymentResolutionStatus> for FfiPrivatePaymentResolutionStatus {
+    fn from(value: PrivatePaymentResolutionStatus) -> Self {
         match value {
-            ContactPaymentResolutionPrivateState::Available => Self::Available,
-            ContactPaymentResolutionPrivateState::NoPrivateEndpoint => Self::NoPrivateEndpoint,
-            ContactPaymentResolutionPrivateState::RecoveryPending => Self::RecoveryPending,
+            PrivatePaymentResolutionStatus::Payable => Self::Payable,
+            PrivatePaymentResolutionStatus::NoEndpoint => Self::NoEndpoint,
+            PrivatePaymentResolutionStatus::UnsupportedEndpoint => Self::UnsupportedEndpoint,
             _ => Self::Unknown,
         }
     }
 }
 
-impl From<PreparedContactPayment> for FfiPreparedContactPayment {
-    fn from(value: PreparedContactPayment) -> Self {
+impl From<PrivatePaymentResolutionState> for FfiPrivatePaymentResolutionState {
+    fn from(value: PrivatePaymentResolutionState) -> Self {
+        match value {
+            PrivatePaymentResolutionState::Available => Self::Available,
+            PrivatePaymentResolutionState::NoPrivateEndpoint => Self::NoPrivateEndpoint,
+            PrivatePaymentResolutionState::RecoveryPending => Self::RecoveryPending,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl From<PreparedPrivateContactPayment> for FfiPreparedPrivateContactPayment {
+    fn from(value: PreparedPrivateContactPayment) -> Self {
         Self {
             resolution: value.resolution.into(),
             link_report: value.link_report.map(Into::into),
             receive_report: value.receive_report.map(Into::into),
             outbound_report: value.outbound_report.map(Into::into),
-            private_error: value.private_error.map(|error| {
-                private_error(
-                    "contact_payment_preparation",
-                    "private_preparation_error",
-                    "private contact payment preparation failed",
-                    error,
-                )
-            }),
         }
-    }
-}
-
-impl TryFrom<FfiContactPaymentResolutionRequest> for ContactPaymentResolutionRequest {
-    type Error = PaykitFfiError;
-
-    fn try_from(value: FfiContactPaymentResolutionRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            counterparty: parse_public_key(value.counterparty)?,
-            counterparty_receiver_path: parse_receiver_path(value.counterparty_receiver_path)?,
-            amount: value.amount.map(Into::into),
-            include_public_endpoints: value.include_public_endpoints,
-        })
     }
 }
 
@@ -250,12 +238,11 @@ impl From<PaymentTarget> for FfiPaymentTarget {
     }
 }
 
-impl From<ResolvedPaymentEndpoint> for FfiResolvedPaymentEndpoint {
-    fn from(value: ResolvedPaymentEndpoint) -> Self {
+impl From<ResolvedPublicPaymentEndpoint> for FfiResolvedPublicPaymentEndpoint {
+    fn from(value: ResolvedPublicPaymentEndpoint) -> Self {
         Self {
             counterparty: app_public_key(&value.endpoint.counterparty),
             counterparty_receiver_path: value.endpoint.counterparty_receiver_path.to_string(),
-            source: value.endpoint.source.into(),
             identifier: value.endpoint.identifier,
             payload: Arc::new(FfiPaymentPayload::new(value.endpoint.payload)),
             target: value.target.into(),
@@ -263,11 +250,22 @@ impl From<ResolvedPaymentEndpoint> for FfiResolvedPaymentEndpoint {
     }
 }
 
-impl From<ContactPaymentResolution> for FfiContactPaymentResolution {
-    fn from(value: ContactPaymentResolution) -> Self {
+impl From<ResolvedPrivatePaymentEndpoint> for FfiResolvedPrivatePaymentEndpoint {
+    fn from(value: ResolvedPrivatePaymentEndpoint) -> Self {
+        Self {
+            counterparty: app_public_key(&value.endpoint.counterparty),
+            counterparty_receiver_path: value.endpoint.counterparty_receiver_path.to_string(),
+            identifier: value.endpoint.identifier,
+            payload: Arc::new(FfiPaymentPayload::new(value.endpoint.payload)),
+            target: value.target.into(),
+        }
+    }
+}
+
+impl From<PublicContactPaymentResolution> for FfiPublicContactPaymentResolution {
+    fn from(value: PublicContactPaymentResolution) -> Self {
         Self {
             status: value.status.into(),
-            private_state: value.private_state.into(),
             payable_endpoints: value
                 .payable_endpoints
                 .into_iter()
@@ -277,63 +275,84 @@ impl From<ContactPaymentResolution> for FfiContactPaymentResolution {
     }
 }
 
-fn private_error(
-    category: &'static str,
-    code: &'static str,
-    context: &'static str,
-    value: String,
-) -> Arc<FfiPrivateOperationError> {
-    Arc::new(FfiPrivateOperationError::new(
-        category, code, context, value,
-    ))
+impl From<PrivateContactPaymentResolution> for FfiPrivateContactPaymentResolution {
+    fn from(value: PrivateContactPaymentResolution) -> Self {
+        Self {
+            status: value.status.into(),
+            state: value.state.into(),
+            payable_endpoints: value
+                .payable_endpoints
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paykit_sdk::PaymentEndpointCandidate;
+    use paykit_sdk::{
+        PrivatePaymentEndpointCandidate, PublicPaymentEndpointCandidate,
+        ResolvedPrivatePaymentEndpoint, ResolvedPublicPaymentEndpoint,
+    };
 
     fn public_key() -> paykit_sdk::PubkyPublicKey {
         parse_public_key("8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io".into()).unwrap()
     }
 
+    fn receiver_path() -> paykit_sdk::PaykitReceiverPath {
+        paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap()
+    }
+
     #[test]
-    fn test_contact_payment_resolution_maps_endpoint_and_target() {
-        let resolution = ContactPaymentResolution {
-            status: ContactPaymentResolutionStatus::Payable,
-            private_state: ContactPaymentResolutionPrivateState::Available,
-            payable_endpoints: vec![ResolvedPaymentEndpoint {
-                endpoint: PaymentEndpointCandidate {
+    fn test_public_payment_resolution_maps_public_endpoint() {
+        let resolution = PublicContactPaymentResolution {
+            status: PublicPaymentResolutionStatus::Payable,
+            payable_endpoints: vec![ResolvedPublicPaymentEndpoint {
+                endpoint: PublicPaymentEndpointCandidate {
                     counterparty: public_key(),
-                    counterparty_receiver_path: paykit_sdk::PaykitReceiverPath::new(
-                        "bitkit/wallet",
-                    )
-                    .unwrap(),
-                    source: paykit_sdk::PaymentEndpointSource::PrivatePaymentList,
+                    counterparty_receiver_path: receiver_path(),
                     identifier: "btc-mainnet-address".into(),
-                    payload: "bc1qprivate".into(),
+                    payload: "bc1qpublic".into(),
                 },
                 target: PaymentTarget {
-                    payload: "wallet-target".into(),
+                    payload: "public-target".into(),
                 },
             }],
         };
 
-        let ffi = FfiContactPaymentResolution::from(resolution);
+        let ffi = FfiPublicContactPaymentResolution::from(resolution);
 
-        assert_eq!(ffi.status, FfiContactPaymentResolutionStatus::Payable);
-        assert_eq!(
-            ffi.private_state,
-            FfiContactPaymentResolutionPrivateState::Available
-        );
-        assert_eq!(ffi.payable_endpoints[0].identifier, "btc-mainnet-address");
+        assert_eq!(ffi.status, FfiPublicPaymentResolutionStatus::Payable);
+        assert_eq!(ffi.payable_endpoints[0].payload.export_text(), "bc1qpublic");
+    }
+
+    #[test]
+    fn test_private_payment_resolution_maps_private_state() {
+        let resolution = PrivateContactPaymentResolution {
+            status: PrivatePaymentResolutionStatus::Payable,
+            state: PrivatePaymentResolutionState::Available,
+            payable_endpoints: vec![ResolvedPrivatePaymentEndpoint {
+                endpoint: PrivatePaymentEndpointCandidate {
+                    counterparty: public_key(),
+                    counterparty_receiver_path: receiver_path(),
+                    identifier: "btc-mainnet-address".into(),
+                    payload: "bc1qprivate".into(),
+                },
+                target: PaymentTarget {
+                    payload: "private-target".into(),
+                },
+            }],
+        };
+
+        let ffi = FfiPrivateContactPaymentResolution::from(resolution);
+
+        assert_eq!(ffi.status, FfiPrivatePaymentResolutionStatus::Payable);
+        assert_eq!(ffi.state, FfiPrivatePaymentResolutionState::Available);
         assert_eq!(
             ffi.payable_endpoints[0].payload.export_text(),
             "bc1qprivate"
-        );
-        assert_eq!(
-            ffi.payable_endpoints[0].target.payload.export_text(),
-            "wallet-target"
         );
     }
 }

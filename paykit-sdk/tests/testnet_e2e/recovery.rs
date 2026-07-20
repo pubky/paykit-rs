@@ -4,7 +4,7 @@ use paykit_sdk::{
 };
 use std::time::{Duration, Instant};
 
-use crate::harness::{linked_two_party, receiving_detail, two_party, TestUser};
+use crate::harness::{linked_two_party, private_receiving_detail, two_party, TestUser};
 
 #[tokio::test]
 async fn test_recovery_marker_publish_observe_remove_roundtrip() {
@@ -36,7 +36,7 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     // re-established.
     pair.alice
         .adapter
-        .set_private_details(vec![receiving_detail(
+        .set_private_details(vec![private_receiving_detail(
             "btc-lightning-bolt11",
             "ln-private-alice",
         )]);

@@ -144,13 +144,15 @@ Common workflows:
   Core/Ring-compatible BIP39 seed or mnemonic helpers; app/runtime separation
   should come from receiver folders, Noise keys, and SDK state, not a different
   Pubky identity derivation label
-- call `receive_private_messages` before deriving private Payment Lists,
-  Payment Requests, Receipt Access state, or resolving a contact payment when
-  the freshest private endpoints matter
-- call `resolve_contact_payment` to get ordered payable Payment Endpoints, each
-  with an adapter-built `PaymentTarget`; check `status` for the general payment
-  outcome and `private_state` for private-payment-specific recovery or
-  availability state
+- call `receive_private_messages` before deriving Private Payment Lists,
+  Payment Requests, Receipt Access state, or resolving a private contact
+  payment when the freshest private endpoints matter
+- call `resolve_private_contact_payment` for Private Payment List endpoints or
+  `resolve_public_contact_payment` for public Payment Endpoints; each returns a
+  source-specific result with ordered adapter-built `PaymentTarget` values
+- call `prepare_and_resolve_private_contact_payment` when private payment setup
+  should also advance the Encrypted Link and drain pending private work; it
+  never reads or falls back to public Payment Endpoints
 - build receipt drafts with `ReceiptDraftBuilder`; call
   `prepare_receipt_issuance` before receipt network side effects, then
   `process_receipt_issuance`; use `issue_receipt` only when the draft already

@@ -5,6 +5,7 @@ pub(crate) mod endpoints;
 pub(crate) mod linked_peers;
 pub(crate) mod outbound_private;
 pub(crate) mod payment_requests;
+pub(crate) mod payment_resolution;
 pub(crate) mod private_lists;
 pub(crate) mod private_stream;
 pub(crate) mod publication;

@@ -1,14 +1,11 @@
-//! Contact, profile, and contact payment resolution types.
+//! Contact and profile types.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::{
-    domain::linked_peers::LinkedPeerHandshakeReport,
-    domain::outbound_private::OutboundPrivateSendReport,
-    domain::private_stream::PrivateStreamIntakeReport, domain::publication::PublicationStatus,
-    PaykitReceiverPath, PaykitSdkError, PaymentAmountContext, PaymentEndpointCandidate,
-    PaymentTarget, PubkyPublicKey, Result,
+    domain::publication::PublicationStatus, PaykitReceiverPath, PaykitSdkError, PubkyPublicKey,
+    Result,
 };
 
 /// Pubky app profile path used by read-only fallback/helper APIs.
@@ -763,112 +760,6 @@ pub(crate) fn public_contact_json(
         context: format!("failed to serialize Paykit public contact: {err}"),
         source: None,
     })
-}
-
-/// Result category for contact payment resolution.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum ContactPaymentResolutionStatus {
-    /// A payable endpoint was found.
-    Payable,
-    /// No endpoint was found.
-    NoEndpoint,
-    /// Endpoints exist but are unsupported.
-    UnsupportedEndpoint,
-}
-
-/// Private-payment state observed while resolving a contact payment.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum ContactPaymentResolutionPrivateState {
-    /// Private Payment List candidates were available for resolution.
-    Available,
-    /// No Private Payment List candidate was available.
-    NoPrivateEndpoint,
-    /// Private payment state is blocked by link recovery.
-    RecoveryPending,
-}
-
-/// Request to resolve payable endpoints for one counterparty.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContactPaymentResolutionRequest {
-    /// Counterparty to pay.
-    pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder to query.
-    pub counterparty_receiver_path: PaykitReceiverPath,
-    /// Optional amount context used by the payment adapter.
-    pub amount: Option<PaymentAmountContext>,
-    /// Include public Payment Endpoints after private candidates.
-    pub include_public_endpoints: bool,
-}
-
-/// Result of preparing a contact payment and resolving payable endpoints.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreparedContactPayment {
-    /// Endpoint resolution after preparation.
-    pub resolution: ContactPaymentResolution,
-    /// Link handshake/advance report when the SDK attempted private setup.
-    pub link_report: Option<LinkedPeerHandshakeReport>,
-    /// Private receive report when the SDK refreshed the private stream.
-    pub receive_report: Option<PrivateStreamIntakeReport>,
-    /// Outbound send report when the SDK processed pending private messages.
-    pub outbound_report: Option<OutboundPrivateSendReport>,
-    /// Private preparation error when public fallback was allowed.
-    pub private_error: Option<String>,
-}
-
-impl fmt::Debug for PreparedContactPayment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PreparedContactPayment")
-            .field("resolution", &self.resolution)
-            .field("link_report", &self.link_report)
-            .field("receive_report", &self.receive_report)
-            .field("outbound_report", &self.outbound_report)
-            .field(
-                "private_error",
-                &self.private_error.as_ref().map(|_| "<redacted>"),
-            )
-            .finish()
-    }
-}
-
-/// Payment Endpoint paired with the target needed to pay through it.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolvedPaymentEndpoint {
-    /// Payable endpoint returned by the payment adapter.
-    pub endpoint: PaymentEndpointCandidate,
-    /// Adapter-built target for executing payment through this endpoint.
-    pub target: PaymentTarget,
-}
-
-impl fmt::Debug for ResolvedPaymentEndpoint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResolvedPaymentEndpoint")
-            .field("endpoint", &self.endpoint)
-            .field("target", &self.target)
-            .finish()
-    }
-}
-
-/// Result of resolving contact Payment Endpoints.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContactPaymentResolution {
-    /// General payment resolution outcome.
-    pub status: ContactPaymentResolutionStatus,
-    /// Private-payment-specific state for this resolution.
-    pub private_state: ContactPaymentResolutionPrivateState,
-    /// Payable Payment Endpoints in adapter-preferred order.
-    pub payable_endpoints: Vec<ResolvedPaymentEndpoint>,
-}
-
-impl fmt::Debug for ContactPaymentResolution {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ContactPaymentResolution")
-            .field("status", &self.status)
-            .field("private_state", &self.private_state)
-            .field("payable_endpoints", &self.payable_endpoints)
-            .finish()
-    }
 }
 
 fn validate_optional_text(

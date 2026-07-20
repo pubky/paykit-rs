@@ -10,10 +10,9 @@ fn receiver_path() -> PaykitReceiverPath {
 
 #[test]
 fn test_endpoint_debug_redacts_payloads() {
-    let candidate = PaymentEndpointCandidate {
+    let candidate = PrivatePaymentEndpointCandidate {
         counterparty: counterparty(),
         counterparty_receiver_path: receiver_path(),
-        source: PaymentEndpointSource::PrivatePaymentList,
         identifier: "btc-lightning-bolt11".into(),
         payload: "ln-private-secret".into(),
     };

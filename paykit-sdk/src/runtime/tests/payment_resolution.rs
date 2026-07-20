@@ -3,71 +3,45 @@ use crate::runtime::payment_resolution::{merge_outbound_report, merge_receive_re
 
 #[test]
 fn test_payable_from_batch_rejects_foreign_candidates() {
-    let candidate = endpoint_candidate("ln-private");
-    let foreign = endpoint_candidate("ln-foreign");
+    let candidate = private_endpoint_candidate("ln-private");
+    let foreign = private_endpoint_candidate("ln-foreign");
 
-    let result = payable_from_batch(&[foreign], &[candidate]);
+    let result = private_payable_from_batch(&[foreign], &[candidate]);
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[test]
 fn test_payable_from_batch_rejects_duplicate_candidates() {
-    let candidate = endpoint_candidate("ln-private");
+    let candidate = private_endpoint_candidate("ln-private");
 
-    let result = payable_from_batch(&[candidate.clone(), candidate.clone()], &[candidate]);
+    let result = private_payable_from_batch(&[candidate.clone(), candidate.clone()], &[candidate]);
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[test]
-fn test_payable_from_batch_preserves_adapter_order_for_private_and_public() {
-    let private = endpoint_candidate("ln-private");
-    let mut public = private.clone();
-    public.source = PaymentEndpointSource::PublicPaymentEndpoint;
-    public.payload = "ln-public".into();
-    let candidates = vec![private.clone(), public.clone()];
+fn test_private_payable_from_batch_preserves_adapter_order() {
+    let first = private_endpoint_candidate("ln-first");
+    let mut second = first.clone();
+    second.payload = "ln-second".into();
+    let candidates = vec![first.clone(), second.clone()];
 
-    let result = payable_from_batch(&[public.clone(), private.clone()], &candidates).unwrap();
+    let result = private_payable_from_batch(&[second.clone(), first.clone()], &candidates).unwrap();
 
-    assert_eq!(result, vec![public, private]);
+    assert_eq!(result, vec![second, first]);
 }
 
 #[test]
-fn test_prepared_resolution_prefers_private_endpoints() {
-    let private = endpoint_candidate("ln-private");
-    let mut public = private.clone();
-    public.source = PaymentEndpointSource::PublicPaymentEndpoint;
-    public.payload = "ln-public".into();
-    let mut resolution = ContactPaymentResolution {
-        status: ContactPaymentResolutionStatus::Payable,
-        private_state: ContactPaymentResolutionPrivateState::Available,
-        payable_endpoints: vec![
-            ResolvedPaymentEndpoint {
-                endpoint: public,
-                target: PaymentTarget {
-                    payload: "public-target".into(),
-                },
-            },
-            ResolvedPaymentEndpoint {
-                endpoint: private,
-                target: PaymentTarget {
-                    payload: "private-target".into(),
-                },
-            },
-        ],
-    };
+fn test_public_payable_from_batch_preserves_adapter_order() {
+    let first = public_endpoint_candidate("ln-first");
+    let mut second = first.clone();
+    second.payload = "ln-second".into();
+    let candidates = vec![first.clone(), second.clone()];
 
-    prefer_private_endpoints(&mut resolution);
+    let result = public_payable_from_batch(&[second.clone(), first.clone()], &candidates).unwrap();
 
-    assert_eq!(
-        resolution.payable_endpoints[0].endpoint.source,
-        PaymentEndpointSource::PrivatePaymentList
-    );
-    assert_eq!(
-        resolution.payable_endpoints[1].endpoint.source,
-        PaymentEndpointSource::PublicPaymentEndpoint
-    );
+    assert_eq!(result, vec![second, first]);
 }
 
 #[test]
@@ -126,7 +100,7 @@ fn test_merge_receive_report_preserves_multiple_rounds() {
 }
 
 #[tokio::test]
-async fn test_resolve_candidate_batch_preserves_private_state() {
+async fn test_resolve_private_candidate_batch_preserves_private_state() {
     let storage = InMemoryStorage::new();
     let sdk = PaykitSdk::with_clock(
         storage,
@@ -135,28 +109,25 @@ async fn test_resolve_candidate_batch_preserves_private_state() {
         PaykitSdkConfig::default(),
         FixedClock,
     );
-    let endpoint = endpoint_candidate("ln-public");
+    let endpoint = private_endpoint_candidate("ln-private");
     let result = sdk
-        .resolve_candidate_batch(
+        .resolve_private_candidate_batch(
             endpoint.counterparty.clone(),
             receiver_path(),
             None,
             vec![endpoint],
-            ContactPaymentResolutionPrivateState::RecoveryPending,
+            PrivatePaymentResolutionState::RecoveryPending,
         )
         .await
         .unwrap();
 
-    assert_eq!(result.status, ContactPaymentResolutionStatus::Payable);
-    assert_eq!(
-        result.private_state,
-        ContactPaymentResolutionPrivateState::RecoveryPending
-    );
+    assert_eq!(result.status, PrivatePaymentResolutionStatus::Payable);
+    assert_eq!(result.state, PrivatePaymentResolutionState::RecoveryPending);
     assert_eq!(result.payable_endpoints.len(), 1);
 }
 
 #[tokio::test]
-async fn test_resolve_candidate_batch_returns_ordered_payable_endpoints() {
+async fn test_resolve_public_candidate_batch_returns_ordered_payable_endpoints() {
     let storage = InMemoryStorage::new();
     let sdk = PaykitSdk::with_clock(
         storage,
@@ -165,39 +136,33 @@ async fn test_resolve_candidate_batch_returns_ordered_payable_endpoints() {
         PaykitSdkConfig::default(),
         FixedClock,
     );
-    let private = endpoint_candidate("ln-private");
-    let mut public = private.clone();
-    public.source = PaymentEndpointSource::PublicPaymentEndpoint;
-    public.payload = "ln-public".into();
+    let first = public_endpoint_candidate("ln-first");
+    let mut second = first.clone();
+    second.payload = "ln-second".into();
 
     let result = sdk
-        .resolve_candidate_batch(
-            private.counterparty.clone(),
+        .resolve_public_candidate_batch(
+            first.counterparty.clone(),
             receiver_path(),
             Some(crate::PaymentAmountContext {
                 value: "10.00".into(),
                 asset: "usd".into(),
             }),
-            vec![private.clone(), public.clone()],
-            ContactPaymentResolutionPrivateState::Available,
+            vec![first.clone(), second.clone()],
         )
         .await
         .unwrap();
 
-    assert_eq!(result.status, ContactPaymentResolutionStatus::Payable);
-    assert_eq!(
-        result.private_state,
-        ContactPaymentResolutionPrivateState::Available
-    );
+    assert_eq!(result.status, PublicPaymentResolutionStatus::Payable);
     assert_eq!(result.payable_endpoints.len(), 2);
-    assert_eq!(result.payable_endpoints[0].endpoint, private);
-    assert_eq!(result.payable_endpoints[0].target.payload, "ln-private");
-    assert_eq!(result.payable_endpoints[1].endpoint, public);
-    assert_eq!(result.payable_endpoints[1].target.payload, "ln-public");
+    assert_eq!(result.payable_endpoints[0].endpoint, first);
+    assert_eq!(result.payable_endpoints[0].target.payload, "ln-first");
+    assert_eq!(result.payable_endpoints[1].endpoint, second);
+    assert_eq!(result.payable_endpoints[1].target.payload, "ln-second");
 }
 
 #[tokio::test]
-async fn test_resolve_contact_payment_hides_cached_private_list_without_identity() {
+async fn test_resolve_private_contact_payment_hides_cached_list_without_identity() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     persist_private_stream_batch(
@@ -220,22 +185,21 @@ async fn test_resolve_contact_payment_hides_cached_private_list_without_identity
     );
 
     let result = sdk
-        .resolve_contact_payment(ContactPaymentResolutionRequest {
-            counterparty: counterparty.clone(),
-            counterparty_receiver_path: receiver_path(),
-            amount: Some(crate::PaymentAmountContext {
+        .resolve_private_contact_payment(
+            counterparty.clone(),
+            receiver_path(),
+            Some(crate::PaymentAmountContext {
                 value: "10.00".into(),
                 asset: "usd".into(),
             }),
-            include_public_endpoints: false,
-        })
+        )
         .await;
 
     let result = result.unwrap();
-    assert_eq!(result.status, ContactPaymentResolutionStatus::NoEndpoint);
+    assert_eq!(result.status, PrivatePaymentResolutionStatus::NoEndpoint);
     assert_eq!(
-        result.private_state,
-        ContactPaymentResolutionPrivateState::NoPrivateEndpoint
+        result.state,
+        PrivatePaymentResolutionState::NoPrivateEndpoint
     );
     assert!(result.payable_endpoints.is_empty());
     assert!(sdk
@@ -246,7 +210,7 @@ async fn test_resolve_contact_payment_hides_cached_private_list_without_identity
 }
 
 #[tokio::test]
-async fn test_resolve_contact_payment_uses_cached_private_list_without_live_session() {
+async fn test_resolve_private_contact_payment_uses_cached_list_without_live_session() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -282,27 +246,20 @@ async fn test_resolve_contact_payment_uses_cached_private_list_without_live_sess
     );
 
     let result = sdk
-        .resolve_contact_payment(ContactPaymentResolutionRequest {
+        .resolve_private_contact_payment(
             counterparty,
-            counterparty_receiver_path: receiver_path(),
-            amount: Some(crate::PaymentAmountContext {
+            receiver_path(),
+            Some(crate::PaymentAmountContext {
                 value: "10.00".into(),
                 asset: "usd".into(),
             }),
-            include_public_endpoints: false,
-        })
+        )
         .await
         .unwrap();
 
-    assert_eq!(result.status, ContactPaymentResolutionStatus::Payable);
-    assert_eq!(
-        result.private_state,
-        ContactPaymentResolutionPrivateState::Available
-    );
-    assert_eq!(
-        result.payable_endpoints[0].endpoint.source,
-        PaymentEndpointSource::PrivatePaymentList
-    );
+    assert_eq!(result.status, PrivatePaymentResolutionStatus::Payable);
+    assert_eq!(result.state, PrivatePaymentResolutionState::Available);
+    assert_eq!(result.payable_endpoints[0].endpoint.payload, "ln-private");
 }
 
 #[tokio::test]
@@ -346,15 +303,12 @@ async fn test_resolve_private_contact_payment_uses_private_candidates_only() {
         .await
         .unwrap();
 
-    assert_eq!(result.status, ContactPaymentResolutionStatus::Payable);
-    assert_eq!(
-        result.payable_endpoints[0].endpoint.source,
-        PaymentEndpointSource::PrivatePaymentList
-    );
+    assert_eq!(result.status, PrivatePaymentResolutionStatus::Payable);
+    assert_eq!(result.payable_endpoints[0].endpoint.payload, "ln-private");
 }
 
 #[tokio::test]
-async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_linking() {
+async fn test_resolve_private_contact_payment_does_not_use_cached_list_while_linking() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -406,23 +360,19 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
     );
 
     let result = sdk
-        .resolve_contact_payment(ContactPaymentResolutionRequest {
+        .resolve_private_contact_payment(
             counterparty,
-            counterparty_receiver_path: receiver_path(),
-            amount: Some(crate::PaymentAmountContext {
+            receiver_path(),
+            Some(crate::PaymentAmountContext {
                 value: "10.00".into(),
                 asset: "usd".into(),
             }),
-            include_public_endpoints: false,
-        })
+        )
         .await
         .unwrap();
 
-    assert_eq!(result.status, ContactPaymentResolutionStatus::NoEndpoint);
-    assert_eq!(
-        result.private_state,
-        ContactPaymentResolutionPrivateState::RecoveryPending
-    );
+    assert_eq!(result.status, PrivatePaymentResolutionStatus::NoEndpoint);
+    assert_eq!(result.state, PrivatePaymentResolutionState::RecoveryPending);
     assert!(result.payable_endpoints.is_empty());
 }
 

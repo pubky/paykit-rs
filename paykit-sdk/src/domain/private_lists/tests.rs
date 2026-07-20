@@ -2,7 +2,7 @@ use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 
 use super::*;
 use crate::{
-    domain::adapters::ReceivingDetail,
+    domain::adapters::PrivateReceivingDetail,
     domain::outbound_private::queued_outbound_private_messages,
     domain::private_stream::persist_private_stream_batch,
     storage::{InMemoryStorage, PrivateStreamItemRecord},
@@ -140,7 +140,7 @@ async fn test_enqueue_private_payment_list_stores_exact_list_message() {
         &storage,
         counterparty.clone(),
         receiver_path(),
-        vec![ReceivingDetail {
+        vec![PrivateReceivingDetail {
             identifier: "btc-lightning-bolt11".into(),
             payload: "ln-private".into(),
         }],
@@ -202,7 +202,7 @@ async fn test_enqueue_private_payment_list_with_link_lease_rejects_stale_lease()
     let result = enqueue_private_payment_list_with_link_lease(
         &storage,
         counterparty.clone(),
-        vec![ReceivingDetail {
+        vec![PrivateReceivingDetail {
             identifier: "btc-lightning-bolt11".into(),
             payload: "ln-private".into(),
         }],

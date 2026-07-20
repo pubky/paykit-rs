@@ -11,9 +11,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use paykit_sdk::{
     InMemoryStorage, LinkedPeerState, PaykitReceiverCapabilities, PaykitReceiverPath, PaykitSdk,
-    PaykitSdkConfig, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointSelectionRequest,
-    PaymentTarget, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
-    PubkySessionProvider, ReceiverNoiseSecretKey, ReceivingDetail, ReceivingDetailScope, Result,
+    PaykitSdkConfig, PaymentAdapter, PaymentTarget, PrivatePaymentEndpointCandidate,
+    PrivatePaymentEndpointSelectionRequest, PrivateReceivingDetail, PubkyLocalSecretKey,
+    PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap, PubkySessionProvider,
+    PublicPaymentEndpointCandidate, PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
+    ReceiverNoiseSecretKey, Result,
 };
 use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
@@ -88,44 +90,68 @@ impl PubkySessionProvider for TestnetSessionProvider {
 /// Payment adapter whose receiving details can be changed mid-test.
 #[derive(Clone, Default)]
 pub struct TestnetPaymentAdapter {
-    public_details: Arc<Mutex<Vec<ReceivingDetail>>>,
-    private_details: Arc<Mutex<Vec<ReceivingDetail>>>,
+    public_details: Arc<Mutex<Vec<PublicReceivingDetail>>>,
+    private_details: Arc<Mutex<Vec<PrivateReceivingDetail>>>,
 }
 
 impl TestnetPaymentAdapter {
-    pub fn set_public_details(&self, details: Vec<ReceivingDetail>) {
+    pub fn set_public_details(&self, details: Vec<PublicReceivingDetail>) {
         *self.public_details.lock().expect("details lock poisoned") = details;
     }
 
-    pub fn set_private_details(&self, details: Vec<ReceivingDetail>) {
+    pub fn set_private_details(&self, details: Vec<PrivateReceivingDetail>) {
         *self.private_details.lock().expect("details lock poisoned") = details;
     }
 }
 
 #[async_trait]
 impl PaymentAdapter for TestnetPaymentAdapter {
-    async fn current_receiving_details(
-        &self,
-        scope: ReceivingDetailScope,
-    ) -> Result<Vec<ReceivingDetail>> {
-        let details = if matches!(scope, ReceivingDetailScope::Public) {
-            &self.public_details
-        } else {
-            &self.private_details
-        };
-        Ok(details.lock().expect("details lock poisoned").clone())
+    async fn current_public_receiving_details(&self) -> Result<Vec<PublicReceivingDetail>> {
+        Ok(self
+            .public_details
+            .lock()
+            .expect("details lock poisoned")
+            .clone())
     }
 
-    async fn select_payment_endpoints(
+    async fn current_private_receiving_details(
         &self,
-        request: &PaymentEndpointSelectionRequest,
-    ) -> Result<Vec<PaymentEndpointCandidate>> {
+        _counterparty: &PubkyPublicKey,
+        _counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Result<Vec<PrivateReceivingDetail>> {
+        Ok(self
+            .private_details
+            .lock()
+            .expect("details lock poisoned")
+            .clone())
+    }
+
+    async fn select_public_payment_endpoints(
+        &self,
+        request: &PublicPaymentEndpointSelectionRequest,
+    ) -> Result<Vec<PublicPaymentEndpointCandidate>> {
         Ok(request.candidates.clone())
     }
 
-    async fn build_payment_target(
+    async fn build_public_payment_target(
         &self,
-        endpoint: &PaymentEndpointCandidate,
+        endpoint: &PublicPaymentEndpointCandidate,
+    ) -> Result<PaymentTarget> {
+        Ok(PaymentTarget {
+            payload: endpoint.payload.clone(),
+        })
+    }
+
+    async fn select_private_payment_endpoints(
+        &self,
+        request: &PrivatePaymentEndpointSelectionRequest,
+    ) -> Result<Vec<PrivatePaymentEndpointCandidate>> {
+        Ok(request.candidates.clone())
+    }
+
+    async fn build_private_payment_target(
+        &self,
+        endpoint: &PrivatePaymentEndpointCandidate,
     ) -> Result<PaymentTarget> {
         Ok(PaymentTarget {
             payload: endpoint.payload.clone(),
@@ -312,8 +338,15 @@ pub fn receiver_path(value: &str) -> PaykitReceiverPath {
     PaykitReceiverPath::new(value).expect("test receiver path should be valid")
 }
 
-pub fn receiving_detail(identifier: &str, payload: &str) -> ReceivingDetail {
-    ReceivingDetail {
+pub fn public_receiving_detail(identifier: &str, payload: &str) -> PublicReceivingDetail {
+    PublicReceivingDetail {
+        identifier: identifier.into(),
+        payload: payload.into(),
+    }
+}
+
+pub fn private_receiving_detail(identifier: &str, payload: &str) -> PrivateReceivingDetail {
+    PrivateReceivingDetail {
         identifier: identifier.into(),
         payload: payload.into(),
     }

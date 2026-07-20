@@ -1,13 +1,13 @@
 use paykit_sdk::{OutboundPrivateMessageStatus, PaykitSdkError};
 
-use crate::harness::{linked_two_party, receiving_detail, two_party};
+use crate::harness::{linked_two_party, private_receiving_detail, two_party};
 
 #[tokio::test]
 async fn test_private_payment_list_roundtrip_between_linked_peers() {
     let pair = linked_two_party().await;
     pair.alice
         .adapter
-        .set_private_details(vec![receiving_detail(
+        .set_private_details(vec![private_receiving_detail(
             "btc-lightning-bolt11",
             "ln-private-alice",
         )]);
@@ -65,7 +65,7 @@ async fn test_enqueue_private_payment_list_without_link_fails() {
     let pair = two_party().await;
     pair.alice
         .adapter
-        .set_private_details(vec![receiving_detail(
+        .set_private_details(vec![private_receiving_detail(
             "btc-lightning-bolt11",
             "ln-private-alice",
         )]);

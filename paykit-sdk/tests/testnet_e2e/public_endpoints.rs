@@ -1,6 +1,6 @@
 use paykit_sdk::{load_public_endpoint_records, PaykitSdkError, PublicationStatus};
 
-use crate::harness::{build_testnet, receiving_detail, TestUser};
+use crate::harness::{build_testnet, public_receiving_detail, TestUser};
 
 /// Payload published for `identifier`, or `None` when the endpoint is absent.
 fn payload_of<'a>(list: &'a paykit_lib::PaymentList, identifier: &str) -> Option<&'a str> {
@@ -15,8 +15,8 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
     let testnet = build_testnet().await;
     let user = TestUser::sign_up(&testnet).await;
     user.adapter.set_public_details(vec![
-        receiving_detail("btc-lightning-bolt11", "lnbc-test-invoice"),
-        receiving_detail("btc-onchain", "bc1q-test-address"),
+        public_receiving_detail("btc-lightning-bolt11", "lnbc-test-invoice"),
+        public_receiving_detail("btc-onchain", "bc1q-test-address"),
     ]);
 
     let report = user
@@ -57,10 +57,11 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
         .all(|record| record.status == PublicationStatus::Published));
 
     // Shrinking the desired set removes the stale endpoint remotely.
-    user.adapter.set_public_details(vec![receiving_detail(
-        "btc-lightning-bolt11",
-        "lnbc-test-invoice",
-    )]);
+    user.adapter
+        .set_public_details(vec![public_receiving_detail(
+            "btc-lightning-bolt11",
+            "lnbc-test-invoice",
+        )]);
     let report = user
         .sdk
         .sync_public_endpoints()
@@ -85,10 +86,11 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
 async fn test_sync_public_endpoints_after_sign_out_fails() {
     let testnet = build_testnet().await;
     let user = TestUser::sign_up(&testnet).await;
-    user.adapter.set_public_details(vec![receiving_detail(
-        "btc-lightning-bolt11",
-        "lnbc-test-invoice",
-    )]);
+    user.adapter
+        .set_public_details(vec![public_receiving_detail(
+            "btc-lightning-bolt11",
+            "lnbc-test-invoice",
+        )]);
 
     user.sdk.sign_out().await.expect("sign-out should succeed");
 

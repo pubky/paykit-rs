@@ -3157,7 +3157,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "paykit-ffi"
-version = "0.1.0-rc37"
+version = "0.1.0-rc38"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -3184,7 +3184,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-lib"
-version = "0.1.0-rc37"
+version = "0.1.0-rc38"
 dependencies = [
  "anyhow",
  "base64",
@@ -3205,7 +3205,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-sdk"
-version = "0.1.0-rc37"
+version = "0.1.0-rc38"
 dependencies = [
  "anyhow",
  "async-trait",

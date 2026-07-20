@@ -136,10 +136,11 @@ that reserve receiving details outside the SDK callback:
 - output: per-counterparty-receiver queue and delivery failures, so apps do not
   have to merge queue reports with outbound-send reports manually
 
-The app-facing contact payment preparation helper must document its sequence:
-refresh live session access, ensure or advance the private link when
+The app-facing private contact payment preparation helper must document its
+sequence: refresh live session access, ensure or advance the private link when
 possible, drain currently available private send/receive work for the peer,
-then resolve endpoints private-first with optional public fallback.
+then resolve only private endpoints. Public resolution is a separate call with
+a separate result type and no implicit fallback in either direction.
 
 ## Pubky Session Binding Shape
 
@@ -367,12 +368,13 @@ Bindings should expose high-level workflows before low-level records:
 - publish Private Payment Lists
 - sync Private Payment Lists for saved contacts, including a helper that also
   processes outbound delivery
-- prepare and resolve contact payment as the default mobile "pay contact"
-  workflow: ensure private state when possible, drain currently available
-  private send/receive work for the peer, then resolve private-first with
-  optional public fallback
-- resolve contact payment with lower-level private-endpoint-only and
-  public-endpoint-only helpers for apps that need explicit source control
+- prepare and resolve private contact payment: ensure private state when
+  possible, drain currently available private send/receive work for the peer,
+  then return a private-only resolution
+- resolve private contact payment without preparation when cached/private-link
+  state should be used directly
+- resolve public contact payment independently, with public-only candidates and
+  a public-only result
 - queue and list Payment Requests
 - submit Payment Proofs with caller-supplied proof data
 - retrieve Receipts
@@ -381,12 +383,12 @@ Bindings should expose high-level workflows before low-level records:
 Bindings should avoid typed private receive helpers that bypass durable ordered
 stream handling.
 
-Private-derived app records should carry enough source and freshness context for
-mobile UI and payment logic. Where applicable, expose fields such as source
-(`fresh_private`, `cached_private`, or `public`), `received_at`,
+Private-derived app records should carry enough freshness context for mobile UI
+and payment logic. Where applicable, expose fields such as `received_at`,
 `verified_with_private_link`, and `recovery_required`. Apps should not have to
 infer whether a cached Private Payment List is current from unrelated identity
-status fields.
+status fields, and public records must not be represented in private result
+types.
 
 ## Testing Expectations
 

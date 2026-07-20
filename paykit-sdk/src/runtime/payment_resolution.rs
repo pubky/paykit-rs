@@ -1,7 +1,7 @@
 use super::*;
 use crate::PaymentAmountContext;
 
-const PREPARE_CONTACT_PAYMENT_SYNC_ROUND_LIMIT: usize = 8;
+const PREPARE_PRIVATE_PAYMENT_SYNC_ROUND_LIMIT: usize = 8;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -10,288 +10,208 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
-    /// Resolve payable endpoints for one counterparty.
+    /// Resolve payable private endpoints for one counterparty.
     ///
-    /// This uses cached private state first. Call
-    /// [`receive_private_messages`](Self::receive_private_messages) before
-    /// resolving when the app needs the freshest Private Payment List.
-    pub async fn resolve_contact_payment(
+    /// This method only reads Private Payment Lists and only invokes the
+    /// private payment adapter callbacks. Public Payment Endpoints are never
+    /// considered as fallback candidates.
+    pub async fn resolve_private_contact_payment(
         &self,
-        request: ContactPaymentResolutionRequest,
-    ) -> Result<ContactPaymentResolution> {
+        counterparty: PubkyPublicKey,
+        counterparty_receiver_path: PaykitReceiverPath,
+        amount: Option<PaymentAmountContext>,
+    ) -> Result<PrivateContactPaymentResolution> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        let mut private_allowed = identity.local_pubky_public_key.is_some();
         let private_live = session_access.is_some();
-        let mut private_state = ContactPaymentResolutionPrivateState::NoPrivateEndpoint;
+        let mut state = PrivatePaymentResolutionState::NoPrivateEndpoint;
+        let mut private_allowed = identity.local_pubky_public_key.is_some();
+
         if private_allowed {
             private_allowed = if private_live {
                 self.private_resolution_allowed_for_peer(
-                    &request.counterparty,
-                    &request.counterparty_receiver_path,
-                    &mut private_state,
+                    &counterparty,
+                    &counterparty_receiver_path,
+                    &mut state,
                 )
                 .await?
             } else {
                 self.cached_private_resolution_allowed_for_peer(
-                    &request.counterparty,
-                    &request.counterparty_receiver_path,
-                    &mut private_state,
+                    &counterparty,
+                    &counterparty_receiver_path,
+                    &mut state,
                 )
                 .await?
             };
         }
+
         if private_allowed && private_live {
-            if let Err(err) = self
+            match self
                 .observe_remote_recovery_marker_for_cached_private_state(
-                    &request.counterparty,
-                    &request.counterparty_receiver_path,
+                    &counterparty,
+                    &counterparty_receiver_path,
                     session_access.as_ref(),
                 )
                 .await
             {
-                if matches!(err, PaykitSdkError::RecoveryRequired { .. }) {
-                    private_state = ContactPaymentResolutionPrivateState::RecoveryPending;
-                } else if !request.include_public_endpoints {
-                    return Err(err);
+                Ok(()) => {}
+                Err(PaykitSdkError::RecoveryRequired { .. }) => {
+                    state = PrivatePaymentResolutionState::RecoveryPending;
+                    private_allowed = false;
                 }
-                private_allowed = false;
+                Err(err) => return Err(err),
             }
         }
+
         if private_allowed && private_live {
             private_allowed = self
                 .private_resolution_allowed_for_peer(
-                    &request.counterparty,
-                    &request.counterparty_receiver_path,
-                    &mut private_state,
+                    &counterparty,
+                    &counterparty_receiver_path,
+                    &mut state,
                 )
                 .await?;
         }
+
         let private_view = if private_allowed {
             load_current_private_payment_list(
                 &self.storage,
-                &request.counterparty,
-                &request.counterparty_receiver_path,
+                &counterparty,
+                &counterparty_receiver_path,
             )
             .await?
         } else {
             None
         };
         let mut candidates = private_candidates(
-            &request.counterparty,
-            &request.counterparty_receiver_path,
+            &counterparty,
+            &counterparty_receiver_path,
             private_view.as_ref(),
         );
         if !candidates.is_empty() {
-            private_state = ContactPaymentResolutionPrivateState::Available;
+            state = PrivatePaymentResolutionState::Available;
         }
-        let had_private_candidates = !candidates.is_empty();
 
-        if candidates.is_empty() && private_live {
-            if private_state == ContactPaymentResolutionPrivateState::RecoveryPending {
-                if !request.include_public_endpoints {
-                    return Ok(status_resolution(
-                        ContactPaymentResolutionStatus::NoEndpoint,
-                        private_state,
-                    ));
+        if candidates.is_empty()
+            && private_live
+            && state != PrivatePaymentResolutionState::RecoveryPending
+        {
+            match self
+                .recover_private_candidates_for_resolution(
+                    &counterparty,
+                    &counterparty_receiver_path,
+                )
+                .await?
+            {
+                PrivateRecoveryOutcome::Refreshed(refreshed) if !refreshed.is_empty() => {
+                    candidates = refreshed;
+                    state = PrivatePaymentResolutionState::Available;
                 }
-            } else {
-                match self
-                    .recover_private_candidates_for_resolution(
-                        &request.counterparty,
-                        &request.counterparty_receiver_path,
-                    )
-                    .await?
-                {
-                    PrivateRecoveryOutcome::Refreshed(refreshed_candidates)
-                        if !refreshed_candidates.is_empty() =>
-                    {
-                        candidates = refreshed_candidates;
-                        private_state = ContactPaymentResolutionPrivateState::Available;
-                    }
-                    PrivateRecoveryOutcome::Pending => {
-                        private_state = ContactPaymentResolutionPrivateState::RecoveryPending;
-                        if !request.include_public_endpoints {
-                            return Ok(status_resolution(
-                                ContactPaymentResolutionStatus::NoEndpoint,
-                                private_state,
-                            ));
-                        }
-                    }
-                    PrivateRecoveryOutcome::NotNeeded | PrivateRecoveryOutcome::Refreshed(_) => {}
+                PrivateRecoveryOutcome::Pending => {
+                    state = PrivatePaymentResolutionState::RecoveryPending;
                 }
+                PrivateRecoveryOutcome::NotNeeded | PrivateRecoveryOutcome::Refreshed(_) => {}
             }
         }
 
-        if request.include_public_endpoints {
-            candidates.extend(
-                self.public_payment_candidates(
-                    &request.counterparty,
-                    &request.counterparty_receiver_path,
-                )
-                .await?,
-            );
-        }
-
         if candidates.is_empty() {
-            return Ok(unresolved_resolution(had_private_candidates, private_state));
+            return Ok(unresolved_private_resolution(false, state));
         }
 
-        self.resolve_candidate_batch(
-            request.counterparty,
-            request.counterparty_receiver_path,
-            request.amount,
+        self.resolve_private_candidate_batch(
+            counterparty,
+            counterparty_receiver_path,
+            amount,
             candidates,
-            private_state,
+            state,
         )
         .await
     }
 
-    /// Resolve payable private endpoints for one counterparty.
-    pub async fn resolve_private_contact_payment(
-        &self,
-        counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
-        amount: Option<PaymentAmountContext>,
-    ) -> Result<ContactPaymentResolution> {
-        self.resolve_contact_payment(ContactPaymentResolutionRequest {
-            counterparty,
-            counterparty_receiver_path,
-            amount,
-            include_public_endpoints: false,
-        })
-        .await
-    }
-
-    /// Resolve payable public endpoints for one counterparty.
+    /// Resolve payable public Payment Endpoints for one counterparty.
+    ///
+    /// This method only reads public Pubky storage and only invokes the public
+    /// payment adapter callbacks. Encrypted Link state is never consulted.
     pub async fn resolve_public_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
         amount: Option<PaymentAmountContext>,
-    ) -> Result<ContactPaymentResolution> {
+    ) -> Result<PublicContactPaymentResolution> {
         let candidates = self
             .public_payment_candidates(&counterparty, &counterparty_receiver_path)
             .await?;
         if candidates.is_empty() {
-            return Ok(status_resolution(
-                ContactPaymentResolutionStatus::NoEndpoint,
-                ContactPaymentResolutionPrivateState::NoPrivateEndpoint,
-            ));
+            return Ok(unresolved_public_resolution(false));
         }
-        self.resolve_candidate_batch(
+
+        self.resolve_public_candidate_batch(
             counterparty,
             counterparty_receiver_path,
             amount,
             candidates,
-            ContactPaymentResolutionPrivateState::NoPrivateEndpoint,
         )
         .await
     }
 
-    /// Prepare private contact state, then resolve payable endpoints.
+    /// Prepare private contact state, then resolve private endpoints.
     ///
-    /// This is the app-facing "pay contact" workflow. It refreshes the live
-    /// session capability, ensures or advances the private link when possible,
-    /// drains currently available private send/receive work for the peer, then
-    /// resolves endpoints private-first. Public endpoints are included only
-    /// when `include_public_endpoints` is true; in that mode, private
-    /// preparation failures are reported and public fallback can still be
-    /// returned.
-    pub async fn prepare_and_resolve_contact_payment(
+    /// The SDK ensures or advances the Encrypted Link when a live session is
+    /// available, drains currently available private send/receive work for the
+    /// peer, and resolves only the counterparty's Private Payment List.
+    pub async fn prepare_and_resolve_private_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
         amount: Option<PaymentAmountContext>,
-        include_public_endpoints: bool,
         max_advance_steps: u32,
-    ) -> Result<PreparedContactPayment> {
+    ) -> Result<PreparedPrivateContactPayment> {
         let mut link_report = None;
         let mut receive_report = None;
         let mut outbound_report = None;
-        let mut private_error = None;
 
         if self.private_payment_preparation_is_available().await? {
-            match self
-                .ensure_link_with_peer(
+            link_report = Some(
+                self.ensure_link_with_peer(
                     counterparty.clone(),
                     counterparty_receiver_path.clone(),
                     max_advance_steps,
                 )
-                .await
-            {
-                Ok(report) => {
-                    link_report = Some(report);
-                    for _ in 0..PREPARE_CONTACT_PAYMENT_SYNC_ROUND_LIMIT {
-                        match self
-                            .process_outbound_private_messages(
-                                counterparty.clone(),
-                                counterparty_receiver_path.clone(),
-                            )
-                            .await
-                        {
-                            Ok(report) => {
-                                let outbound_progress = outbound_report_made_progress(&report);
-                                merge_outbound_report(&mut outbound_report, report);
+                .await?,
+            );
+            for _ in 0..PREPARE_PRIVATE_PAYMENT_SYNC_ROUND_LIMIT {
+                let outbound = self
+                    .process_outbound_private_messages(
+                        counterparty.clone(),
+                        counterparty_receiver_path.clone(),
+                    )
+                    .await?;
+                let outbound_progress = outbound_report_made_progress(&outbound);
+                merge_outbound_report(&mut outbound_report, outbound);
 
-                                match self
-                                    .receive_private_messages(
-                                        counterparty.clone(),
-                                        counterparty_receiver_path.clone(),
-                                    )
-                                    .await
-                                {
-                                    Ok(report) => {
-                                        let receive_progress =
-                                            receive_report_made_progress(&report);
-                                        merge_receive_report(&mut receive_report, report);
-                                        if !outbound_progress && !receive_progress {
-                                            break;
-                                        }
-                                    }
-                                    Err(err) => {
-                                        if !include_public_endpoints {
-                                            return Err(err);
-                                        }
-                                        private_error = Some(err.to_string());
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                if !include_public_endpoints {
-                                    return Err(err);
-                                }
-                                private_error = Some(err.to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(err) => {
-                    if !include_public_endpoints {
-                        return Err(err);
-                    }
-                    private_error = Some(err.to_string());
+                let received = self
+                    .receive_private_messages(
+                        counterparty.clone(),
+                        counterparty_receiver_path.clone(),
+                    )
+                    .await?;
+                let receive_progress = receive_report_made_progress(&received);
+                merge_receive_report(&mut receive_report, received);
+
+                if !outbound_progress && !receive_progress {
+                    break;
                 }
             }
         }
 
-        let mut resolution = self
-            .resolve_contact_payment(ContactPaymentResolutionRequest {
-                counterparty,
-                counterparty_receiver_path,
-                amount,
-                include_public_endpoints,
-            })
+        let resolution = self
+            .resolve_private_contact_payment(counterparty, counterparty_receiver_path, amount)
             .await?;
-        prefer_private_endpoints(&mut resolution);
 
-        Ok(PreparedContactPayment {
+        Ok(PreparedPrivateContactPayment {
             resolution,
             link_report,
             receive_report,
             outbound_report,
-            private_error,
         })
     }
 
@@ -304,7 +224,7 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
-        private_state: &mut ContactPaymentResolutionPrivateState,
+        state: &mut PrivatePaymentResolutionState,
     ) -> Result<bool> {
         match self
             .ensure_peer_allows_private_automation(counterparty, counterparty_receiver_path)
@@ -312,7 +232,7 @@ where
         {
             Ok(()) => Ok(true),
             Err(PaykitSdkError::RecoveryRequired { .. }) => {
-                *private_state = ContactPaymentResolutionPrivateState::RecoveryPending;
+                *state = PrivatePaymentResolutionState::RecoveryPending;
                 Ok(false)
             }
             Err(err) => Err(err),
@@ -323,7 +243,7 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
-        private_state: &mut ContactPaymentResolutionPrivateState,
+        state: &mut PrivatePaymentResolutionState,
     ) -> Result<bool> {
         let peer_state = self
             .storage
@@ -335,7 +255,7 @@ where
             .await?;
         match peer_state {
             Some(LinkedPeerState::Linking | LinkedPeerState::RecoveryRequired) => {
-                *private_state = ContactPaymentResolutionPrivateState::RecoveryPending;
+                *state = PrivatePaymentResolutionState::RecoveryPending;
                 Ok(false)
             }
             Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy {
@@ -381,49 +301,47 @@ where
             return Ok(PrivateRecoveryOutcome::Pending);
         }
 
-        if has_active_link {
-            self.observe_remote_recovery_marker_for_cached_private_state(
-                counterparty,
-                counterparty_receiver_path,
-                None,
-            )
-            .await?;
-
-            match self
-                .receive_private_messages(counterparty.clone(), counterparty_receiver_path.clone())
-                .await
-            {
-                Ok(_) => {
-                    let private_view = load_current_private_payment_list(
-                        &self.storage,
-                        counterparty,
-                        counterparty_receiver_path,
-                    )
-                    .await?;
-                    return Ok(PrivateRecoveryOutcome::Refreshed(private_candidates(
-                        counterparty,
-                        counterparty_receiver_path,
-                        private_view.as_ref(),
-                    )));
-                }
-                Err(PaykitSdkError::Policy { .. }) => return Ok(PrivateRecoveryOutcome::Pending),
-                Err(PaykitSdkError::RecoveryRequired { .. })
-                | Err(PaykitSdkError::Transport { .. })
-                | Err(PaykitSdkError::Protocol { .. }) => {
-                    return Ok(PrivateRecoveryOutcome::Pending);
-                }
-                Err(err) => return Err(err),
-            }
+        if !has_active_link {
+            return Ok(PrivateRecoveryOutcome::NotNeeded);
         }
 
-        Ok(PrivateRecoveryOutcome::NotNeeded)
+        self.observe_remote_recovery_marker_for_cached_private_state(
+            counterparty,
+            counterparty_receiver_path,
+            None,
+        )
+        .await?;
+
+        match self
+            .receive_private_messages(counterparty.clone(), counterparty_receiver_path.clone())
+            .await
+        {
+            Ok(_) => {
+                let private_view = load_current_private_payment_list(
+                    &self.storage,
+                    counterparty,
+                    counterparty_receiver_path,
+                )
+                .await?;
+                Ok(PrivateRecoveryOutcome::Refreshed(private_candidates(
+                    counterparty,
+                    counterparty_receiver_path,
+                    private_view.as_ref(),
+                )))
+            }
+            Err(PaykitSdkError::Policy { .. })
+            | Err(PaykitSdkError::RecoveryRequired { .. })
+            | Err(PaykitSdkError::Transport { .. })
+            | Err(PaykitSdkError::Protocol { .. }) => Ok(PrivateRecoveryOutcome::Pending),
+            Err(err) => Err(err),
+        }
     }
 
     async fn public_payment_candidates(
         &self,
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Result<Vec<PaymentEndpointCandidate>> {
+    ) -> Result<Vec<PublicPaymentEndpointCandidate>> {
         let public_storage =
             self.pubky
                 .load_public_storage()
@@ -442,10 +360,9 @@ where
         let mut endpoints = payment_list
             .payment_endpoints
             .into_iter()
-            .map(|(identifier, payload)| PaymentEndpointCandidate {
+            .map(|(identifier, payload)| PublicPaymentEndpointCandidate {
                 counterparty: counterparty.clone(),
                 counterparty_receiver_path: counterparty_receiver_path.clone(),
-                source: PaymentEndpointSource::PublicPaymentEndpoint,
                 identifier: identifier.as_str().to_owned(),
                 payload: payload.into_inner(),
             })
@@ -454,42 +371,84 @@ where
         Ok(endpoints)
     }
 
-    async fn build_payable_endpoints(
+    async fn build_public_payable_endpoints(
         &self,
-        payable: Vec<PaymentEndpointCandidate>,
-    ) -> Result<Vec<ResolvedPaymentEndpoint>> {
+        payable: Vec<PublicPaymentEndpointCandidate>,
+    ) -> Result<Vec<ResolvedPublicPaymentEndpoint>> {
         let mut endpoints = Vec::with_capacity(payable.len());
         for endpoint in payable {
-            let target = self.payment.build_payment_target(&endpoint).await?;
-            endpoints.push(ResolvedPaymentEndpoint { endpoint, target });
+            let target = self.payment.build_public_payment_target(&endpoint).await?;
+            endpoints.push(ResolvedPublicPaymentEndpoint { endpoint, target });
         }
         Ok(endpoints)
     }
 
-    pub(super) async fn resolve_candidate_batch(
+    async fn build_private_payable_endpoints(
+        &self,
+        payable: Vec<PrivatePaymentEndpointCandidate>,
+    ) -> Result<Vec<ResolvedPrivatePaymentEndpoint>> {
+        let mut endpoints = Vec::with_capacity(payable.len());
+        for endpoint in payable {
+            let target = self.payment.build_private_payment_target(&endpoint).await?;
+            endpoints.push(ResolvedPrivatePaymentEndpoint { endpoint, target });
+        }
+        Ok(endpoints)
+    }
+
+    pub(super) async fn resolve_public_candidate_batch(
         &self,
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
         amount: Option<PaymentAmountContext>,
-        candidates: Vec<PaymentEndpointCandidate>,
-        private_state: ContactPaymentResolutionPrivateState,
-    ) -> Result<ContactPaymentResolution> {
+        candidates: Vec<PublicPaymentEndpointCandidate>,
+    ) -> Result<PublicContactPaymentResolution> {
         let payable = self
             .payment
-            .select_payment_endpoints(&PaymentEndpointSelectionRequest {
+            .select_public_payment_endpoints(&PublicPaymentEndpointSelectionRequest {
                 counterparty,
                 counterparty_receiver_path,
                 amount,
                 candidates: candidates.clone(),
             })
             .await?;
-        let payable = payable_from_batch(&payable, &candidates)?;
-        let payable_endpoints = self.build_payable_endpoints(payable).await?;
-        if !payable_endpoints.is_empty() {
-            return Ok(payable_resolution(payable_endpoints, private_state));
+        let payable = public_payable_from_batch(&payable, &candidates)?;
+        let payable_endpoints = self.build_public_payable_endpoints(payable).await?;
+        if payable_endpoints.is_empty() {
+            return Ok(unresolved_public_resolution(true));
         }
+        Ok(PublicContactPaymentResolution {
+            status: PublicPaymentResolutionStatus::Payable,
+            payable_endpoints,
+        })
+    }
 
-        Ok(unresolved_resolution(true, private_state))
+    pub(super) async fn resolve_private_candidate_batch(
+        &self,
+        counterparty: PubkyPublicKey,
+        counterparty_receiver_path: PaykitReceiverPath,
+        amount: Option<PaymentAmountContext>,
+        candidates: Vec<PrivatePaymentEndpointCandidate>,
+        state: PrivatePaymentResolutionState,
+    ) -> Result<PrivateContactPaymentResolution> {
+        let payable = self
+            .payment
+            .select_private_payment_endpoints(&PrivatePaymentEndpointSelectionRequest {
+                counterparty,
+                counterparty_receiver_path,
+                amount,
+                candidates: candidates.clone(),
+            })
+            .await?;
+        let payable = private_payable_from_batch(&payable, &candidates)?;
+        let payable_endpoints = self.build_private_payable_endpoints(payable).await?;
+        if payable_endpoints.is_empty() {
+            return Ok(unresolved_private_resolution(true, state));
+        }
+        Ok(PrivateContactPaymentResolution {
+            status: PrivatePaymentResolutionStatus::Payable,
+            state,
+            payable_endpoints,
+        })
     }
 }
 
@@ -497,29 +456,22 @@ fn private_candidates(
     counterparty: &PubkyPublicKey,
     counterparty_receiver_path: &PaykitReceiverPath,
     view: Option<&PrivatePaymentListView>,
-) -> Vec<PaymentEndpointCandidate> {
+) -> Vec<PrivatePaymentEndpointCandidate> {
     let Some(view) = view else {
         return Vec::new();
     };
     let mut candidates = view
         .payment_endpoints
         .iter()
-        .map(|(identifier, payload)| PaymentEndpointCandidate {
+        .map(|(identifier, payload)| PrivatePaymentEndpointCandidate {
             counterparty: counterparty.clone(),
             counterparty_receiver_path: counterparty_receiver_path.clone(),
-            source: PaymentEndpointSource::PrivatePaymentList,
             identifier: identifier.clone(),
             payload: payload.clone(),
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.identifier.cmp(&right.identifier));
     candidates
-}
-
-pub(super) fn prefer_private_endpoints(resolution: &mut ContactPaymentResolution) {
-    resolution.payable_endpoints.sort_by_key(|endpoint| {
-        endpoint.endpoint.source != PaymentEndpointSource::PrivatePaymentList
-    });
 }
 
 pub(super) fn merge_outbound_report(
@@ -564,49 +516,53 @@ fn receive_report_made_progress(report: &PrivateStreamIntakeReport) -> bool {
 pub(super) enum PrivateRecoveryOutcome {
     NotNeeded,
     Pending,
-    Refreshed(Vec<PaymentEndpointCandidate>),
-}
-fn payable_resolution(
-    payable_endpoints: Vec<ResolvedPaymentEndpoint>,
-    private_state: ContactPaymentResolutionPrivateState,
-) -> ContactPaymentResolution {
-    ContactPaymentResolution {
-        status: ContactPaymentResolutionStatus::Payable,
-        private_state,
-        payable_endpoints,
-    }
+    Refreshed(Vec<PrivatePaymentEndpointCandidate>),
 }
 
-fn status_resolution(
-    status: ContactPaymentResolutionStatus,
-    private_state: ContactPaymentResolutionPrivateState,
-) -> ContactPaymentResolution {
-    ContactPaymentResolution {
-        status,
-        private_state,
-        payable_endpoints: Vec::new(),
-    }
-}
-
-fn unresolved_resolution(
-    had_candidates: bool,
-    private_state: ContactPaymentResolutionPrivateState,
-) -> ContactPaymentResolution {
-    ContactPaymentResolution {
+fn unresolved_public_resolution(had_candidates: bool) -> PublicContactPaymentResolution {
+    PublicContactPaymentResolution {
         status: if had_candidates {
-            ContactPaymentResolutionStatus::UnsupportedEndpoint
+            PublicPaymentResolutionStatus::UnsupportedEndpoint
         } else {
-            ContactPaymentResolutionStatus::NoEndpoint
+            PublicPaymentResolutionStatus::NoEndpoint
         },
-        private_state,
         payable_endpoints: Vec::new(),
     }
 }
 
-pub(super) fn payable_from_batch(
-    selected: &[PaymentEndpointCandidate],
-    candidates: &[PaymentEndpointCandidate],
-) -> Result<Vec<PaymentEndpointCandidate>> {
+fn unresolved_private_resolution(
+    had_candidates: bool,
+    state: PrivatePaymentResolutionState,
+) -> PrivateContactPaymentResolution {
+    PrivateContactPaymentResolution {
+        status: if had_candidates {
+            PrivatePaymentResolutionStatus::UnsupportedEndpoint
+        } else {
+            PrivatePaymentResolutionStatus::NoEndpoint
+        },
+        state,
+        payable_endpoints: Vec::new(),
+    }
+}
+
+pub(super) fn public_payable_from_batch(
+    selected: &[PublicPaymentEndpointCandidate],
+    candidates: &[PublicPaymentEndpointCandidate],
+) -> Result<Vec<PublicPaymentEndpointCandidate>> {
+    payable_from_batch(selected, candidates)
+}
+
+pub(super) fn private_payable_from_batch(
+    selected: &[PrivatePaymentEndpointCandidate],
+    candidates: &[PrivatePaymentEndpointCandidate],
+) -> Result<Vec<PrivatePaymentEndpointCandidate>> {
+    payable_from_batch(selected, candidates)
+}
+
+fn payable_from_batch<T>(selected: &[T], candidates: &[T]) -> Result<Vec<T>>
+where
+    T: Clone + PartialEq,
+{
     let mut payable = Vec::with_capacity(selected.len());
     for candidate in selected {
         if !candidates.contains(candidate) {

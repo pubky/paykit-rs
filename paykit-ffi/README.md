@@ -100,15 +100,19 @@ context. Raw diagnostic details require an explicit debug export method.
   delivery, with per-counterparty-receiver queue and delivery failures.
 - `PaykitSdk.currentPrivatePaymentList` — inspect the latest cached Private
   Payment List view for one counterparty receiver.
-- `PaykitSdk.prepareAndResolveContactPayment` — app-facing payment setup:
+- `PaykitSdk.prepareAndResolvePrivateContactPayment` — app-facing private
+  payment setup:
   refresh live session access, ensure or advance private link state,
   drain currently available private send/receive work for the peer, then
-  resolve private-first with optional public fallback.
-- `PaykitSdk.resolveContactPayment` — resolve payable private and optional
-  public Payment Endpoints into adapter-built payment targets.
-- `PaykitSdk.resolvePrivateContactPayment` and
-  `resolvePublicContactPayment` — source-specific resolution helpers for apps
-  that want to avoid mixed private/public results.
+  resolve only the counterparty's Private Payment List.
+- `PaykitSdk.resolvePrivateContactPayment` — resolve only payable private
+  Payment Endpoints into adapter-built private payment targets.
+- `PaykitSdk.resolvePublicContactPayment` — independently resolve only payable
+  public Payment Endpoints into adapter-built public payment targets. It does
+  not inspect or mutate Encrypted Link state.
+
+The bindings do not expose a mixed public/private resolution call, a source
+discriminator, or implicit fallback between the two payment modes.
 
 Private endpoint payloads and payment targets use `PaymentPayload`, so raw
 payment-method data is exported only through explicit payload methods.
@@ -335,24 +339,35 @@ and retry with `processPendingPrivateMessages`.
 
 ### Pay A Contact
 
-For normal contact payment UX, use the high-level preparation call:
+For private contact payment UX, use the high-level private preparation call:
 
 ```text
-resolution = sdk.prepareAndResolveContactPayment(
+prepared = sdk.prepareAndResolvePrivateContactPayment(
     counterparty,
     counterpartyReceiverPath,
     amount, // PaymentAmountContext or nil/null
-    includePublicEndpoints,
     maxAdvanceSteps
 )
 ```
 
 This refreshes session access, advances or starts private link work when
 possible, receives pending private messages, processes pending outbound
-messages, and resolves private endpoints first. Public endpoints are included
-only when the call asks for them. Use `resolution.status` for the overall
-payment outcome and `resolution.privateState` for private-link-specific
-recovery or availability state.
+messages, and resolves only private endpoints. Use
+`prepared.resolution.status` for the private payment outcome and
+`prepared.resolution.state` for private-link recovery or availability state.
+
+Public payment is a separate call and result type:
+
+```text
+resolution = sdk.resolvePublicContactPayment(
+    counterparty,
+    counterpartyReceiverPath,
+    amount // PaymentAmountContext or nil/null
+)
+```
+
+No API combines these results or falls back from one mode to the other. The
+application chooses which payment mode to present and invoke.
 
 ### Backup And Restore
 
