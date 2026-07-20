@@ -47,6 +47,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   machine-readable code, and reason are recovered by downcast instead of
   degrading to the variant's generic code.
 
+## [0.1.0-rc37] - 2026-07-17
+
+### Added
+- Receiver Markers now publish a receiver-scoped Noise public key. The SDK
+  discovers that key before establishing an Encrypted Link, so private path
+  derivation no longer requires access to the Pubky identity secret key.
+- SDK and FFI session access now carry a separately persisted receiver Noise
+  secret key, including secure-storage import/export support in the bindings.
+
+### Changed
+- Encrypted Link, handshake, and recovery path derivation now use receiver
+  Noise keys while retaining Pubky identity keys solely for homeserver routing
+  and receiver-pair domain separation.
+- Encrypted Link snapshots now include the counterparty receiver Noise public
+  key so existing links can be restored without repeating public discovery.
+- Session signup, signin, auth completion, and import require the receiver Noise
+  key explicitly so reauthentication can reuse it. Ring- or server-owned Pubky
+  identities remain private-link-capable without exposing the identity secret.
+- Identity status now reports the optional persisted public key and live-session
+  availability directly, removing redundant capability enums and flags.
+
 ## [0.1.0-rc36] - 2026-07-14
 
 ### Fixed
@@ -325,7 +346,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc36...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc37...HEAD
+[0.1.0-rc37]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc37
 [0.1.0-rc36]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc36
 [0.1.0-rc35]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc35
 [0.1.0-rc33]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc33

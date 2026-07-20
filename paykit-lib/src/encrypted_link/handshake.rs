@@ -14,6 +14,13 @@ use super::{
 /// Override per-handshake via [`EncryptedLinkHandshake::set_max_recovery_attempts`].
 pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 
+struct HandshakeReceiverScope<'a> {
+    remote_identity_public_key: &'a PublicKey,
+    remote_noise_public_key: &'a PublicKey,
+    local_receiver_path: &'a PaykitReceiverPath,
+    remote_receiver_path: &'a PaykitReceiverPath,
+}
+
 /// Handle to an in-progress Noise handshake.
 ///
 /// Created by [`initiate_encrypted_link`] (initiator) or
@@ -29,6 +36,8 @@ pub struct EncryptedLinkHandshake {
     encryptor: pubky_noise::PubkyNoiseEncryptor,
     /// The counterparty's public key (used for homeserver path construction).
     remote_pubkey: PublicKey,
+    /// Counterparty receiver Noise public key used for path derivation.
+    remote_noise_public_key: PublicKey,
     /// Shared Noise configuration needed for snapshot-based recovery.
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
     /// Local receiver path used by this handshake.
@@ -60,6 +69,7 @@ impl EncryptedLinkHandshake {
         EncryptedLinkHandshakeSnapshot::from_state(
             self.encryptor.snapshot(),
             self.remote_pubkey.clone(),
+            self.remote_noise_public_key.clone(),
             self.local_receiver_path.clone(),
             self.remote_receiver_path.clone(),
         )
@@ -106,28 +116,41 @@ pub enum HandshakeProgress {
 /// Initiates a Noise XX Encrypted Link Handshake with a counterparty
 /// (initiator role).
 ///
+/// `receiver_pubkey` identifies the counterparty homeserver. The separate
+/// `receiver_noise_public_key` is discovered from that receiver's public
+/// [`PaykitReceiverMarker`](crate::PaykitReceiverMarker) and pairs with
+/// `sender_noise_secret_key` for private path derivation. The local secret is
+/// also used as this side's Noise static key.
+///
 /// Call [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
-#[instrument(skip(session, sender_secret_key, outbox_client))]
+#[instrument(skip(session, sender_noise_secret_key, outbox_client))]
 pub fn initiate_encrypted_link(
     session: pubky::PubkySession,
-    sender_secret_key: [u8; 32],
+    sender_noise_secret_key: [u8; 32],
     receiver_pubkey: &PublicKey,
+    receiver_noise_public_key: &PublicKey,
     local_receiver_path: &PaykitReceiverPath,
     remote_receiver_path: &PaykitReceiverPath,
     outbox_client: pubky::Pubky,
 ) -> Result<EncryptedLinkHandshake> {
+    let sender_pubkey = session.info().public_key().clone();
     let paths = compute_private_payment_paths(
-        &sender_secret_key,
+        &sender_noise_secret_key,
+        &sender_pubkey,
         receiver_pubkey,
+        receiver_noise_public_key,
         local_receiver_path,
         remote_receiver_path,
     );
     initiate_encrypted_link_with_paths(
         session,
-        sender_secret_key,
-        receiver_pubkey,
-        local_receiver_path,
-        remote_receiver_path,
+        sender_noise_secret_key,
+        HandshakeReceiverScope {
+            remote_identity_public_key: receiver_pubkey,
+            remote_noise_public_key: receiver_noise_public_key,
+            local_receiver_path,
+            remote_receiver_path,
+        },
         outbox_client,
         paths,
     )
@@ -135,10 +158,8 @@ pub fn initiate_encrypted_link(
 
 fn initiate_encrypted_link_with_paths(
     session: pubky::PubkySession,
-    sender_secret_key: [u8; 32],
-    receiver_pubkey: &PublicKey,
-    local_receiver_path: &PaykitReceiverPath,
-    remote_receiver_path: &PaykitReceiverPath,
+    sender_noise_secret_key: [u8; 32],
+    receiver_scope: HandshakeReceiverScope<'_>,
     outbox_client: pubky::Pubky,
     paths: (String, String),
 ) -> Result<EncryptedLinkHandshake> {
@@ -147,7 +168,7 @@ fn initiate_encrypted_link_with_paths(
     let (write_path, read_path) = paths;
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
-        sender_secret_key,
+        sender_noise_secret_key,
         0,
         "XX",
         session,
@@ -162,9 +183,9 @@ fn initiate_encrypted_link_with_paths(
 
     let encryptor = pubky_noise::PubkyNoiseEncryptor::new(
         config.clone(),
-        sender_secret_key,
+        sender_noise_secret_key,
         true,
-        receiver_pubkey.clone(),
+        receiver_scope.remote_identity_public_key.clone(),
     )
     .map_err(|err| PaykitError::Transport {
         context: format!("failed to initialize encryptor: {err:?}"),
@@ -174,10 +195,11 @@ fn initiate_encrypted_link_with_paths(
     debug!("handshake context initialized (initiator)");
     Ok(EncryptedLinkHandshake {
         encryptor,
-        remote_pubkey: receiver_pubkey.clone(),
+        remote_pubkey: receiver_scope.remote_identity_public_key.clone(),
+        remote_noise_public_key: receiver_scope.remote_noise_public_key.clone(),
         config,
-        local_receiver_path: local_receiver_path.clone(),
-        remote_receiver_path: remote_receiver_path.clone(),
+        local_receiver_path: receiver_scope.local_receiver_path.clone(),
+        remote_receiver_path: receiver_scope.remote_receiver_path.clone(),
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })
@@ -186,28 +208,41 @@ fn initiate_encrypted_link_with_paths(
 /// Accepts a Noise XX Encrypted Link Handshake from a counterparty
 /// (responder role).
 ///
+/// `sender_pubkey` identifies the counterparty homeserver. The separate
+/// `sender_noise_public_key` is discovered from that receiver's public
+/// [`PaykitReceiverMarker`](crate::PaykitReceiverMarker) and pairs with
+/// `receiver_noise_secret_key` for private path derivation. The local secret is
+/// also used as this side's Noise static key.
+///
 /// Call [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
-#[instrument(skip(session, receiver_secret_key, outbox_client))]
+#[instrument(skip(session, receiver_noise_secret_key, outbox_client))]
 pub fn accept_encrypted_link(
     session: pubky::PubkySession,
-    receiver_secret_key: [u8; 32],
+    receiver_noise_secret_key: [u8; 32],
     sender_pubkey: &PublicKey,
+    sender_noise_public_key: &PublicKey,
     local_receiver_path: &PaykitReceiverPath,
     remote_receiver_path: &PaykitReceiverPath,
     outbox_client: pubky::Pubky,
 ) -> Result<EncryptedLinkHandshake> {
+    let receiver_pubkey = session.info().public_key().clone();
     let paths = compute_private_payment_paths(
-        &receiver_secret_key,
+        &receiver_noise_secret_key,
+        &receiver_pubkey,
         sender_pubkey,
+        sender_noise_public_key,
         local_receiver_path,
         remote_receiver_path,
     );
     accept_encrypted_link_with_paths(
         session,
-        receiver_secret_key,
-        sender_pubkey,
-        local_receiver_path,
-        remote_receiver_path,
+        receiver_noise_secret_key,
+        HandshakeReceiverScope {
+            remote_identity_public_key: sender_pubkey,
+            remote_noise_public_key: sender_noise_public_key,
+            local_receiver_path,
+            remote_receiver_path,
+        },
         outbox_client,
         paths,
     )
@@ -215,10 +250,8 @@ pub fn accept_encrypted_link(
 
 fn accept_encrypted_link_with_paths(
     session: pubky::PubkySession,
-    receiver_secret_key: [u8; 32],
-    sender_pubkey: &PublicKey,
-    local_receiver_path: &PaykitReceiverPath,
-    remote_receiver_path: &PaykitReceiverPath,
+    receiver_noise_secret_key: [u8; 32],
+    sender_scope: HandshakeReceiverScope<'_>,
     outbox_client: pubky::Pubky,
     paths: (String, String),
 ) -> Result<EncryptedLinkHandshake> {
@@ -227,7 +260,7 @@ fn accept_encrypted_link_with_paths(
     let (write_path, read_path) = paths;
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
-        receiver_secret_key,
+        receiver_noise_secret_key,
         0,
         "XX",
         session,
@@ -242,9 +275,9 @@ fn accept_encrypted_link_with_paths(
 
     let encryptor = pubky_noise::PubkyNoiseEncryptor::new(
         config.clone(),
-        receiver_secret_key,
+        receiver_noise_secret_key,
         false,
-        sender_pubkey.clone(),
+        sender_scope.remote_identity_public_key.clone(),
     )
     .map_err(|err| PaykitError::Transport {
         context: format!("failed to initialize encryptor: {err:?}"),
@@ -254,10 +287,11 @@ fn accept_encrypted_link_with_paths(
     debug!("handshake context initialized (responder)");
     Ok(EncryptedLinkHandshake {
         encryptor,
-        remote_pubkey: sender_pubkey.clone(),
+        remote_pubkey: sender_scope.remote_identity_public_key.clone(),
+        remote_noise_public_key: sender_scope.remote_noise_public_key.clone(),
         config,
-        local_receiver_path: local_receiver_path.clone(),
-        remote_receiver_path: remote_receiver_path.clone(),
+        local_receiver_path: sender_scope.local_receiver_path.clone(),
+        remote_receiver_path: sender_scope.remote_receiver_path.clone(),
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })
@@ -336,6 +370,7 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
                 encryptor: restored,
                 config: handshake.config,
                 remote_pubkey: handshake.remote_pubkey,
+                remote_noise_public_key: handshake.remote_noise_public_key,
                 local_receiver_path: handshake.local_receiver_path,
                 remote_receiver_path: handshake.remote_receiver_path,
                 recovery_attempts: handshake.recovery_attempts,
@@ -364,6 +399,7 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
     Ok(HandshakeProgress::Complete(EncryptedLink::from_parts(
         handshake.encryptor,
         handshake.remote_pubkey,
+        handshake.remote_noise_public_key,
         handshake.config,
         handshake.local_receiver_path,
         handshake.remote_receiver_path,
@@ -372,12 +408,16 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
 
 /// Restores an [`EncryptedLinkHandshake`] from a previously saved snapshot.
 ///
+/// `noise_secret_key` must be the local receiver Noise key used to create the
+/// original handshake. The snapshot carries the counterparty receiver Noise
+/// public key needed to reconstruct the private paths.
+///
 /// Restored handshakes reset recovery tuning to defaults. `remote_pubkey` must
 /// match `snapshot.recipient()`.
-#[instrument(skip(session, secret_key, outbox_client, snapshot))]
+#[instrument(skip(session, noise_secret_key, outbox_client, snapshot))]
 pub async fn restore_encrypted_link_handshake(
     session: pubky::PubkySession,
-    secret_key: [u8; 32],
+    noise_secret_key: [u8; 32],
     remote_pubkey: &PublicKey,
     local_receiver_path: &PaykitReceiverPath,
     remote_receiver_path: &PaykitReceiverPath,
@@ -385,15 +425,19 @@ pub async fn restore_encrypted_link_handshake(
     snapshot: EncryptedLinkHandshakeSnapshot,
 ) -> Result<EncryptedLinkHandshake> {
     snapshot.validate_receiver_scope(local_receiver_path, remote_receiver_path)?;
+    let remote_noise_public_key = snapshot.remote_noise_public_key().clone();
+    let local_pubkey = session.info().public_key().clone();
     let paths = compute_private_payment_paths(
-        &secret_key,
+        &noise_secret_key,
+        &local_pubkey,
         remote_pubkey,
+        &remote_noise_public_key,
         local_receiver_path,
         remote_receiver_path,
     );
     restore_encrypted_link_handshake_with_paths(
         session,
-        secret_key,
+        noise_secret_key,
         remote_pubkey,
         outbox_client,
         snapshot,
@@ -404,7 +448,7 @@ pub async fn restore_encrypted_link_handshake(
 
 async fn restore_encrypted_link_handshake_with_paths(
     session: pubky::PubkySession,
-    secret_key: [u8; 32],
+    noise_secret_key: [u8; 32],
     remote_pubkey: &PublicKey,
     outbox_client: pubky::Pubky,
     snapshot: EncryptedLinkHandshakeSnapshot,
@@ -415,7 +459,7 @@ async fn restore_encrypted_link_handshake_with_paths(
     let (write_path, read_path) = paths;
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
-        secret_key,
+        noise_secret_key,
         0,
         "XX",
         session,
@@ -470,9 +514,11 @@ async fn restore_encrypted_link_handshake_inner(
 
     let local_receiver_path = snapshot.local_receiver_path().clone();
     let remote_receiver_path = snapshot.remote_receiver_path().clone();
+    let remote_noise_public_key = snapshot.remote_noise_public_key().clone();
     validate_private_payment_paths(
         &config,
         remote_pubkey,
+        &remote_noise_public_key,
         &local_receiver_path,
         &remote_receiver_path,
     )?;
@@ -490,6 +536,7 @@ async fn restore_encrypted_link_handshake_inner(
     Ok(EncryptedLinkHandshake {
         encryptor,
         remote_pubkey: remote_pubkey.clone(),
+        remote_noise_public_key,
         config,
         local_receiver_path,
         remote_receiver_path,

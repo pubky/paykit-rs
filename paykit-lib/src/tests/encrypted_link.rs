@@ -24,6 +24,11 @@ async fn test_handshake_snapshot_serialize_roundtrip() {
         "recipient public key should survive serialize/deserialize"
     );
     assert_eq!(
+        restored_snapshot.remote_noise_public_key(),
+        snapshot.remote_noise_public_key(),
+        "receiver Noise public key should survive serialize/deserialize"
+    );
+    assert_eq!(
         restored_snapshot.local_receiver_path(),
         snapshot.local_receiver_path(),
         "local receiver path should survive serialize/deserialize"
@@ -332,6 +337,11 @@ async fn test_encrypted_link_snapshot_serialize_roundtrip() {
         restored_snapshot.recipient(),
         snapshot.recipient(),
         "recipient public key should survive serialize/deserialize"
+    );
+    assert_eq!(
+        restored_snapshot.remote_noise_public_key(),
+        snapshot.remote_noise_public_key(),
+        "receiver Noise public key should survive serialize/deserialize"
     );
     assert_eq!(
         restored_snapshot.local_receiver_path(),
@@ -667,6 +677,7 @@ fn scoped_snapshot_bytes(state: pubky_noise::serializer::PubkyNoiseSessionState)
         "version": 1,
         "local_receiver_path": "bitkit/wallet",
         "remote_receiver_path": "tether/wallet",
+        "remote_noise_public_key": Keypair::from_secret(&[42; 32]).public_key(),
         "state": state.serialize(),
     }))
     .unwrap()

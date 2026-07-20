@@ -201,14 +201,18 @@ pub(super) async fn receive_private_application_messages(
 /// is not touched.
 pub async fn clear_encrypted_link_outbox(
     session: &PubkySession,
-    local_secret_key: &[u8; 32],
-    remote_pubkey: &PublicKey,
+    local_noise_secret_key: &[u8; 32],
+    remote_identity_public_key: &PublicKey,
+    remote_noise_public_key: &PublicKey,
     local_receiver_path: &PaykitReceiverPath,
     remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<usize> {
+    let local_identity_public_key = session.info().public_key();
     let (write_path, _) = compute_private_payment_paths(
-        local_secret_key,
-        remote_pubkey,
+        local_noise_secret_key,
+        local_identity_public_key,
+        remote_identity_public_key,
+        remote_noise_public_key,
         local_receiver_path,
         remote_receiver_path,
     );
@@ -349,6 +353,11 @@ pub(super) async fn send_private_application_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        serialize_private_payment_list_json, PaymentEndpointIdentifier, PaymentEndpointPayload,
+        PrivatePaymentList,
+    };
+    use std::collections::HashMap;
 
     #[test]
     fn test_send_attempts_from_retries_bounds() {
@@ -425,6 +434,46 @@ mod tests {
         let payload = vec![b'x'; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN + 1];
         let err =
             validate_private_application_message_size(&payload, "Payment Request").unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("exceeds")),
+            "expected oversize validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_private_application_message_size_validation_accepts_payload_at_limit() {
+        // Guards against a `>` -> `>=` regression in the send-time size check:
+        // a payload of exactly PUBKY_NOISE_MSG_LEN bytes must be accepted.
+        let payload = vec![b'x'; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN];
+        validate_private_application_message_size(&payload, "Payment Request")
+            .expect("payload of exactly PUBKY_NOISE_MSG_LEN bytes should be accepted");
+    }
+
+    #[test]
+    fn test_private_application_message_size_validation_rejects_oversized_private_payment_list() {
+        // A Private Payment List can cross the pubky-noise message ceiling via
+        // many small Payment Endpoints rather than one oversized payload.
+        // Send-time validation is the documented enforcement point; there is
+        // no construction-time size limit. The context string matches the real
+        // send path (EncryptedLink::send_private_payment_list_message).
+        let mut payment_endpoints = HashMap::new();
+        for i in 0..20 {
+            payment_endpoints.insert(
+                PaymentEndpointIdentifier::new(format!("endpoint-{i:02}")).unwrap(),
+                PaymentEndpointPayload::new(format!("payload-{i:02}-{}", "x".repeat(40))),
+            );
+        }
+        let list = PrivatePaymentList::new(payment_endpoints);
+        let json = serialize_private_payment_list_json(&list).unwrap();
+        assert!(
+            json.len() > pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN,
+            "fixture must exceed the pubky-noise message ceiling, got {} bytes",
+            json.len()
+        );
+
+        let err =
+            validate_private_application_message_size(json.as_bytes(), "Private Payment List")
+                .unwrap_err();
         assert!(
             matches!(err, PaykitError::Validation(ref msg) if msg.contains("exceeds")),
             "expected oversize validation error, got: {err}"

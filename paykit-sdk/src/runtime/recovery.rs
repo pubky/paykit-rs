@@ -60,10 +60,14 @@ where
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
         let (session_access, secret_key) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
+        let remote_noise_public_key = self
+            .receiver_noise_public_key(&counterparty, &counterparty_receiver_path)
+            .await?;
         paykit_lib::remove_encrypted_link_recovery_marker(
             &session_access.session,
             &secret_key,
             &remote_public_key,
+            &remote_noise_public_key,
             &self.config.receiver_path,
             &counterparty_receiver_path,
         )
@@ -266,17 +270,11 @@ where
                 .await;
         }
 
-        let secret_key = session_access
-            .local_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context:
-                    "local Pubky secret key is unavailable for Encrypted Link recovery markers"
-                        .into(),
-                source: None,
-            })?
-            .as_bytes();
+        let secret_key = session_access.receiver_noise_secret_key.as_bytes();
         let remote_public_key = counterparty.to_public_key()?;
+        let remote_noise_public_key = self
+            .receiver_noise_public_key(counterparty, counterparty_receiver_path)
+            .await?;
         let now = self.clock.now();
         let marker = self
             .storage
@@ -340,6 +338,7 @@ where
             &session_access.session,
             secret_key,
             &remote_public_key,
+            &remote_noise_public_key,
             &self.config.receiver_path,
             counterparty_receiver_path,
             &marker,
@@ -421,21 +420,17 @@ where
                     context: "no Pubky public storage available for recovery marker lookup".into(),
                     source: None,
                 })?;
-        let secret_key = session_access
-            .local_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context:
-                    "local Pubky secret key is unavailable for Encrypted Link recovery markers"
-                        .into(),
-                source: None,
-            })?
-            .as_bytes();
+        let secret_key = session_access.receiver_noise_secret_key.as_bytes();
         let remote_public_key = counterparty.to_public_key()?;
+        let remote_noise_public_key = self
+            .receiver_noise_public_key(counterparty, counterparty_receiver_path)
+            .await?;
         let Some(marker) = paykit_lib::fetch_encrypted_link_recovery_marker(
             &public_storage,
             secret_key,
+            session_access.session.info().public_key(),
             &remote_public_key,
+            &remote_noise_public_key,
             &self.config.receiver_path,
             counterparty_receiver_path,
         )
@@ -465,6 +460,7 @@ where
                     &session_access.session,
                     secret_key,
                     &remote_public_key,
+                    &remote_noise_public_key,
                     &self.config.receiver_path,
                     &lease.counterparty_receiver_path,
                 )
@@ -674,10 +670,27 @@ where
                 .await;
             return Ok(());
         };
+        let remote_noise_public_key = match self
+            .receiver_noise_public_key(counterparty, counterparty_receiver_path)
+            .await
+        {
+            Ok(public_key) => public_key,
+            Err(err) => {
+                let _ = self
+                    .save_local_recovery_marker_last_error(
+                        counterparty,
+                        counterparty_receiver_path,
+                        Some(err.to_string()),
+                    )
+                    .await;
+                return Ok(());
+            }
+        };
         if let Err(err) = paykit_lib::remove_encrypted_link_recovery_marker(
             &session_access.session,
             &secret_key,
             &remote_public_key,
+            &remote_noise_public_key,
             &self.config.receiver_path,
             counterparty_receiver_path,
         )

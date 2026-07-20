@@ -257,6 +257,8 @@ pub struct FfiPaykitReceiverMarker {
     pub receiver_path: String,
     /// Public receiver capabilities.
     pub capabilities: FfiPaykitReceiverCapabilities,
+    /// Receiver-scoped public key used for Encrypted Links.
+    pub noise_public_key: String,
 }
 
 /// Platform-owned payment adapter callbacks.
@@ -556,6 +558,7 @@ impl From<PaykitReceiverMarker> for FfiPaykitReceiverMarker {
         Self {
             receiver_path: value.receiver_path.to_string(),
             capabilities: value.capabilities.into(),
+            noise_public_key: value.noise_public_key.z32(),
         }
     }
 }

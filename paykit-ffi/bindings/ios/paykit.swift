@@ -3511,9 +3511,9 @@ public protocol PubkyAuthRequestProtocol: AnyObject, Sendable {
     func authorizationUrl() async throws  -> String
 
     /**
-     * Wait for auth approval and validate the resulting session capabilities.
+     * Wait for auth approval using the receiver's persisted Noise key.
      */
-    func complete(localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
+    func complete(localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
 }
 /**
@@ -3592,15 +3592,15 @@ open func authorizationUrl()async throws  -> String  {
 }
 
     /**
-     * Wait for auth approval and validate the resulting session capabilities.
+     * Wait for auth approval using the receiver's persisted Noise key.
      */
-open func complete(localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
+open func complete(localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkyauthrequest_complete(
                     self.uniffiClonePointer(),
-                    FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),FfiConverterString.lower(requiredCapabilities)
+                    FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),FfiConverterTypeReceiverNoiseSecretKey_lower(receiverNoiseSecretKey),FfiConverterString.lower(requiredCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -3825,6 +3825,11 @@ public protocol PubkySessionAccessProtocol: AnyObject, Sendable {
     func exportLocalSecretKey()  -> PubkyLocalSecretKey?
 
     /**
+     * Export the receiver Noise secret key for platform secure storage.
+     */
+    func exportReceiverNoiseSecretKey()  -> ReceiverNoiseSecretKey
+
+    /**
      * Export the Pubky session bearer secret for platform secure storage.
      */
     func exportSessionSecret()  -> String
@@ -3875,12 +3880,13 @@ open class PubkySessionAccess: PubkySessionAccessProtocol, @unchecked Sendable {
     /**
      * Create session access material from platform secure storage.
      */
-public convenience init(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?) {
+public convenience init(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey) {
     let pointer =
         try! rustCall() {
     uniffi_paykit_fn_constructor_ffipubkysessionaccess_new(
         FfiConverterString.lower(sessionSecret),
-        FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),$0
+        FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),
+        FfiConverterTypeReceiverNoiseSecretKey_lower(receiverNoiseSecretKey),$0
     )
 }
     self.init(unsafeFromRawPointer: pointer)
@@ -3903,6 +3909,16 @@ public convenience init(sessionSecret: String, localSecretKey: PubkyLocalSecretK
 open func exportLocalSecretKey() -> PubkyLocalSecretKey?  {
     return try!  FfiConverterOptionTypePubkyLocalSecretKey.lift(try! rustCall() {
     uniffi_paykit_fn_method_ffipubkysessionaccess_export_local_secret_key(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Export the receiver Noise secret key for platform secure storage.
+     */
+open func exportReceiverNoiseSecretKey() -> ReceiverNoiseSecretKey  {
+    return try!  FfiConverterTypeReceiverNoiseSecretKey_lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkysessionaccess_export_receiver_noise_secret_key(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -3994,9 +4010,9 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey, claim: PubkyAuthCompanionClaim) async throws
 
     /**
-     * Import an exported Pubky session secret.
+     * Import an exported Pubky session secret and its persisted receiver Noise key.
      */
-    func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
+    func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
      * Resume a short-lived auth flow from its authorization URL.
@@ -4004,14 +4020,14 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     func resumeAuth(authorizationUrl: String, expectedCapabilities: String) async throws  -> PubkyAuthRequest
 
     /**
-     * Sign in with a local Pubky secret key and return session access material.
+     * Sign in with the receiver's persisted Noise key.
      */
-    func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
+    func signIn(localSecretKey: PubkyLocalSecretKey, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
-     * Sign up on a homeserver and return session access material.
+     * Sign up on a homeserver with the receiver-owned Noise key.
      */
-    func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
+    func signUp(localSecretKey: PubkyLocalSecretKey, receiverNoiseSecretKey: ReceiverNoiseSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
      * Start a sign-in auth flow for an external signer.
@@ -4144,15 +4160,15 @@ open func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: S
 }
 
     /**
-     * Import an exported Pubky session secret.
+     * Import an exported Pubky session secret and its persisted receiver Noise key.
      */
-open func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
+open func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkysessionbootstrap_import_session(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(sessionSecret),FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),FfiConverterString.lower(requiredCapabilities)
+                    FfiConverterString.lower(sessionSecret),FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),FfiConverterTypeReceiverNoiseSecretKey_lower(receiverNoiseSecretKey),FfiConverterString.lower(requiredCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -4184,15 +4200,15 @@ open func resumeAuth(authorizationUrl: String, expectedCapabilities: String)asyn
 }
 
     /**
-     * Sign in with a local Pubky secret key and return session access material.
+     * Sign in with the receiver's persisted Noise key.
      */
-open func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
+open func signIn(localSecretKey: PubkyLocalSecretKey, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_in(
                     self.uniffiClonePointer(),
-                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterString.lower(requiredCapabilities)
+                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterTypeReceiverNoiseSecretKey_lower(receiverNoiseSecretKey),FfiConverterString.lower(requiredCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -4204,15 +4220,15 @@ open func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: Stri
 }
 
     /**
-     * Sign up on a homeserver and return session access material.
+     * Sign up on a homeserver with the receiver-owned Noise key.
      */
-open func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
+open func signUp(localSecretKey: PubkyLocalSecretKey, receiverNoiseSecretKey: ReceiverNoiseSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkysessionbootstrap_sign_up(
                     self.uniffiClonePointer(),
-                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterString.lower(homeserverPublicKey),FfiConverterOptionString.lower(signupCode),FfiConverterString.lower(requiredCapabilities)
+                    FfiConverterTypePubkyLocalSecretKey_lower(localSecretKey),FfiConverterTypeReceiverNoiseSecretKey_lower(receiverNoiseSecretKey),FfiConverterString.lower(homeserverPublicKey),FfiConverterOptionString.lower(signupCode),FfiConverterString.lower(requiredCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -4314,6 +4330,161 @@ public func FfiConverterTypePubkySessionBootstrap_lift(_ pointer: UnsafeMutableR
 #endif
 public func FfiConverterTypePubkySessionBootstrap_lower(_ value: PubkySessionBootstrap) -> UnsafeMutableRawPointer {
     return FfiConverterTypePubkySessionBootstrap.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Receiver-scoped Noise secret key bytes supplied by platform secure storage.
+ */
+public protocol ReceiverNoiseSecretKeyProtocol: AnyObject, Sendable {
+
+    /**
+     * Export the raw bytes for platform secure storage.
+     */
+    func exportBytes()  -> Data
+
+}
+/**
+ * Receiver-scoped Noise secret key bytes supplied by platform secure storage.
+ */
+open class ReceiverNoiseSecretKey: ReceiverNoiseSecretKeyProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffireceivernoisesecretkey(self.pointer, $0) }
+    }
+    /**
+     * Create a receiver Noise secret key from platform secure storage bytes.
+     */
+public convenience init(bytes: Data) {
+    let pointer =
+        try! rustCall() {
+    uniffi_paykit_fn_constructor_ffireceivernoisesecretkey_new(
+        FfiConverterData.lower(bytes),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffireceivernoisesecretkey(pointer, $0) }
+    }
+
+
+    /**
+     * Generate a fresh receiver Noise secret key.
+     */
+public static func random() -> ReceiverNoiseSecretKey  {
+    return try!  FfiConverterTypeReceiverNoiseSecretKey_lift(try! rustCall() {
+    uniffi_paykit_fn_constructor_ffireceivernoisesecretkey_random($0
+    )
+})
+}
+
+
+
+    /**
+     * Export the raw bytes for platform secure storage.
+     */
+open func exportBytes() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffireceivernoisesecretkey_export_bytes(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReceiverNoiseSecretKey: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = ReceiverNoiseSecretKey
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> ReceiverNoiseSecretKey {
+        return ReceiverNoiseSecretKey(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: ReceiverNoiseSecretKey) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReceiverNoiseSecretKey {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: ReceiverNoiseSecretKey, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReceiverNoiseSecretKey_lift(_ pointer: UnsafeMutableRawPointer) throws -> ReceiverNoiseSecretKey {
+    return try FfiConverterTypeReceiverNoiseSecretKey.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReceiverNoiseSecretKey_lower(_ value: ReceiverNoiseSecretKey) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeReceiverNoiseSecretKey.lower(value)
 }
 
 
@@ -6896,41 +7067,25 @@ public func FfiConverterTypeEventIdConflict_lower(_ value: EventIdConflict) -> R
  */
 public struct IdentityStatus {
     /**
-     * Current local public key, when signed in.
+     * Persisted local public key, or `None` after explicit sign-out.
      */
     public var publicKey: String?
-    /**
-     * Current Pubky capability.
-     */
-    public var capability: PubkyIdentityCapability
     /**
      * Whether live Pubky session access is available for this identity.
      */
     public var liveSessionAvailable: Bool
-    /**
-     * Whether private Paykit workflows can run with the live session.
-     */
-    public var privateLinkCapable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
-         * Current local public key, when signed in.
+         * Persisted local public key, or `None` after explicit sign-out.
          */publicKey: String?,
         /**
-         * Current Pubky capability.
-         */capability: PubkyIdentityCapability,
-        /**
          * Whether live Pubky session access is available for this identity.
-         */liveSessionAvailable: Bool,
-        /**
-         * Whether private Paykit workflows can run with the live session.
-         */privateLinkCapable: Bool) {
+         */liveSessionAvailable: Bool) {
         self.publicKey = publicKey
-        self.capability = capability
         self.liveSessionAvailable = liveSessionAvailable
-        self.privateLinkCapable = privateLinkCapable
     }
 }
 
@@ -6944,13 +7099,7 @@ extension IdentityStatus: Equatable, Hashable {
         if lhs.publicKey != rhs.publicKey {
             return false
         }
-        if lhs.capability != rhs.capability {
-            return false
-        }
         if lhs.liveSessionAvailable != rhs.liveSessionAvailable {
-            return false
-        }
-        if lhs.privateLinkCapable != rhs.privateLinkCapable {
             return false
         }
         return true
@@ -6958,9 +7107,7 @@ extension IdentityStatus: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(publicKey)
-        hasher.combine(capability)
         hasher.combine(liveSessionAvailable)
-        hasher.combine(privateLinkCapable)
     }
 }
 
@@ -6976,17 +7123,13 @@ public struct FfiConverterTypeIdentityStatus: FfiConverterRustBuffer {
         return
             try IdentityStatus(
                 publicKey: FfiConverterOptionString.read(from: &buf),
-                capability: FfiConverterTypePubkyIdentityCapability.read(from: &buf),
-                liveSessionAvailable: FfiConverterBool.read(from: &buf),
-                privateLinkCapable: FfiConverterBool.read(from: &buf)
+                liveSessionAvailable: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: IdentityStatus, into buf: inout [UInt8]) {
         FfiConverterOptionString.write(value.publicKey, into: &buf)
-        FfiConverterTypePubkyIdentityCapability.write(value.capability, into: &buf)
         FfiConverterBool.write(value.liveSessionAvailable, into: &buf)
-        FfiConverterBool.write(value.privateLinkCapable, into: &buf)
     }
 }
 
@@ -7014,22 +7157,14 @@ public struct InitializationReport {
      * Last persisted identity status.
      */
     public var identity: IdentityStatus
-    /**
-     * Whether live Pubky session access was available during startup.
-     */
-    public var liveSessionAvailable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * Last persisted identity status.
-         */identity: IdentityStatus,
-        /**
-         * Whether live Pubky session access was available during startup.
-         */liveSessionAvailable: Bool) {
+         */identity: IdentityStatus) {
         self.identity = identity
-        self.liveSessionAvailable = liveSessionAvailable
     }
 }
 
@@ -7043,15 +7178,11 @@ extension InitializationReport: Equatable, Hashable {
         if lhs.identity != rhs.identity {
             return false
         }
-        if lhs.liveSessionAvailable != rhs.liveSessionAvailable {
-            return false
-        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(identity)
-        hasher.combine(liveSessionAvailable)
     }
 }
 
@@ -7066,14 +7197,12 @@ public struct FfiConverterTypeInitializationReport: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InitializationReport {
         return
             try InitializationReport(
-                identity: FfiConverterTypeIdentityStatus.read(from: &buf),
-                liveSessionAvailable: FfiConverterBool.read(from: &buf)
+                identity: FfiConverterTypeIdentityStatus.read(from: &buf)
         )
     }
 
     public static func write(_ value: InitializationReport, into buf: inout [UInt8]) {
         FfiConverterTypeIdentityStatus.write(value.identity, into: &buf)
-        FfiConverterBool.write(value.liveSessionAvailable, into: &buf)
     }
 }
 
@@ -8102,6 +8231,10 @@ public struct PaykitReceiverMarker {
      * Public receiver capabilities.
      */
     public var capabilities: PaykitReceiverCapabilities
+    /**
+     * Receiver-scoped public key used for Encrypted Links.
+     */
+    public var noisePublicKey: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8111,9 +8244,13 @@ public struct PaykitReceiverMarker {
          */receiverPath: String,
         /**
          * Public receiver capabilities.
-         */capabilities: PaykitReceiverCapabilities) {
+         */capabilities: PaykitReceiverCapabilities,
+        /**
+         * Receiver-scoped public key used for Encrypted Links.
+         */noisePublicKey: String) {
         self.receiverPath = receiverPath
         self.capabilities = capabilities
+        self.noisePublicKey = noisePublicKey
     }
 }
 
@@ -8130,12 +8267,16 @@ extension PaykitReceiverMarker: Equatable, Hashable {
         if lhs.capabilities != rhs.capabilities {
             return false
         }
+        if lhs.noisePublicKey != rhs.noisePublicKey {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(receiverPath)
         hasher.combine(capabilities)
+        hasher.combine(noisePublicKey)
     }
 }
 
@@ -8151,13 +8292,15 @@ public struct FfiConverterTypePaykitReceiverMarker: FfiConverterRustBuffer {
         return
             try PaykitReceiverMarker(
                 receiverPath: FfiConverterString.read(from: &buf),
-                capabilities: FfiConverterTypePaykitReceiverCapabilities.read(from: &buf)
+                capabilities: FfiConverterTypePaykitReceiverCapabilities.read(from: &buf),
+                noisePublicKey: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: PaykitReceiverMarker, into buf: inout [UInt8]) {
         FfiConverterString.write(value.receiverPath, into: &buf)
         FfiConverterTypePaykitReceiverCapabilities.write(value.capabilities, into: &buf)
+        FfiConverterString.write(value.noisePublicKey, into: &buf)
     }
 }
 
@@ -11630,10 +11773,6 @@ public struct PubkySessionBootstrapResult {
      * Local Pubky public key.
      */
     public var publicKey: String
-    /**
-     * Capability implied by the session and optional local secret key.
-     */
-    public var capability: PubkyIdentityCapability
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -11643,13 +11782,9 @@ public struct PubkySessionBootstrapResult {
          */sessionAccess: PubkySessionAccess,
         /**
          * Local Pubky public key.
-         */publicKey: String,
-        /**
-         * Capability implied by the session and optional local secret key.
-         */capability: PubkyIdentityCapability) {
+         */publicKey: String) {
         self.sessionAccess = sessionAccess
         self.publicKey = publicKey
-        self.capability = capability
     }
 }
 
@@ -11667,15 +11802,13 @@ public struct FfiConverterTypePubkySessionBootstrapResult: FfiConverterRustBuffe
         return
             try PubkySessionBootstrapResult(
                 sessionAccess: FfiConverterTypePubkySessionAccess.read(from: &buf),
-                publicKey: FfiConverterString.read(from: &buf),
-                capability: FfiConverterTypePubkyIdentityCapability.read(from: &buf)
+                publicKey: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: PubkySessionBootstrapResult, into buf: inout [UInt8]) {
         FfiConverterTypePubkySessionAccess.write(value.sessionAccess, into: &buf)
         FfiConverterString.write(value.publicKey, into: &buf)
-        FfiConverterTypePubkyIdentityCapability.write(value.capability, into: &buf)
     }
 }
 
@@ -13482,10 +13615,6 @@ public enum ContactPaymentResolutionPrivateState {
      */
     case recoveryPending
     /**
-     * The local identity cannot establish private links.
-     */
-    case publicOnlySession
-    /**
      * SDK returned a value this binding version does not understand.
      */
     case unknown
@@ -13512,9 +13641,7 @@ public struct FfiConverterTypeContactPaymentResolutionPrivateState: FfiConverter
 
         case 3: return .recoveryPending
 
-        case 4: return .publicOnlySession
-
-        case 5: return .unknown
+        case 4: return .unknown
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -13536,12 +13663,8 @@ public struct FfiConverterTypeContactPaymentResolutionPrivateState: FfiConverter
             writeInt(&buf, Int32(3))
 
 
-        case .publicOnlySession:
-            writeInt(&buf, Int32(4))
-
-
         case .unknown:
-            writeInt(&buf, Int32(5))
+            writeInt(&buf, Int32(4))
 
         }
     }
@@ -14899,107 +15022,6 @@ public func FfiConverterTypePubkyAuthRequestKind_lower(_ value: PubkyAuthRequest
 extension PubkyAuthRequestKind: Equatable, Hashable {}
 
 extension PubkyAuthRequestKind: Codable {}
-
-
-
-
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-/**
- * Pubky capability state for one app-owned Paykit runtime.
- */
-
-public enum PubkyIdentityCapability {
-
-    /**
-     * No Pubky identity is initialized, or explicit sign-out completed.
-     */
-    case signedOut
-    /**
-     * Public Pubky operations may work, but private links cannot be established.
-     */
-    case publicOnly
-    /**
-     * Public operations and Encrypted Links can work.
-     */
-    case privateLinkCapable
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    case unknown
-}
-
-
-#if compiler(>=6)
-extension PubkyIdentityCapability: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypePubkyIdentityCapability: FfiConverterRustBuffer {
-    typealias SwiftType = PubkyIdentityCapability
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyIdentityCapability {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-
-        case 1: return .signedOut
-
-        case 2: return .publicOnly
-
-        case 3: return .privateLinkCapable
-
-        case 4: return .unknown
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: PubkyIdentityCapability, into buf: inout [UInt8]) {
-        switch value {
-
-
-        case .signedOut:
-            writeInt(&buf, Int32(1))
-
-
-        case .publicOnly:
-            writeInt(&buf, Int32(2))
-
-
-        case .privateLinkCapable:
-            writeInt(&buf, Int32(3))
-
-
-        case .unknown:
-            writeInt(&buf, Int32(4))
-
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePubkyIdentityCapability_lift(_ buf: RustBuffer) throws -> PubkyIdentityCapability {
-    return try FfiConverterTypePubkyIdentityCapability.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePubkyIdentityCapability_lower(_ value: PubkyIdentityCapability) -> RustBuffer {
-    return FfiConverterTypePubkyIdentityCapability.lower(value)
-}
-
-
-extension PubkyIdentityCapability: Equatable, Hashable {}
-
-extension PubkyIdentityCapability: Codable {}
 
 
 
@@ -17812,13 +17834,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url() != 7484) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 26526) {
+    if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 51216) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_export_bytes() != 58726) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_local_secret_key() != 61849) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_receiver_noise_secret_key() != 4431) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 4660) {
@@ -17830,22 +17855,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 6650) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 19676) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 27640) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 45596) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 15662) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 60739) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 31538) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 25951) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 47023) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_up_auth() != 45811) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffireceivernoisesecretkey_export_bytes() != 50277) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffireservationattribution_export_fields() != 11904) {
@@ -17911,13 +17939,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 2417) {
+    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 5869) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 44998) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_with_pubky_client_config() != 35417) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffireceivernoisesecretkey_new() != 34247) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffireceivernoisesecretkey_random() != 54931) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffireservationattribution_new() != 43638) {

@@ -565,7 +565,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
 }
 
 #[tokio::test]
-async fn test_enqueue_payment_request_event_requires_private_capable_identity() {
+async fn test_enqueue_payment_request_event_requires_initialized_identity() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let sdk = PaykitSdk::with_clock(

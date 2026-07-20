@@ -8,9 +8,8 @@ async fn test_prepare_receipt_issuance_persists_pending_record() {
     let counterparty = PubkyPublicKey::from_public_key(&counterparty_keypair.public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PublicOnly,
-            local_secret_available: false,
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -75,9 +74,8 @@ async fn test_receipt_listing_helpers_match_record_views() {
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key.clone()),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -159,9 +157,8 @@ async fn test_prepare_receipt_issuance_rejects_conflicting_reused_receipt_id() {
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PublicOnly,
-            local_secret_available: false,
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -212,9 +209,8 @@ async fn test_prepare_receipt_issuance_rejects_reused_receipt_id_for_other_count
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PublicOnly,
-            local_secret_available: false,
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -254,9 +250,8 @@ async fn test_prepare_receipt_issuance_rejects_reused_receipt_id_for_other_recei
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PublicOnly,
-            local_secret_available: false,
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -316,9 +311,8 @@ async fn test_process_receipt_issuance_without_session_preserves_prepared_record
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
-            local_secret_available: true,
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -397,7 +391,7 @@ async fn test_receipt_access_records_require_initialized_identity() {
 }
 
 #[tokio::test]
-async fn test_receipt_access_records_allow_public_only_identity() {
+async fn test_receipt_access_records_allow_identity_without_live_session() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -407,9 +401,8 @@ async fn test_receipt_access_records_allow_public_only_identity() {
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -450,9 +443,8 @@ async fn test_receipt_access_records_hide_conflicted_event_ids() {
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -492,9 +484,8 @@ async fn test_retrieve_receipt_reports_conflicted_access_before_missing_public_s
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -529,9 +520,8 @@ async fn test_retrieve_receipt_reports_missing_access_before_public_storage() {
     let receipt_id = "receipt-1";
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PublicOnly,
-            local_secret_available: false,
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -556,7 +546,7 @@ async fn test_retrieve_receipt_reports_missing_access_before_public_storage() {
 }
 
 #[tokio::test]
-async fn test_retrieve_receipt_returns_cached_record_for_public_only_identity() {
+async fn test_retrieve_receipt_returns_cached_record_without_live_session() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -567,9 +557,8 @@ async fn test_retrieve_receipt_returns_cached_record_for_public_only_identity() 
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key.clone()),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -607,9 +596,8 @@ async fn test_retrieve_receipt_rejects_clean_mismatched_access_for_cached_receip
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key.clone()),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -662,9 +650,8 @@ async fn test_retrieve_receipt_rejects_conflicted_access_for_cached_receipt() {
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key.clone()),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -704,9 +691,8 @@ async fn test_retrieve_receipt_rejects_conflicted_cached_provenance_with_clean_a
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key.clone()),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -751,9 +737,8 @@ async fn test_receipt_records_filter_recipient_identity() {
             let wrong_recipient = wrong_recipient.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key.clone()),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -796,9 +781,8 @@ async fn test_receipt_records_hide_conflicted_receipt_access_provenance() {
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key.clone()),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key.clone()),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -838,9 +822,8 @@ async fn test_retrieve_receipt_requires_public_storage_when_uncached() {
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });

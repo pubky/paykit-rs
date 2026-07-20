@@ -787,8 +787,6 @@ pub enum ContactPaymentResolutionPrivateState {
     NoPrivateEndpoint,
     /// Private payment state is blocked by link recovery.
     RecoveryPending,
-    /// The local identity cannot establish private links.
-    PublicOnlySession,
 }
 
 /// Request to resolve payable endpoints for one counterparty.

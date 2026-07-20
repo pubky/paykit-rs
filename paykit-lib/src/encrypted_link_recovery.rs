@@ -3,9 +3,10 @@
 //! Recovery markers are public Pubky records used when a runtime decides an
 //! Encrypted Link with one counterparty can no longer be used safely. They are
 //! not sent over the broken link. Instead, each peer derives a pairwise marker
-//! path from its local secret key and the counterparty public key, writes a
-//! minimal marker to its own homeserver, and polls the counterparty's derived
-//! marker path.
+//! path from its receiver Noise secret key and the counterparty receiver Noise
+//! public key, writes a minimal marker to its own homeserver, and polls the
+//! counterparty's derived marker path. Pubky identity keys remain part of the
+//! receiver-pair domain and select the homeserver used for storage.
 //!
 //! Marker payloads intentionally contain only `version`, `kind`, `attempt_id`,
 //! and `created_at`. They do not contain payment data, endpoint data, message
@@ -129,30 +130,31 @@ pub fn parse_encrypted_link_recovery_marker_json(
 
 /// Compute local write and remote read paths for recovery markers.
 pub fn encrypted_link_recovery_marker_paths(
-    local_secret_key: &[u8; 32],
-    remote_pubkey: &PublicKey,
+    local_noise_secret_key: &[u8; 32],
+    local_identity_public_key: &PublicKey,
+    remote_identity_public_key: &PublicKey,
+    remote_noise_public_key: &PublicKey,
     local_receiver_path: &PaykitReceiverPath,
     remote_receiver_path: &PaykitReceiverPath,
 ) -> (String, String) {
     let local_base = encrypted_link_recovery_path_prefix(local_receiver_path);
     let remote_base = encrypted_link_recovery_path_prefix(remote_receiver_path);
-    let local_public_key = pubky::Keypair::from_secret(local_secret_key).public_key();
     let path_domain = receiver_pair_path_domain(
         RECOVERY_MARKER_PATH_DOMAIN,
-        &local_public_key,
+        local_identity_public_key,
         local_receiver_path,
-        remote_pubkey,
+        remote_identity_public_key,
         remote_receiver_path,
     );
     let (write_path, _) = pubky_noise::path_derivation::derive_asymmetric_paths(
-        local_secret_key,
-        remote_pubkey,
+        local_noise_secret_key,
+        remote_noise_public_key,
         &path_domain,
         &local_base,
     );
     let (_, read_path) = pubky_noise::path_derivation::derive_asymmetric_paths(
-        local_secret_key,
-        remote_pubkey,
+        local_noise_secret_key,
+        remote_noise_public_key,
         &path_domain,
         &remote_base,
     );
@@ -162,15 +164,19 @@ pub fn encrypted_link_recovery_marker_paths(
 /// Publish a local recovery marker and return the path written.
 pub async fn publish_encrypted_link_recovery_marker(
     session: &PubkySession,
-    local_secret_key: &[u8; 32],
-    remote_pubkey: &PublicKey,
+    local_noise_secret_key: &[u8; 32],
+    remote_identity_public_key: &PublicKey,
+    remote_noise_public_key: &PublicKey,
     local_receiver_path: &PaykitReceiverPath,
     remote_receiver_path: &PaykitReceiverPath,
     marker: &EncryptedLinkRecoveryMarker,
 ) -> Result<String> {
+    let local_identity_public_key = session.info().public_key();
     let (write_path, _) = encrypted_link_recovery_marker_paths(
-        local_secret_key,
-        remote_pubkey,
+        local_noise_secret_key,
+        local_identity_public_key,
+        remote_identity_public_key,
+        remote_noise_public_key,
         local_receiver_path,
         remote_receiver_path,
     );
@@ -189,14 +195,18 @@ pub async fn publish_encrypted_link_recovery_marker(
 /// Remove the local recovery marker for a counterparty.
 pub async fn remove_encrypted_link_recovery_marker(
     session: &PubkySession,
-    local_secret_key: &[u8; 32],
-    remote_pubkey: &PublicKey,
+    local_noise_secret_key: &[u8; 32],
+    remote_identity_public_key: &PublicKey,
+    remote_noise_public_key: &PublicKey,
     local_receiver_path: &PaykitReceiverPath,
     remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<String> {
+    let local_identity_public_key = session.info().public_key();
     let (write_path, _) = encrypted_link_recovery_marker_paths(
-        local_secret_key,
-        remote_pubkey,
+        local_noise_secret_key,
+        local_identity_public_key,
+        remote_identity_public_key,
+        remote_noise_public_key,
         local_receiver_path,
         remote_receiver_path,
     );
@@ -213,18 +223,22 @@ pub async fn remove_encrypted_link_recovery_marker(
 /// Fetch a counterparty's recovery marker, if one is present.
 pub async fn fetch_encrypted_link_recovery_marker(
     storage: &PublicStorage,
-    local_secret_key: &[u8; 32],
-    remote_pubkey: &PublicKey,
+    local_noise_secret_key: &[u8; 32],
+    local_identity_public_key: &PublicKey,
+    remote_identity_public_key: &PublicKey,
+    remote_noise_public_key: &PublicKey,
     local_receiver_path: &PaykitReceiverPath,
     remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<Option<EncryptedLinkRecoveryMarker>> {
     let (_, read_path) = encrypted_link_recovery_marker_paths(
-        local_secret_key,
-        remote_pubkey,
+        local_noise_secret_key,
+        local_identity_public_key,
+        remote_identity_public_key,
+        remote_noise_public_key,
         local_receiver_path,
         remote_receiver_path,
     );
-    let addr = format!("{remote_pubkey}{read_path}");
+    let addr = format!("{remote_identity_public_key}{read_path}");
     match storage.get(&addr).await {
         Ok(resp) => {
             let bytes = resp.bytes().await.map_err(|err| PaykitError::Transport {
@@ -265,7 +279,7 @@ mod tests {
 
     use super::*;
 
-    fn secret_pair() -> ([u8; 32], PublicKey) {
+    fn key_pair() -> ([u8; 32], PublicKey) {
         let keypair = Keypair::random();
         (keypair.secret_key(), keypair.public_key())
     }
@@ -296,20 +310,26 @@ mod tests {
 
     #[test]
     fn test_recovery_marker_paths_are_pairwise_symmetric() {
-        let (alice_secret, alice_public) = secret_pair();
-        let (bob_secret, bob_public) = secret_pair();
+        let (alice_noise_secret, alice_noise_public) = key_pair();
+        let (bob_noise_secret, bob_noise_public) = key_pair();
+        let (_, alice_identity_public) = key_pair();
+        let (_, bob_identity_public) = key_pair();
         let alice_receiver = PaykitReceiverPath::new("bitkit/wallet").unwrap();
         let bob_receiver = PaykitReceiverPath::new("tether/wallet").unwrap();
 
         let (alice_write, alice_read) = encrypted_link_recovery_marker_paths(
-            &alice_secret,
-            &bob_public,
+            &alice_noise_secret,
+            &alice_identity_public,
+            &bob_identity_public,
+            &bob_noise_public,
             &alice_receiver,
             &bob_receiver,
         );
         let (bob_write, bob_read) = encrypted_link_recovery_marker_paths(
-            &bob_secret,
-            &alice_public,
+            &bob_noise_secret,
+            &bob_identity_public,
+            &alice_identity_public,
+            &alice_noise_public,
             &bob_receiver,
             &alice_receiver,
         );
@@ -327,21 +347,27 @@ mod tests {
 
     #[test]
     fn test_recovery_marker_paths_include_both_receiver_paths() {
-        let (alice_secret, _) = secret_pair();
-        let (_, bob_public) = secret_pair();
+        let (alice_noise_secret, _) = key_pair();
+        let (_, bob_noise_public) = key_pair();
+        let (_, alice_identity_public) = key_pair();
+        let (_, bob_identity_public) = key_pair();
         let alice_receiver = PaykitReceiverPath::new("bitkit/wallet").unwrap();
         let bob_receiver = PaykitReceiverPath::new("tether/wallet").unwrap();
         let bob_other_receiver = PaykitReceiverPath::new("bitkit/server").unwrap();
 
         let (write_to_bob_receiver, _) = encrypted_link_recovery_marker_paths(
-            &alice_secret,
-            &bob_public,
+            &alice_noise_secret,
+            &alice_identity_public,
+            &bob_identity_public,
+            &bob_noise_public,
             &alice_receiver,
             &bob_receiver,
         );
         let (write_to_bob_other_receiver, _) = encrypted_link_recovery_marker_paths(
-            &alice_secret,
-            &bob_public,
+            &alice_noise_secret,
+            &alice_identity_public,
+            &bob_identity_public,
+            &bob_noise_public,
             &alice_receiver,
             &bob_other_receiver,
         );

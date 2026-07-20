@@ -9,7 +9,7 @@ use crate::payment_adapter::{
 };
 use crate::secrets::FfiSdkBackupBlob;
 use crate::session::{
-    app_public_key, pubky_from_config, FfiPubkyIdentityCapability, FfiSdkPubkySessionProvider,
+    app_public_key, pubky_from_config, FfiSdkPubkySessionProvider,
     FfiSdkPubkySessionProviderAdapter,
 };
 use crate::storage::{
@@ -19,14 +19,10 @@ use crate::storage::{
 /// Current identity status returned to apps.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiIdentityStatus {
-    /// Current local public key, when signed in.
+    /// Persisted local public key, or `None` after explicit sign-out.
     pub public_key: Option<String>,
-    /// Current Pubky capability.
-    pub capability: FfiPubkyIdentityCapability,
     /// Whether live Pubky session access is available for this identity.
     pub live_session_available: bool,
-    /// Whether private Paykit workflows can run with the live session.
-    pub private_link_capable: bool,
 }
 
 /// Initialization report returned after SDK startup.
@@ -34,8 +30,6 @@ pub struct FfiIdentityStatus {
 pub struct FfiInitializationReport {
     /// Last persisted identity status.
     pub identity: FfiIdentityStatus,
-    /// Whether live Pubky session access was available during startup.
-    pub live_session_available: bool,
 }
 
 /// Report returned after restoring SDK-managed backup state.
@@ -258,9 +252,7 @@ impl From<IdentityStatus> for FfiIdentityStatus {
     fn from(value: IdentityStatus) -> Self {
         Self {
             public_key: value.public_key.map(|key| app_public_key(&key)),
-            capability: value.capability.into(),
             live_session_available: value.live_session_available,
-            private_link_capable: value.private_link_capable,
         }
     }
 }
@@ -269,7 +261,6 @@ impl From<InitializationReport> for FfiInitializationReport {
     fn from(value: InitializationReport) -> Self {
         Self {
             identity: value.identity.into(),
-            live_session_available: value.live_session_available,
         }
     }
 }

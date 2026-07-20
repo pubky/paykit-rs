@@ -24,7 +24,7 @@ use crate::{
         ReceiptRecord, ReceiptRetrievalStatus,
     },
     domain::records::{AmountRecord, BillingPeriodRecord},
-    identity::{IdentityState, PubkyIdentityCapability, PubkyPublicKey},
+    identity::{IdentityState, PubkyPublicKey},
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
         PaymentEndpointReservationRecord, PrivateStreamItemRecord, PublicEndpointRecord,
@@ -482,7 +482,7 @@ impl SdkBackupState {
         )?;
         let expected_receipt_recipient = identity_state
             .as_ref()
-            .and_then(|identity| identity.public_key.as_ref());
+            .and_then(|identity| identity.local_pubky_public_key.as_ref());
         validate_receipt_records(
             &receipt_records,
             &receipt_access_records,
@@ -601,12 +601,12 @@ impl SdkBackupState {
         }
 
         if let Some(current_public_key) =
-            current_identity.and_then(|state| state.public_key.as_ref())
+            current_identity.and_then(|state| state.local_pubky_public_key.as_ref())
         {
             let backup_public_key = self
                 .identity_state
                 .as_ref()
-                .and_then(|state| state.public_key.as_ref());
+                .and_then(|state| state.local_pubky_public_key.as_ref());
             if backup_public_key != Some(current_public_key) {
                 return Err(PaykitSdkError::Identity {
                     context: "backup identity does not match current local identity".into(),
@@ -615,10 +615,25 @@ impl SdkBackupState {
             }
         }
 
+        if let Some(current_receiver_noise_public_key) =
+            current_identity.and_then(|state| state.local_receiver_noise_public_key.as_ref())
+        {
+            let backup_receiver_noise_public_key = self
+                .identity_state
+                .as_ref()
+                .and_then(|state| state.local_receiver_noise_public_key.as_ref());
+            if backup_receiver_noise_public_key != Some(current_receiver_noise_public_key) {
+                return Err(PaykitSdkError::Identity {
+                    context: "backup receiver Noise key does not match current receiver".into(),
+                    source: None,
+                });
+            }
+        }
+
         let backup_public_key = self
             .identity_state
             .as_ref()
-            .and_then(|state| state.public_key.as_ref());
+            .and_then(|state| state.local_pubky_public_key.as_ref());
         if backup_public_key.is_none() && self.has_identity_scoped_state() {
             return Err(PaykitSdkError::Protocol {
                 context: "backup has SDK state but no local public identity".into(),
@@ -629,28 +644,22 @@ impl SdkBackupState {
         Ok(())
     }
 
-    pub(crate) fn identity_public_key(&self) -> Option<&PubkyPublicKey> {
+    pub(crate) fn local_pubky_public_key(&self) -> Option<&PubkyPublicKey> {
         self.identity_state
             .as_ref()
-            .and_then(|state| state.public_key.as_ref())
+            .and_then(|state| state.local_pubky_public_key.as_ref())
+    }
+
+    pub(crate) fn local_receiver_noise_public_key(&self) -> Option<&PubkyPublicKey> {
+        self.identity_state
+            .as_ref()
+            .and_then(|state| state.local_receiver_noise_public_key.as_ref())
     }
 
     pub(crate) fn has_identity_scoped_state(&self) -> bool {
         !self.linked_peers.is_empty()
             || !self.contact_records.is_empty()
             || !self.public_endpoint_records.is_empty()
-            || !self.payment_endpoint_reservations.is_empty()
-            || !self.encrypted_link_states.is_empty()
-            || !self.outbound_private_messages.is_empty()
-            || !self.private_stream_items.is_empty()
-            || !self.event_dedup_records.is_empty()
-            || !self.receipt_access_records.is_empty()
-            || !self.receipt_records.is_empty()
-            || !self.receipt_issuance_records.is_empty()
-    }
-
-    pub(crate) fn has_private_identity_scoped_state(&self) -> bool {
-        !self.linked_peers.is_empty()
             || !self.payment_endpoint_reservations.is_empty()
             || !self.encrypted_link_states.is_empty()
             || !self.outbound_private_messages.is_empty()

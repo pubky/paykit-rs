@@ -651,17 +651,20 @@ fn other_receiver_path() -> PaykitReceiverPath {
     PaykitReceiverPath::new("tether/wallet").unwrap()
 }
 
-async fn seed_private_capable_identity_and_link(
+fn receiver_noise_public_key() -> PubkyPublicKey {
+    PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[7; 32]).public_key())
+}
+
+async fn seed_initialized_identity_and_link(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,
 ) {
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(PubkyPublicKey::from_public_key(
+            local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                 &pubky::Keypair::random().public_key(),
             )),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
-            local_secret_available: true,
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -684,17 +687,16 @@ async fn seed_private_capable_identity_and_link(
         .unwrap();
 }
 
-async fn seed_private_capable_identity_and_handshake(
+async fn seed_initialized_identity_and_handshake(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,
 ) {
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(PubkyPublicKey::from_public_key(
+            local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                 &pubky::Keypair::random().public_key(),
             )),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
-            local_secret_available: true,
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })

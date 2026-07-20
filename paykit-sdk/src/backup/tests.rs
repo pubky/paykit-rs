@@ -3,8 +3,7 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     domain::outbound_private::OutboundPrivateMessageStatus,
-    domain::private_stream::PrivateStreamParseStatus, identity::PubkyIdentityCapability,
-    storage::InMemoryStorage,
+    domain::private_stream::PrivateStreamParseStatus, storage::InMemoryStorage,
 };
 
 fn timestamp() -> chrono::DateTime<Utc> {
@@ -13,6 +12,10 @@ fn timestamp() -> chrono::DateTime<Utc> {
 
 fn public_key() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
+}
+
+fn receiver_noise_public_key() -> PubkyPublicKey {
+    PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[7; 32]).public_key())
 }
 
 fn receiver_path() -> paykit_lib::PaykitReceiverPath {
@@ -34,11 +37,10 @@ fn recovery_required_peer(public_key: &PubkyPublicKey) -> RestoreRecoveryRequire
     }
 }
 
-fn identity(public_key: PubkyPublicKey) -> IdentityState {
+fn identity(local_pubky_public_key: PubkyPublicKey) -> IdentityState {
     IdentityState {
-        public_key: Some(public_key),
-        capability: PubkyIdentityCapability::PrivateLinkCapable,
-        local_secret_available: true,
+        local_pubky_public_key: Some(local_pubky_public_key),
+        local_receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 0,
     }
@@ -46,9 +48,8 @@ fn identity(public_key: PubkyPublicKey) -> IdentityState {
 
 fn signed_out_identity(sign_out_generation: u64) -> IdentityState {
     IdentityState {
-        public_key: None,
-        capability: PubkyIdentityCapability::SignedOut,
-        local_secret_available: false,
+        local_pubky_public_key: None,
+        local_receiver_noise_public_key: None,
         initialized_at: timestamp(),
         sign_out_generation,
     }

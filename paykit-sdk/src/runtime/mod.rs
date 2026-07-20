@@ -98,7 +98,7 @@ use crate::{
         ReceiptRetrievalStatus,
     },
     domain::recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
-    identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
+    identity::{IdentityState, IdentityStatus},
     storage::{
         outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
         OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
@@ -143,8 +143,6 @@ impl Clock for SystemClock {
 pub struct InitializationReport {
     /// Last persisted identity status.
     pub identity: IdentityStatus,
-    /// Whether the provider returned live Pubky session access during startup.
-    pub live_session_available: bool,
 }
 
 /// Stateful Paykit SDK runtime for one app-owned local Paykit runtime.
@@ -251,20 +249,9 @@ where
         let _identity_guard = self.claim_identity_operation("initialize")?;
         let (session, state) = self.load_session_access_and_refresh_identity().await?;
         let live_session_available = session.is_some();
-        let required_capabilities = self.config.required_session_capabilities();
-        let private_link_capable = session
-            .as_ref()
-            .map(|session| session.private_link_capable_for_capabilities(&required_capabilities))
-            .transpose()?
-            .unwrap_or(false);
 
         Ok(InitializationReport {
-            identity: IdentityStatus::from_state(
-                &state,
-                live_session_available,
-                private_link_capable,
-            ),
-            live_session_available,
+            identity: IdentityStatus::from_state(&state, live_session_available),
         })
     }
 
@@ -290,10 +277,9 @@ where
                     .as_ref()
                     .map(|state| state.sign_out_generation)
                     .unwrap_or_default();
-                let was_signed_in = previous.as_ref().is_some_and(|state| {
-                    state.public_key.is_some()
-                        || state.capability != PubkyIdentityCapability::SignedOut
-                });
+                let was_signed_in = previous
+                    .as_ref()
+                    .is_some_and(|state| state.local_pubky_public_key.is_some());
                 let generation = if was_signed_in {
                     previous_generation.saturating_add(1)
                 } else {
@@ -302,9 +288,8 @@ where
 
                 tx.clear_identity_scoped_state();
                 let state = IdentityState {
-                    public_key: None,
-                    local_secret_available: false,
-                    capability: PubkyIdentityCapability::SignedOut,
+                    local_pubky_public_key: None,
+                    local_receiver_noise_public_key: None,
                     initialized_at: now,
                     sign_out_generation: generation,
                 };
@@ -313,7 +298,7 @@ where
             })
             .await?;
 
-        Ok(IdentityStatus::from_state(&state, false, false))
+        Ok(IdentityStatus::from_state(&state, false))
     }
 
     async fn load_session_access_and_refresh_identity(
@@ -331,9 +316,8 @@ where
                     }
 
                     let state = IdentityState {
-                        public_key: None,
-                        local_secret_available: false,
-                        capability: PubkyIdentityCapability::SignedOut,
+                        local_pubky_public_key: None,
+                        local_receiver_noise_public_key: None,
                         initialized_at: now,
                         sign_out_generation: 0,
                     };
@@ -346,41 +330,14 @@ where
         };
 
         let required_capabilities = self.config.required_session_capabilities();
-        let public_key = Some(session_access.public_key()?);
-        let capability = session_access.capability_for_capabilities(&required_capabilities)?;
+        let active_identity = ActiveReceiverIdentity {
+            local_pubky_public_key: session_access.public_key()?,
+            local_receiver_noise_public_key: session_access.receiver_noise_public_key(),
+        };
+        session_access.validate_for_capabilities(&required_capabilities)?;
         let state = self
             .storage
-            .transaction(move |tx| {
-                let previous = tx.load_identity_state();
-                let identity_missing = previous.is_none();
-                let previous_generation = previous
-                    .as_ref()
-                    .map(|state| state.sign_out_generation)
-                    .unwrap_or_default();
-                let identity_changed = previous
-                    .as_ref()
-                    .is_some_and(|state| state.public_key != public_key);
-                let generation = if identity_changed {
-                    previous_generation.saturating_add(1)
-                } else {
-                    previous_generation
-                };
-
-                if identity_missing || identity_changed {
-                    tx.clear_identity_scoped_state();
-                }
-
-                let state = IdentityState {
-                    public_key,
-                    local_secret_available: capability
-                        == PubkyIdentityCapability::PrivateLinkCapable,
-                    capability,
-                    initialized_at: now,
-                    sign_out_generation: generation,
-                };
-                tx.save_identity_state(state.clone());
-                Ok(state)
-            })
+            .transaction(move |tx| Ok(refresh_active_identity(tx, active_identity, now)))
             .await?;
 
         Ok((session, state))
@@ -390,7 +347,7 @@ where
         self.storage
             .transaction(|tx| {
                 tx.load_identity_state()
-                    .and_then(|state| state.public_key)
+                    .and_then(|state| state.local_pubky_public_key)
                     .ok_or_else(|| PaykitSdkError::Identity {
                         context: format!("cannot {context} without an initialized Pubky identity"),
                         source: None,
@@ -435,17 +392,15 @@ where
             session.validate()?;
         }
         let required_capabilities = self.config.required_session_capabilities();
-        let matching_session = session
-            .as_ref()
-            .filter(|session| session.public_key().ok().as_ref() == state.public_key.as_ref());
-        let private_link_capable = matching_session
-            .map(|session| session.private_link_capable_for_capabilities(&required_capabilities))
-            .transpose()?
-            .unwrap_or(false);
+        let matching_session = session.as_ref().filter(|session| {
+            session.public_key().ok().as_ref() == state.local_pubky_public_key.as_ref()
+        });
+        if let Some(session) = matching_session {
+            session.validate_for_capabilities(&required_capabilities)?;
+        }
         Ok(Some(IdentityStatus::from_state(
             &state,
             matching_session.is_some(),
-            private_link_capable,
         )))
     }
 
@@ -490,6 +445,72 @@ where
             Ok(())
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActiveReceiverIdentity {
+    local_pubky_public_key: PubkyPublicKey,
+    local_receiver_noise_public_key: PubkyPublicKey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdentityTransition {
+    Initial,
+    PubkyIdentityChanged,
+    ReceiverNoiseKeyChanged,
+    Unchanged,
+}
+
+fn refresh_active_identity(
+    tx: &mut dyn StorageTransaction,
+    active: ActiveReceiverIdentity,
+    initialized_at: DateTime<Utc>,
+) -> IdentityState {
+    let previous = tx.load_identity_state();
+    let transition = identity_transition(previous.as_ref(), &active);
+    let previous_generation = previous
+        .as_ref()
+        .map(|state| state.sign_out_generation)
+        .unwrap_or_default();
+
+    match transition {
+        IdentityTransition::Initial | IdentityTransition::PubkyIdentityChanged => {
+            tx.clear_identity_scoped_state();
+        }
+        IdentityTransition::ReceiverNoiseKeyChanged => tx.clear_private_identity_scoped_state(),
+        IdentityTransition::Unchanged => {}
+    }
+
+    let sign_out_generation = match transition {
+        IdentityTransition::PubkyIdentityChanged => previous_generation.saturating_add(1),
+        _ => previous_generation,
+    };
+    let state = IdentityState {
+        local_pubky_public_key: Some(active.local_pubky_public_key),
+        local_receiver_noise_public_key: Some(active.local_receiver_noise_public_key),
+        initialized_at,
+        sign_out_generation,
+    };
+    tx.save_identity_state(state.clone());
+    state
+}
+
+fn identity_transition(
+    previous: Option<&IdentityState>,
+    active: &ActiveReceiverIdentity,
+) -> IdentityTransition {
+    let Some(previous) = previous else {
+        return IdentityTransition::Initial;
+    };
+    if previous.local_pubky_public_key.as_ref() != Some(&active.local_pubky_public_key) {
+        return IdentityTransition::PubkyIdentityChanged;
+    }
+    if previous.local_receiver_noise_public_key.as_ref()
+        != Some(&active.local_receiver_noise_public_key)
+    {
+        return IdentityTransition::ReceiverNoiseKeyChanged;
+    }
+    IdentityTransition::Unchanged
 }
 
 async fn fetch_public_text(

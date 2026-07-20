@@ -7,14 +7,15 @@ pub(super) fn preserve_current_sign_out_generation(
 ) {
     match (backup_identity, current_identity) {
         (Some(backup_identity), Some(current_identity))
-            if backup_identity.public_key == current_identity.public_key =>
+            if backup_identity.local_pubky_public_key
+                == current_identity.local_pubky_public_key =>
         {
             backup_identity.sign_out_generation = backup_identity
                 .sign_out_generation
                 .max(current_identity.sign_out_generation);
         }
         (backup_identity @ None, Some(current_identity))
-            if current_identity.capability == PubkyIdentityCapability::SignedOut =>
+            if current_identity.local_pubky_public_key.is_none() =>
         {
             *backup_identity = Some(current_identity.clone());
         }

@@ -219,6 +219,7 @@ Rules:
 - `starts_at` MUST be an RFC3339 UTC timestamp using the `Z` suffix.
 - `anchor` MUST be an RFC3339 UTC timestamp using the `Z` suffix.
 - `ends_at` MUST be `null` or an RFC3339 UTC timestamp using the `Z` suffix.
+- When `ends_at` is non-null, it MUST be after `starts_at`.
 - Recurrence describes the requested schedule. Payment Request v0.2 does not
   define canonical calendar expansion or reusable recurrence math for SDKs.
 - Implementations that materialize monthly or yearly recurrence periods SHOULD

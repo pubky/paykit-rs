@@ -23,7 +23,7 @@ async fn test_initiate_link_with_peer_requires_pubky_session() {
 async fn test_initiate_link_with_peer_requires_session_before_using_stored_link() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    seed_initialized_identity_and_link(&storage, counterparty.clone()).await;
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
@@ -80,7 +80,7 @@ async fn test_initiate_link_with_peer_preserves_untrusted_linking_state_without_
 async fn test_private_queue_readiness_allows_linking_peer_with_handshake() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    seed_private_capable_identity_and_handshake(&storage, counterparty.clone()).await;
+    seed_initialized_identity_and_handshake(&storage, counterparty.clone()).await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },

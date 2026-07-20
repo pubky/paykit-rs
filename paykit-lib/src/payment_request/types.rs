@@ -96,7 +96,8 @@ pub struct Recurrence {
     pub starts_at: String,
     /// RFC3339 UTC timestamp using `Z`.
     pub anchor: String,
-    /// Optional RFC3339 UTC timestamp using `Z`.
+    /// Optional RFC3339 UTC timestamp using `Z`, after `starts_at` when
+    /// present.
     pub ends_at: Option<String>,
 }
 
@@ -527,16 +528,23 @@ impl PaymentRequestEventMessage {
 }
 
 impl Recurrence {
+    /// Check `every`, timestamp formats, and that a non-null `ends_at` is
+    /// after `starts_at`. `anchor` ordering is not constrained.
     pub(super) fn validate(&self) -> Result<()> {
         if self.every == 0 {
             return Err(PaykitError::Validation(
                 "Recurrence every must be a positive integer".into(),
             ));
         }
-        parse_utc_timestamp(&self.starts_at, "Recurrence starts_at")?;
+        let starts_at = parse_utc_timestamp(&self.starts_at, "Recurrence starts_at")?;
         parse_utc_timestamp(&self.anchor, "Recurrence anchor")?;
         if let Some(ends_at) = &self.ends_at {
-            parse_utc_timestamp(ends_at, "Recurrence ends_at")?;
+            let ends_at = parse_utc_timestamp(ends_at, "Recurrence ends_at")?;
+            if ends_at <= starts_at {
+                return Err(PaykitError::Validation(
+                    "Recurrence ends_at must be after starts_at".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -619,6 +627,41 @@ mod tests {
         };
         let err = recurrence.validate().unwrap_err();
         assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("Z suffix")));
+    }
+
+    fn recurrence_with_ends_at(ends_at: Option<&str>) -> Recurrence {
+        Recurrence {
+            every: 1,
+            unit: RecurrenceUnit::Month,
+            starts_at: "2026-07-01T00:00:00Z".to_string(),
+            anchor: "2026-07-01T00:00:00Z".to_string(),
+            ends_at: ends_at.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn recurrence_rejects_ends_at_before_starts_at() {
+        // specs/payment-requests.md: non-null ends_at MUST be after starts_at.
+        let recurrence = recurrence_with_ends_at(Some("2026-06-01T00:00:00Z"));
+        let err = recurrence.validate().unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("ends_at must be after starts_at"))
+        );
+    }
+
+    #[test]
+    fn recurrence_rejects_ends_at_equal_to_starts_at() {
+        let recurrence = recurrence_with_ends_at(Some("2026-07-01T00:00:00Z"));
+        let err = recurrence.validate().unwrap_err();
+        assert!(
+            matches!(err, PaykitError::Validation(ref msg) if msg.contains("ends_at must be after starts_at"))
+        );
+    }
+
+    #[test]
+    fn recurrence_accepts_ends_at_after_starts_at() {
+        let recurrence = recurrence_with_ends_at(Some("2026-08-01T00:00:00Z"));
+        recurrence.validate().unwrap();
     }
 
     #[test]

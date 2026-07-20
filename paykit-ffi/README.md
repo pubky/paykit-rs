@@ -101,7 +101,7 @@ context. Raw diagnostic details require an explicit debug export method.
 - `PaykitSdk.currentPrivatePaymentList` — inspect the latest cached Private
   Payment List view for one counterparty receiver.
 - `PaykitSdk.prepareAndResolveContactPayment` — app-facing payment setup:
-  refresh live session capability, ensure or advance private link state,
+  refresh live session access, ensure or advance private link state,
   drain currently available private send/receive work for the peer, then
   resolve private-first with optional public fallback.
 - `PaykitSdk.resolveContactPayment` — resolve payable private and optional
@@ -246,6 +246,10 @@ app-specific public profile fields without exposing an FFI JSON value model.
 - `SdkBackupBlob` — SDK backup/export payload for app-controlled
   backup flows.
 - `PubkyLocalSecretKey` — local Pubky secret key bytes.
+- `ReceiverNoiseSecretKey` — receiver-scoped Noise secret key bytes. Generate
+  it once per receiver, persist it with session access, and reuse it when
+  signing in, completing auth, or importing that session. It remains required
+  when an external signer owns the Pubky identity secret.
 
 `PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.
@@ -274,10 +278,10 @@ sdk.initialize()
 status = sdk.identityStatus()
 ```
 
-Use `identityStatus` to gate product actions. Public-only sessions can still
-publish public Payment Endpoints and resolve public fallback when requested, but
-apps should not offer Private Payment List publication or private-link setup
-unless the current identity is private-link-capable.
+Use `identityStatus` to gate product actions. A persisted identity can remain
+visible while live session access is unavailable. A missing `publicKey` means
+explicit sign-out; a present `publicKey` with `liveSessionAvailable == false`
+means the identity is remembered but Pubky-backed workflows must wait.
 
 `SdkStateBlobStore` must persist every blob save atomically. If the app stores
 the SDK blob inside a larger app backup record, compare `stateRevision`
@@ -343,12 +347,12 @@ resolution = sdk.prepareAndResolveContactPayment(
 )
 ```
 
-This refreshes session capability, advances or starts private link work when
+This refreshes session access, advances or starts private link work when
 possible, receives pending private messages, processes pending outbound
 messages, and resolves private endpoints first. Public endpoints are included
 only when the call asks for them. Use `resolution.status` for the overall
 payment outcome and `resolution.privateState` for private-link-specific
-recovery or capability state.
+recovery or availability state.
 
 ### Backup And Restore
 
@@ -381,7 +385,7 @@ derivable from the Pubky public key alone.
   state unless the nested error says recovery is required. Keep the queued
   state and let the retry worker continue.
 - Contact payment resolution may return public Payment Endpoints while
-  `privateState` reports private recovery or unavailable private capability.
+  `privateState` reports private recovery or unavailable private state.
   Treat `status` as the general result and `privateState` as the private
   transport state.
 

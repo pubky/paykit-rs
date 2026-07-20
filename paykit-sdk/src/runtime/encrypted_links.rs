@@ -780,11 +780,15 @@ where
 
         let (session_access, secret_key) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
+        let remote_noise_public_key = self
+            .receiver_noise_public_key(&counterparty, &lease.counterparty_receiver_path)
+            .await?;
         if matches!(peer_state, Some(LinkedPeerState::RecoveryRequired)) {
             paykit_lib::clear_encrypted_link_outbox(
                 &session_access.session,
                 &secret_key,
                 &remote_public_key,
+                &remote_noise_public_key,
                 &self.config.receiver_path,
                 &lease.counterparty_receiver_path,
             )
@@ -795,6 +799,7 @@ where
                 session_access.session,
                 secret_key,
                 &remote_public_key,
+                &remote_noise_public_key,
                 &self.config.receiver_path,
                 &lease.counterparty_receiver_path,
                 session_access.outbox_client,
@@ -803,6 +808,7 @@ where
                 session_access.session,
                 secret_key,
                 &remote_public_key,
+                &remote_noise_public_key,
                 &self.config.receiver_path,
                 &lease.counterparty_receiver_path,
                 session_access.outbox_client,
@@ -887,14 +893,7 @@ where
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let secret_key = *session_access
-            .local_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
-                source: None,
-            })?
-            .as_bytes();
+        let secret_key = *session_access.receiver_noise_secret_key.as_bytes();
         Ok((session_access, secret_key))
     }
 }

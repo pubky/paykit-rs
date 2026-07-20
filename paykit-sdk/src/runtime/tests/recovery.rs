@@ -230,7 +230,7 @@ async fn test_publish_recovery_marker_disabled_does_not_mutate_link_state() {
 }
 
 #[tokio::test]
-async fn test_publish_recovery_marker_public_only_does_not_mutate_link_state() {
+async fn test_publish_recovery_marker_without_live_session_does_not_mutate_link_state() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -238,11 +238,10 @@ async fn test_publish_recovery_marker_public_only_does_not_mutate_link_state() {
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(PubkyPublicKey::from_public_key(
+                    local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                         &pubky::Keypair::random().public_key(),
                     )),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
