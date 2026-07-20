@@ -15,7 +15,7 @@ fn timestamp() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
 }
 
-fn counterparty() -> PubkyPublicKey {
+fn random_public_key() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
@@ -148,7 +148,7 @@ fn payment_endpoint_reservation_record_with_receiver(
 #[tokio::test]
 async fn test_storage_adapter_supports_erased_transactions() {
     let storage: std::sync::Arc<dyn StorageAdapter> = std::sync::Arc::new(InMemoryStorage::new());
-    let identity_public_key = counterparty();
+    let identity_public_key = random_public_key();
     let saved_identity = crate::IdentityState {
         public_key: Some(identity_public_key.clone()),
         receiver_noise_public_key: Some(receiver_noise_public_key()),
@@ -176,7 +176,7 @@ async fn test_storage_adapter_supports_erased_transactions() {
 
 #[test]
 fn test_sensitive_storage_debug_is_redacted() {
-    let stream_counterparty = counterparty();
+    let stream_counterparty = random_public_key();
     let link_state = EncryptedLinkStateRecord {
         counterparty: stream_counterparty.clone(),
         counterparty_receiver_path: receiver_path(),
@@ -222,7 +222,7 @@ fn test_sensitive_storage_debug_is_redacted() {
         remote_recovery_attempt_id: None,
         remote_recovery_marker_observed_at: None,
     };
-    let contact_public_key = counterparty();
+    let contact_public_key = random_public_key();
     let contact = ContactRecord {
         public_key: contact_public_key.clone(),
         receiver_paths: vec![receiver_path()],
@@ -268,7 +268,7 @@ fn test_sensitive_storage_debug_is_redacted() {
 #[tokio::test]
 async fn test_transaction_commits_records() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let stream_item_id = storage
         .transaction({
@@ -348,7 +348,7 @@ async fn test_transaction_commits_records() {
 #[tokio::test]
 async fn test_receiver_path_scopes_peer_state_and_queue_claims() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
     let receiver_path = receiver_path();
     let other_receiver_path = other_receiver_path();
 
@@ -465,7 +465,7 @@ async fn test_receiver_path_scopes_peer_state_and_queue_claims() {
 #[tokio::test]
 async fn test_save_outbound_private_message_rejects_missing_record() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let result: Result<()> = storage
         .transaction({
@@ -502,7 +502,7 @@ async fn test_save_outbound_private_message_rejects_missing_record() {
 #[tokio::test]
 async fn test_invalid_outbound_private_message_does_not_block_later_records() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let (first, second) = storage
         .transaction({
@@ -554,7 +554,7 @@ async fn test_invalid_outbound_private_message_does_not_block_later_records() {
 #[tokio::test]
 async fn test_private_payment_list_queue_sends_only_latest_state() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let (first, second) = storage
         .transaction({
@@ -597,7 +597,7 @@ async fn test_private_payment_list_queue_sends_only_latest_state() {
 #[tokio::test]
 async fn test_private_payment_list_queue_reclaims_stale_sending_before_newer_list() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let (first, second) = storage
         .transaction({
@@ -650,7 +650,7 @@ async fn test_private_payment_list_queue_reclaims_stale_sending_before_newer_lis
 #[tokio::test]
 async fn test_event_message_queue_preserves_fifo() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let (first, second) = storage
         .transaction({
@@ -693,7 +693,7 @@ async fn test_event_message_queue_preserves_fifo() {
 #[tokio::test]
 async fn test_peer_link_operation_lease_blocks_until_released() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let first = storage
         .transaction({
@@ -757,9 +757,10 @@ async fn test_peer_link_operation_lease_blocks_until_released() {
 #[tokio::test]
 async fn test_clear_identity_scoped_state_preserves_identity_only() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let local_public_key = random_public_key();
+    let counterparty = random_public_key();
     let identity = IdentityState {
-        public_key: Some(counterparty.clone()),
+        public_key: Some(local_public_key),
         receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 1,
@@ -828,9 +829,10 @@ async fn test_clear_identity_scoped_state_preserves_identity_only() {
 #[tokio::test]
 async fn test_clear_private_identity_scoped_state_preserves_public_endpoints() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let local_public_key = random_public_key();
+    let counterparty = random_public_key();
     let identity = IdentityState {
-        public_key: Some(counterparty.clone()),
+        public_key: Some(local_public_key),
         receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 1,
@@ -910,7 +912,7 @@ async fn test_clear_private_identity_scoped_state_preserves_public_endpoints() {
 #[tokio::test]
 async fn test_peer_link_operation_lease_can_be_reclaimed_after_expiry() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let first = storage
         .transaction({
@@ -959,7 +961,7 @@ async fn test_peer_link_operation_lease_can_be_reclaimed_after_expiry() {
 #[tokio::test]
 async fn test_peer_link_operation_stale_release_keeps_newer_lease() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let first = storage
         .transaction({
@@ -1018,7 +1020,7 @@ async fn test_peer_link_operation_stale_release_keeps_newer_lease() {
 #[tokio::test]
 async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let (record, first_lease) = storage
         .transaction({
@@ -1098,7 +1100,7 @@ async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
 #[tokio::test]
 async fn test_transaction_rolls_back_on_error() {
     let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
+    let counterparty = random_public_key();
 
     let result: Result<()> = storage
         .transaction({

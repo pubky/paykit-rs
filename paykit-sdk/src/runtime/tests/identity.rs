@@ -24,13 +24,15 @@ async fn test_initialize_persists_signed_out_identity() {
 #[tokio::test]
 async fn test_initialize_without_live_session_preserves_identity_scoped_state() {
     let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .transaction({
+            let local_public_key = local_public_key.clone();
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(counterparty.clone()),
+                    public_key: Some(local_public_key),
                     receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
@@ -94,7 +96,7 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
     let snapshot = storage.snapshot().unwrap();
     let identity = snapshot.identity_state.unwrap();
     assert!(!report.identity.live_session_available);
-    assert_eq!(identity.public_key.as_ref(), Some(&counterparty));
+    assert_eq!(identity.public_key.as_ref(), Some(&local_public_key));
     assert_eq!(identity.sign_out_generation, 3);
     assert_eq!(snapshot.linked_peers.len(), 1);
     assert_eq!(snapshot.contact_records.len(), 1);
@@ -202,13 +204,15 @@ async fn test_identity_status_cached_identity_requires_live_session() {
 #[tokio::test]
 async fn test_sign_out_clears_identity_scoped_state() {
     let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .transaction({
+            let local_public_key = local_public_key.clone();
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(counterparty.clone()),
+                    public_key: Some(local_public_key),
                     receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
@@ -302,13 +306,15 @@ async fn test_sign_out_rejects_concurrent_identity_operation() {
 #[tokio::test]
 async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
     let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .transaction({
+            let local_public_key = local_public_key.clone();
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(counterparty.clone()),
+                    public_key: Some(local_public_key),
                     receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
