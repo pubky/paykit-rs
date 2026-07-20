@@ -739,10 +739,10 @@ public interface PubkyAuthRequestInterface {
     public suspend fun `authorizationUrl`(): kotlin.String
 
     /**
-     * Wait for auth approval and validate the resulting session capabilities.
+     * Wait for auth approval using the receiver's persisted Noise key.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     public companion object
 }
@@ -777,6 +777,11 @@ public interface PubkySessionAccessInterface {
     public fun `exportLocalSecretKey`(): PubkyLocalSecretKey?
 
     /**
+     * Export the receiver Noise secret key for platform secure storage.
+     */
+    public fun `exportReceiverNoiseSecretKey`(): ReceiverNoiseSecretKey
+
+    /**
      * Export the Pubky session bearer secret for platform secure storage.
      */
     public fun `exportSessionSecret`(): kotlin.String
@@ -808,10 +813,10 @@ public interface PubkySessionBootstrapInterface {
     public suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: PubkyAuthCompanionClaim)
 
     /**
-     * Import an exported Pubky session secret.
+     * Import an exported Pubky session secret and its persisted receiver Noise key.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
      * Resume a short-lived auth flow from its authorization URL.
@@ -820,16 +825,16 @@ public interface PubkySessionBootstrapInterface {
     public suspend fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): PubkyAuthRequest
 
     /**
-     * Sign in with a local Pubky secret key and return session access material.
+     * Sign in with the receiver's persisted Noise key.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
-     * Sign up on a homeserver and return session access material.
+     * Sign up on a homeserver with the receiver-owned Noise key.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
      * Start a sign-in auth flow for an external signer.
@@ -842,6 +847,22 @@ public interface PubkySessionBootstrapInterface {
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `startSignUpAuth`(`capabilities`: kotlin.String, `homeserverPublicKey`: kotlin.String, `signupToken`: kotlin.String?): PubkyAuthRequest
+
+    public companion object
+}
+
+
+
+
+/**
+ * Receiver-scoped Noise secret key bytes supplied by platform secure storage.
+ */
+public interface ReceiverNoiseSecretKeyInterface {
+
+    /**
+     * Export the raw bytes for platform secure storage.
+     */
+    public fun `exportBytes`(): kotlin.ByteArray
 
     public companion object
 }
@@ -1344,21 +1365,13 @@ public data class EventIdConflict (
 @kotlinx.serialization.Serializable
 public data class IdentityStatus (
     /**
-     * Current local public key, when signed in.
+     * Persisted local public key, or `None` after explicit sign-out.
      */
     val `publicKey`: kotlin.String?,
     /**
-     * Current Pubky capability.
-     */
-    val `capability`: PubkyIdentityCapability,
-    /**
      * Whether live Pubky session access is available for this identity.
      */
-    val `liveSessionAvailable`: kotlin.Boolean,
-    /**
-     * Whether private Paykit workflows can run with the live session.
-     */
-    val `privateLinkCapable`: kotlin.Boolean
+    val `liveSessionAvailable`: kotlin.Boolean
 ) {
     public companion object
 }
@@ -1373,11 +1386,7 @@ public data class InitializationReport (
     /**
      * Last persisted identity status.
      */
-    val `identity`: IdentityStatus,
-    /**
-     * Whether live Pubky session access was available during startup.
-     */
-    val `liveSessionAvailable`: kotlin.Boolean
+    val `identity`: IdentityStatus
 ) {
     public companion object
 }
@@ -1705,7 +1714,11 @@ public data class PaykitReceiverMarker (
     /**
      * Public receiver capabilities.
      */
-    val `capabilities`: PaykitReceiverCapabilities
+    val `capabilities`: PaykitReceiverCapabilities,
+    /**
+     * Receiver-scoped public key used for Encrypted Links.
+     */
+    val `noisePublicKey`: kotlin.String
 ) {
     public companion object
 }
@@ -2834,17 +2847,12 @@ public data class PubkySessionBootstrapResult (
     /**
      * Local Pubky public key.
      */
-    val `publicKey`: kotlin.String,
-    /**
-     * Capability implied by the session and optional local secret key.
-     */
-    val `capability`: PubkyIdentityCapability
+    val `publicKey`: kotlin.String
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
             this.`sessionAccess`,
             this.`publicKey`,
-            this.`capability`,
         )
     }
     public companion object
@@ -3526,10 +3534,6 @@ public enum class ContactPaymentResolutionPrivateState {
      */
     RECOVERY_PENDING,
     /**
-     * The local identity cannot establish private links.
-     */
-    PUBLIC_ONLY_SESSION,
-    /**
      * SDK returned a value this binding version does not understand.
      */
     UNKNOWN;
@@ -3975,37 +3979,6 @@ public enum class PubkyAuthRequestKind {
      * Export a secret from a signer.
      */
     SECRET_EXPORT,
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    UNKNOWN;
-    public companion object
-}
-
-
-
-
-
-
-/**
- * Pubky capability state for one app-owned Paykit runtime.
- */
-
-@kotlinx.serialization.Serializable
-public enum class PubkyIdentityCapability {
-
-    /**
-     * No Pubky identity is initialized, or explicit sign-out completed.
-     */
-    SIGNED_OUT,
-    /**
-     * Public Pubky operations may work, but private links cannot be established.
-     */
-    PUBLIC_ONLY,
-    /**
-     * Public operations and Encrypted Links can work.
-     */
-    PRIVATE_LINK_CAPABLE,
     /**
      * SDK returned a value this binding version does not understand.
      */

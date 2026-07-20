@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn test_payment_requests_with_allows_public_only_identity() {
+async fn test_payment_requests_with_allows_identity_without_live_session() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -10,9 +10,8 @@ async fn test_payment_requests_with_allows_public_only_identity() {
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -63,9 +62,8 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -134,9 +132,8 @@ async fn test_list_payment_requests_filters_across_counterparties() {
             let blocked = blocked.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -240,9 +237,8 @@ async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_pres
             let blocked = blocked.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    capability: PubkyIdentityCapability::PublicOnly,
-                    local_secret_available: false,
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -349,9 +345,8 @@ async fn test_active_recurring_payment_requests_filters_accepted_recurring_reque
     let one_time_peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            capability: PubkyIdentityCapability::PublicOnly,
-            local_secret_available: false,
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -397,7 +392,7 @@ async fn test_active_recurring_payment_requests_filters_accepted_recurring_reque
 }
 
 #[tokio::test]
-async fn test_enqueue_payment_request_event_requires_private_capable_identity() {
+async fn test_enqueue_payment_request_event_requires_initialized_identity() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let sdk = PaykitSdk::with_clock(

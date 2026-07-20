@@ -68,14 +68,7 @@ where
         lease: PeerLinkOperationLease,
         session_access: PubkySessionAccess,
     ) -> Result<PrivateStreamIntakeReport> {
-        let secret_key = *session_access
-            .local_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
-                source: None,
-            })?
-            .as_bytes();
+        let secret_key = *session_access.receiver_noise_secret_key.as_bytes();
         let remote_public_key = counterparty.to_public_key()?;
 
         let stored_link_state = self

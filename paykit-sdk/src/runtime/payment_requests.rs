@@ -21,7 +21,7 @@ where
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PaymentRequestRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
+        if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
@@ -52,7 +52,7 @@ where
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PaymentRequestRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
+        if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
@@ -83,7 +83,7 @@ where
         filter: PaymentRequestFilter,
     ) -> Result<Vec<PaymentRequestRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
+        if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
         }
         let now = self.clock.now();
@@ -264,9 +264,9 @@ where
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
+        if identity.local_pubky_public_key.is_none() {
             return Err(PaykitSdkError::Identity {
-                context: "local Pubky identity is not private-link-capable".into(),
+                context: "local Pubky identity is not initialized".into(),
                 source: None,
             });
         }

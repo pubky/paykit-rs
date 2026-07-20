@@ -14,18 +14,12 @@ where
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<crate::PrivatePaymentListView>> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
+        if identity.local_pubky_public_key.is_none() {
             return Ok(None);
         }
         self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
             .await?;
-        let required_capabilities = self.config.required_session_capabilities();
-        if session_access
-            .as_ref()
-            .map(|session| session.private_link_capable_for_capabilities(&required_capabilities))
-            .transpose()?
-            .unwrap_or(false)
-        {
+        if session_access.is_some() {
             self.observe_remote_recovery_marker_for_cached_private_state(
                 counterparty,
                 counterparty_receiver_path,
@@ -552,9 +546,9 @@ where
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
+        if identity.local_pubky_public_key.is_none() {
             return Err(PaykitSdkError::Identity {
-                context: "local Pubky identity is not private-link-capable".into(),
+                context: "local Pubky identity is not initialized".into(),
                 source: None,
             });
         }

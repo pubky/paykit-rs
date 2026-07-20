@@ -64,6 +64,36 @@ async fn test_link_handshake_two_party_reaches_linked() {
 }
 
 #[tokio::test]
+async fn test_link_handshake_works_without_local_identity_secret() {
+    let testnet = build_testnet().await;
+    let alice = TestUser::sign_up_with_receiver(&testnet, receiver_path("bitkit/wallet")).await;
+    let bob =
+        TestUser::sign_up_with_server_owned_identity(&testnet, receiver_path("bitkit/server"))
+            .await;
+    assert!(bob.access.local_secret_key.is_none());
+
+    alice
+        .sdk
+        .initiate_link_with_peer(bob.public_key.clone(), bob.receiver_path.clone())
+        .await
+        .expect("initiating with a server-owned identity should succeed");
+    bob.sdk
+        .accept_link_with_peer(alice.public_key.clone(), alice.receiver_path.clone())
+        .await
+        .expect("a server-owned identity should accept with its receiver Noise key");
+
+    drive_link_to_linked(&alice, &bob).await;
+    assert_eq!(
+        bob.sdk
+            .linked_peers()
+            .await
+            .expect("loading linked peers should succeed")[0]
+            .state,
+        LinkedPeerState::Linked
+    );
+}
+
+#[tokio::test]
 async fn test_advance_link_handshake_without_started_handshake_fails() {
     let testnet = build_testnet().await;
     let user = TestUser::sign_up(&testnet).await;

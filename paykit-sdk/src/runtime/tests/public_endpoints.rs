@@ -9,15 +9,6 @@ fn marker_private_capabilities() -> PaykitReceiverCapabilities {
     }
 }
 
-fn marker_public_capabilities() -> PaykitReceiverCapabilities {
-    PaykitReceiverCapabilities {
-        private_payments: false,
-        payment_requests: false,
-        receipts: false,
-        outgoing_payments: true,
-    }
-}
-
 #[tokio::test]
 async fn test_sync_public_endpoints_requires_pubky_session() {
     let storage = InMemoryStorage::new();
@@ -53,41 +44,15 @@ async fn test_sync_public_endpoints_rejects_reentrant_call() {
     assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
 }
 
-#[test]
-fn test_receiver_marker_capabilities_require_private_identity_for_private_workflows() {
-    assert!(matches!(
-        crate::runtime::public_endpoints::validate_receiver_marker_capabilities(
-            &marker_private_capabilities(),
-            PubkyIdentityCapability::PublicOnly
-        ),
-        Err(PaykitSdkError::Policy(_))
-    ));
-    assert!(
-        crate::runtime::public_endpoints::validate_receiver_marker_capabilities(
-            &marker_private_capabilities(),
-            PubkyIdentityCapability::PrivateLinkCapable
-        )
-        .is_ok()
-    );
-    assert!(
-        crate::runtime::public_endpoints::validate_receiver_marker_capabilities(
-            &marker_public_capabilities(),
-            PubkyIdentityCapability::PublicOnly
-        )
-        .is_ok()
-    );
-}
-
 #[tokio::test]
-async fn test_publish_receiver_marker_rejects_private_capabilities_without_local_secret() {
+async fn test_publish_receiver_marker_requires_live_session() {
     let storage = InMemoryStorage::new();
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(PubkyPublicKey::from_public_key(
+            local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                 &pubky::Keypair::random().public_key(),
             )),
-            capability: PubkyIdentityCapability::PublicOnly,
-            local_secret_available: false,
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -105,5 +70,5 @@ async fn test_publish_receiver_marker_rejects_private_capabilities_without_local
         .publish_paykit_receiver_marker(marker_private_capabilities())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
 }

@@ -20,22 +20,27 @@ where
         request: ContactPaymentResolutionRequest,
     ) -> Result<ContactPaymentResolution> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        let mut private_allowed = identity.public_key.is_some();
-        let mut private_state = if private_allowed {
-            ContactPaymentResolutionPrivateState::NoPrivateEndpoint
-        } else {
-            ContactPaymentResolutionPrivateState::PublicOnlySession
-        };
-        if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
-            private_allowed = self
-                .private_resolution_allowed_for_peer(
+        let mut private_allowed = identity.local_pubky_public_key.is_some();
+        let private_live = session_access.is_some();
+        let mut private_state = ContactPaymentResolutionPrivateState::NoPrivateEndpoint;
+        if private_allowed {
+            private_allowed = if private_live {
+                self.private_resolution_allowed_for_peer(
                     &request.counterparty,
                     &request.counterparty_receiver_path,
                     &mut private_state,
                 )
-                .await?;
+                .await?
+            } else {
+                self.cached_private_resolution_allowed_for_peer(
+                    &request.counterparty,
+                    &request.counterparty_receiver_path,
+                    &mut private_state,
+                )
+                .await?
+            };
         }
-        if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
+        if private_allowed && private_live {
             if let Err(err) = self
                 .observe_remote_recovery_marker_for_cached_private_state(
                     &request.counterparty,
@@ -52,7 +57,7 @@ where
                 private_allowed = false;
             }
         }
-        if private_allowed && identity.capability == PubkyIdentityCapability::PrivateLinkCapable {
+        if private_allowed && private_live {
             private_allowed = self
                 .private_resolution_allowed_for_peer(
                     &request.counterparty,
@@ -78,14 +83,10 @@ where
         );
         if !candidates.is_empty() {
             private_state = ContactPaymentResolutionPrivateState::Available;
-        } else if private_allowed
-            && identity.capability != PubkyIdentityCapability::PrivateLinkCapable
-        {
-            private_state = ContactPaymentResolutionPrivateState::PublicOnlySession;
         }
         let had_private_candidates = !candidates.is_empty();
 
-        if candidates.is_empty() && private_allowed {
+        if candidates.is_empty() && private_live {
             if private_state == ContactPaymentResolutionPrivateState::RecoveryPending {
                 if !request.include_public_endpoints {
                     return Ok(status_resolution(
@@ -116,19 +117,8 @@ where
                             ));
                         }
                     }
-                    PrivateRecoveryOutcome::PublicOnly => {
-                        private_state = ContactPaymentResolutionPrivateState::PublicOnlySession;
-                    }
                     PrivateRecoveryOutcome::NotNeeded | PrivateRecoveryOutcome::Refreshed(_) => {}
                 }
-            }
-            if !request.include_public_endpoints
-                && private_state == ContactPaymentResolutionPrivateState::PublicOnlySession
-            {
-                return Ok(status_resolution(
-                    ContactPaymentResolutionStatus::NoEndpoint,
-                    private_state,
-                ));
             }
         }
 
@@ -306,8 +296,8 @@ where
     }
 
     async fn private_payment_preparation_is_available(&self) -> Result<bool> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        Ok(identity.capability == PubkyIdentityCapability::PrivateLinkCapable)
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        Ok(session_access.is_some())
     }
 
     async fn private_resolution_allowed_for_peer(
@@ -329,16 +319,42 @@ where
         }
     }
 
+    async fn cached_private_resolution_allowed_for_peer(
+        &self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+        private_state: &mut ContactPaymentResolutionPrivateState,
+    ) -> Result<bool> {
+        let peer_state = self
+            .storage
+            .transaction(|tx| {
+                Ok(tx
+                    .linked_peer(counterparty, counterparty_receiver_path)
+                    .map(|peer| peer.state))
+            })
+            .await?;
+        match peer_state {
+            Some(LinkedPeerState::Linking | LinkedPeerState::RecoveryRequired) => {
+                *private_state = ContactPaymentResolutionPrivateState::RecoveryPending;
+                Ok(false)
+            }
+            Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy(format!(
+                "counterparty {counterparty} is blocked"
+            ))),
+            _ => Ok(true),
+        }
+    }
+
     pub(super) async fn recover_private_candidates_for_resolution(
         &self,
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<PrivateRecoveryOutcome> {
         let Some(identity) = self.storage.load_identity_state().await? else {
-            return Ok(PrivateRecoveryOutcome::PublicOnly);
+            return Ok(PrivateRecoveryOutcome::NotNeeded);
         };
-        if identity.capability != PubkyIdentityCapability::PrivateLinkCapable {
-            return Ok(PrivateRecoveryOutcome::PublicOnly);
+        if identity.local_pubky_public_key.is_none() {
+            return Ok(PrivateRecoveryOutcome::NotNeeded);
         }
 
         let (peer_state, has_active_link) = self
@@ -390,9 +406,6 @@ where
                     )));
                 }
                 Err(PaykitSdkError::Policy(_)) => return Ok(PrivateRecoveryOutcome::Pending),
-                Err(PaykitSdkError::Identity { .. }) => {
-                    return Ok(PrivateRecoveryOutcome::PublicOnly)
-                }
                 Err(PaykitSdkError::RecoveryRequired(_))
                 | Err(PaykitSdkError::Transport { .. })
                 | Err(PaykitSdkError::Protocol(_)) => {
@@ -550,7 +563,6 @@ fn receive_report_made_progress(report: &PrivateStreamIntakeReport) -> bool {
 pub(super) enum PrivateRecoveryOutcome {
     NotNeeded,
     Pending,
-    PublicOnly,
     Refreshed(Vec<PaymentEndpointCandidate>),
 }
 fn payable_resolution(

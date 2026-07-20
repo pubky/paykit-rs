@@ -10,13 +10,17 @@ use paykit_sdk::storage::{StorageAdapter, StorageState};
 use paykit_sdk::PaykitSdkConfig;
 use paykit_sdk::{
     ContactRecord, EncryptedLinkHandshakeRole, IdentityState, LinkedPeerState,
-    OutboundPrivateMessageStatus, PaykitProfile, PrivateStreamParseStatus, PubkyIdentityCapability,
-    PubkyPublicKey, PublicationStatus,
+    OutboundPrivateMessageStatus, PaykitProfile, PrivateStreamParseStatus, PubkyPublicKey,
+    PublicationStatus,
 };
 
 use crate::errors::storage_error;
 use crate::storage::{decode_storage_state, encode_storage_state, FfiSdkStorage};
 use crate::*;
+
+fn receiver_noise_public_key() -> PubkyPublicKey {
+    PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[7; 32]).public_key())
+}
 
 #[test]
 fn test_default_config_round_trips_to_sdk_config() {
@@ -163,9 +167,8 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     };
     let mut state = StorageState {
         identity_state: Some(IdentityState {
-            public_key: Some(local_key),
-            capability: PubkyIdentityCapability::PrivateLinkCapable,
-            local_secret_available: true,
+            local_pubky_public_key: Some(local_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: now,
             sign_out_generation: 0,
         }),
@@ -445,6 +448,7 @@ fn test_blob_debug_redacts_bytes() {
     let state = FfiSdkStateBlob::new(vec![1, 2, 3]);
     let backup = FfiSdkBackupBlob::new(vec![4, 5, 6, 7]);
     let secret = FfiPubkyLocalSecretKey::new(vec![8; 32]);
+    let receiver_noise_secret = FfiReceiverNoiseSecretKey::random();
     let payment_payload = FfiPaymentPayload::new("bc1qexample".into());
     let attribution = FfiReservationAttribution::new(HashMap::from([(
         "backend_reference".into(),
@@ -460,6 +464,11 @@ fn test_blob_debug_redacts_bytes() {
         format!("{secret:?}"),
         "FfiPubkyLocalSecretKey(<redacted:32 bytes>)"
     );
+    assert_eq!(receiver_noise_secret.export_bytes().len(), 32);
+    assert_eq!(
+        format!("{receiver_noise_secret:?}"),
+        "FfiReceiverNoiseSecretKey(<redacted:32 bytes>)"
+    );
     assert_eq!(
         format!("{payment_payload:?}"),
         "FfiPaymentPayload(<redacted:11 bytes>)"
@@ -467,6 +476,19 @@ fn test_blob_debug_redacts_bytes() {
     assert_eq!(
         format!("{attribution:?}"),
         "FfiReservationAttribution(<redacted:1 fields>)"
+    );
+}
+
+#[test]
+fn test_session_access_exports_receiver_noise_secret_key() {
+    let receiver_noise_secret_key = Arc::new(FfiReceiverNoiseSecretKey::random());
+    let expected = receiver_noise_secret_key.export_bytes();
+    let access =
+        FfiPubkySessionAccess::new("session-secret".into(), None, receiver_noise_secret_key);
+
+    assert_eq!(
+        access.export_receiver_noise_secret_key().export_bytes(),
+        expected
     );
 }
 
@@ -540,11 +562,16 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
     }
 
     let secret = FfiPubkyLocalSecretKey::new(vec![8; 32]);
+    let receiver_noise_secret = FfiReceiverNoiseSecretKey::random();
     let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
     let config = default_config("bitkit/wallet".into()).unwrap();
     let capabilities = required_session_capabilities(config.clone()).unwrap();
     let result = bootstrap
-        .sign_in(Arc::new(secret), capabilities)
+        .sign_in(
+            Arc::new(secret),
+            Arc::new(receiver_noise_secret),
+            capabilities,
+        )
         .await
         .unwrap();
     let store = Arc::new(MemoryStore::default());
@@ -563,6 +590,6 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
     for _ in 0..5 {
         let status = sdk.identity_status().await.unwrap().unwrap();
         assert_eq!(status.public_key, Some(result.public_key.clone()));
-        assert!(status.private_link_capable);
+        assert!(status.live_session_available);
     }
 }

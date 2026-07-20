@@ -41,8 +41,6 @@ pub enum FfiContactPaymentResolutionPrivateState {
     NoPrivateEndpoint,
     /// Private payment state is blocked by link recovery.
     RecoveryPending,
-    /// The local identity cannot establish private links.
-    PublicOnlySession,
     /// SDK returned a value this binding version does not understand.
     Unknown,
 }
@@ -198,7 +196,6 @@ impl From<ContactPaymentResolutionPrivateState> for FfiContactPaymentResolutionP
             ContactPaymentResolutionPrivateState::Available => Self::Available,
             ContactPaymentResolutionPrivateState::NoPrivateEndpoint => Self::NoPrivateEndpoint,
             ContactPaymentResolutionPrivateState::RecoveryPending => Self::RecoveryPending,
-            ContactPaymentResolutionPrivateState::PublicOnlySession => Self::PublicOnlySession,
             _ => Self::Unknown,
         }
     }

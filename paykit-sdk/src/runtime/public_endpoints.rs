@@ -51,19 +51,50 @@ where
         .await?)
     }
 
+    pub(super) async fn receiver_noise_public_key(
+        &self,
+        owner: &PubkyPublicKey,
+        receiver_path: &PaykitReceiverPath,
+    ) -> Result<paykit_lib::PublicKey> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for receiver marker lookup".into(),
+                    source: None,
+                })?;
+        let marker = paykit_lib::get_paykit_receiver_marker(
+            &public_storage,
+            &owner.to_public_key()?,
+            receiver_path,
+        )
+        .await?
+        .ok_or_else(|| {
+            PaykitSdkError::NotFound(format!(
+                "Paykit receiver marker for {owner}/{receiver_path}"
+            ))
+        })?;
+        Ok(marker.noise_public_key)
+    }
+
     /// Publish the configured local receiver marker.
     pub async fn publish_paykit_receiver_marker(
         &self,
         capabilities: PaykitReceiverCapabilities,
     ) -> Result<PaykitReceiverMarker> {
         let _identity_guard = self.claim_identity_operation("publish Paykit receiver marker")?;
-        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        validate_receiver_marker_capabilities(&capabilities, identity.capability)?;
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let marker = PaykitReceiverMarker::new(self.config.receiver_path.clone(), capabilities);
+        let noise_public_key = session_access.receiver_noise_secret_key.public_key();
+        let marker = PaykitReceiverMarker::new(
+            self.config.receiver_path.clone(),
+            capabilities,
+            noise_public_key,
+        );
         paykit_lib::publish_paykit_receiver_marker(&session_access.session, &marker).await?;
         Ok(marker)
     }
@@ -308,20 +339,4 @@ where
 
         Ok(report)
     }
-}
-
-pub(super) fn validate_receiver_marker_capabilities(
-    capabilities: &PaykitReceiverCapabilities,
-    identity_capability: PubkyIdentityCapability,
-) -> Result<()> {
-    let advertises_private_workflows =
-        capabilities.private_payments || capabilities.payment_requests || capabilities.receipts;
-    if advertises_private_workflows
-        && identity_capability != PubkyIdentityCapability::PrivateLinkCapable
-    {
-        return Err(PaykitSdkError::Policy(
-            "receiver marker private capabilities require a local Pubky secret key".into(),
-        ));
-    }
-    Ok(())
 }

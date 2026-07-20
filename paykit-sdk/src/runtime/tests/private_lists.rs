@@ -4,7 +4,7 @@ use super::*;
 async fn test_enqueue_private_payment_list_requires_live_session_for_stored_link() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    seed_initialized_identity_and_link(&storage, counterparty.clone()).await;
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
@@ -23,7 +23,7 @@ async fn test_enqueue_private_payment_list_requires_live_session_for_stored_link
 }
 
 #[tokio::test]
-async fn test_enqueue_private_payment_list_requires_private_capable_identity() {
+async fn test_enqueue_private_payment_list_requires_initialized_identity() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let sdk = PaykitSdk::with_clock(
@@ -46,7 +46,7 @@ async fn test_sync_contact_private_payment_lists_reports_contact_and_clear_failu
     let storage = InMemoryStorage::new();
     let contact = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let unlisted = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    seed_private_capable_identity_and_link(&storage, unlisted.clone()).await;
+    seed_initialized_identity_and_link(&storage, unlisted.clone()).await;
     storage
         .transaction({
             let unlisted = unlisted.clone();
@@ -102,7 +102,7 @@ async fn test_sync_contact_private_payment_lists_reports_contact_and_clear_failu
 async fn test_sync_private_payment_lists_with_reservations_reports_queue_failures() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    seed_initialized_identity_and_link(&storage, counterparty.clone()).await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
@@ -142,7 +142,7 @@ async fn test_sync_private_payment_lists_with_reservations_reports_queue_failure
 async fn test_enqueue_private_payment_list_with_reservations_cancels_on_preflight_error() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    seed_initialized_identity_and_link(&storage, counterparty.clone()).await;
     let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage,
@@ -178,7 +178,7 @@ async fn test_enqueue_private_payment_list_with_reservations_cancels_on_prefligh
 async fn test_sync_private_payment_lists_with_reservations_reports_duplicate_updates() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    seed_initialized_identity_and_link(&storage, counterparty.clone()).await;
     let canceled = Arc::new(Mutex::new(Vec::new()));
     let sdk = PaykitSdk::with_clock(
         storage,
@@ -974,17 +974,16 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
 }
 
 #[tokio::test]
-async fn test_current_private_payment_list_reads_cached_view_for_public_only_identity() {
+async fn test_current_private_payment_list_reads_cached_view_without_live_session() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .transaction(|tx| {
             tx.save_identity_state(IdentityState {
-                public_key: Some(PubkyPublicKey::from_public_key(
+                local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                     &pubky::Keypair::random().public_key(),
                 )),
-                capability: PubkyIdentityCapability::PublicOnly,
-                local_secret_available: false,
+                local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                 initialized_at: FixedClock.now(),
                 sign_out_generation: 0,
             });

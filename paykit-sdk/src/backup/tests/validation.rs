@@ -1331,6 +1331,29 @@ async fn test_restore_backup_state_rejects_wrong_identity() {
 }
 
 #[tokio::test]
+async fn test_restore_backup_state_rejects_wrong_receiver_noise_key() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = public_key();
+    storage
+        .save_identity_state(identity(local_public_key.clone()))
+        .await
+        .unwrap();
+    let mut backup_identity = identity(local_public_key);
+    backup_identity.local_receiver_noise_public_key = Some(public_key());
+    let backup = SdkBackupState::from_storage_state(
+        StorageState {
+            identity_state: Some(backup_identity),
+            ..StorageState::default()
+        },
+        receiver_path(),
+    );
+
+    let result = restore_backup_state(&storage, backup).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+}
+
+#[tokio::test]
 async fn test_restore_backup_state_preserves_current_sign_out_generation() {
     let storage = InMemoryStorage::new();
     let local_public_key = public_key();
@@ -1406,7 +1429,10 @@ async fn test_restore_backup_state_allows_trusted_identity_switch() {
         .unwrap();
 
     let identity = storage.snapshot().unwrap().identity_state.unwrap();
-    assert_eq!(identity.public_key.as_ref(), Some(&backup_public_key));
+    assert_eq!(
+        identity.local_pubky_public_key.as_ref(),
+        Some(&backup_public_key)
+    );
     assert_eq!(identity.sign_out_generation, 3);
 }
 
@@ -1440,7 +1466,7 @@ async fn test_restore_identity_less_backup_preserves_signed_out_generation() {
     restore_backup_state(&storage, backup).await.unwrap();
 
     let identity = storage.snapshot().unwrap().identity_state.unwrap();
-    assert_eq!(identity.capability, PubkyIdentityCapability::SignedOut);
+    assert!(identity.local_pubky_public_key.is_none());
     assert_eq!(identity.sign_out_generation, 7);
 }
 

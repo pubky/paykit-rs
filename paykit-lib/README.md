@@ -274,12 +274,12 @@ If a payment execution fails with an error suggesting the endpoint has been cons
 
 Private Payment Lists are end-to-end encrypted via a Noise protocol handshake managed by `pubky-noise`. `PubkyNoiseEncryptor` handles encryption, file naming, and homeserver storage via `send_message`/`receive_message`.
 
-Storage paths for private Paykit data are derived per-counterparty receiver pair using `pubky_noise::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private/{receiver_path}/messages`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-noise` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private Paykit data.
+Storage paths for private Paykit data are derived per-counterparty receiver pair using `pubky_noise::path_derivation::derive_asymmetric_paths`. Each receiver publishes its Noise public key in its Receiver Marker; the caller discovers that key and supplies it to the handshake together with the local receiver Noise secret. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private/{receiver_path}/messages`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-noise` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private Paykit data.
 
 #### Handshake Initiation
-- `initiate_encrypted_link(session, sender_secret_key, receiver_pubkey, local_receiver_path, remote_receiver_path, outbox_client) -> Result<EncryptedLinkHandshake>`
+- `initiate_encrypted_link(session, sender_noise_secret_key, receiver_pubkey, receiver_noise_public_key, local_receiver_path, remote_receiver_path, outbox_client) -> Result<EncryptedLinkHandshake>`
   Initializes a Noise XX handshake as the **initiator**. Returns a handshake handle to be driven forward with `advance_handshake`.
-- `accept_encrypted_link(session, receiver_secret_key, sender_pubkey, local_receiver_path, remote_receiver_path, outbox_client) -> Result<EncryptedLinkHandshake>`
+- `accept_encrypted_link(session, receiver_noise_secret_key, sender_pubkey, sender_noise_public_key, local_receiver_path, remote_receiver_path, outbox_client) -> Result<EncryptedLinkHandshake>`
   Initializes a Noise XX handshake as the **responder**. Returns a handshake handle to be driven forward with `advance_handshake`.
 
 **NOTE**: Due to the nature of Noise it is important that one party is the "initiator" and the other is the "responder". Sometimes it is impossible to determine the roles from user flow alone. One option is to compare the counterparty key to the local key and let the initiator be the one with the lexicographically bigger public key.
@@ -295,9 +295,9 @@ Storage paths for private Paykit data are derived per-counterparty receiver pair
   Convenience method equivalent to `self.snapshot().serialize()`.
 - `EncryptedLinkHandshake::config() -> &Arc<PubkyNoiseConfig>`
   Access the shared Noise configuration for in-process handshake restore.
-- `EncryptedLinkHandshakeSnapshot::serialize() -> Vec<u8>` / `EncryptedLinkHandshakeSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkHandshakeSnapshot>` / `EncryptedLinkHandshakeSnapshot::recipient() -> &PublicKey`
-  Snapshot wire format helpers. Snapshot bytes include receiver scope plus the underlying Noise state.
-- `restore_encrypted_link_handshake(session, secret_key, remote_pubkey, local_receiver_path, remote_receiver_path, outbox_client, snapshot) -> Result<EncryptedLinkHandshake>`
+- `EncryptedLinkHandshakeSnapshot::serialize() -> Vec<u8>` / `EncryptedLinkHandshakeSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkHandshakeSnapshot>` / `EncryptedLinkHandshakeSnapshot::recipient() -> &PublicKey` / `EncryptedLinkHandshakeSnapshot::remote_noise_public_key() -> &PublicKey`
+  Snapshot wire format helpers. Snapshot bytes include receiver scope, the counterparty receiver Noise public key, and the underlying Noise state.
+- `restore_encrypted_link_handshake(session, noise_secret_key, remote_pubkey, local_receiver_path, remote_receiver_path, outbox_client, snapshot) -> Result<EncryptedLinkHandshake>`
   Cross-restart restore for an in-progress handshake.
 - `restore_encrypted_link_handshake_from_config(config, remote_pubkey, snapshot) -> Result<EncryptedLinkHandshake>`
   In-process restore for an in-progress handshake.
@@ -454,13 +454,15 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
   Reconstructs a snapshot from bytes, including the embedded recipient public key.
 - `EncryptedLinkSnapshot::recipient() -> &PublicKey`
   Access the counterparty's public key embedded in the snapshot.
+- `EncryptedLinkSnapshot::remote_noise_public_key() -> &PublicKey`
+  Access the counterparty receiver Noise public key embedded in the snapshot.
 
 Snapshots must be restored with the same local/remote receiver scope they were created with. Receiver mismatches are rejected so a saved link cannot be resumed against different Paykit folders.
 
 **Restore:**
 
-- `restore_encrypted_link(session, secret_key, remote_pubkey, local_receiver_path, remote_receiver_path, outbox_client, snapshot) -> Result<EncryptedLink>`
-  Cross-restart restore. Accepts a fresh `PubkySession` and the same secret key used in the original `initiate_encrypted_link` or `accept_encrypted_link` call. Internally builds a new `PubkyNoiseConfig` and restores the transport-phase Noise state and counters directly from the serialized snapshot.
+- `restore_encrypted_link(session, noise_secret_key, remote_pubkey, local_receiver_path, remote_receiver_path, outbox_client, snapshot) -> Result<EncryptedLink>`
+  Cross-restart restore. Accepts a fresh `PubkySession` and the same receiver Noise secret key used in the original `initiate_encrypted_link` or `accept_encrypted_link` call. The snapshot carries the counterparty receiver Noise public key. Internally builds a new `PubkyNoiseConfig` and restores the transport-phase Noise state and counters directly from the serialized snapshot.
 - `restore_encrypted_link_from_config(config, remote_pubkey, snapshot) -> Result<EncryptedLink>`
   In-process restore. Reuses an existing `Arc<PubkyNoiseConfig>` (obtainable via `EncryptedLink::config()`) when the link needs rebuilding without an app restart.
 
@@ -490,7 +492,7 @@ let bytes = load_from_disk();
 let snapshot = EncryptedLinkSnapshot::deserialize(&bytes)?;
 let remote_pubkey = snapshot.recipient().clone();
 let mut link = restore_encrypted_link(
-    fresh_session, secret_key, &remote_pubkey, &local_receiver_path, &remote_receiver_path, outbox_client, snapshot,
+    fresh_session, receiver_noise_secret_key, &remote_pubkey, &local_receiver_path, &remote_receiver_path, outbox_client, snapshot,
 ).await?;
 // Continue using set_private_payment_list and raw stream receive/parsing
 ```
@@ -502,7 +504,7 @@ The crate exports:
 - `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0`) and `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) to standardize receiver-scoped Pubky path construction.
 - `PaykitReceiverPath` for app/runtime receiver paths such as `bitkit/wallet` under a Pubky identity.
 - `list_paykit_receiver_paths`, `set_payment_endpoint`, `remove_payment_endpoint`, `get_payment_list`, and `get_payment_endpoint` for Public Payment Endpoint operations over `pubky::PubkySession` and `pubky::PublicStorage`.
-- `PaykitReceiverMarker`, `PaykitReceiverCapabilities`, `publish_paykit_receiver_marker`, `remove_paykit_receiver_marker`, and `get_paykit_receiver_marker` for lightweight public receiver discovery at `/pub/paykit/v0/{receiver_path}/receiver.json`.
+- `PaykitReceiverMarker`, `PaykitReceiverCapabilities`, `publish_paykit_receiver_marker`, `remove_paykit_receiver_marker`, and `get_paykit_receiver_marker` for lightweight public receiver and Noise-key discovery at `/pub/paykit/v0/{receiver_path}/receiver.json`.
 - `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot`, `EncryptedLinkHandshakeSnapshot`, `PrivateApplicationMessage`, and `PrivateMessageKind` for Encrypted Link types.
 - `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `EncryptedLink::receive_private_application_messages`, `set_private_payment_list`, and `parse_private_payment_list_json` for Encrypted Link and Private Payment List operations.
 - `PaymentAmount`, `PaymentRequest`, `PaymentRequestEvent`, `PaymentRequestEventMessage`, `PaymentRequestAcceptance`, `PaymentRequestRejection`, `PaymentRequestCancellation`, `PaymentProof`, `send_payment_request`, `serialize_payment_request_event`, `parse_payment_request_event_message`, and proof validation helpers for Payment Request exchange.

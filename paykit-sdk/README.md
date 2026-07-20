@@ -38,13 +38,22 @@ still discoverable from the Pubky identity. Marker publication is explicit
 because it makes the receiver publicly discoverable; SDK setup, auth, and
 profile helpers do not publish it automatically.
 
+The Receiver Marker also publishes that receiver's Noise public key. Its
+public visibility is intentional: it cannot decrypt messages or derive the
+pairwise DH secret without the receiver Noise secret. Apps generate that
+secret once per receiver, supply it when creating or importing session access,
+persist it alongside that access, and reuse it after restart or
+reauthentication. It is independent of the Pubky identity secret, so Ring- or
+server-owned identities remain private-link-capable. Session creation and
+restore require this receiver key even when the Pubky identity secret remains
+in an external signer.
+
 ## Current Scope
 
 Implemented in this Rust SDK crate:
 
 - SDK runtime facade and atomic storage adapter contract
-- Pubky session bootstrap helpers, identity capability tracking, and sign-out
-  handling
+- Pubky session bootstrap helpers, identity status tracking, and sign-out handling
 - request-bound application-defined companion claims for Pubky Auth
 - public Payment Endpoint sync
 - Encrypted Link setup, private stream intake, outbound retries, and recovery
@@ -93,7 +102,7 @@ let config = PaykitSdkConfig::new(PaykitReceiverPath::new("bitkit/wallet")?);
 let sdk = PaykitSdk::try_new(storage, pubky, payment, config)?;
 let report = sdk.initialize().await?;
 
-if report.identity.private_link_capable {
+if report.identity.live_session_available {
     // Private Paykit workflows can run for linked peers.
 }
 # Ok(())
@@ -102,8 +111,8 @@ if report.identity.private_link_capable {
 
 Common workflows:
 
-- call `initialize` on startup to refresh identity capability from the Pubky
-  provider when live session access is available
+- call `initialize` on startup to refresh identity status from the Pubky
+  provider
 - call `sync_public_endpoints` after local receiving details change
 - request and validate `config.required_session_capabilities()` for full SDK
   auth/session handoff
@@ -141,7 +150,7 @@ Common workflows:
 - call `resolve_contact_payment` to get ordered payable Payment Endpoints, each
   with an adapter-built `PaymentTarget`; check `status` for the general payment
   outcome and `private_state` for private-payment-specific recovery or
-  capability state
+  availability state
 - build receipt drafts with `ReceiptDraftBuilder`; call
   `prepare_receipt_issuance` before receipt network side effects, then
   `process_receipt_issuance`; use `issue_receipt` only when the draft already
@@ -230,8 +239,8 @@ that state. If the app wants to restore private Paykit state after sign-out, it
 must keep a separate SDK backup and not delete it as part of sign-out.
 
 Read-only private views such as cached Private Payment Lists can still be
-returned for the initialized identity when live private-link capability is
-missing. These cached views are local state, not proof that the Encrypted Link is
+returned for the initialized identity when live session access is missing.
+These cached views are local state, not proof that the Encrypted Link is
 currently healthy; apps should surface linked-peer recovery status when using
 cached private endpoints for payment resolution.
 

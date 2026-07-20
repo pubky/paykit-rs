@@ -235,7 +235,7 @@ async fn test_resolve_contact_payment_hides_cached_private_list_without_identity
     assert_eq!(result.status, ContactPaymentResolutionStatus::NoEndpoint);
     assert_eq!(
         result.private_state,
-        ContactPaymentResolutionPrivateState::PublicOnlySession
+        ContactPaymentResolutionPrivateState::NoPrivateEndpoint
     );
     assert!(result.payable_endpoints.is_empty());
     assert!(sdk
@@ -246,17 +246,16 @@ async fn test_resolve_contact_payment_hides_cached_private_list_without_identity
 }
 
 #[tokio::test]
-async fn test_resolve_contact_payment_uses_cached_private_list_for_public_only_identity() {
+async fn test_resolve_contact_payment_uses_cached_private_list_without_live_session() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .transaction(|tx| {
             tx.save_identity_state(IdentityState {
-                public_key: Some(PubkyPublicKey::from_public_key(
+                local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                     &pubky::Keypair::random().public_key(),
                 )),
-                capability: PubkyIdentityCapability::PublicOnly,
-                local_secret_available: false,
+                local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                 initialized_at: FixedClock.now(),
                 sign_out_generation: 0,
             });
@@ -313,11 +312,10 @@ async fn test_resolve_private_contact_payment_uses_private_candidates_only() {
     storage
         .transaction(|tx| {
             tx.save_identity_state(IdentityState {
-                public_key: Some(PubkyPublicKey::from_public_key(
+                local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                     &pubky::Keypair::random().public_key(),
                 )),
-                capability: PubkyIdentityCapability::PublicOnly,
-                local_secret_available: false,
+                local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                 initialized_at: FixedClock.now(),
                 sign_out_generation: 0,
             });
@@ -364,11 +362,10 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(PubkyPublicKey::from_public_key(
+                    local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                         &pubky::Keypair::random().public_key(),
                     )),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
-                    local_secret_available: true,
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -438,11 +435,10 @@ async fn test_recover_private_candidates_reports_pending_for_linking_peer() {
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(PubkyPublicKey::from_public_key(
+                    local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                         &pubky::Keypair::random().public_key(),
                     )),
-                    capability: PubkyIdentityCapability::PrivateLinkCapable,
-                    local_secret_available: true,
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });

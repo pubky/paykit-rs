@@ -48,6 +48,11 @@ rather than protocol errors.
 Private Application Messages use `pubky-noise`. Paykit derives
 per-counterparty-receiver private folders during the Encrypted Link Handshake,
 while `pubky-noise` owns encryption, file naming, counters, and storage slots.
+Each receiver publishes its receiver-scoped Noise public key in
+`receiver.json`. The corresponding secret stays in that receiver's secure
+storage and is independent of the Pubky identity secret; the Pubky identity
+key locates and authenticates homeserver state and separates receiver-pair
+path domains.
 
 ### Core Vocabulary
 

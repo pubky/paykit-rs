@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    InMemoryStorage, LinkedPeerState, PaykitReceiverPath, PaykitSdk, PaykitSdkConfig,
-    PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointSelectionRequest, PaymentTarget,
-    PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
-    PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, Result,
+    InMemoryStorage, LinkedPeerState, PaykitReceiverCapabilities, PaykitReceiverPath, PaykitSdk,
+    PaykitSdkConfig, PaymentAdapter, PaymentEndpointCandidate, PaymentEndpointSelectionRequest,
+    PaymentTarget, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
+    PubkySessionProvider, ReceiverNoiseSecretKey, ReceivingDetail, ReceivingDetailScope, Result,
 };
 use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
@@ -151,9 +151,8 @@ impl TestUser {
     /// Sign up a fresh keypair on the testnet homeserver through the SDK's own
     /// bootstrap, then build and initialize a runtime around the session.
     ///
-    /// One keypair is used for both signup and the local secret key so that
-    /// `PubkySessionAccess::validate` holds and the session is
-    /// private-link-capable.
+    /// The identity keypair authenticates Pubky while bootstrap creates the
+    /// independent receiver Noise key used for private links.
     pub async fn sign_up(testnet: &EphemeralTestnet) -> TestUser {
         Self::sign_up_with_receiver(testnet, receiver_path("bitkit/wallet")).await
     }
@@ -162,6 +161,21 @@ impl TestUser {
         testnet: &EphemeralTestnet,
         receiver_path: PaykitReceiverPath,
     ) -> TestUser {
+        Self::sign_up_with_receiver_access(testnet, receiver_path, true).await
+    }
+
+    pub async fn sign_up_with_server_owned_identity(
+        testnet: &EphemeralTestnet,
+        receiver_path: PaykitReceiverPath,
+    ) -> TestUser {
+        Self::sign_up_with_receiver_access(testnet, receiver_path, false).await
+    }
+
+    async fn sign_up_with_receiver_access(
+        testnet: &EphemeralTestnet,
+        receiver_path: PaykitReceiverPath,
+        retain_identity_secret: bool,
+    ) -> TestUser {
         let keypair = Keypair::random();
         let secret_key = PubkyLocalSecretKey::new(keypair.secret_key());
         let homeserver_public_key =
@@ -169,19 +183,30 @@ impl TestUser {
         let bootstrap =
             PubkySessionBootstrap::with_pubky(testnet.sdk().expect("testnet Pubky client"));
         let config = PaykitSdkConfig::new(receiver_path.clone());
+        let receiver_noise_secret_key = ReceiverNoiseSecretKey::random();
+        let receiver_noise_public_key = receiver_noise_secret_key.public_key();
         let result = bootstrap
             .sign_up(
                 &secret_key,
+                receiver_noise_secret_key,
                 &homeserver_public_key,
                 None,
                 &config.required_session_capabilities(),
             )
             .await
             .expect("testnet sign-up should succeed");
+        assert_eq!(
+            result.access.receiver_noise_secret_key.public_key(),
+            receiver_noise_public_key
+        );
+        let mut access = result.access;
+        if !retain_identity_secret {
+            access.local_secret_key = None;
+        }
 
         let storage = InMemoryStorage::default();
         let adapter = TestnetPaymentAdapter::default();
-        let provider = TestnetSessionProvider::new(result.access.clone());
+        let provider = TestnetSessionProvider::new(access.clone());
         let sdk = PaykitSdk::new(storage.clone(), provider, adapter.clone(), config)
             .expect("SDK construction should succeed");
 
@@ -189,14 +214,21 @@ impl TestUser {
             .initialize()
             .await
             .expect("SDK initialization should succeed");
-        assert!(report.live_session_available);
-        assert!(report.identity.private_link_capable);
+        assert!(report.identity.live_session_available);
+        sdk.publish_paykit_receiver_marker(PaykitReceiverCapabilities {
+            private_payments: true,
+            payment_requests: true,
+            receipts: true,
+            outgoing_payments: true,
+        })
+        .await
+        .expect("receiver marker publication should succeed");
 
         TestUser {
             sdk,
             storage,
             adapter,
-            access: result.access,
+            access,
             public_key: result.public_key,
             receiver_path,
         }
