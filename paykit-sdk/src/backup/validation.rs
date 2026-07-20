@@ -1348,7 +1348,7 @@ pub(super) fn validate_receipt_issuance_records(
                 // (and its `source` can carry envelope parse detail), and
                 // this context crosses the FFI from backup restore; keep it
                 // static and drop the cause.
-                context: "stored encrypted receipt failed to decrypt".into(),
+                context: "stored encrypted receipt is invalid".into(),
                 source: None,
             })?;
         let recipient = PubkyPublicKey::from_public_key(&receipt.recipient_public_key);

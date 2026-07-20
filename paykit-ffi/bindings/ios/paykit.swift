@@ -9827,7 +9827,8 @@ public struct PaymentRequestRecurrence {
      */
     public var anchor: String
     /**
-     * Optional RFC3339 UTC timestamp using `Z`.
+     * Optional RFC3339 UTC timestamp using `Z`, after `starts_at` when
+     * present.
      */
     public var endsAt: String?
 
@@ -9847,7 +9848,8 @@ public struct PaymentRequestRecurrence {
          * RFC3339 UTC timestamp using `Z`.
          */anchor: String,
         /**
-         * Optional RFC3339 UTC timestamp using `Z`.
+         * Optional RFC3339 UTC timestamp using `Z`, after `starts_at` when
+         * present.
          */endsAt: String?) {
         self.every = every
         self.unit = unit

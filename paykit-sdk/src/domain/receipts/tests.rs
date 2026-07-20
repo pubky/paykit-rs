@@ -321,6 +321,26 @@ fn test_decrypt_receipt_record_from_access_rejects_wrong_recipient() {
 }
 
 #[test]
+fn test_encrypted_receipt_json_from_bytes_redacts_invalid_utf8() {
+    let sentinel = "/pub/paykit/v0/private/SENTINEL_DH_PATH/receipts/receipt-1";
+    let mut bytes = sentinel.as_bytes().to_vec();
+    bytes.push(0xff);
+
+    let err = encrypted_receipt_json_from_bytes(&bytes).unwrap_err();
+
+    assert!(matches!(
+        &err,
+        PaykitSdkError::Protocol { context, source }
+            if context == "encrypted receipt is not valid UTF-8" && source.is_none()
+    ));
+    let rendered = format!("{err} / {err:?}");
+    assert!(
+        !rendered.contains(sentinel),
+        "fetched receipt body leaked into Display/Debug: {rendered}"
+    );
+}
+
+#[test]
 fn test_store_encrypted_receipt_error_redacts_receipt_location() {
     // Regression guard: `store_encrypted_receipt_error` builds the error surfaced
     // when the Encrypted Receipt write fails. Its `context` is rendered verbatim

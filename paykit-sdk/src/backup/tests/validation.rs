@@ -1815,6 +1815,68 @@ async fn test_restore_backup_state_rejects_receipt_issuance_access_mismatch() {
 }
 
 #[tokio::test]
+async fn test_restore_backup_state_redacts_invalid_receipt_issuance() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = public_key();
+    let counterparty = public_key();
+    let prepared = paykit_lib::prepare_receipt_for_recipient(
+        counterparty.to_public_key().unwrap(),
+        &receiver_path(),
+        paykit_lib::ReceiptDraft {
+            receipt_id: Some(
+                paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+            payment_reference: paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+            payment_request_id: None,
+            billing_period: None,
+            payment_endpoint_identifier: Some(
+                paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            ),
+            amount: Some(paykit_lib::PaymentAmount::new("0.001", "btc").unwrap()),
+            metadata: serde_json::Map::new(),
+        },
+    )
+    .unwrap();
+    let mut issuance =
+        ReceiptIssuanceRecord::from_prepared(counterparty, receiver_path(), prepared, timestamp())
+            .unwrap();
+    let sentinel = "SENTINEL_PRIVATE_RECEIPT_CONTENT";
+    issuance.encrypted_receipt = format!(r#"{{"sentinel":"{sentinel}""#);
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        local_receiver_path: receiver_path(),
+        identity_state: Some(identity(local_public_key)),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: Vec::new(),
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: vec![issuance],
+        next_outbound_private_message_id: 0,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    };
+
+    let err = restore_backup_state(&storage, backup).await.unwrap_err();
+
+    assert!(matches!(
+        &err,
+        PaykitSdkError::Protocol { context, source }
+            if context == "stored encrypted receipt is invalid" && source.is_none()
+    ));
+    let rendered = format!("{err} / {err:?}");
+    assert!(
+        !rendered.contains(sentinel),
+        "stored encrypted Receipt leaked into Display/Debug: {rendered}"
+    );
+}
+
+#[tokio::test]
 async fn test_restore_backup_state_rejects_receipt_issuance_wrong_local_receiver() {
     let storage = InMemoryStorage::new();
     let local_public_key = public_key();

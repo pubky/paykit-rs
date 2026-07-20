@@ -2269,7 +2269,8 @@ public data class PaymentRequestRecurrence (
      */
     val `anchor`: kotlin.String,
     /**
-     * Optional RFC3339 UTC timestamp using `Z`.
+     * Optional RFC3339 UTC timestamp using `Z`, after `starts_at` when
+     * present.
      */
     val `endsAt`: kotlin.String?
 ) {
