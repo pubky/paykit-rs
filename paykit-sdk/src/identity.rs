@@ -363,10 +363,10 @@ impl fmt::Debug for PubkySessionAccess {
 /// Durable identity state tracked by one SDK runtime.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityState {
-    /// Persisted local public key, or `None` after explicit sign-out.
-    pub public_key: Option<PubkyPublicKey>,
-    /// Persisted receiver-scoped Noise public key, or `None` after sign-out.
-    pub receiver_noise_public_key: Option<PubkyPublicKey>,
+    /// Persisted local Pubky public key, or `None` after explicit sign-out.
+    pub local_pubky_public_key: Option<PubkyPublicKey>,
+    /// Persisted local receiver-scoped Noise public key, or `None` after sign-out.
+    pub local_receiver_noise_public_key: Option<PubkyPublicKey>,
     /// Last successful initialization time.
     pub initialized_at: DateTime<Utc>,
     /// Monotonic generation used to separate state across sign-outs.
@@ -385,7 +385,7 @@ pub struct IdentityStatus {
 impl IdentityStatus {
     pub(crate) fn from_state(state: &IdentityState, live_session_available: bool) -> Self {
         Self {
-            public_key: state.public_key.clone(),
+            public_key: state.local_pubky_public_key.clone(),
             live_session_available,
         }
     }

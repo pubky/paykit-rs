@@ -148,10 +148,10 @@ fn payment_endpoint_reservation_record_with_receiver(
 #[tokio::test]
 async fn test_storage_adapter_supports_erased_transactions() {
     let storage: std::sync::Arc<dyn StorageAdapter> = std::sync::Arc::new(InMemoryStorage::new());
-    let identity_public_key = random_public_key();
+    let local_pubky_public_key = random_public_key();
     let saved_identity = crate::IdentityState {
-        public_key: Some(identity_public_key.clone()),
-        receiver_noise_public_key: Some(receiver_noise_public_key()),
+        local_pubky_public_key: Some(local_pubky_public_key.clone()),
+        local_receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 0,
     };
@@ -171,7 +171,10 @@ async fn test_storage_adapter_supports_erased_transactions() {
         .await
         .unwrap();
     let loaded = *loaded.downcast::<Option<crate::IdentityState>>().unwrap();
-    assert_eq!(loaded.unwrap().public_key, Some(identity_public_key));
+    assert_eq!(
+        loaded.unwrap().local_pubky_public_key,
+        Some(local_pubky_public_key)
+    );
 }
 
 #[test]
@@ -760,8 +763,8 @@ async fn test_clear_identity_scoped_state_preserves_identity_only() {
     let local_public_key = random_public_key();
     let counterparty = random_public_key();
     let identity = IdentityState {
-        public_key: Some(local_public_key),
-        receiver_noise_public_key: Some(receiver_noise_public_key()),
+        local_pubky_public_key: Some(local_public_key),
+        local_receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 1,
     };
@@ -832,8 +835,8 @@ async fn test_clear_private_identity_scoped_state_preserves_public_endpoints() {
     let local_public_key = random_public_key();
     let counterparty = random_public_key();
     let identity = IdentityState {
-        public_key: Some(local_public_key),
-        receiver_noise_public_key: Some(receiver_noise_public_key()),
+        local_pubky_public_key: Some(local_public_key),
+        local_receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 1,
     };

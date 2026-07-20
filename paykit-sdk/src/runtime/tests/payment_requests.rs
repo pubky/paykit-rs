@@ -10,8 +10,8 @@ async fn test_payment_requests_with_allows_identity_without_live_session() {
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -62,8 +62,8 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -132,8 +132,8 @@ async fn test_list_payment_requests_filters_across_counterparties() {
             let blocked = blocked.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -237,8 +237,8 @@ async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_pres
             let blocked = blocked.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -345,8 +345,8 @@ async fn test_active_recurring_payment_requests_filters_accepted_recurring_reque
     let one_time_peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })

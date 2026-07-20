@@ -8,8 +8,8 @@ async fn test_contact_records_save_list_and_remove_locally() {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -57,8 +57,8 @@ async fn test_save_contact_empty_label_clears_existing_label() {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -97,8 +97,8 @@ async fn test_publish_paykit_blob_requires_session() {
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -191,8 +191,8 @@ async fn test_remove_contact_blocks_when_public_marker_may_exist() {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -242,8 +242,8 @@ async fn test_publish_public_contact_does_not_mark_pending_without_session() {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -309,8 +309,8 @@ async fn test_remove_public_contact_cleanup_is_allowed_when_sharing_disabled() {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -373,8 +373,8 @@ async fn test_remove_public_contact_without_local_record_still_requires_session(
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -401,8 +401,8 @@ async fn test_sync_public_contact_markers_returns_empty_without_pending_markers(
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -429,8 +429,8 @@ async fn test_sync_public_contact_markers_preserves_pending_without_session() {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -494,8 +494,8 @@ async fn test_sync_public_contact_markers_fails_pending_publication_when_sharing
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })

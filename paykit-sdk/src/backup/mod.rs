@@ -482,7 +482,7 @@ impl SdkBackupState {
         )?;
         let expected_receipt_recipient = identity_state
             .as_ref()
-            .and_then(|identity| identity.public_key.as_ref());
+            .and_then(|identity| identity.local_pubky_public_key.as_ref());
         validate_receipt_records(
             &receipt_records,
             &receipt_access_records,
@@ -598,12 +598,12 @@ impl SdkBackupState {
         }
 
         if let Some(current_public_key) =
-            current_identity.and_then(|state| state.public_key.as_ref())
+            current_identity.and_then(|state| state.local_pubky_public_key.as_ref())
         {
             let backup_public_key = self
                 .identity_state
                 .as_ref()
-                .and_then(|state| state.public_key.as_ref());
+                .and_then(|state| state.local_pubky_public_key.as_ref());
             if backup_public_key != Some(current_public_key) {
                 return Err(PaykitSdkError::Identity {
                     context: "backup identity does not match current local identity".into(),
@@ -613,12 +613,12 @@ impl SdkBackupState {
         }
 
         if let Some(current_receiver_noise_public_key) =
-            current_identity.and_then(|state| state.receiver_noise_public_key.as_ref())
+            current_identity.and_then(|state| state.local_receiver_noise_public_key.as_ref())
         {
             let backup_receiver_noise_public_key = self
                 .identity_state
                 .as_ref()
-                .and_then(|state| state.receiver_noise_public_key.as_ref());
+                .and_then(|state| state.local_receiver_noise_public_key.as_ref());
             if backup_receiver_noise_public_key != Some(current_receiver_noise_public_key) {
                 return Err(PaykitSdkError::Identity {
                     context: "backup receiver Noise key does not match current receiver".into(),
@@ -630,7 +630,7 @@ impl SdkBackupState {
         let backup_public_key = self
             .identity_state
             .as_ref()
-            .and_then(|state| state.public_key.as_ref());
+            .and_then(|state| state.local_pubky_public_key.as_ref());
         if backup_public_key.is_none() && self.has_identity_scoped_state() {
             return Err(PaykitSdkError::Protocol(
                 "backup has SDK state but no local public identity".into(),
@@ -640,16 +640,16 @@ impl SdkBackupState {
         Ok(())
     }
 
-    pub(crate) fn identity_public_key(&self) -> Option<&PubkyPublicKey> {
+    pub(crate) fn local_pubky_public_key(&self) -> Option<&PubkyPublicKey> {
         self.identity_state
             .as_ref()
-            .and_then(|state| state.public_key.as_ref())
+            .and_then(|state| state.local_pubky_public_key.as_ref())
     }
 
-    pub(crate) fn identity_receiver_noise_public_key(&self) -> Option<&PubkyPublicKey> {
+    pub(crate) fn local_receiver_noise_public_key(&self) -> Option<&PubkyPublicKey> {
         self.identity_state
             .as_ref()
-            .and_then(|state| state.receiver_noise_public_key.as_ref())
+            .and_then(|state| state.local_receiver_noise_public_key.as_ref())
     }
 
     pub(crate) fn has_identity_scoped_state(&self) -> bool {

@@ -16,8 +16,8 @@ async fn test_initialize_persists_signed_out_identity() {
 
     assert!(!report.identity.live_session_available);
     let stored = storage.snapshot().unwrap().identity_state.unwrap();
-    assert!(stored.public_key.is_none());
-    assert!(stored.receiver_noise_public_key.is_none());
+    assert!(stored.local_pubky_public_key.is_none());
+    assert!(stored.local_receiver_noise_public_key.is_none());
     assert_eq!(stored.initialized_at, FixedClock.now());
 }
 
@@ -32,8 +32,8 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
                 });
@@ -96,7 +96,10 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
     let snapshot = storage.snapshot().unwrap();
     let identity = snapshot.identity_state.unwrap();
     assert!(!report.identity.live_session_available);
-    assert_eq!(identity.public_key.as_ref(), Some(&local_public_key));
+    assert_eq!(
+        identity.local_pubky_public_key.as_ref(),
+        Some(&local_public_key)
+    );
     assert_eq!(identity.sign_out_generation, 3);
     assert_eq!(snapshot.linked_peers.len(), 1);
     assert_eq!(snapshot.contact_records.len(), 1);
@@ -117,8 +120,8 @@ async fn test_receiver_noise_key_change_clears_only_private_identity_scoped_stat
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
                 });
@@ -149,8 +152,8 @@ async fn test_receiver_noise_key_change_clears_only_private_identity_scoped_stat
         .unwrap();
 
     let active_identity = ActiveReceiverIdentity {
-        public_key: local_public_key,
-        receiver_noise_public_key: next_receiver_noise_public_key.clone(),
+        local_pubky_public_key: local_public_key,
+        local_receiver_noise_public_key: next_receiver_noise_public_key.clone(),
     };
     storage
         .transaction(move |tx| {
@@ -166,7 +169,7 @@ async fn test_receiver_noise_key_change_clears_only_private_identity_scoped_stat
     let snapshot = storage.snapshot().unwrap();
     let identity = snapshot.identity_state.unwrap();
     assert_eq!(
-        identity.receiver_noise_public_key,
+        identity.local_receiver_noise_public_key,
         Some(next_receiver_noise_public_key)
     );
     assert_eq!(identity.sign_out_generation, 3);
@@ -180,8 +183,8 @@ async fn test_identity_status_cached_identity_requires_live_session() {
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(local_public_key.clone()),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_public_key.clone()),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         })
@@ -212,8 +215,8 @@ async fn test_sign_out_clears_identity_scoped_state() {
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
                 });
@@ -278,8 +281,8 @@ async fn test_sign_out_clears_identity_scoped_state() {
     let snapshot = storage.snapshot().unwrap();
     let identity = snapshot.identity_state.unwrap();
     assert_eq!(identity.sign_out_generation, 4);
-    assert!(identity.public_key.is_none());
-    assert!(identity.receiver_noise_public_key.is_none());
+    assert!(identity.local_pubky_public_key.is_none());
+    assert!(identity.local_receiver_noise_public_key.is_none());
     assert!(snapshot.linked_peers.is_empty());
     assert!(snapshot.contact_records.is_empty());
     assert!(snapshot.public_endpoint_records.is_empty());
@@ -314,8 +317,8 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(local_public_key),
-                    receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 3,
                 });
@@ -352,6 +355,6 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
     let snapshot = storage.snapshot().unwrap();
     let identity = snapshot.identity_state.unwrap();
     assert_eq!(identity.sign_out_generation, 3);
-    assert!(identity.public_key.is_some());
+    assert!(identity.local_pubky_public_key.is_some());
     assert_eq!(snapshot.contact_records.len(), 1);
 }

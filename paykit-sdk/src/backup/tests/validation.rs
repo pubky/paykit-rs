@@ -1339,7 +1339,7 @@ async fn test_restore_backup_state_rejects_wrong_receiver_noise_key() {
         .await
         .unwrap();
     let mut backup_identity = identity(local_public_key);
-    backup_identity.receiver_noise_public_key = Some(public_key());
+    backup_identity.local_receiver_noise_public_key = Some(public_key());
     let backup = SdkBackupState::from_storage_state(
         StorageState {
             identity_state: Some(backup_identity),
@@ -1429,7 +1429,10 @@ async fn test_restore_backup_state_allows_trusted_identity_switch() {
         .unwrap();
 
     let identity = storage.snapshot().unwrap().identity_state.unwrap();
-    assert_eq!(identity.public_key.as_ref(), Some(&backup_public_key));
+    assert_eq!(
+        identity.local_pubky_public_key.as_ref(),
+        Some(&backup_public_key)
+    );
     assert_eq!(identity.sign_out_generation, 3);
 }
 
@@ -1463,7 +1466,7 @@ async fn test_restore_identity_less_backup_preserves_signed_out_generation() {
     restore_backup_state(&storage, backup).await.unwrap();
 
     let identity = storage.snapshot().unwrap().identity_state.unwrap();
-    assert!(identity.public_key.is_none());
+    assert!(identity.local_pubky_public_key.is_none());
     assert_eq!(identity.sign_out_generation, 7);
 }
 

@@ -19,7 +19,7 @@ where
         draft: ReceiptDraft,
     ) -> Result<ReceiptIssuanceView> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
+        if identity.local_pubky_public_key.is_none() {
             return Err(PaykitSdkError::Identity {
                 context: "no local Pubky identity available for receipt issuance".into(),
                 source: None,
@@ -202,7 +202,7 @@ where
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptIssuanceView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
+        if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
@@ -230,7 +230,7 @@ where
     /// List issued receipts across non-blocked counterparties, newest first.
     pub async fn issued_receipts(&self) -> Result<Vec<ReceiptIssuanceView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
+        if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
         }
         self.storage
@@ -269,12 +269,13 @@ where
         receipt_id: &str,
     ) -> Result<ReceiptRecord> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let local_public_key = identity
-            .public_key
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context: "no local Pubky identity available for receipt retrieval".into(),
-                source: None,
-            })?;
+        let local_public_key =
+            identity
+                .local_pubky_public_key
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no local Pubky identity available for receipt retrieval".into(),
+                    source: None,
+                })?;
         self.ensure_peer_not_blocked(&counterparty, &counterparty_receiver_path)
             .await?;
         let (stored_receipt, access_records, conflicted_access_count, stored_receipt_conflicted) =
@@ -442,7 +443,7 @@ where
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptAccessView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
+        if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
@@ -474,7 +475,7 @@ where
     /// List Receipt Access across non-blocked counterparties, newest first.
     pub async fn receipt_access(&self) -> Result<Vec<ReceiptAccessView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
+        if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
         }
         self.storage
@@ -508,7 +509,7 @@ where
         issuer_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let Some(local_public_key) = identity.public_key else {
+        let Some(local_public_key) = identity.local_pubky_public_key else {
             return Ok(Vec::new());
         };
         self.ensure_peer_not_blocked(issuer, issuer_receiver_path)
@@ -542,7 +543,7 @@ where
     /// List decrypted receipts across non-blocked issuers, newest first.
     pub async fn receipts(&self) -> Result<Vec<ReceiptRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let Some(local_public_key) = identity.public_key else {
+        let Some(local_public_key) = identity.local_pubky_public_key else {
             return Ok(Vec::new());
         };
         self.storage

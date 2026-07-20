@@ -29,8 +29,8 @@ async fn test_restore_backup_state_requires_active_identity() {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            public_key: Some(existing_public_key.clone()),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(existing_public_key.clone()),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 7,
         })
@@ -41,8 +41,8 @@ async fn test_restore_backup_state_requires_active_identity() {
         version: crate::SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(IdentityState {
-            public_key: Some(backup_public_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(backup_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
             sign_out_generation: 0,
         }),
@@ -74,7 +74,7 @@ async fn test_restore_backup_state_requires_active_identity() {
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     let identity = storage.snapshot().unwrap().identity_state.unwrap();
     assert_eq!(identity.sign_out_generation, 7);
-    assert_eq!(identity.public_key, Some(existing_public_key));
+    assert_eq!(identity.local_pubky_public_key, Some(existing_public_key));
 }
 
 #[tokio::test]

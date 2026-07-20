@@ -167,8 +167,8 @@ fn test_storage_state_blob_round_trips_private_sync_records() {
     };
     let mut state = StorageState {
         identity_state: Some(IdentityState {
-            public_key: Some(local_key),
-            receiver_noise_public_key: Some(receiver_noise_public_key()),
+            local_pubky_public_key: Some(local_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: now,
             sign_out_generation: 0,
         }),

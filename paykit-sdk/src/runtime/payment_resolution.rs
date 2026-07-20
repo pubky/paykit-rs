@@ -20,7 +20,7 @@ where
         request: ContactPaymentResolutionRequest,
     ) -> Result<ContactPaymentResolution> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        let mut private_allowed = identity.public_key.is_some();
+        let mut private_allowed = identity.local_pubky_public_key.is_some();
         let private_live = session_access.is_some();
         let mut private_state = ContactPaymentResolutionPrivateState::NoPrivateEndpoint;
         if private_allowed {
@@ -353,7 +353,7 @@ where
         let Some(identity) = self.storage.load_identity_state().await? else {
             return Ok(PrivateRecoveryOutcome::NotNeeded);
         };
-        if identity.public_key.is_none() {
+        if identity.local_pubky_public_key.is_none() {
             return Ok(PrivateRecoveryOutcome::NotNeeded);
         }
 

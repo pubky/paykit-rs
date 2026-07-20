@@ -252,10 +252,10 @@ async fn test_resolve_contact_payment_uses_cached_private_list_without_live_sess
     storage
         .transaction(|tx| {
             tx.save_identity_state(IdentityState {
-                public_key: Some(PubkyPublicKey::from_public_key(
+                local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                     &pubky::Keypair::random().public_key(),
                 )),
-                receiver_noise_public_key: Some(receiver_noise_public_key()),
+                local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                 initialized_at: FixedClock.now(),
                 sign_out_generation: 0,
             });
@@ -312,10 +312,10 @@ async fn test_resolve_private_contact_payment_uses_private_candidates_only() {
     storage
         .transaction(|tx| {
             tx.save_identity_state(IdentityState {
-                public_key: Some(PubkyPublicKey::from_public_key(
+                local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                     &pubky::Keypair::random().public_key(),
                 )),
-                receiver_noise_public_key: Some(receiver_noise_public_key()),
+                local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                 initialized_at: FixedClock.now(),
                 sign_out_generation: 0,
             });
@@ -362,10 +362,10 @@ async fn test_resolve_contact_payment_does_not_use_cached_private_list_while_lin
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(PubkyPublicKey::from_public_key(
+                    local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                         &pubky::Keypair::random().public_key(),
                     )),
-                    receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
@@ -435,10 +435,10 @@ async fn test_recover_private_candidates_reports_pending_for_linking_peer() {
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    public_key: Some(PubkyPublicKey::from_public_key(
+                    local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
                         &pubky::Keypair::random().public_key(),
                     )),
-                    receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });

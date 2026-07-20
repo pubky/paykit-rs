@@ -272,7 +272,7 @@ where
                     .unwrap_or_default();
                 let was_signed_in = previous
                     .as_ref()
-                    .is_some_and(|state| state.public_key.is_some());
+                    .is_some_and(|state| state.local_pubky_public_key.is_some());
                 let generation = if was_signed_in {
                     previous_generation.saturating_add(1)
                 } else {
@@ -281,8 +281,8 @@ where
 
                 tx.clear_identity_scoped_state();
                 let state = IdentityState {
-                    public_key: None,
-                    receiver_noise_public_key: None,
+                    local_pubky_public_key: None,
+                    local_receiver_noise_public_key: None,
                     initialized_at: now,
                     sign_out_generation: generation,
                 };
@@ -309,8 +309,8 @@ where
                     }
 
                     let state = IdentityState {
-                        public_key: None,
-                        receiver_noise_public_key: None,
+                        local_pubky_public_key: None,
+                        local_receiver_noise_public_key: None,
                         initialized_at: now,
                         sign_out_generation: 0,
                     };
@@ -324,8 +324,8 @@ where
 
         let required_capabilities = self.config.required_session_capabilities();
         let active_identity = ActiveReceiverIdentity {
-            public_key: session_access.public_key()?,
-            receiver_noise_public_key: session_access.receiver_noise_public_key(),
+            local_pubky_public_key: session_access.public_key()?,
+            local_receiver_noise_public_key: session_access.receiver_noise_public_key(),
         };
         session_access.validate_for_capabilities(&required_capabilities)?;
         let state = self
@@ -340,7 +340,7 @@ where
         self.storage
             .transaction(|tx| {
                 tx.load_identity_state()
-                    .and_then(|state| state.public_key)
+                    .and_then(|state| state.local_pubky_public_key)
                     .ok_or_else(|| PaykitSdkError::Identity {
                         context: format!("cannot {context} without an initialized Pubky identity"),
                         source: None,
@@ -385,9 +385,9 @@ where
             session.validate()?;
         }
         let required_capabilities = self.config.required_session_capabilities();
-        let matching_session = session
-            .as_ref()
-            .filter(|session| session.public_key().ok().as_ref() == state.public_key.as_ref());
+        let matching_session = session.as_ref().filter(|session| {
+            session.public_key().ok().as_ref() == state.local_pubky_public_key.as_ref()
+        });
         if let Some(session) = matching_session {
             session.validate_for_capabilities(&required_capabilities)?;
         }
@@ -441,8 +441,8 @@ where
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ActiveReceiverIdentity {
-    public_key: PubkyPublicKey,
-    receiver_noise_public_key: PubkyPublicKey,
+    local_pubky_public_key: PubkyPublicKey,
+    local_receiver_noise_public_key: PubkyPublicKey,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -478,8 +478,8 @@ fn refresh_active_identity(
         _ => previous_generation,
     };
     let state = IdentityState {
-        public_key: Some(active.public_key),
-        receiver_noise_public_key: Some(active.receiver_noise_public_key),
+        local_pubky_public_key: Some(active.local_pubky_public_key),
+        local_receiver_noise_public_key: Some(active.local_receiver_noise_public_key),
         initialized_at,
         sign_out_generation,
     };
@@ -494,10 +494,12 @@ fn identity_transition(
     let Some(previous) = previous else {
         return IdentityTransition::Initial;
     };
-    if previous.public_key.as_ref() != Some(&active.public_key) {
+    if previous.local_pubky_public_key.as_ref() != Some(&active.local_pubky_public_key) {
         return IdentityTransition::PubkyIdentityChanged;
     }
-    if previous.receiver_noise_public_key.as_ref() != Some(&active.receiver_noise_public_key) {
+    if previous.local_receiver_noise_public_key.as_ref()
+        != Some(&active.local_receiver_noise_public_key)
+    {
         return IdentityTransition::ReceiverNoiseKeyChanged;
     }
     IdentityTransition::Unchanged

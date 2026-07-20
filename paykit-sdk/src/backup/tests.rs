@@ -37,10 +37,10 @@ fn recovery_required_peer(public_key: &PubkyPublicKey) -> RestoreRecoveryRequire
     }
 }
 
-fn identity(public_key: PubkyPublicKey) -> IdentityState {
+fn identity(local_pubky_public_key: PubkyPublicKey) -> IdentityState {
     IdentityState {
-        public_key: Some(public_key),
-        receiver_noise_public_key: Some(receiver_noise_public_key()),
+        local_pubky_public_key: Some(local_pubky_public_key),
+        local_receiver_noise_public_key: Some(receiver_noise_public_key()),
         initialized_at: timestamp(),
         sign_out_generation: 0,
     }
@@ -48,8 +48,8 @@ fn identity(public_key: PubkyPublicKey) -> IdentityState {
 
 fn signed_out_identity(sign_out_generation: u64) -> IdentityState {
     IdentityState {
-        public_key: None,
-        receiver_noise_public_key: None,
+        local_pubky_public_key: None,
+        local_receiver_noise_public_key: None,
         initialized_at: timestamp(),
         sign_out_generation,
     }
