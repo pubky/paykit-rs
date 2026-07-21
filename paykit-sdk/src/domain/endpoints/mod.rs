@@ -7,7 +7,7 @@ use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::adapters::ReceivingDetail,
+    domain::adapters::PublicReceivingDetail,
     domain::publication::PublicationStatus,
     storage::{PublicEndpointRecord, StorageAdapter},
     PaykitSdkError, Result,
@@ -36,7 +36,7 @@ pub struct EndpointSyncReport {
 }
 
 pub(crate) fn normalize_receiving_details(
-    details: Vec<ReceivingDetail>,
+    details: Vec<PublicReceivingDetail>,
 ) -> Result<HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>> {
     let mut desired = HashMap::with_capacity(details.len());
 

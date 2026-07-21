@@ -7,10 +7,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     domain::adapters::{
-        PaymentEndpointReservation, PaymentEndpointReservationCancellation, ReceivingDetail,
+        PrivatePaymentEndpointReservation, PrivatePaymentEndpointReservationCancellation,
+        PrivateReceivingDetail,
     },
-    domain::endpoints::normalize_receiving_details,
     domain::outbound_private::{validate_outbound_private_message, OutboundPrivateMessageStatus},
+    domain::private_lists::normalize_private_receiving_details,
     storage::{
         require_peer_link_operation_lease, NewOutboundPrivateMessage, OutboundPrivateMessageRecord,
         PaymentEndpointReservationRecord, PeerLinkOperationLease, StorageAdapter,
@@ -25,7 +26,7 @@ const MAX_RESERVATION_ID_LEN: usize = 128;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaymentEndpointReservationCancellationRecord {
     pub(crate) outbound_message_id: u64,
-    pub(crate) cancellation: PaymentEndpointReservationCancellation,
+    pub(crate) cancellation: PrivatePaymentEndpointReservationCancellation,
 }
 
 /// Load Payment Endpoint Reservation records for one counterparty.
@@ -156,7 +157,7 @@ fn cancellation_record_from_reservation_record(
 ) -> PaymentEndpointReservationCancellationRecord {
     PaymentEndpointReservationCancellationRecord {
         outbound_message_id: record.outbound_message_id,
-        cancellation: PaymentEndpointReservationCancellation {
+        cancellation: PrivatePaymentEndpointReservationCancellation {
             reservation_id: record.reservation_id,
             counterparty: record.counterparty,
             counterparty_receiver_path: record.counterparty_receiver_path,
@@ -173,7 +174,7 @@ pub(crate) async fn queue_private_payment_list_with_reservations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
     counterparty_receiver_path: &PaykitReceiverPath,
-    reservations: Vec<PaymentEndpointReservation>,
+    reservations: Vec<PrivatePaymentEndpointReservation>,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
 where
@@ -195,7 +196,7 @@ where
 pub(crate) async fn queue_private_payment_list_with_reservations_with_link_lease<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    reservations: Vec<PaymentEndpointReservation>,
+    reservations: Vec<PrivatePaymentEndpointReservation>,
     now: DateTime<Utc>,
     lease: &PeerLinkOperationLease,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -217,7 +218,7 @@ async fn queue_private_payment_list_with_reservations_inner<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
     counterparty_receiver_path: &PaykitReceiverPath,
-    reservations: Vec<PaymentEndpointReservation>,
+    reservations: Vec<PrivatePaymentEndpointReservation>,
     now: DateTime<Utc>,
     lease: Option<PeerLinkOperationLease>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -226,7 +227,7 @@ where
 {
     let (receiving_details, drafts) =
         build_reservation_records(counterparty, counterparty_receiver_path, reservations, now)?;
-    let payment_endpoints = normalize_receiving_details(receiving_details)?;
+    let payment_endpoints = normalize_private_receiving_details(receiving_details)?;
     let list = PrivatePaymentList::new(payment_endpoints);
     let raw_json = serialize_private_payment_list_json(&list)?;
     let kind = validate_outbound_private_message(&raw_json)?;
@@ -330,10 +331,10 @@ impl PaymentEndpointReservationRecordDraft {
 fn build_reservation_records(
     counterparty: &PubkyPublicKey,
     counterparty_receiver_path: &PaykitReceiverPath,
-    reservations: Vec<PaymentEndpointReservation>,
+    reservations: Vec<PrivatePaymentEndpointReservation>,
     now: DateTime<Utc>,
 ) -> Result<(
-    Vec<ReceivingDetail>,
+    Vec<PrivateReceivingDetail>,
     Vec<PaymentEndpointReservationRecordDraft>,
 )> {
     let mut reservation_ids = HashMap::new();
@@ -363,7 +364,7 @@ fn build_reservation_records(
         ));
     }
 
-    normalize_receiving_details(receiving_details.clone())?;
+    normalize_private_receiving_details(receiving_details.clone())?;
     Ok((receiving_details, records))
 }
 
@@ -394,7 +395,7 @@ pub(crate) fn validate_reservation_id(reservation_id: &str) -> Result<()> {
 fn record_from_reservation(
     counterparty: &PubkyPublicKey,
     counterparty_receiver_path: &PaykitReceiverPath,
-    reservation: PaymentEndpointReservation,
+    reservation: PrivatePaymentEndpointReservation,
     now: DateTime<Utc>,
 ) -> PaymentEndpointReservationRecordDraft {
     let payload_hash = reservation_payload_hash(&reservation.receiving_detail.payload);

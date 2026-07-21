@@ -7,6 +7,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc39] - 2026-07-21
+
+### Fixed
+- Republished the iOS and Android release artifacts under a fresh release
+  candidate after the Android `0.1.0-rc38` package upload ended in an
+  immutable GitHub Packages artifact conflict.
+
+## [0.1.0-rc38] - 2026-07-20
+
+### Added
+- Private payment resolution now returns an opaque Private Payment List version
+  and accepts the last consumed version, returning a distinct waiting status
+  until a newer complete list is available.
+
 ### Changed
 - **Breaking (Rust API):** `PaykitSdkError::NotFound`, `Protocol`, `Policy`,
   and `RecoveryRequired` changed from tuple variants (`NotFound(String)`) to
@@ -40,12 +54,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   and `Debug` output no longer renders the dropped cause chain. Detail that
   a lib call site folds into the `context` string itself is unaffected by
   this conversion and still appears in `Display`/`Debug`.
+- Split public and private payment resolution across the SDK and platform
+  bindings. Each mode now has distinct receiving details, endpoint candidates,
+  adapter callbacks, statuses, and result types.
 
 ### Fixed
 - Platform callback errors now survive the FFI -> SDK -> FFI round trip
   losslessly for all eight error variants: the original variant, custom
   machine-readable code, and reason are recovered by downcast instead of
   degrading to the variant's generic code.
+
+### Removed
+- Removed mixed contact-payment resolution and implicit private-to-public
+  fallback. Applications now choose public or private payment resolution
+  explicitly.
 
 ## [0.1.0-rc37] - 2026-07-17
 
@@ -346,7 +368,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc37...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc39...HEAD
+[0.1.0-rc39]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc39
+[0.1.0-rc38]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc38
 [0.1.0-rc37]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc37
 [0.1.0-rc36]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc36
 [0.1.0-rc35]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc35

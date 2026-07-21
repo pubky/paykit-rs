@@ -116,9 +116,9 @@ async fn test_sync_private_payment_lists_with_reservations_reports_queue_failure
             vec![PrivatePaymentListReservationUpdate {
                 counterparty: counterparty.clone(),
                 counterparty_receiver_path: receiver_path(),
-                reservations: vec![PaymentEndpointReservation {
+                reservations: vec![PrivatePaymentEndpointReservation {
                     reservation_id: "reservation-1".into(),
-                    receiving_detail: ReceivingDetail {
+                    receiving_detail: PrivateReceivingDetail {
                         identifier: "btc-lightning-bolt11".into(),
                         payload: "ln-reserved".into(),
                     },
@@ -158,9 +158,9 @@ async fn test_enqueue_private_payment_list_with_reservations_cancels_on_prefligh
         .enqueue_private_payment_list_with_reservations(
             counterparty,
             receiver_path(),
-            vec![PaymentEndpointReservation {
+            vec![PrivatePaymentEndpointReservation {
                 reservation_id: "reservation-1".into(),
-                receiving_detail: ReceivingDetail {
+                receiving_detail: PrivateReceivingDetail {
                     identifier: "btc-lightning-bolt11".into(),
                     payload: "ln-reserved".into(),
                 },
@@ -196,9 +196,9 @@ async fn test_sync_private_payment_lists_with_reservations_reports_duplicate_upd
                 PrivatePaymentListReservationUpdate {
                     counterparty: counterparty.clone(),
                     counterparty_receiver_path: receiver_path(),
-                    reservations: vec![PaymentEndpointReservation {
+                    reservations: vec![PrivatePaymentEndpointReservation {
                         reservation_id: "reservation-1".into(),
-                        receiving_detail: ReceivingDetail {
+                        receiving_detail: PrivateReceivingDetail {
                             identifier: "btc-lightning-bolt11".into(),
                             payload: "one".into(),
                         },
@@ -209,9 +209,9 @@ async fn test_sync_private_payment_lists_with_reservations_reports_duplicate_upd
                 PrivatePaymentListReservationUpdate {
                     counterparty,
                     counterparty_receiver_path: receiver_path(),
-                    reservations: vec![PaymentEndpointReservation {
+                    reservations: vec![PrivatePaymentEndpointReservation {
                         reservation_id: "reservation-2".into(),
-                        receiving_detail: ReceivingDetail {
+                        receiving_detail: PrivateReceivingDetail {
                             identifier: "btc-onchain-address".into(),
                             payload: "two".into(),
                         },
@@ -412,9 +412,9 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "one".into(),
             },
@@ -429,9 +429,9 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "reservation-2".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "two".into(),
             },
@@ -502,9 +502,9 @@ async fn test_terminal_private_list_reservation_cleanup_cancels_invalid_message_
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "one".into(),
             },
@@ -596,7 +596,7 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
     );
     let cancellation = PaymentEndpointReservationCancellationRecord {
         outbound_message_id: 1,
-        cancellation: PaymentEndpointReservationCancellation {
+        cancellation: PrivatePaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
             counterparty_receiver_path: receiver_path(),
@@ -685,7 +685,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
     );
     let cancellation = PaymentEndpointReservationCancellationRecord {
         outbound_message_id: 1,
-        cancellation: PaymentEndpointReservationCancellation {
+        cancellation: PrivatePaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
             counterparty_receiver_path: receiver_path(),
@@ -744,7 +744,7 @@ async fn test_reservation_cleanup_failure_keeps_cancellation_claim() {
     );
     let cancellation = PaymentEndpointReservationCancellationRecord {
         outbound_message_id: 1,
-        cancellation: PaymentEndpointReservationCancellation {
+        cancellation: PrivatePaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
             counterparty_receiver_path: receiver_path(),
@@ -817,7 +817,7 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
     );
     let cancellation = PaymentEndpointReservationCancellationRecord {
         outbound_message_id: 1,
-        cancellation: PaymentEndpointReservationCancellation {
+        cancellation: PrivatePaymentEndpointReservationCancellation {
             reservation_id: "reservation-1".into(),
             counterparty: counterparty.clone(),
             counterparty_receiver_path: receiver_path(),
@@ -849,9 +849,9 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "one".into(),
             },
@@ -866,9 +866,9 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "reservation-2".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "two".into(),
             },
@@ -930,9 +930,9 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "existing-reservation".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "existing".into(),
             },

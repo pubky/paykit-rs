@@ -59,9 +59,9 @@ async fn test_pending_outbound_private_counterparties_includes_cleanup_only_work
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "one".into(),
             },
@@ -440,9 +440,9 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "reservation-1".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "one".into(),
             },
@@ -457,9 +457,9 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "reservation-2".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "two".into(),
             },
@@ -521,9 +521,9 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "existing-reservation".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "existing".into(),
             },

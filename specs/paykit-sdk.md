@@ -435,40 +435,58 @@ semantics, contact grouping, or UI behavior.
 ### PaymentAdapter
 
 Required for endpoint publication, endpoint selection, and payment-target
-building.
+building. Public and private values use distinct types and callbacks; they are
+never combined into one candidate batch.
 
 ```rust
 pub trait PaymentAdapter {
-    async fn current_receiving_details(
+    async fn current_public_receiving_details(
         &self,
-        scope: ReceivingDetailScope,
-    ) -> Result<Vec<ReceivingDetail>>;
+    ) -> Result<Vec<PublicReceivingDetail>>;
 
-    async fn reserve_receiving_details(
+    async fn select_public_payment_endpoints(
+        &self,
+        request: &PublicPaymentEndpointSelectionRequest,
+    ) -> Result<Vec<PublicPaymentEndpointCandidate>>;
+
+    async fn build_public_payment_target(
+        &self,
+        endpoint: &PublicPaymentEndpointCandidate,
+    ) -> Result<PaymentTarget>;
+
+    async fn current_private_receiving_details(
         &self,
         counterparty: &PubkyPublicKey,
-    ) -> Result<Option<Vec<PaymentEndpointReservation>>>;
+        counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Result<Vec<PrivateReceivingDetail>>;
 
-    async fn cancel_receiving_detail_reservation(
+    async fn reserve_private_receiving_details(
         &self,
-        cancellation: &PaymentEndpointReservationCancellation,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>>;
+
+    async fn cancel_private_receiving_detail_reservation(
+        &self,
+        cancellation: &PrivatePaymentEndpointReservationCancellation,
     ) -> Result<()>;
 
-    async fn select_payment_endpoints(
+    async fn select_private_payment_endpoints(
         &self,
-        request: &PaymentEndpointSelectionRequest,
-    ) -> Result<Vec<PaymentEndpointCandidate>>;
+        request: &PrivatePaymentEndpointSelectionRequest,
+    ) -> Result<Vec<PrivatePaymentEndpointCandidate>>;
 
-    async fn build_payment_target(
+    async fn build_private_payment_target(
         &self,
-        endpoint: &PaymentEndpointCandidate,
+        endpoint: &PrivatePaymentEndpointCandidate,
     ) -> Result<PaymentTarget>;
 }
 ```
 
-Endpoint selection requests include all discovered candidates, each candidate's
-source, and optional amount context. The adapter returns payable candidates in
-the order it wants payment execution to try them.
+Each endpoint selection request includes candidates from exactly one payment
+mode and optional amount context. The adapter returns payable candidates in the
+order it wants payment execution to try them. Public APIs cannot receive
+private candidates, and private APIs cannot receive public candidates.
 
 The adapter owns payment-method-specific endpoint details:
 
@@ -953,53 +971,55 @@ Payment Requests, Payment Proofs, and Receipts.
 Receive routing should extend the same raw stream log to Payment Requests,
 Payment Proofs, and any other Event Message kinds.
 
-### Resolve Contact Payment
+### Resolve Public Payment
 
-Input:
+`resolve_public_contact_payment` fetches only the counterparty receiver's
+public Payment Endpoints, passes only `PublicPaymentEndpointCandidate` values
+to the public adapter callback, and returns `PublicContactPaymentResolution`.
+It does not inspect or mutate Linked Peer, Encrypted Link, or Private Payment
+List state.
 
-- counterparty public key
-- counterparty receiver path
-- desired amount/asset, if known
-- payment adapter support policy
-- whether public Payment Endpoints should be included
+### Resolve Private Payment
 
-Flow:
+`resolve_private_contact_payment` checks only Linked Peer and cached Private
+Payment List state. When an active link exists and no cached endpoint is
+available, it may try the private refresh/recovery path. It passes only
+`PrivatePaymentEndpointCandidate` values to the private adapter callback and
+returns `PrivateContactPaymentResolution`, including private state:
 
-1. Load contact/profile display metadata if configured.
-2. Check Linked Peer and cached private Payment List. Callers that need the
-   freshest private endpoints should run private stream receive before
-   resolution.
-3. If no cached private endpoint is available and public endpoints are not
-   included, try an immediate private refresh/recovery path when an active link
-   exists.
-4. If public endpoints are included, fetch that receiver's public Payment
-   Endpoints and append those candidates after private candidates.
-5. Pass the full candidate list to `PaymentAdapter` as one batch with amount
-   context when known.
-6. Return a structured result with a general payment `status`:
-   - `Payable`
-   - `NoEndpoint`
-   - `UnsupportedEndpoint`
+- `Available`
+- `NoPrivateEndpoint`
+- `RecoveryPending`
 
-   The result also includes `private_state`, which is only about private
-   payment resolution:
-   - `Available`
-   - `NoPrivateEndpoint`
-   - `RecoveryPending`
+The private resolution input accepts an optional
+`after_private_payment_list_version`. The private result carries the
+`private_payment_list_version` from the same local Private Payment List
+snapshot as its endpoints. When the available version is not newer than the
+input version, resolution returns `WaitingForUpdatedPaymentList` with no
+payable endpoints. These versions are opaque local freshness tokens scoped to
+one SDK state, counterparty, and counterparty receiver path; they are not the
+serialized Private Application Message schema version.
 
-When the result is `Payable`, it includes ordered payable Payment Endpoints.
-Each entry contains the Payment Endpoint and adapter-built `PaymentTarget` for
-that endpoint. Payment execution can try the entries in order until one
-succeeds.
+The application owns consumption. Submitting, pending, or uncertain payment
+execution should persist the returned version as consumed before another
+payment is resolved for that peer and receiver path. Applications should
+serialize this handoff per counterparty and counterparty receiver path. Using
+one endpoint consumes every endpoint in that Private Payment List. A newer
+list is fresh as a whole and may intentionally repeat reusable Payment
+Endpoints.
 
-`status` answers whether the wallet has a payable endpoint now. `private_state`
-answers whether private payment details were available, missing, or blocked by
-recovery. For example, public fallback can make the result `Payable` while
-`private_state` is `RecoveryPending`.
+`prepare_and_resolve_private_contact_payment` may first advance the Encrypted
+Link and drain currently available private send/receive work, then invokes the
+same private-only resolution with the optional consumed version. It never
+falls back to public Payment Endpoints.
 
-The SDK should not wait inside payment resolution for private linking/recovery
-to complete. Apps can retry receive/resolve from their own workflow when they
-want to keep waiting for private state.
+Both public and private result statuses use `Payable`, `NoEndpoint`, and
+`UnsupportedEndpoint`; private resolution additionally uses
+`WaitingForUpdatedPaymentList`. Public and private statuses remain distinct
+enum and result types. When a result is `Payable`, its ordered endpoints each
+include an adapter-built `PaymentTarget`. The application explicitly chooses
+the payment mode; the SDK does not combine candidates, results, or fallback
+policy.
 
 ### Send Payment Request
 

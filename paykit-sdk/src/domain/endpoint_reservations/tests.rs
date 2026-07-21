@@ -16,10 +16,10 @@ fn receiver_path() -> PaykitReceiverPath {
     PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
-fn reservation(id: &str, payload: &str) -> PaymentEndpointReservation {
-    PaymentEndpointReservation {
+fn reservation(id: &str, payload: &str) -> PrivatePaymentEndpointReservation {
+    PrivatePaymentEndpointReservation {
         reservation_id: id.into(),
-        receiving_detail: ReceivingDetail {
+        receiving_detail: PrivateReceivingDetail {
             identifier: "btc-lightning-bolt11".into(),
             payload: payload.into(),
         },
@@ -175,9 +175,9 @@ async fn test_queue_private_payment_list_with_reservations_preserves_existing_me
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "res-1".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "one".into(),
             },
@@ -358,9 +358,9 @@ async fn test_expired_outbound_reservation_cancellations() {
         &storage,
         &counterparty,
         &receiver_path(),
-        vec![PaymentEndpointReservation {
+        vec![PrivatePaymentEndpointReservation {
             reservation_id: "res-1".into(),
-            receiving_detail: ReceivingDetail {
+            receiving_detail: PrivateReceivingDetail {
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "one".into(),
             },

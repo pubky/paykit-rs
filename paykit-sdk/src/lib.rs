@@ -20,17 +20,16 @@ pub use config::{
 };
 #[doc(inline)]
 pub use domain::adapters::{
-    PaymentAdapter, PaymentAmountContext, PaymentEndpointCandidate, PaymentEndpointReservation,
-    PaymentEndpointReservationCancellation, PaymentEndpointSelectionRequest, PaymentEndpointSource,
-    PaymentTarget, PubkySessionProvider, ReceivingDetail, ReceivingDetailScope,
+    PaymentAdapter, PaymentAmountContext, PaymentTarget, PrivatePaymentEndpointCandidate,
+    PrivatePaymentEndpointReservation, PrivatePaymentEndpointReservationCancellation,
+    PrivatePaymentEndpointSelectionRequest, PrivateReceivingDetail, PubkySessionProvider,
+    PublicPaymentEndpointCandidate, PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
 };
 #[doc(inline)]
 pub use domain::contacts::{
-    ContactPaymentResolution, ContactPaymentResolutionPrivateState,
-    ContactPaymentResolutionRequest, ContactPaymentResolutionStatus, ContactProfileResolution,
-    ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile,
-    PaykitProfileRecord, PreparedContactPayment, PubkyProfile, PubkyProfileLink,
-    PubkyProfileRecord, ResolvedPaymentEndpoint, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+    ContactProfileResolution, ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord,
+    PaykitProfile, PaykitProfileRecord, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
+    PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
 };
 #[doc(inline)]
 pub use domain::endpoints::{load_public_endpoint_records, EndpointSyncChange, EndpointSyncReport};
@@ -50,6 +49,12 @@ pub use domain::payment_requests::{
     PaymentProofRecord, PaymentRequestFilter, PaymentRequestLifecycleState,
     PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
     PaymentRequestTermsRecord,
+};
+#[doc(inline)]
+pub use domain::payment_resolution::{
+    PreparedPrivateContactPayment, PrivateContactPaymentResolution, PrivatePaymentResolutionState,
+    PrivatePaymentResolutionStatus, PublicContactPaymentResolution, PublicPaymentResolutionStatus,
+    ResolvedPrivatePaymentEndpoint, ResolvedPublicPaymentEndpoint,
 };
 #[doc(inline)]
 pub use domain::private_lists::{

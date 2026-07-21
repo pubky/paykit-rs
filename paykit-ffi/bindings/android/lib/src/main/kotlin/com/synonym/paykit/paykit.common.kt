@@ -221,7 +221,7 @@ public interface PaykitSdkInterface {
      * Queue an explicit complete Private Payment List for one counterparty receiver.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `enqueuePrivatePaymentListWithReceivingDetails`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `receivingDetails`: List<ReceivingDetail>): QueuedPrivateMessage
+    public suspend fun `enqueuePrivatePaymentListWithReceivingDetails`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `receivingDetails`: List<PrivateReceivingDetail>): QueuedPrivateMessage
 
     /**
      * Start or advance an Encrypted Link Handshake for one counterparty.
@@ -356,15 +356,13 @@ public interface PaykitSdkInterface {
     public suspend fun `pendingOutboundPrivateCounterparties`(): List<CounterpartyReceiver>
 
     /**
-     * Prepare private contact state, then resolve payable endpoints.
+     * Prepare private contact state, then resolve private endpoints.
      *
-     * The SDK refreshes live session capability, ensures or advances the
-     * private link when possible, drains currently available private
-     * send/receive work for the peer, then resolves endpoints private-first.
-     * Public endpoints are included only when requested.
+     * Pass the last consumed list version to require a newer Private Payment
+     * List after private messages have been refreshed.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `prepareAndResolveContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `includePublicEndpoints`: kotlin.Boolean, `maxAdvanceSteps`: kotlin.UInt): PreparedContactPayment
+    public suspend fun `prepareAndResolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `afterPrivatePaymentListVersion`: kotlin.ULong?, `maxAdvanceSteps`: kotlin.UInt): PreparedPrivateContactPayment
 
     /**
      * Prepare a receipt issuance and persist it before network side effects.
@@ -523,12 +521,6 @@ public interface PaykitSdkInterface {
     public suspend fun `removePublicContact`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): ContactRecord?
 
     /**
-     * Resolve payable endpoints for one counterparty.
-     */
-    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolveContactPayment`(`request`: ContactPaymentResolutionRequest): ContactPaymentResolution
-
-    /**
      * Resolve display metadata for a contact.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -536,9 +528,13 @@ public interface PaykitSdkInterface {
 
     /**
      * Resolve payable private endpoints for one counterparty.
+     *
+     * Pass the last consumed list version to require a newer Private Payment
+     * List. The returned version and endpoints come from the same local list
+     * snapshot.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?): ContactPaymentResolution
+    public suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `afterPrivatePaymentListVersion`: kotlin.ULong?): PrivateContactPaymentResolution
 
     /**
      * Resolve public profile metadata, preferring Paykit Profile.
@@ -547,10 +543,10 @@ public interface PaykitSdkInterface {
     public suspend fun `resolveProfile`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
 
     /**
-     * Resolve payable public endpoints for one counterparty.
+     * Resolve payable public Payment Endpoints for one counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolvePublicContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?): ContactPaymentResolution
+    public suspend fun `resolvePublicContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?): PublicContactPaymentResolution
 
     /**
      * Restore SDK-managed backup state from an opaque blob.
@@ -628,7 +624,7 @@ public interface PaykitSdkInterface {
      * Publish explicit public receiving details and remove stale SDK-managed endpoints.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `syncPublicEndpointsWithReceivingDetails`(`receivingDetails`: List<ReceivingDetail>): EndpointSyncReport
+    public suspend fun `syncPublicEndpointsWithReceivingDetails`(`receivingDetails`: List<PublicReceivingDetail>): EndpointSyncReport
 
     /**
      * Remove a local peer block and return the peer to NotLinked.
@@ -903,39 +899,60 @@ public interface SdkBackupBlobInterface {
 
 
 /**
- * Platform-owned payment adapter callbacks.
+ * Platform-owned, mode-specific payment adapter callbacks.
+ *
+ * Public callbacks never receive private values, and private callbacks never
+ * receive public values.
  */
 public interface SdkPaymentAdapter {
 
     /**
-     * Return current receiving details for a scope.
+     * Return receiving details intended for public Payment Endpoints.
      */
     @Throws(PaykitException::class)
-    public fun `currentReceivingDetails`(`scope`: ReceivingDetailScope): List<ReceivingDetail>
+    public fun `currentPublicReceivingDetails`(): List<PublicReceivingDetail>
+
+    /**
+     * Return receiving details for one counterparty's Private Payment List.
+     */
+    @Throws(PaykitException::class)
+    public fun `currentPrivateReceivingDetails`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): List<PrivateReceivingDetail>
 
     /**
      * Reserve receiving details for a counterparty's Private Payment List.
      */
     @Throws(PaykitException::class)
-    public fun `reserveReceivingDetails`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): ReceivingDetailReservationResponse
+    public fun `reservePrivateReceivingDetails`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): PrivateReceivingDetailReservationResponse
 
     /**
      * Cancel a previously reserved receiving detail.
      */
     @Throws(PaykitException::class)
-    public fun `cancelReceivingDetailReservation`(`cancellation`: PaymentEndpointReservationCancellation)
+    public fun `cancelPrivateReceivingDetailReservation`(`cancellation`: PrivatePaymentEndpointReservationCancellation)
 
     /**
-     * Return payable candidate ids in adapter-preferred order.
+     * Return payable public candidate ids in adapter-preferred order.
      */
     @Throws(PaykitException::class)
-    public fun `selectPaymentEndpointIds`(`request`: PaymentEndpointSelectionRequest): List<kotlin.String>
+    public fun `selectPublicPaymentEndpointIds`(`request`: PublicPaymentEndpointSelectionRequest): List<kotlin.String>
 
     /**
-     * Build a payment target from a payable endpoint.
+     * Build a payment target from a payable public endpoint.
      */
     @Throws(PaykitException::class)
-    public fun `buildPaymentTarget`(`endpoint`: PaymentEndpointCandidate): PaymentTarget
+    public fun `buildPublicPaymentTarget`(`endpoint`: PublicPaymentEndpointCandidate): PaymentTarget
+
+    /**
+     * Return payable private candidate ids in adapter-preferred order.
+     */
+    @Throws(PaykitException::class)
+    public fun `selectPrivatePaymentEndpointIds`(`request`: PrivatePaymentEndpointSelectionRequest): List<kotlin.String>
+
+    /**
+     * Build a payment target from a payable private endpoint.
+     */
+    @Throws(PaykitException::class)
+    public fun `buildPrivatePaymentTarget`(`endpoint`: PrivatePaymentEndpointCandidate): PaymentTarget
 
     public companion object
 }
@@ -1027,63 +1044,6 @@ public data class BillingPeriod (
      * RFC3339 UTC end timestamp.
      */
     val `endsAt`: kotlin.String
-) {
-    public companion object
-}
-
-
-
-/**
- * Result of resolving contact Payment Endpoints.
- */
-
-public data class ContactPaymentResolution (
-    /**
-     * General payment resolution outcome.
-     */
-    val `status`: ContactPaymentResolutionStatus,
-    /**
-     * Private-payment-specific state for this resolution.
-     */
-    val `privateState`: ContactPaymentResolutionPrivateState,
-    /**
-     * Payable Payment Endpoints in adapter-preferred order.
-     */
-    val `payableEndpoints`: List<ResolvedPaymentEndpoint>
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`status`,
-            this.`privateState`,
-            this.`payableEndpoints`,
-        )
-    }
-    public companion object
-}
-
-
-
-/**
- * Request to resolve payable endpoints for one counterparty.
- */
-@kotlinx.serialization.Serializable
-public data class ContactPaymentResolutionRequest (
-    /**
-     * Counterparty to pay.
-     */
-    val `counterparty`: kotlin.String,
-    /**
-     * Counterparty Paykit receiver path.
-     */
-    val `counterpartyReceiverPath`: kotlin.String,
-    /**
-     * Optional amount context used by the payment adapter.
-     */
-    val `amount`: PaymentAmountContext?,
-    /**
-     * Include public Payment Endpoints after private candidates.
-     */
-    val `includePublicEndpoints`: kotlin.Boolean
 ) {
     public companion object
 }
@@ -1788,197 +1748,6 @@ public data class PaymentAmountContext (
 
 
 /**
- * Candidate endpoint passed to the payment adapter.
- */
-
-public data class PaymentEndpointCandidate (
-    /**
-     * Opaque candidate id for this callback request.
-     */
-    val `candidateId`: kotlin.String,
-    /**
-     * Counterparty that published the endpoint.
-     */
-    val `counterparty`: kotlin.String,
-    /**
-     * Counterparty Paykit receiver path.
-     */
-    val `counterpartyReceiverPath`: kotlin.String,
-    /**
-     * Where the endpoint was discovered.
-     */
-    val `source`: PaymentEndpointSource,
-    /**
-     * Payment Endpoint Identifier string.
-     */
-    val `identifier`: kotlin.String,
-    /**
-     * Serialized endpoint payload.
-     */
-    val `payload`: PaymentPayload
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`candidateId`,
-            this.`counterparty`,
-            this.`counterpartyReceiverPath`,
-            this.`source`,
-            this.`identifier`,
-            this.`payload`,
-        )
-    }
-    public companion object
-}
-
-
-
-/**
- * Receiving detail reserved by the payment adapter.
- */
-
-public data class PaymentEndpointReservation (
-    /**
-     * Adapter-stable reservation id.
-     */
-    val `reservationId`: kotlin.String,
-    /**
-     * Reserved receiving detail.
-     */
-    val `receivingDetail`: ReceivingDetail,
-    /**
-     * Optional reservation expiry as RFC3339 text.
-     */
-    val `expiresAt`: kotlin.String?,
-    /**
-     * Adapter attribution metadata.
-     */
-    val `attribution`: ReservationAttribution
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`reservationId`,
-            this.`receivingDetail`,
-            this.`expiresAt`,
-            this.`attribution`,
-        )
-    }
-    public companion object
-}
-
-
-
-/**
- * Request passed to cancel a receiving-detail reservation.
- */
-
-public data class PaymentEndpointReservationCancellation (
-    /**
-     * Adapter-stable reservation id.
-     */
-    val `reservationId`: kotlin.String,
-    /**
-     * Counterparty the reservation was intended for.
-     */
-    val `counterparty`: kotlin.String,
-    /**
-     * Counterparty Paykit receiver path.
-     */
-    val `counterpartyReceiverPath`: kotlin.String,
-    /**
-     * Payment Endpoint Identifier.
-     */
-    val `identifier`: kotlin.String,
-    /**
-     * Hash of the reserved endpoint payload.
-     */
-    val `payloadHash`: kotlin.String,
-    /**
-     * Adapter attribution metadata from the reservation.
-     */
-    val `attribution`: ReservationAttribution
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`reservationId`,
-            this.`counterparty`,
-            this.`counterpartyReceiverPath`,
-            this.`identifier`,
-            this.`payloadHash`,
-            this.`attribution`,
-        )
-    }
-    public companion object
-}
-
-
-
-/**
- * Plain reservation input for one Payment Endpoint.
- */
-@kotlinx.serialization.Serializable
-public data class PaymentEndpointReservationInput (
-    /**
-     * Adapter-stable reservation id.
-     */
-    val `reservationId`: kotlin.String,
-    /**
-     * Payment Endpoint Identifier string.
-     */
-    val `identifier`: kotlin.String,
-    /**
-     * Serialized endpoint payload.
-     */
-    val `payload`: kotlin.String,
-    /**
-     * Optional reservation expiry as RFC3339 text.
-     */
-    val `expiresAt`: kotlin.String?,
-    /**
-     * Adapter attribution metadata.
-     */
-    val `attribution`: Map<kotlin.String, kotlin.String>
-) {
-    public companion object
-}
-
-
-
-/**
- * Request passed to the payment adapter for payable endpoint ordering.
- */
-
-public data class PaymentEndpointSelectionRequest (
-    /**
-     * Counterparty being paid.
-     */
-    val `counterparty`: kotlin.String,
-    /**
-     * Counterparty Paykit receiver path.
-     */
-    val `counterpartyReceiverPath`: kotlin.String,
-    /**
-     * Optional amount context.
-     */
-    val `amount`: PaymentAmountContext?,
-    /**
-     * Candidate endpoints in SDK preference order.
-     */
-    val `candidates`: List<PaymentEndpointCandidate>
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`counterparty`,
-            this.`counterpartyReceiverPath`,
-            this.`amount`,
-            this.`candidates`,
-        )
-    }
-    public companion object
-}
-
-
-
-/**
  * Payment Proof captured in a derived Payment Request record.
  */
 
@@ -2345,30 +2114,26 @@ public data class PaymentTarget (
 
 
 /**
- * Result of preparing a contact payment and resolving payable endpoints.
+ * Result of preparing private contact state and resolving private endpoints.
  */
 
-public data class PreparedContactPayment (
+public data class PreparedPrivateContactPayment (
     /**
-     * Endpoint resolution after preparation.
+     * Private endpoint resolution after preparation.
      */
-    val `resolution`: ContactPaymentResolution,
+    val `resolution`: PrivateContactPaymentResolution,
     /**
-     * Link handshake/advance report when the SDK attempted private setup.
+     * Encrypted Link handshake/advance report, when setup was attempted.
      */
     val `linkReport`: LinkedPeerHandshakeReport?,
     /**
-     * Private receive report when the SDK refreshed the private stream.
+     * Private stream receive report, when messages were refreshed.
      */
     val `receiveReport`: PrivateStreamIntakeReport?,
     /**
-     * Outbound send report when the SDK processed pending private messages.
+     * Outbound private send report, when queued messages were processed.
      */
-    val `outboundReport`: OutboundPrivateSendReport?,
-    /**
-     * Private preparation error when public fallback was allowed.
-     */
-    val `privateError`: PrivateOperationError?
+    val `outboundReport`: OutboundPrivateSendReport?
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -2376,7 +2141,227 @@ public data class PreparedContactPayment (
             this.`linkReport`,
             this.`receiveReport`,
             this.`outboundReport`,
-            this.`privateError`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Result of resolving a Private Payment List for one counterparty.
+ */
+
+public data class PrivateContactPaymentResolution (
+    /**
+     * Private payment resolution outcome.
+     */
+    val `status`: PrivatePaymentResolutionStatus,
+    /**
+     * Encrypted Link and Private Payment List state observed during resolution.
+     */
+    val `state`: PrivatePaymentResolutionState,
+    /**
+     * Opaque freshness token for the Private Payment List used by this result.
+     */
+    val `privatePaymentListVersion`: kotlin.ULong?,
+    /**
+     * Payable private Payment Endpoints in adapter-preferred order.
+     */
+    val `payableEndpoints`: List<ResolvedPrivatePaymentEndpoint>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`status`,
+            this.`state`,
+            this.`privatePaymentListVersion`,
+            this.`payableEndpoints`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Private Payment Endpoint candidate passed to the payment adapter.
+ */
+
+public data class PrivatePaymentEndpointCandidate (
+    /**
+     * Opaque candidate id for this callback request.
+     */
+    val `candidateId`: kotlin.String,
+    /**
+     * Counterparty that privately shared the endpoint.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: PaymentPayload
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`candidateId`,
+            this.`counterparty`,
+            this.`counterpartyReceiverPath`,
+            this.`identifier`,
+            this.`payload`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Private receiving detail reserved by the payment adapter.
+ */
+
+public data class PrivatePaymentEndpointReservation (
+    /**
+     * Adapter-stable reservation id.
+     */
+    val `reservationId`: kotlin.String,
+    /**
+     * Reserved receiving detail.
+     */
+    val `receivingDetail`: PrivateReceivingDetail,
+    /**
+     * Optional reservation expiry as RFC3339 text.
+     */
+    val `expiresAt`: kotlin.String?,
+    /**
+     * Adapter attribution metadata.
+     */
+    val `attribution`: ReservationAttribution
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`reservationId`,
+            this.`receivingDetail`,
+            this.`expiresAt`,
+            this.`attribution`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Request passed to cancel a receiving-detail reservation.
+ */
+
+public data class PrivatePaymentEndpointReservationCancellation (
+    /**
+     * Adapter-stable reservation id.
+     */
+    val `reservationId`: kotlin.String,
+    /**
+     * Counterparty the reservation was intended for.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
+     * Payment Endpoint Identifier.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Hash of the reserved endpoint payload.
+     */
+    val `payloadHash`: kotlin.String,
+    /**
+     * Adapter attribution metadata from the reservation.
+     */
+    val `attribution`: ReservationAttribution
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`reservationId`,
+            this.`counterparty`,
+            this.`counterpartyReceiverPath`,
+            this.`identifier`,
+            this.`payloadHash`,
+            this.`attribution`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Plain reservation input for one Payment Endpoint.
+ */
+@kotlinx.serialization.Serializable
+public data class PrivatePaymentEndpointReservationInput (
+    /**
+     * Adapter-stable reservation id.
+     */
+    val `reservationId`: kotlin.String,
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: kotlin.String,
+    /**
+     * Optional reservation expiry as RFC3339 text.
+     */
+    val `expiresAt`: kotlin.String?,
+    /**
+     * Adapter attribution metadata.
+     */
+    val `attribution`: Map<kotlin.String, kotlin.String>
+) {
+    public companion object
+}
+
+
+
+/**
+ * Request passed to the payment adapter for private endpoint ordering.
+ */
+
+public data class PrivatePaymentEndpointSelectionRequest (
+    /**
+     * Counterparty being paid.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
+     * Optional amount context.
+     */
+    val `amount`: PaymentAmountContext?,
+    /**
+     * Private candidate endpoints in SDK preference order.
+     */
+    val `candidates`: List<PrivatePaymentEndpointCandidate>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`counterpartyReceiverPath`,
+            this.`amount`,
+            this.`candidates`,
         )
     }
     public companion object
@@ -2502,7 +2487,7 @@ public data class PrivatePaymentListReservationUpdateInput (
      *
      * An empty list queues an empty Private Payment List for this counterparty.
      */
-    val `reservations`: List<PaymentEndpointReservationInput>
+    val `reservations`: List<PrivatePaymentEndpointReservationInput>
 ) {
     public companion object
 }
@@ -2582,6 +2567,56 @@ public data class PrivatePaymentListView (
             this.`latestStreamItemId`,
             this.`paymentEndpoints`,
             this.`lastRefreshAt`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Payment-method-specific receiving detail for a Private Payment List.
+ */
+
+public data class PrivateReceivingDetail (
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: PaymentPayload
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`identifier`,
+            this.`payload`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Explicit result for private receiving-detail reservation callbacks.
+ */
+
+public data class PrivateReceivingDetailReservationResponse (
+    /**
+     * Response kind.
+     */
+    val `kind`: PrivateReceivingDetailReservationResponseKind,
+    /**
+     * Reserved details when `kind` is `Reservations`.
+     */
+    val `reservations`: List<PrivatePaymentEndpointReservation>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`kind`,
+            this.`reservations`,
         )
     }
     public companion object
@@ -2854,6 +2889,131 @@ public data class PubkySessionBootstrapResult (
         Disposable.destroy(
             this.`sessionAccess`,
             this.`publicKey`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Result of resolving public Payment Endpoints for one counterparty.
+ */
+
+public data class PublicContactPaymentResolution (
+    /**
+     * Public payment resolution outcome.
+     */
+    val `status`: PublicPaymentResolutionStatus,
+    /**
+     * Payable public Payment Endpoints in adapter-preferred order.
+     */
+    val `payableEndpoints`: List<ResolvedPublicPaymentEndpoint>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`status`,
+            this.`payableEndpoints`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Public Payment Endpoint candidate passed to the payment adapter.
+ */
+
+public data class PublicPaymentEndpointCandidate (
+    /**
+     * Opaque candidate id for this callback request.
+     */
+    val `candidateId`: kotlin.String,
+    /**
+     * Counterparty that published the endpoint.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: PaymentPayload
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`candidateId`,
+            this.`counterparty`,
+            this.`counterpartyReceiverPath`,
+            this.`identifier`,
+            this.`payload`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Request passed to the payment adapter for public endpoint ordering.
+ */
+
+public data class PublicPaymentEndpointSelectionRequest (
+    /**
+     * Counterparty being paid.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
+     * Optional amount context.
+     */
+    val `amount`: PaymentAmountContext?,
+    /**
+     * Public candidate endpoints in SDK preference order.
+     */
+    val `candidates`: List<PublicPaymentEndpointCandidate>
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`counterpartyReceiverPath`,
+            this.`amount`,
+            this.`candidates`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Payment-method-specific receiving detail for public publication.
+ */
+
+public data class PublicReceivingDetail (
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: PaymentPayload
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`identifier`,
+            this.`payload`,
         )
     }
     public companion object
@@ -3236,79 +3396,6 @@ public data class ReceiptRecord (
 
 
 /**
- * Payment-method-specific receiving detail returned by the payment adapter.
- */
-
-public data class ReceivingDetail (
-    /**
-     * Payment Endpoint Identifier string.
-     */
-    val `identifier`: kotlin.String,
-    /**
-     * Serialized endpoint payload.
-     */
-    val `payload`: PaymentPayload
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`identifier`,
-            this.`payload`,
-        )
-    }
-    public companion object
-}
-
-
-
-/**
- * Explicit result for private receiving-detail reservation callbacks.
- */
-
-public data class ReceivingDetailReservationResponse (
-    /**
-     * Response kind.
-     */
-    val `kind`: ReceivingDetailReservationResponseKind,
-    /**
-     * Reserved details when `kind` is `Reservations`.
-     */
-    val `reservations`: List<PaymentEndpointReservation>
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`kind`,
-            this.`reservations`,
-        )
-    }
-    public companion object
-}
-
-
-
-/**
- * Receiving-detail request scope passed to the payment adapter.
- */
-@kotlinx.serialization.Serializable
-public data class ReceivingDetailScope (
-    /**
-     * Scope kind.
-     */
-    val `kind`: ReceivingDetailScopeKind,
-    /**
-     * Counterparty public key for private scopes.
-     */
-    val `counterparty`: kotlin.String?,
-    /**
-     * Counterparty Paykit receiver path for private scopes.
-     */
-    val `counterpartyReceiverPath`: kotlin.String?
-) {
-    public companion object
-}
-
-
-
-/**
  * Failed recovery marker publication during outbound private send recovery.
  */
 
@@ -3359,22 +3446,18 @@ public data class ReservationCleanupFailure (
 
 
 /**
- * Payment Endpoint paired with the target needed to pay through it.
+ * Private Payment Endpoint paired with its adapter-built payment target.
  */
 
-public data class ResolvedPaymentEndpoint (
+public data class ResolvedPrivatePaymentEndpoint (
     /**
-     * Counterparty that published the endpoint.
+     * Counterparty that privately shared the endpoint.
      */
     val `counterparty`: kotlin.String,
     /**
      * Counterparty Paykit receiver path.
      */
     val `counterpartyReceiverPath`: kotlin.String,
-    /**
-     * Where the endpoint was discovered.
-     */
-    val `source`: PaymentEndpointSource,
     /**
      * Payment Endpoint Identifier string.
      */
@@ -3392,7 +3475,46 @@ public data class ResolvedPaymentEndpoint (
         Disposable.destroy(
             this.`counterparty`,
             this.`counterpartyReceiverPath`,
-            this.`source`,
+            this.`identifier`,
+            this.`payload`,
+            this.`target`,
+        )
+    }
+    public companion object
+}
+
+
+
+/**
+ * Public Payment Endpoint paired with its adapter-built payment target.
+ */
+
+public data class ResolvedPublicPaymentEndpoint (
+    /**
+     * Counterparty that published the endpoint.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
+     * Payment Endpoint Identifier string.
+     */
+    val `identifier`: kotlin.String,
+    /**
+     * Serialized endpoint payload.
+     */
+    val `payload`: PaymentPayload,
+    /**
+     * Adapter-built target for executing payment through this endpoint.
+     */
+    val `target`: PaymentTarget
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`counterpartyReceiverPath`,
             this.`identifier`,
             this.`payload`,
             this.`target`,
@@ -3511,68 +3633,6 @@ public data class SdkStateBlobSnapshot (
     }
     public companion object
 }
-
-
-
-
-/**
- * Private-payment state observed while resolving a contact payment.
- */
-
-@kotlinx.serialization.Serializable
-public enum class ContactPaymentResolutionPrivateState {
-
-    /**
-     * Private Payment List candidates were available for resolution.
-     */
-    AVAILABLE,
-    /**
-     * No Private Payment List candidate was available.
-     */
-    NO_PRIVATE_ENDPOINT,
-    /**
-     * Private payment state is blocked by link recovery.
-     */
-    RECOVERY_PENDING,
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    UNKNOWN;
-    public companion object
-}
-
-
-
-
-
-
-/**
- * Result category for contact payment resolution.
- */
-
-@kotlinx.serialization.Serializable
-public enum class ContactPaymentResolutionStatus {
-
-    /**
-     * A payable endpoint was found.
-     */
-    PAYABLE,
-    /**
-     * No endpoint was found.
-     */
-    NO_ENDPOINT,
-    /**
-     * Endpoints exist but are unsupported.
-     */
-    UNSUPPORTED_ENDPOINT,
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    UNKNOWN;
-    public companion object
-}
-
-
 
 
 
@@ -3772,33 +3832,6 @@ public enum class OutboundPrivateMessageStatus {
 
 
 /**
- * Source of a discovered Payment Endpoint candidate.
- */
-
-@kotlinx.serialization.Serializable
-public enum class PaymentEndpointSource {
-
-    /**
-     * Endpoint came from a counterparty-specific Private Payment List.
-     */
-    PRIVATE_PAYMENT_LIST,
-    /**
-     * Endpoint came from a public Payment Endpoint.
-     */
-    PUBLIC_PAYMENT_ENDPOINT,
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    UNKNOWN;
-    public companion object
-}
-
-
-
-
-
-
-/**
  * SDK-derived Payment Request lifecycle state.
  */
 
@@ -3870,6 +3903,99 @@ public enum class PaymentRequestLocalRole {
     PAYEE,
     /**
      * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Encrypted Link and Private Payment List state observed during resolution.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class PrivatePaymentResolutionState {
+
+    /**
+     * Private Payment List candidates were available for resolution.
+     */
+    AVAILABLE,
+    /**
+     * No Private Payment List candidate was available.
+     */
+    NO_PRIVATE_ENDPOINT,
+    /**
+     * Private payment state is blocked by Encrypted Link recovery.
+     */
+    RECOVERY_PENDING,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Result category for private Payment Endpoint resolution.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class PrivatePaymentResolutionStatus {
+
+    /**
+     * A payable private Payment Endpoint was found.
+     */
+    PAYABLE,
+    /**
+     * No private Payment Endpoint was found.
+     */
+    NO_ENDPOINT,
+    /**
+     * Private Payment Endpoints exist but are unsupported.
+     */
+    UNSUPPORTED_ENDPOINT,
+    /**
+     * No Private Payment List newer than the caller's consumed version is available.
+     */
+    WAITING_FOR_UPDATED_PAYMENT_LIST,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Reservation callback result kind.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class PrivateReceivingDetailReservationResponseKind {
+
+    /**
+     * Use `current_private_receiving_details` for this private list.
+     */
+    USE_CURRENT_RECEIVING_DETAILS,
+    /**
+     * Use the reservations carried by this response, including an empty list.
+     */
+    RESERVATIONS,
+    /**
+     * Reserved invalid response kind.
      */
     UNKNOWN;
     public companion object
@@ -4020,6 +4146,37 @@ public enum class PublicContactSharingPolicy {
 
 
 /**
+ * Result category for public Payment Endpoint resolution.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class PublicPaymentResolutionStatus {
+
+    /**
+     * A payable public Payment Endpoint was found.
+     */
+    PAYABLE,
+    /**
+     * No public Payment Endpoint was found.
+     */
+    NO_ENDPOINT,
+    /**
+     * Public Payment Endpoints exist but are unsupported.
+     */
+    UNSUPPORTED_ENDPOINT,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
  * Local publication state for SDK-managed public data.
  */
 
@@ -4120,60 +4277,6 @@ public enum class ReceiptRetrievalStatus {
      * Retrieval or decryption failed.
      */
     FAILED,
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    UNKNOWN;
-    public companion object
-}
-
-
-
-
-
-
-/**
- * Reservation callback result kind.
- */
-
-@kotlinx.serialization.Serializable
-public enum class ReceivingDetailReservationResponseKind {
-
-    /**
-     * Use `current_receiving_details` for this private list.
-     */
-    USE_CURRENT_RECEIVING_DETAILS,
-    /**
-     * Use the reservations carried by this response, including an empty list.
-     */
-    RESERVATIONS,
-    /**
-     * Reserved invalid response kind.
-     */
-    UNKNOWN;
-    public companion object
-}
-
-
-
-
-
-
-/**
- * Scope used when asking a payment adapter for receiving details.
- */
-
-@kotlinx.serialization.Serializable
-public enum class ReceivingDetailScopeKind {
-
-    /**
-     * Details intended for public Payment Endpoints.
-     */
-    PUBLIC,
-    /**
-     * Details intended for one counterparty's Private Payment List.
-     */
-    PRIVATE,
     /**
      * SDK returned a value this binding version does not understand.
      */

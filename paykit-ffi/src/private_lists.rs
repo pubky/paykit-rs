@@ -9,7 +9,7 @@ use paykit_sdk::{
 
 use crate::{
     payment_adapter::{
-        payment_endpoint_reservation_from_parts, FfiPaymentPayload, FfiReceivingDetail,
+        payment_endpoint_reservation_from_parts, FfiPaymentPayload, FfiPrivateReceivingDetail,
     },
     private_links::FfiPrivateOperationError,
     sdk::FfiPaykitSdk,
@@ -98,7 +98,7 @@ pub struct FfiPrivatePaymentListSyncReport {
 
 /// Plain reservation input for one Payment Endpoint.
 #[derive(uniffi::Record, Clone, Debug)]
-pub struct FfiPaymentEndpointReservationInput {
+pub struct FfiPrivatePaymentEndpointReservationInput {
     /// Adapter-stable reservation id.
     pub reservation_id: String,
     /// Payment Endpoint Identifier string.
@@ -121,7 +121,7 @@ pub struct FfiPrivatePaymentListReservationUpdateInput {
     /// Complete reserved receiving details to share with this counterparty.
     ///
     /// An empty list queues an empty Private Payment List for this counterparty.
-    pub reservations: Vec<FfiPaymentEndpointReservationInput>,
+    pub reservations: Vec<FfiPrivatePaymentEndpointReservationInput>,
 }
 
 /// Failed delivery after a Private Payment List was queued.
@@ -214,7 +214,7 @@ impl FfiPaykitSdk {
         &self,
         counterparty: String,
         counterparty_receiver_path: String,
-        receiving_details: Vec<FfiReceivingDetail>,
+        receiving_details: Vec<FfiPrivateReceivingDetail>,
     ) -> Result<FfiQueuedPrivateMessage, PaykitFfiError> {
         let receiving_details = receiving_details
             .into_iter()
@@ -420,10 +420,12 @@ impl From<PrivatePaymentListDeliveryFailure> for FfiPrivatePaymentListDeliveryFa
     }
 }
 
-impl TryFrom<FfiPaymentEndpointReservationInput> for paykit_sdk::PaymentEndpointReservation {
+impl TryFrom<FfiPrivatePaymentEndpointReservationInput>
+    for paykit_sdk::PrivatePaymentEndpointReservation
+{
     type Error = paykit_sdk::PaykitSdkError;
 
-    fn try_from(value: FfiPaymentEndpointReservationInput) -> Result<Self, Self::Error> {
+    fn try_from(value: FfiPrivatePaymentEndpointReservationInput) -> Result<Self, Self::Error> {
         payment_endpoint_reservation_from_parts(
             value.reservation_id,
             value.identifier,
@@ -542,7 +544,7 @@ mod tests {
         let update = FfiPrivatePaymentListReservationUpdateInput {
             counterparty: public_key().to_app_key(),
             counterparty_receiver_path: receiver_path().to_string(),
-            reservations: vec![FfiPaymentEndpointReservationInput {
+            reservations: vec![FfiPrivatePaymentEndpointReservationInput {
                 reservation_id: "reservation-1".into(),
                 identifier: "btc-lightning-bolt11".into(),
                 payload: "ln-reserved".into(),

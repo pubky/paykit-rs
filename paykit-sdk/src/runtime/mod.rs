@@ -31,11 +31,9 @@ use crate::{
     domain::contacts::{
         parse_profile_json, parse_pubky_profile_json, paykit_blob_path,
         paykit_blob_path_from_uri_or_path, paykit_blob_uri, profile_json,
-        pubky_follow_keys_from_follow_entries, public_contact_json, ContactPaymentResolution,
-        ContactPaymentResolutionPrivateState, ContactPaymentResolutionRequest,
-        ContactPaymentResolutionStatus, ContactProfileResolution, ContactRecord, ContactUpdate,
-        PaykitBlobRecord, PaykitProfile, PaykitProfileRecord, PreparedContactPayment,
-        PubkyProfileRecord, ResolvedPaymentEndpoint, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+        pubky_follow_keys_from_follow_entries, public_contact_json, ContactProfileResolution,
+        ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
+        PubkyProfileRecord, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
     },
     domain::endpoint_reservations::{
         expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
@@ -74,6 +72,12 @@ use crate::{
         request_from_record, PaymentRequestFilter, PaymentRequestLifecycleState,
         PaymentRequestLocalRole, PaymentRequestRecord,
     },
+    domain::payment_resolution::{
+        PreparedPrivateContactPayment, PrivateContactPaymentResolution,
+        PrivatePaymentResolutionState, PrivatePaymentResolutionStatus,
+        PublicContactPaymentResolution, PublicPaymentResolutionStatus,
+        ResolvedPrivatePaymentEndpoint, ResolvedPublicPaymentEndpoint,
+    },
     domain::private_lists::{
         current_private_payment_list as load_current_private_payment_list,
         enqueue_private_payment_list_with_link_lease as enqueue_private_payment_list_message_with_link_lease,
@@ -103,10 +107,11 @@ use crate::{
         outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
         OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
-    PaykitReceiverPath, PaykitSdkError, PaymentAdapter, PaymentEndpointCandidate,
-    PaymentEndpointReservation, PaymentEndpointReservationCancellation,
-    PaymentEndpointSelectionRequest, PaymentEndpointSource, PrivatePaymentListView, PubkyPublicKey,
-    PubkySessionAccess, PubkySessionProvider, ReceivingDetail, ReceivingDetailScope, Result,
+    PaykitReceiverPath, PaykitSdkError, PaymentAdapter, PrivatePaymentEndpointCandidate,
+    PrivatePaymentEndpointReservation, PrivatePaymentEndpointReservationCancellation,
+    PrivatePaymentEndpointSelectionRequest, PrivatePaymentListView, PrivateReceivingDetail,
+    PubkyPublicKey, PubkySessionAccess, PubkySessionProvider, PublicPaymentEndpointCandidate,
+    PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
 };
 
 mod backup;

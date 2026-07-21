@@ -4,16 +4,15 @@ use std::{collections::HashMap, fmt};
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{
-    parse_private_payment_list_json, serialize_private_payment_list_json, PrivateMessageKind,
-    PrivatePaymentList,
+    parse_private_payment_list_json, serialize_private_payment_list_json,
+    PaymentEndpointIdentifier, PaymentEndpointPayload, PrivateMessageKind, PrivatePaymentList,
 };
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use crate::domain::outbound_private::enqueue_private_message;
 use crate::{
-    domain::adapters::{PaymentEndpointReservation, ReceivingDetail},
-    domain::endpoints::normalize_receiving_details,
+    domain::adapters::{PrivatePaymentEndpointReservation, PrivateReceivingDetail},
     domain::outbound_private::enqueue_private_message_with_link_lease,
     domain::private_stream::PrivateStreamParseStatus,
     storage::{
@@ -103,7 +102,7 @@ pub struct PrivatePaymentListReservationUpdate {
     /// Complete reserved receiving details to share with this counterparty.
     ///
     /// An empty list queues an empty Private Payment List for this counterparty.
-    pub reservations: Vec<PaymentEndpointReservation>,
+    pub reservations: Vec<PrivatePaymentEndpointReservation>,
 }
 
 impl fmt::Debug for PrivatePaymentListReservationUpdate {
@@ -200,13 +199,13 @@ pub(crate) async fn enqueue_private_payment_list<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
     counterparty_receiver_path: PaykitReceiverPath,
-    receiving_details: Vec<ReceivingDetail>,
+    receiving_details: Vec<PrivateReceivingDetail>,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
 where
     S: StorageAdapter,
 {
-    let payment_endpoints = normalize_receiving_details(receiving_details)?;
+    let payment_endpoints = normalize_private_receiving_details(receiving_details)?;
     let list = PrivatePaymentList::new(payment_endpoints);
     let raw_json = serialize_private_payment_list_json(&list)?;
     enqueue_private_message(
@@ -223,17 +222,39 @@ where
 pub(crate) async fn enqueue_private_payment_list_with_link_lease<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
-    receiving_details: Vec<ReceivingDetail>,
+    receiving_details: Vec<PrivateReceivingDetail>,
     now: DateTime<Utc>,
     lease: &PeerLinkOperationLease,
 ) -> Result<OutboundPrivateMessageRecord>
 where
     S: StorageAdapter,
 {
-    let payment_endpoints = normalize_receiving_details(receiving_details)?;
+    let payment_endpoints = normalize_private_receiving_details(receiving_details)?;
     let list = PrivatePaymentList::new(payment_endpoints);
     let raw_json = serialize_private_payment_list_json(&list)?;
     enqueue_private_message_with_link_lease(storage, counterparty, raw_json, now, lease).await
+}
+
+pub(crate) fn normalize_private_receiving_details(
+    details: Vec<PrivateReceivingDetail>,
+) -> Result<HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>> {
+    let mut desired = HashMap::with_capacity(details.len());
+
+    for detail in details {
+        let identifier = PaymentEndpointIdentifier::new(detail.identifier)?;
+        if desired.contains_key(&identifier) {
+            return Err(crate::PaykitSdkError::Protocol {
+                context: format!(
+                    "duplicate Payment Endpoint identifier '{}'",
+                    identifier.as_str()
+                ),
+                source: None,
+            });
+        }
+        desired.insert(identifier, PaymentEndpointPayload::new(detail.payload));
+    }
+
+    Ok(desired)
 }
 
 /// Derive the latest valid Private Payment List view from private stream items.

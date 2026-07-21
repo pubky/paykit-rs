@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_normalize_receiving_details_rejects_invalid_identifier() {
-    let result = normalize_receiving_details(vec![ReceivingDetail {
+    let result = normalize_receiving_details(vec![PublicReceivingDetail {
         identifier: "../bad".into(),
         payload: "payload".into(),
     }]);
@@ -13,11 +13,11 @@ fn test_normalize_receiving_details_rejects_invalid_identifier() {
 #[test]
 fn test_normalize_receiving_details_rejects_duplicates() {
     let result = normalize_receiving_details(vec![
-        ReceivingDetail {
+        PublicReceivingDetail {
             identifier: "btc-lightning-bolt11".into(),
             payload: "one".into(),
         },
-        ReceivingDetail {
+        PublicReceivingDetail {
             identifier: "btc-lightning-bolt11".into(),
             payload: "two".into(),
         },
