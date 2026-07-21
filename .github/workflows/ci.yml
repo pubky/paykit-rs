@@ -77,6 +77,41 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake
       - run: cargo check --workspace --all-features
 
+  coverage-pr:
+    name: Coverage (PR)
+    if: github.event_name == 'pull_request'
+    # Flip to blocking after ~2 weeks of stable signal.
+    continue-on-error: true
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake
+      - name: Check coverage
+        shell: bash
+        run: |
+          set +e
+          cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 69.8 2>&1 | tee coverage-summary.txt
+          status=${PIPESTATUS[0]}
+          {
+            printf '## Coverage summary\n\n'
+            printf '```text\n'
+            cat coverage-summary.txt
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          set -e
+          exit "$status"
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
