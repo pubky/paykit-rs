@@ -139,6 +139,18 @@ impl fmt::Debug for PaymentRequestTerms {
 }
 
 /// Time interval a recurring Payment Proof applies to.
+///
+/// # Validation
+///
+/// `BillingPeriod` has no public validating constructor or standalone validator.
+/// Direct struct construction and later field mutation are unchecked. Payment
+/// Proof serialization and parsing, and Receipt preparation and parsing, require
+/// `starts_at` and `ends_at` to be RFC3339 timestamps with a `Z` suffix and
+/// `ends_at` to be strictly later than `starts_at`.
+///
+/// [`serialize_receipt_access_json`](crate::serialize_receipt_access_json) does
+/// not validate these fields. Callers must first use
+/// [`ReceiptAccess::validate`](crate::ReceiptAccess::validate).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BillingPeriod {
     /// RFC3339 UTC timestamp using `Z`.

@@ -1,11 +1,22 @@
 use crate::{PaykitError, Result};
 
 /// Amount of value in a payment flow, expressed as decimal text plus asset.
+///
+/// # Validation
+///
+/// [`PaymentAmount::new`] accepts a `value` consisting only of ASCII digits and
+/// at most one decimal point, with at least one digit. Leading `+` and `-` signs
+/// are rejected. Values such as `.5` and `10.` are accepted. The `asset` must be
+/// non-empty and contain no control characters. Beyond these checks, Paykit
+/// defines no range, precision, scale, normalization, or asset-registry policy.
+///
+/// [`PaymentAmount::new`] validates only during construction. Direct struct
+/// construction and later field mutation are unchecked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentAmount {
-    /// Decimal string, such as `10.00`.
+    /// Decimal string, such as `10.00`. Mutation is not revalidated.
     pub value: String,
-    /// Asset code or unit, such as `usd`, `btc`, or `usdt`.
+    /// Asset code or unit, such as `usd`, `btc`, or `usdt`. Mutation is not revalidated.
     pub asset: String,
 }
 
