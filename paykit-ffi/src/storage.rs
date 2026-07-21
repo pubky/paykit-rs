@@ -24,15 +24,45 @@ pub struct FfiSdkStateBlobSnapshot {
 }
 
 /// Platform-owned durable blob store for SDK state.
+///
+/// Callbacks execute synchronously on the thread executing or polling the SDK
+/// call. Each SDK handle owns a transaction mutex shared by that handle's
+/// storage clones. The mutex serializes callbacks made inside SDK storage
+/// transactions on that handle; it does not coordinate the revision-read API,
+/// other SDK handles, or other processes.
+///
+/// Callbacks must return promptly. Use bounded local durable persistence and
+/// bounded local coordination needed for atomic compare-and-swap. Do not use
+/// network or iCloud round trips, unbounded cross-process waits, or re-enter or
+/// depend on work from the same SDK handle.
+///
+/// A slow transactional callback blocks that foreign thread and queues other
+/// storage transactions on the same SDK handle. The revision-read API invokes
+/// the load callback outside the transaction mutex and can overlap transaction
+/// callbacks. Other SDK handles can also invoke callbacks concurrently.
+/// Implementations must be thread-safe. Store-level coordination may block
+/// across handles or processes and must remain bounded.
+///
+/// Paykit does not encrypt state blobs; they contain sensitive private runtime
+/// state and must not be logged. Store them in protected local storage with
+/// backup exclusion unless the app encrypts them, and encrypt them before cloud
+/// or cross-device transport. If the blob is lost, private runtime state cannot
+/// be safely reconstructed from homeserver data alone.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkStateBlobStore: Send + Sync {
     /// Load the current SDK state blob, when one exists.
+    ///
+    /// The blob and revision must be a coherent snapshot of the same committed
+    /// state.
     fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError>;
 
-    /// Atomically save a new SDK state blob.
+    /// Atomically replace the complete SDK state blob.
     ///
-    /// `expected_revision` is `None` when no previous blob was loaded. The
-    /// platform store should reject the write if the stored revision changed.
+    /// `expected_revision` is `None` when no previous blob was loaded and
+    /// matches only an absent stored blob. Otherwise it must match the current
+    /// stored revision. Return a new opaque revision after a successful write.
+    /// On conflict or failure, leave the stored data intact and return the
+    /// binding's storage error variant; Paykit does not automatically retry.
     fn save_state_blob_atomically(
         &self,
         blob: Arc<FfiSdkStateBlob>,
