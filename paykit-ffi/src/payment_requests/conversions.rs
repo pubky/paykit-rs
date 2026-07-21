@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use paykit_lib::{
-    BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestId,
-    PaymentRequestTerms, Recurrence, RecurrenceUnit,
+    BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestTerms,
+    Recurrence, RecurrenceUnit,
 };
 use paykit_sdk::{
     AmountRecord, BillingPeriodRecord, PaymentProofRecord, PaymentRequestFilter,
@@ -16,6 +16,9 @@ use crate::{
     session::{app_public_key, parse_public_key as parse_pubky_public_key, parse_receiver_path},
     PaykitFfiError,
 };
+
+use crate::conversions_common::parse_endpoint_identifier;
+pub(super) use crate::conversions_common::parse_payment_request_id;
 
 use super::{
     FfiBillingPeriod, FfiPaymentProofRecord, FfiPaymentProofSubmission, FfiPaymentReference,
@@ -287,14 +290,6 @@ pub(super) fn payment_request_records_to_ffi(
 
 pub(super) fn parse_public_key(value: String) -> Result<PubkyPublicKey, PaykitFfiError> {
     parse_pubky_public_key(value)
-}
-
-pub(super) fn parse_payment_request_id(value: String) -> Result<PaymentRequestId, PaykitFfiError> {
-    PaymentRequestId::new(value).map_err(|err| validation_error(err.to_string()))
-}
-
-fn parse_endpoint_identifier(value: String) -> Result<PaymentEndpointIdentifier, PaykitFfiError> {
-    PaymentEndpointIdentifier::new(value).map_err(|err| validation_error(err.to_string()))
 }
 
 fn parse_recurrence_unit(value: &str) -> Result<RecurrenceUnit, PaykitFfiError> {

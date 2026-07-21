@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use paykit_lib::{
-    PaymentAmount, PaymentEndpointIdentifier, PaymentRequestId, ReceiptDraft, ReceiptId,
-};
+use paykit_lib::{PaymentAmount, ReceiptDraft, ReceiptId};
 use paykit_sdk::{
     AmountRecord, ReceiptAccessView, ReceiptDraftBuilder, ReceiptIssuanceStatus,
     ReceiptIssuanceView, ReceiptRecord, ReceiptRetrievalStatus,
@@ -15,6 +13,8 @@ use crate::{
     session::{app_public_key, parse_public_key as parse_pubky_public_key},
     PaykitFfiError,
 };
+
+use crate::conversions_common::{parse_endpoint_identifier, parse_payment_request_id};
 
 use super::{
     FfiReceiptAccessView, FfiReceiptAmount, FfiReceiptDraft, FfiReceiptIssuanceStatus,
@@ -183,12 +183,4 @@ pub(super) fn parse_public_key(
 
 fn parse_receipt_id(value: String) -> Result<ReceiptId, PaykitFfiError> {
     ReceiptId::new(value).map_err(|err| validation_error(err.to_string()))
-}
-
-fn parse_payment_request_id(value: String) -> Result<PaymentRequestId, PaykitFfiError> {
-    PaymentRequestId::new(value).map_err(|err| validation_error(err.to_string()))
-}
-
-fn parse_endpoint_identifier(value: String) -> Result<PaymentEndpointIdentifier, PaykitFfiError> {
-    PaymentEndpointIdentifier::new(value).map_err(|err| validation_error(err.to_string()))
 }
