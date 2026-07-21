@@ -33,6 +33,8 @@ pub enum PrivatePaymentResolutionStatus {
     NoEndpoint,
     /// Private Payment Endpoints exist but are unsupported.
     UnsupportedEndpoint,
+    /// No Private Payment List newer than the caller's consumed version is available.
+    WaitingForUpdatedPaymentList,
 }
 
 /// Private state observed while resolving a Private Payment List.
@@ -108,6 +110,12 @@ pub struct PrivateContactPaymentResolution {
     pub status: PrivatePaymentResolutionStatus,
     /// Encrypted Link and Private Payment List state observed during resolution.
     pub state: PrivatePaymentResolutionState,
+    /// Local stream version of the Private Payment List used for this result.
+    ///
+    /// Treat this value as an opaque freshness token scoped to this SDK state,
+    /// counterparty, and counterparty receiver path. A payable result always
+    /// includes a version.
+    pub private_payment_list_version: Option<u64>,
     /// Payable private Payment Endpoints in adapter-preferred order.
     pub payable_endpoints: Vec<ResolvedPrivatePaymentEndpoint>,
 }
@@ -117,6 +125,10 @@ impl fmt::Debug for PrivateContactPaymentResolution {
         f.debug_struct("PrivateContactPaymentResolution")
             .field("status", &self.status)
             .field("state", &self.state)
+            .field(
+                "private_payment_list_version",
+                &self.private_payment_list_version,
+            )
             .field("payable_endpoints", &self.payable_endpoints)
             .finish()
     }

@@ -149,10 +149,14 @@ Common workflows:
   payment when the freshest private endpoints matter
 - call `resolve_private_contact_payment` for Private Payment List endpoints or
   `resolve_public_contact_payment` for public Payment Endpoints; each returns a
-  source-specific result with ordered adapter-built `PaymentTarget` values
+  source-specific result with ordered adapter-built `PaymentTarget` values;
+  private results also include an opaque `private_payment_list_version`, and
+  passing the last consumed version back prevents every endpoint from that
+  Private Payment List from being reused
 - call `prepare_and_resolve_private_contact_payment` when private payment setup
   should also advance the Encrypted Link and drain pending private work; it
-  never reads or falls back to public Payment Endpoints
+  never reads or falls back to public Payment Endpoints, and accepts the same
+  optional consumed Private Payment List version
 - build receipt drafts with `ReceiptDraftBuilder`; call
   `prepare_receipt_issuance` before receipt network side effects, then
   `process_receipt_issuance`; use `issue_receipt` only when the draft already

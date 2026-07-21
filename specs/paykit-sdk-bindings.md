@@ -142,6 +142,14 @@ possible, drain currently available private send/receive work for the peer,
 then resolve only private endpoints. Public resolution is a separate call with
 a separate result type and no implicit fallback in either direction.
 
+Private resolution and preparation accept an optional consumed Private Payment
+List version. Their private-only result returns the version from the same list
+snapshot as the resolved endpoints. If the available list is not newer, the
+binding returns `waitingForUpdatedPaymentList` with no payable endpoints. The
+app must persist the version before handing a payment to the wallet; consuming
+one endpoint consumes the complete list for that counterparty receiver. A
+newer list is fresh even if it repeats a reusable endpoint.
+
 ## Pubky Session Binding Shape
 
 Bindings should make identity and live-session availability explicit.
@@ -370,9 +378,10 @@ Bindings should expose high-level workflows before low-level records:
   processes outbound delivery
 - prepare and resolve private contact payment: ensure private state when
   possible, drain currently available private send/receive work for the peer,
-  then return a private-only resolution
+  then return a private-only resolution with atomic list-version provenance
 - resolve private contact payment without preparation when cached/private-link
-  state should be used directly
+  state should be used directly, optionally requiring a version newer than the
+  last consumed Private Payment List
 - resolve public contact payment independently, with public-only candidates and
   a public-only result
 - queue and list Payment Requests

@@ -991,15 +991,35 @@ returns `PrivateContactPaymentResolution`, including private state:
 - `NoPrivateEndpoint`
 - `RecoveryPending`
 
+The private resolution input accepts an optional
+`after_private_payment_list_version`. The private result carries the
+`private_payment_list_version` from the same local Private Payment List
+snapshot as its endpoints. When the available version is not newer than the
+input version, resolution returns `WaitingForUpdatedPaymentList` with no
+payable endpoints. These versions are opaque local freshness tokens scoped to
+one SDK state, counterparty, and counterparty receiver path; they are not the
+serialized Private Application Message schema version.
+
+The application owns consumption. Submitting, pending, or uncertain payment
+execution should persist the returned version as consumed before another
+payment is resolved for that peer and receiver path. Applications should
+serialize this handoff per counterparty and counterparty receiver path. Using
+one endpoint consumes every endpoint in that Private Payment List. A newer
+list is fresh as a whole and may intentionally repeat reusable Payment
+Endpoints.
+
 `prepare_and_resolve_private_contact_payment` may first advance the Encrypted
 Link and drain currently available private send/receive work, then invokes the
-same private-only resolution. It never falls back to public Payment Endpoints.
+same private-only resolution with the optional consumed version. It never
+falls back to public Payment Endpoints.
 
 Both public and private result statuses use `Payable`, `NoEndpoint`, and
-`UnsupportedEndpoint`, but they are distinct enum and result types. When a
-result is `Payable`, its ordered endpoints each include an adapter-built
-`PaymentTarget`. The application explicitly chooses the payment mode; the SDK
-does not combine candidates, results, or fallback policy.
+`UnsupportedEndpoint`; private resolution additionally uses
+`WaitingForUpdatedPaymentList`. Public and private statuses remain distinct
+enum and result types. When a result is `Payable`, its ordered endpoints each
+include an adapter-built `PaymentTarget`. The application explicitly chooses
+the payment mode; the SDK does not combine candidates, results, or fallback
+policy.
 
 ### Send Payment Request
 

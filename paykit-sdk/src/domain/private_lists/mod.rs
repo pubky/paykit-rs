@@ -243,10 +243,13 @@ pub(crate) fn normalize_private_receiving_details(
     for detail in details {
         let identifier = PaymentEndpointIdentifier::new(detail.identifier)?;
         if desired.contains_key(&identifier) {
-            return Err(crate::PaykitSdkError::Protocol(format!(
-                "duplicate Payment Endpoint identifier '{}'",
-                identifier.as_str()
-            )));
+            return Err(crate::PaykitSdkError::Protocol {
+                context: format!(
+                    "duplicate Payment Endpoint identifier '{}'",
+                    identifier.as_str()
+                ),
+                source: None,
+            });
         }
         desired.insert(identifier, PaymentEndpointPayload::new(detail.payload));
     }

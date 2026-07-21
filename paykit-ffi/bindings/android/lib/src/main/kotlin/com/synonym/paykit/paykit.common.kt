@@ -357,9 +357,12 @@ public interface PaykitSdkInterface {
 
     /**
      * Prepare private contact state, then resolve private endpoints.
+     *
+     * Pass the last consumed list version to require a newer Private Payment
+     * List after private messages have been refreshed.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `prepareAndResolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `maxAdvanceSteps`: kotlin.UInt): PreparedPrivateContactPayment
+    public suspend fun `prepareAndResolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `afterPrivatePaymentListVersion`: kotlin.ULong?, `maxAdvanceSteps`: kotlin.UInt): PreparedPrivateContactPayment
 
     /**
      * Prepare a receipt issuance and persist it before network side effects.
@@ -525,9 +528,13 @@ public interface PaykitSdkInterface {
 
     /**
      * Resolve payable private endpoints for one counterparty.
+     *
+     * Pass the last consumed list version to require a newer Private Payment
+     * List. The returned version and endpoints come from the same local list
+     * snapshot.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?): PrivateContactPaymentResolution
+    public suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `afterPrivatePaymentListVersion`: kotlin.ULong?): PrivateContactPaymentResolution
 
     /**
      * Resolve public profile metadata, preferring Paykit Profile.
@@ -2155,6 +2162,10 @@ public data class PrivateContactPaymentResolution (
      */
     val `state`: PrivatePaymentResolutionState,
     /**
+     * Opaque freshness token for the Private Payment List used by this result.
+     */
+    val `privatePaymentListVersion`: kotlin.ULong?,
+    /**
      * Payable private Payment Endpoints in adapter-preferred order.
      */
     val `payableEndpoints`: List<ResolvedPrivatePaymentEndpoint>
@@ -2163,6 +2174,7 @@ public data class PrivateContactPaymentResolution (
         Disposable.destroy(
             this.`status`,
             this.`state`,
+            this.`privatePaymentListVersion`,
             this.`payableEndpoints`,
         )
     }
@@ -3951,6 +3963,10 @@ public enum class PrivatePaymentResolutionStatus {
      * Private Payment Endpoints exist but are unsupported.
      */
     UNSUPPORTED_ENDPOINT,
+    /**
+     * No Private Payment List newer than the caller's consumed version is available.
+     */
+    WAITING_FOR_UPDATED_PAYMENT_LIST,
     /**
      * SDK returned a value this binding version does not understand.
      */

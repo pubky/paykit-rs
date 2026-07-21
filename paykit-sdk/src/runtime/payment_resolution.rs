@@ -14,12 +14,21 @@ where
     ///
     /// This method only reads Private Payment Lists and only invokes the
     /// private payment adapter callbacks. Public Payment Endpoints are never
-    /// considered as fallback candidates.
+    /// considered as fallback candidates. Pass the last consumed
+    /// `private_payment_list_version` as `after_private_payment_list_version`
+    /// to require a newer list. When the current list is not newer, the result
+    /// is `WaitingForUpdatedPaymentList` and contains no payable endpoints.
+    ///
+    /// Versions are opaque local freshness tokens scoped to this SDK state,
+    /// counterparty, and counterparty receiver path. The application owns
+    /// consumption policy and should persist a payable result's version before
+    /// submitting a payment that consumes the whole Private Payment List.
     pub async fn resolve_private_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
         amount: Option<PaymentAmountContext>,
+        after_private_payment_list_version: Option<u64>,
     ) -> Result<PrivateContactPaymentResolution> {
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         let private_live = session_access.is_some();
@@ -82,16 +91,21 @@ where
         } else {
             None
         };
-        let mut candidates = private_candidates(
+        let mut candidate_batch = private_candidate_batch(
             &counterparty,
             &counterparty_receiver_path,
             private_view.as_ref(),
-        );
-        if !candidates.is_empty() {
+        )?;
+        if candidate_batch
+            .as_ref()
+            .is_some_and(PrivatePaymentCandidateBatch::has_candidates)
+        {
             state = PrivatePaymentResolutionState::Available;
         }
 
-        if candidates.is_empty()
+        if candidate_batch
+            .as_ref()
+            .is_none_or(|batch| !batch.has_candidates())
             && private_live
             && state != PrivatePaymentResolutionState::RecoveryPending
         {
@@ -102,27 +116,46 @@ where
                 )
                 .await?
             {
-                PrivateRecoveryOutcome::Refreshed(refreshed) if !refreshed.is_empty() => {
-                    candidates = refreshed;
-                    state = PrivatePaymentResolutionState::Available;
+                PrivateRecoveryOutcome::Refreshed(refreshed) => {
+                    candidate_batch = refreshed;
+                    if candidate_batch
+                        .as_ref()
+                        .is_some_and(PrivatePaymentCandidateBatch::has_candidates)
+                    {
+                        state = PrivatePaymentResolutionState::Available;
+                    }
                 }
                 PrivateRecoveryOutcome::Pending => {
                     state = PrivatePaymentResolutionState::RecoveryPending;
                 }
-                PrivateRecoveryOutcome::NotNeeded | PrivateRecoveryOutcome::Refreshed(_) => {}
+                PrivateRecoveryOutcome::NotNeeded => {}
             }
         }
 
-        if candidates.is_empty() {
-            return Ok(unresolved_private_resolution(false, state));
+        let Some(candidate_batch) = candidate_batch else {
+            return Ok(unresolved_private_resolution(false, state, None));
+        };
+        if !candidate_batch.is_newer_than(after_private_payment_list_version) {
+            return Ok(waiting_for_updated_private_payment_list(
+                state,
+                candidate_batch.private_payment_list_version,
+            ));
+        }
+        if !candidate_batch.has_candidates() {
+            return Ok(unresolved_private_resolution(
+                false,
+                state,
+                Some(candidate_batch.private_payment_list_version),
+            ));
         }
 
         self.resolve_private_candidate_batch(
             counterparty,
             counterparty_receiver_path,
             amount,
-            candidates,
+            candidate_batch.candidates,
             state,
+            candidate_batch.private_payment_list_version,
         )
         .await
     }
@@ -157,12 +190,15 @@ where
     ///
     /// The SDK ensures or advances the Encrypted Link when a live session is
     /// available, drains currently available private send/receive work for the
-    /// peer, and resolves only the counterparty's Private Payment List.
+    /// peer, and resolves only the counterparty's Private Payment List. Pass
+    /// the last consumed list version as `after_private_payment_list_version`
+    /// to return `WaitingForUpdatedPaymentList` until a newer list is received.
     pub async fn prepare_and_resolve_private_contact_payment(
         &self,
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
         amount: Option<PaymentAmountContext>,
+        after_private_payment_list_version: Option<u64>,
         max_advance_steps: u32,
     ) -> Result<PreparedPrivateContactPayment> {
         let mut link_report = None;
@@ -204,7 +240,12 @@ where
         }
 
         let resolution = self
-            .resolve_private_contact_payment(counterparty, counterparty_receiver_path, amount)
+            .resolve_private_contact_payment(
+                counterparty,
+                counterparty_receiver_path,
+                amount,
+                after_private_payment_list_version,
+            )
             .await?;
 
         Ok(PreparedPrivateContactPayment {
@@ -323,11 +364,11 @@ where
                     counterparty_receiver_path,
                 )
                 .await?;
-                Ok(PrivateRecoveryOutcome::Refreshed(private_candidates(
+                Ok(PrivateRecoveryOutcome::Refreshed(private_candidate_batch(
                     counterparty,
                     counterparty_receiver_path,
                     private_view.as_ref(),
-                )))
+                )?))
             }
             Err(PaykitSdkError::Policy { .. })
             | Err(PaykitSdkError::RecoveryRequired { .. })
@@ -429,6 +470,7 @@ where
         amount: Option<PaymentAmountContext>,
         candidates: Vec<PrivatePaymentEndpointCandidate>,
         state: PrivatePaymentResolutionState,
+        private_payment_list_version: u64,
     ) -> Result<PrivateContactPaymentResolution> {
         let payable = self
             .payment
@@ -442,24 +484,35 @@ where
         let payable = private_payable_from_batch(&payable, &candidates)?;
         let payable_endpoints = self.build_private_payable_endpoints(payable).await?;
         if payable_endpoints.is_empty() {
-            return Ok(unresolved_private_resolution(true, state));
+            return Ok(unresolved_private_resolution(
+                true,
+                state,
+                Some(private_payment_list_version),
+            ));
         }
         Ok(PrivateContactPaymentResolution {
             status: PrivatePaymentResolutionStatus::Payable,
             state,
+            private_payment_list_version: Some(private_payment_list_version),
             payable_endpoints,
         })
     }
 }
 
-fn private_candidates(
+fn private_candidate_batch(
     counterparty: &PubkyPublicKey,
     counterparty_receiver_path: &PaykitReceiverPath,
     view: Option<&PrivatePaymentListView>,
-) -> Vec<PrivatePaymentEndpointCandidate> {
+) -> Result<Option<PrivatePaymentCandidateBatch>> {
     let Some(view) = view else {
-        return Vec::new();
+        return Ok(None);
     };
+    let private_payment_list_version =
+        view.latest_stream_item_id
+            .ok_or_else(|| PaykitSdkError::Protocol {
+                context: "current Private Payment List has no stream item id".into(),
+                source: None,
+            })?;
     let mut candidates = view
         .payment_endpoints
         .iter()
@@ -471,7 +524,25 @@ fn private_candidates(
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.identifier.cmp(&right.identifier));
-    candidates
+    Ok(Some(PrivatePaymentCandidateBatch {
+        private_payment_list_version,
+        candidates,
+    }))
+}
+
+pub(super) struct PrivatePaymentCandidateBatch {
+    private_payment_list_version: u64,
+    candidates: Vec<PrivatePaymentEndpointCandidate>,
+}
+
+impl PrivatePaymentCandidateBatch {
+    fn has_candidates(&self) -> bool {
+        !self.candidates.is_empty()
+    }
+
+    fn is_newer_than(&self, previous_version: Option<u64>) -> bool {
+        previous_version.is_none_or(|version| self.private_payment_list_version > version)
+    }
 }
 
 pub(super) fn merge_outbound_report(
@@ -516,7 +587,7 @@ fn receive_report_made_progress(report: &PrivateStreamIntakeReport) -> bool {
 pub(super) enum PrivateRecoveryOutcome {
     NotNeeded,
     Pending,
-    Refreshed(Vec<PrivatePaymentEndpointCandidate>),
+    Refreshed(Option<PrivatePaymentCandidateBatch>),
 }
 
 fn unresolved_public_resolution(had_candidates: bool) -> PublicContactPaymentResolution {
@@ -533,6 +604,7 @@ fn unresolved_public_resolution(had_candidates: bool) -> PublicContactPaymentRes
 fn unresolved_private_resolution(
     had_candidates: bool,
     state: PrivatePaymentResolutionState,
+    private_payment_list_version: Option<u64>,
 ) -> PrivateContactPaymentResolution {
     PrivateContactPaymentResolution {
         status: if had_candidates {
@@ -541,6 +613,19 @@ fn unresolved_private_resolution(
             PrivatePaymentResolutionStatus::NoEndpoint
         },
         state,
+        private_payment_list_version,
+        payable_endpoints: Vec::new(),
+    }
+}
+
+fn waiting_for_updated_private_payment_list(
+    state: PrivatePaymentResolutionState,
+    private_payment_list_version: u64,
+) -> PrivateContactPaymentResolution {
+    PrivateContactPaymentResolution {
+        status: PrivatePaymentResolutionStatus::WaitingForUpdatedPaymentList,
+        state,
+        private_payment_list_version: Some(private_payment_list_version),
         payable_endpoints: Vec::new(),
     }
 }

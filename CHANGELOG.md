@@ -9,6 +9,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [0.1.0-rc38] - 2026-07-20
 
+### Added
+- Private payment resolution now returns an opaque Private Payment List version
+  and accepts the last consumed version, returning a distinct waiting status
+  until a newer complete list is available.
+
 ### Changed
 - **Breaking (Rust API):** `PaykitSdkError::NotFound`, `Protocol`, `Policy`,
   and `RecoveryRequired` changed from tuple variants (`NotFound(String)`) to

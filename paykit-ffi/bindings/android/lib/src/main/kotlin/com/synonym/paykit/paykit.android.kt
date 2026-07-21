@@ -1702,7 +1702,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 32211.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_contact_payment() != 962.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_contact_payment() != 46826.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 38644.toShort()) {
@@ -1786,7 +1786,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 57380.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 58313.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 52408.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_profile() != 46263.toShort()) {
@@ -2761,6 +2761,7 @@ internal object UniffiLib : Library {
         `counterparty`: RustBufferByValue,
         `counterpartyReceiverPath`: RustBufferByValue,
         `amount`: RustBufferByValue,
+        `afterPrivatePaymentListVersion`: RustBufferByValue,
         `maxAdvanceSteps`: Int,
     ): Long
     @JvmStatic
@@ -2924,6 +2925,7 @@ internal object UniffiLib : Library {
         `counterparty`: RustBufferByValue,
         `counterpartyReceiverPath`: RustBufferByValue,
         `amount`: RustBufferByValue,
+        `afterPrivatePaymentListVersion`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_resolve_profile(
@@ -5087,9 +5089,12 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
 
     /**
      * Prepare private contact state, then resolve private endpoints.
+     *
+     * Pass the last consumed list version to require a newer Private Payment
+     * List after private messages have been refreshed.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `prepareAndResolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `maxAdvanceSteps`: kotlin.UInt): PreparedPrivateContactPayment {
+    public override suspend fun `prepareAndResolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `afterPrivatePaymentListVersion`: kotlin.ULong?, `maxAdvanceSteps`: kotlin.UInt): PreparedPrivateContactPayment {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_prepare_and_resolve_private_contact_payment(
@@ -5097,6 +5102,7 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
                     FfiConverterString.lower(`counterparty`),
                     FfiConverterString.lower(`counterpartyReceiverPath`),
                     FfiConverterOptionalTypeFfiPaymentAmountContext.lower(`amount`),
+                    FfiConverterOptionalULong.lower(`afterPrivatePaymentListVersion`),
                     FfiConverterUInt.lower(`maxAdvanceSteps`),
                 )
             },
@@ -5755,9 +5761,13 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
 
     /**
      * Resolve payable private endpoints for one counterparty.
+     *
+     * Pass the last consumed list version to require a newer Private Payment
+     * List. The returned version and endpoints come from the same local list
+     * snapshot.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?): PrivateContactPaymentResolution {
+    public override suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `afterPrivatePaymentListVersion`: kotlin.ULong?): PrivateContactPaymentResolution {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_resolve_private_contact_payment(
@@ -5765,6 +5775,7 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
                     FfiConverterString.lower(`counterparty`),
                     FfiConverterString.lower(`counterpartyReceiverPath`),
                     FfiConverterOptionalTypeFfiPaymentAmountContext.lower(`amount`),
+                    FfiConverterOptionalULong.lower(`afterPrivatePaymentListVersion`),
                 )
             },
             { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -10458,6 +10469,7 @@ public object FfiConverterTypePrivateContactPaymentResolution: FfiConverterRustB
         return PrivateContactPaymentResolution(
             FfiConverterTypePrivatePaymentResolutionStatus.read(buf),
             FfiConverterTypePrivatePaymentResolutionState.read(buf),
+            FfiConverterOptionalULong.read(buf),
             FfiConverterSequenceTypeResolvedPrivatePaymentEndpoint.read(buf),
         )
     }
@@ -10465,12 +10477,14 @@ public object FfiConverterTypePrivateContactPaymentResolution: FfiConverterRustB
     override fun allocationSize(value: PrivateContactPaymentResolution): ULong = (
             FfiConverterTypePrivatePaymentResolutionStatus.allocationSize(value.`status`) +
             FfiConverterTypePrivatePaymentResolutionState.allocationSize(value.`state`) +
+            FfiConverterOptionalULong.allocationSize(value.`privatePaymentListVersion`) +
             FfiConverterSequenceTypeResolvedPrivatePaymentEndpoint.allocationSize(value.`payableEndpoints`)
     )
 
     override fun write(value: PrivateContactPaymentResolution, buf: ByteBuffer) {
         FfiConverterTypePrivatePaymentResolutionStatus.write(value.`status`, buf)
         FfiConverterTypePrivatePaymentResolutionState.write(value.`state`, buf)
+        FfiConverterOptionalULong.write(value.`privatePaymentListVersion`, buf)
         FfiConverterSequenceTypeResolvedPrivatePaymentEndpoint.write(value.`payableEndpoints`, buf)
     }
 }

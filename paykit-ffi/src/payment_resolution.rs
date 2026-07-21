@@ -38,6 +38,8 @@ pub enum FfiPrivatePaymentResolutionStatus {
     NoEndpoint,
     /// Private Payment Endpoints exist but are unsupported.
     UnsupportedEndpoint,
+    /// No Private Payment List newer than the caller's consumed version is available.
+    WaitingForUpdatedPaymentList,
     /// SDK returned a value this binding version does not understand.
     Unknown,
 }
@@ -101,6 +103,8 @@ pub struct FfiPrivateContactPaymentResolution {
     pub status: FfiPrivatePaymentResolutionStatus,
     /// Encrypted Link and Private Payment List state observed during resolution.
     pub state: FfiPrivatePaymentResolutionState,
+    /// Opaque freshness token for the Private Payment List used by this result.
+    pub private_payment_list_version: Option<u64>,
     /// Payable private Payment Endpoints in adapter-preferred order.
     pub payable_endpoints: Vec<FfiResolvedPrivatePaymentEndpoint>,
 }
@@ -121,17 +125,23 @@ pub struct FfiPreparedPrivateContactPayment {
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Resolve payable private endpoints for one counterparty.
+    ///
+    /// Pass the last consumed list version to require a newer Private Payment
+    /// List. The returned version and endpoints come from the same local list
+    /// snapshot.
     pub async fn resolve_private_contact_payment(
         &self,
         counterparty: String,
         counterparty_receiver_path: String,
         amount: Option<FfiPaymentAmountContext>,
+        after_private_payment_list_version: Option<u64>,
     ) -> Result<FfiPrivateContactPaymentResolution, PaykitFfiError> {
         self.runtime
             .resolve_private_contact_payment(
                 parse_public_key(counterparty)?,
                 parse_receiver_path(counterparty_receiver_path)?,
                 amount.map(Into::into),
+                after_private_payment_list_version,
             )
             .await
             .map(Into::into)
@@ -157,11 +167,15 @@ impl FfiPaykitSdk {
     }
 
     /// Prepare private contact state, then resolve private endpoints.
+    ///
+    /// Pass the last consumed list version to require a newer Private Payment
+    /// List after private messages have been refreshed.
     pub async fn prepare_and_resolve_private_contact_payment(
         &self,
         counterparty: String,
         counterparty_receiver_path: String,
         amount: Option<FfiPaymentAmountContext>,
+        after_private_payment_list_version: Option<u64>,
         max_advance_steps: u32,
     ) -> Result<FfiPreparedPrivateContactPayment, PaykitFfiError> {
         self.runtime
@@ -169,6 +183,7 @@ impl FfiPaykitSdk {
                 parse_public_key(counterparty)?,
                 parse_receiver_path(counterparty_receiver_path)?,
                 amount.map(Into::into),
+                after_private_payment_list_version,
                 max_advance_steps,
             )
             .await
@@ -194,6 +209,9 @@ impl From<PrivatePaymentResolutionStatus> for FfiPrivatePaymentResolutionStatus 
             PrivatePaymentResolutionStatus::Payable => Self::Payable,
             PrivatePaymentResolutionStatus::NoEndpoint => Self::NoEndpoint,
             PrivatePaymentResolutionStatus::UnsupportedEndpoint => Self::UnsupportedEndpoint,
+            PrivatePaymentResolutionStatus::WaitingForUpdatedPaymentList => {
+                Self::WaitingForUpdatedPaymentList
+            }
             _ => Self::Unknown,
         }
     }
@@ -280,6 +298,7 @@ impl From<PrivateContactPaymentResolution> for FfiPrivateContactPaymentResolutio
         Self {
             status: value.status.into(),
             state: value.state.into(),
+            private_payment_list_version: value.private_payment_list_version,
             payable_endpoints: value
                 .payable_endpoints
                 .into_iter()
@@ -333,6 +352,7 @@ mod tests {
         let resolution = PrivateContactPaymentResolution {
             status: PrivatePaymentResolutionStatus::Payable,
             state: PrivatePaymentResolutionState::Available,
+            private_payment_list_version: Some(7),
             payable_endpoints: vec![ResolvedPrivatePaymentEndpoint {
                 endpoint: PrivatePaymentEndpointCandidate {
                     counterparty: public_key(),
@@ -350,9 +370,22 @@ mod tests {
 
         assert_eq!(ffi.status, FfiPrivatePaymentResolutionStatus::Payable);
         assert_eq!(ffi.state, FfiPrivatePaymentResolutionState::Available);
+        assert_eq!(ffi.private_payment_list_version, Some(7));
         assert_eq!(
             ffi.payable_endpoints[0].payload.export_text(),
             "bc1qprivate"
+        );
+    }
+
+    #[test]
+    fn test_private_payment_resolution_maps_waiting_status() {
+        let status = FfiPrivatePaymentResolutionStatus::from(
+            PrivatePaymentResolutionStatus::WaitingForUpdatedPaymentList,
+        );
+
+        assert_eq!(
+            status,
+            FfiPrivatePaymentResolutionStatus::WaitingForUpdatedPaymentList
         );
     }
 }

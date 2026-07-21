@@ -117,12 +117,14 @@ async fn test_resolve_private_candidate_batch_preserves_private_state() {
             None,
             vec![endpoint],
             PrivatePaymentResolutionState::RecoveryPending,
+            7,
         )
         .await
         .unwrap();
 
     assert_eq!(result.status, PrivatePaymentResolutionStatus::Payable);
     assert_eq!(result.state, PrivatePaymentResolutionState::RecoveryPending);
+    assert_eq!(result.private_payment_list_version, Some(7));
     assert_eq!(result.payable_endpoints.len(), 1);
 }
 
@@ -192,6 +194,7 @@ async fn test_resolve_private_contact_payment_hides_cached_list_without_identity
                 value: "10.00".into(),
                 asset: "usd".into(),
             }),
+            None,
         )
         .await;
 
@@ -201,6 +204,7 @@ async fn test_resolve_private_contact_payment_hides_cached_list_without_identity
         result.state,
         PrivatePaymentResolutionState::NoPrivateEndpoint
     );
+    assert_eq!(result.private_payment_list_version, None);
     assert!(result.payable_endpoints.is_empty());
     assert!(sdk
         .current_private_payment_list(&counterparty, &receiver_path())
@@ -253,13 +257,108 @@ async fn test_resolve_private_contact_payment_uses_cached_list_without_live_sess
                 value: "10.00".into(),
                 asset: "usd".into(),
             }),
+            None,
         )
         .await
         .unwrap();
 
     assert_eq!(result.status, PrivatePaymentResolutionStatus::Payable);
     assert_eq!(result.state, PrivatePaymentResolutionState::Available);
+    assert_eq!(result.private_payment_list_version, Some(0));
     assert_eq!(result.payable_endpoints[0].endpoint.payload, "ln-private");
+}
+
+#[tokio::test]
+async fn test_resolve_private_contact_payment_waits_after_current_list_version() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
+                &pubky::Keypair::random().public_key(),
+            )),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+            initialized_at: FixedClock.now(),
+            sign_out_generation: 0,
+        })
+        .await
+        .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        vec![private_list_message("ln-private")],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .resolve_private_contact_payment(counterparty, receiver_path(), None, Some(0))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.status,
+        PrivatePaymentResolutionStatus::WaitingForUpdatedPaymentList
+    );
+    assert_eq!(result.state, PrivatePaymentResolutionState::Available);
+    assert_eq!(result.private_payment_list_version, Some(0));
+    assert!(result.payable_endpoints.is_empty());
+}
+
+#[tokio::test]
+async fn test_resolve_private_contact_payment_accepts_newer_repeated_endpoint() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
+                &pubky::Keypair::random().public_key(),
+            )),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+            initialized_at: FixedClock.now(),
+            sign_out_generation: 0,
+        })
+        .await
+        .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        vec![
+            private_list_message("ln-reusable"),
+            private_list_message("ln-reusable"),
+        ],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .resolve_private_contact_payment(counterparty, receiver_path(), None, Some(0))
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, PrivatePaymentResolutionStatus::Payable);
+    assert_eq!(result.private_payment_list_version, Some(1));
+    assert_eq!(result.payable_endpoints[0].endpoint.payload, "ln-reusable");
 }
 
 #[tokio::test]
@@ -299,11 +398,12 @@ async fn test_resolve_private_contact_payment_uses_private_candidates_only() {
     );
 
     let result = sdk
-        .resolve_private_contact_payment(counterparty, receiver_path(), None)
+        .resolve_private_contact_payment(counterparty, receiver_path(), None, None)
         .await
         .unwrap();
 
     assert_eq!(result.status, PrivatePaymentResolutionStatus::Payable);
+    assert_eq!(result.private_payment_list_version, Some(0));
     assert_eq!(result.payable_endpoints[0].endpoint.payload, "ln-private");
 }
 
@@ -367,12 +467,14 @@ async fn test_resolve_private_contact_payment_does_not_use_cached_list_while_lin
                 value: "10.00".into(),
                 asset: "usd".into(),
             }),
+            None,
         )
         .await
         .unwrap();
 
     assert_eq!(result.status, PrivatePaymentResolutionStatus::NoEndpoint);
     assert_eq!(result.state, PrivatePaymentResolutionState::RecoveryPending);
+    assert_eq!(result.private_payment_list_version, None);
     assert!(result.payable_endpoints.is_empty());
 }
 

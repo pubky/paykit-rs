@@ -733,8 +733,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Prepare private contact state, then resolve private endpoints.
+     *
+     * Pass the last consumed list version to require a newer Private Payment
+     * List after private messages have been refreshed.
      */
-    func prepareAndResolvePrivateContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?, maxAdvanceSteps: UInt32) async throws  -> PreparedPrivateContactPayment
+    func prepareAndResolvePrivateContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?, afterPrivatePaymentListVersion: UInt64?, maxAdvanceSteps: UInt32) async throws  -> PreparedPrivateContactPayment
 
     /**
      * Prepare a receipt issuance and persist it before network side effects.
@@ -873,8 +876,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Resolve payable private endpoints for one counterparty.
+     *
+     * Pass the last consumed list version to require a newer Private Payment
+     * List. The returned version and endpoints come from the same local list
+     * snapshot.
      */
-    func resolvePrivateContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?) async throws  -> PrivateContactPaymentResolution
+    func resolvePrivateContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?, afterPrivatePaymentListVersion: UInt64?) async throws  -> PrivateContactPaymentResolution
 
     /**
      * Resolve public profile metadata, preferring Paykit Profile.
@@ -1885,14 +1892,17 @@ open func pendingOutboundPrivateCounterparties()async throws  -> [CounterpartyRe
 
     /**
      * Prepare private contact state, then resolve private endpoints.
+     *
+     * Pass the last consumed list version to require a newer Private Payment
+     * List after private messages have been refreshed.
      */
-open func prepareAndResolvePrivateContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?, maxAdvanceSteps: UInt32)async throws  -> PreparedPrivateContactPayment  {
+open func prepareAndResolvePrivateContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?, afterPrivatePaymentListVersion: UInt64?, maxAdvanceSteps: UInt32)async throws  -> PreparedPrivateContactPayment  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_prepare_and_resolve_private_contact_payment(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterOptionTypePaymentAmountContext.lower(amount),FfiConverterUInt32.lower(maxAdvanceSteps)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterOptionTypePaymentAmountContext.lower(amount),FfiConverterOptionUInt64.lower(afterPrivatePaymentListVersion),FfiConverterUInt32.lower(maxAdvanceSteps)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2445,14 +2455,18 @@ open func resolveContactProfile(publicKey: String, receiverPath: String, allowPu
 
     /**
      * Resolve payable private endpoints for one counterparty.
+     *
+     * Pass the last consumed list version to require a newer Private Payment
+     * List. The returned version and endpoints come from the same local list
+     * snapshot.
      */
-open func resolvePrivateContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?)async throws  -> PrivateContactPaymentResolution  {
+open func resolvePrivateContactPayment(counterparty: String, counterpartyReceiverPath: String, amount: PaymentAmountContext?, afterPrivatePaymentListVersion: UInt64?)async throws  -> PrivateContactPaymentResolution  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_resolve_private_contact_payment(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterOptionTypePaymentAmountContext.lower(amount)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterOptionTypePaymentAmountContext.lower(amount),FfiConverterOptionUInt64.lower(afterPrivatePaymentListVersion)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -9586,6 +9600,10 @@ public struct PrivateContactPaymentResolution {
      */
     public var state: PrivatePaymentResolutionState
     /**
+     * Opaque freshness token for the Private Payment List used by this result.
+     */
+    public var privatePaymentListVersion: UInt64?
+    /**
      * Payable private Payment Endpoints in adapter-preferred order.
      */
     public var payableEndpoints: [ResolvedPrivatePaymentEndpoint]
@@ -9600,10 +9618,14 @@ public struct PrivateContactPaymentResolution {
          * Encrypted Link and Private Payment List state observed during resolution.
          */state: PrivatePaymentResolutionState,
         /**
+         * Opaque freshness token for the Private Payment List used by this result.
+         */privatePaymentListVersion: UInt64?,
+        /**
          * Payable private Payment Endpoints in adapter-preferred order.
          */payableEndpoints: [ResolvedPrivatePaymentEndpoint]) {
         self.status = status
         self.state = state
+        self.privatePaymentListVersion = privatePaymentListVersion
         self.payableEndpoints = payableEndpoints
     }
 }
@@ -9623,6 +9645,7 @@ public struct FfiConverterTypePrivateContactPaymentResolution: FfiConverterRustB
             try PrivateContactPaymentResolution(
                 status: FfiConverterTypePrivatePaymentResolutionStatus.read(from: &buf),
                 state: FfiConverterTypePrivatePaymentResolutionState.read(from: &buf),
+                privatePaymentListVersion: FfiConverterOptionUInt64.read(from: &buf),
                 payableEndpoints: FfiConverterSequenceTypeResolvedPrivatePaymentEndpoint.read(from: &buf)
         )
     }
@@ -9630,6 +9653,7 @@ public struct FfiConverterTypePrivateContactPaymentResolution: FfiConverterRustB
     public static func write(_ value: PrivateContactPaymentResolution, into buf: inout [UInt8]) {
         FfiConverterTypePrivatePaymentResolutionStatus.write(value.status, into: &buf)
         FfiConverterTypePrivatePaymentResolutionState.write(value.state, into: &buf)
+        FfiConverterOptionUInt64.write(value.privatePaymentListVersion, into: &buf)
         FfiConverterSequenceTypeResolvedPrivatePaymentEndpoint.write(value.payableEndpoints, into: &buf)
     }
 }
@@ -14859,6 +14883,10 @@ public enum PrivatePaymentResolutionStatus {
      */
     case unsupportedEndpoint
     /**
+     * No Private Payment List newer than the caller's consumed version is available.
+     */
+    case waitingForUpdatedPaymentList
+    /**
      * SDK returned a value this binding version does not understand.
      */
     case unknown
@@ -14885,7 +14913,9 @@ public struct FfiConverterTypePrivatePaymentResolutionStatus: FfiConverterRustBu
 
         case 3: return .unsupportedEndpoint
 
-        case 4: return .unknown
+        case 4: return .waitingForUpdatedPaymentList
+
+        case 5: return .unknown
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -14907,8 +14937,12 @@ public struct FfiConverterTypePrivatePaymentResolutionStatus: FfiConverterRustBu
             writeInt(&buf, Int32(3))
 
 
-        case .unknown:
+        case .waitingForUpdatedPaymentList:
             writeInt(&buf, Int32(4))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(5))
 
         }
     }
@@ -17928,7 +17962,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 32211) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_contact_payment() != 962) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_contact_payment() != 46826) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 38644) {
@@ -18012,7 +18046,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 57380) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 58313) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 52408) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_profile() != 46263) {
