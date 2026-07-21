@@ -211,7 +211,7 @@ async fn test_enqueue_private_payment_list_with_link_lease_rejects_stale_lease()
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     assert!(
         queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
             .await

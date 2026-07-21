@@ -6,6 +6,7 @@ use chacha20poly1305::{
 
 use zeroize::Zeroize;
 
+use crate::validation::invalid_plaintext_json;
 use crate::{PaykitError, PaykitReceiverPath, Result};
 
 use super::{
@@ -93,42 +94,44 @@ impl Receipt {
         key: &ReceiptDecryptionKey,
         location: &str,
     ) -> Result<Self> {
+        // The serde error can embed fragments of the fetched document; keep the
+        // context static and leave the detail in `source`, which stays local.
         let wire: EncryptedReceiptWire =
             serde_json::from_str(encrypted_json).map_err(|err| PaykitError::InvalidData {
-                context: format!("failed to parse encrypted receipt JSON: {err}"),
+                context: "failed to parse encrypted receipt JSON".into(),
                 source: Some(err.into()),
             })?;
         if wire.version != 1
             || wire.kind != "paykit.receipt.encrypted"
             || wire.algorithm != RECEIPT_ENCRYPTION_ALGORITHM
         {
+            // The offending values are fetched-document content; keep the
+            // context static so they never cross the FFI as exception text.
             return Err(PaykitError::InvalidData {
-                context: format!(
-                    "unsupported encrypted receipt envelope version/kind/algorithm: {}/{}/{}",
-                    wire.version, wire.kind, wire.algorithm
-                ),
+                context: "unsupported encrypted receipt envelope version/kind/algorithm".into(),
                 source: None,
             });
         }
+        // base64 DecodeError Display renders the offending byte and offset of
+        // the fetched document; keep these contexts static and leave the
+        // detail in `source`, which stays local. The nonce-length echo is
+        // likewise fetched-document derived, so it stays static too.
         let nonce = URL_SAFE_NO_PAD
             .decode(wire.nonce)
             .map_err(|err| PaykitError::InvalidData {
-                context: format!("encrypted receipt nonce is not valid base64url: {err}"),
+                context: "encrypted receipt nonce is not valid base64url".into(),
                 source: Some(err.into()),
             })?;
         let ciphertext =
             URL_SAFE_NO_PAD
                 .decode(wire.ciphertext)
                 .map_err(|err| PaykitError::InvalidData {
-                    context: format!("encrypted receipt ciphertext is not valid base64url: {err}"),
+                    context: "encrypted receipt ciphertext is not valid base64url".into(),
                     source: Some(err.into()),
                 })?;
         if nonce.len() != 24 {
             return Err(PaykitError::InvalidData {
-                context: format!(
-                    "encrypted receipt nonce must be 24 bytes, got {}",
-                    nonce.len()
-                ),
+                context: "encrypted receipt nonce must be 24 bytes".into(),
                 source: None,
             });
         }
@@ -148,11 +151,12 @@ impl Receipt {
                 context: format!("failed to decrypt receipt: {err}"),
                 source: None,
             })?;
-        let receipt_wire: ReceiptWire =
-            serde_json::from_slice(&plaintext).map_err(|err| PaykitError::InvalidData {
-                context: format!("failed to parse receipt plaintext JSON: {err}"),
-                source: Some(err.into()),
-            })?;
+        // SECURITY / REDACTION: the serde error is derived from DECRYPTED
+        // receipt plaintext (its Display embeds field values on type
+        // mismatches), so it must not be folded into the context or kept as
+        // `source` -- this error crosses the FFI boundary as exception text.
+        let receipt_wire: ReceiptWire = serde_json::from_slice(&plaintext)
+            .map_err(|_| invalid_plaintext_json("failed to parse receipt plaintext JSON"))?;
         let receipt = Self::try_from(receipt_wire)?;
         if !ReceiptAccess::location_matches_receipt_id(location, &receipt.receipt_id) {
             return Err(PaykitError::InvalidData {

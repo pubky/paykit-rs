@@ -70,10 +70,9 @@ where
             receiver_path,
         )
         .await?
-        .ok_or_else(|| {
-            PaykitSdkError::NotFound(format!(
-                "Paykit receiver marker for {owner}/{receiver_path}"
-            ))
+        .ok_or_else(|| PaykitSdkError::NotFound {
+            context: format!("Paykit receiver marker for {owner}/{receiver_path}"),
+            source: None,
         })?;
         Ok(marker.noise_public_key)
     }

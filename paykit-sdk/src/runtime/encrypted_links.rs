@@ -27,18 +27,28 @@ where
             .await?;
         match peer_state {
             Some(LinkedPeerState::Linked) if has_active_link => Ok(()),
-            Some(LinkedPeerState::Linking) => Err(PaykitSdkError::RecoveryRequired(format!(
-                "Encrypted Link Handshake is still in progress for counterparty {counterparty}"
-            ))),
-            Some(LinkedPeerState::RecoveryRequired) => Err(PaykitSdkError::RecoveryRequired(
-                format!("Encrypted Link recovery is required for counterparty {counterparty}"),
-            )),
-            Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy(format!(
-                "counterparty {counterparty} is blocked"
-            ))),
-            _ => Err(PaykitSdkError::RecoveryRequired(format!(
-                "no active Encrypted Link snapshot for counterparty {counterparty}"
-            ))),
+            Some(LinkedPeerState::Linking) => Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "Encrypted Link Handshake is still in progress for counterparty {counterparty}"
+                ),
+                source: None,
+            }),
+            Some(LinkedPeerState::RecoveryRequired) => Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "Encrypted Link recovery is required for counterparty {counterparty}"
+                ),
+                source: None,
+            }),
+            Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy {
+                context: format!("counterparty {counterparty} is blocked"),
+                source: None,
+            }),
+            _ => Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "no active Encrypted Link snapshot for counterparty {counterparty}"
+                ),
+                source: None,
+            }),
         }
     }
 
@@ -65,27 +75,40 @@ where
             })
             .await?;
         let Some(peer_state) = peer_state else {
-            return Err(PaykitSdkError::RecoveryRequired(format!(
-                "no active or in-progress Encrypted Link state for counterparty {counterparty}"
-            )));
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "no active or in-progress Encrypted Link state for counterparty {counterparty}"
+                ),
+                source: None,
+            });
         };
         match peer_state {
             LinkedPeerState::Linked if has_active_link => Ok(PrivateQueueReadiness::Ready),
             LinkedPeerState::Linking if has_restorable_handshake => {
                 Ok(PrivateQueueReadiness::PendingHandshake)
             }
-            LinkedPeerState::Linking => Err(PaykitSdkError::RecoveryRequired(format!(
-                "Encrypted Link Handshake state is incomplete for counterparty {counterparty}"
-            ))),
-            LinkedPeerState::RecoveryRequired => Err(PaykitSdkError::RecoveryRequired(format!(
-                "Encrypted Link recovery is required for counterparty {counterparty}"
-            ))),
-            LinkedPeerState::Blocked => Err(PaykitSdkError::Policy(format!(
-                "counterparty {counterparty} is blocked"
-            ))),
-            _ => Err(PaykitSdkError::RecoveryRequired(format!(
-                "no active or in-progress Encrypted Link state for counterparty {counterparty}"
-            ))),
+            LinkedPeerState::Linking => Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "Encrypted Link Handshake state is incomplete for counterparty {counterparty}"
+                ),
+                source: None,
+            }),
+            LinkedPeerState::RecoveryRequired => Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "Encrypted Link recovery is required for counterparty {counterparty}"
+                ),
+                source: None,
+            }),
+            LinkedPeerState::Blocked => Err(PaykitSdkError::Policy {
+                context: format!("counterparty {counterparty} is blocked"),
+                source: None,
+            }),
+            _ => Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "no active or in-progress Encrypted Link state for counterparty {counterparty}"
+                ),
+                source: None,
+            }),
         }
     }
 
@@ -103,9 +126,10 @@ where
             })
             .await?;
         if matches!(peer_state, Some(LinkedPeerState::Blocked)) {
-            Err(PaykitSdkError::Policy(format!(
-                "counterparty {counterparty} is blocked"
-            )))
+            Err(PaykitSdkError::Policy {
+                context: format!("counterparty {counterparty} is blocked"),
+                source: None,
+            })
         } else {
             Ok(())
         }
@@ -125,12 +149,16 @@ where
             })
             .await?;
         match peer_state {
-            Some(LinkedPeerState::RecoveryRequired) => Err(PaykitSdkError::RecoveryRequired(
-                format!("Encrypted Link recovery is required for counterparty {counterparty}"),
-            )),
-            Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy(format!(
-                "counterparty {counterparty} is blocked"
-            ))),
+            Some(LinkedPeerState::RecoveryRequired) => Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "Encrypted Link recovery is required for counterparty {counterparty}"
+                ),
+                source: None,
+            }),
+            Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy {
+                context: format!("counterparty {counterparty} is blocked"),
+                source: None,
+            }),
             _ => Ok(()),
         }
     }
@@ -147,9 +175,10 @@ where
     ) -> Result<LinkedPeerRecord> {
         let local_public_key = self.require_initialized_identity("block peer").await?;
         if counterparty == local_public_key {
-            return Err(PaykitSdkError::Policy(
-                "cannot block the local Paykit identity".into(),
-            ));
+            return Err(PaykitSdkError::Policy {
+                context: "cannot block the local Paykit identity".into(),
+                source: None,
+            });
         }
         let lease = self
             .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
@@ -203,9 +232,10 @@ where
     ) -> Result<LinkedPeerRecord> {
         let local_public_key = self.require_initialized_identity("unblock peer").await?;
         if counterparty == local_public_key {
-            return Err(PaykitSdkError::Policy(
-                "cannot unblock the local Paykit identity".into(),
-            ));
+            return Err(PaykitSdkError::Policy {
+                context: "cannot unblock the local Paykit identity".into(),
+                source: None,
+            });
         }
         let lease = self
             .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
@@ -316,9 +346,10 @@ where
         let (session_access, _) = self.private_link_session_access().await?;
         let local_public_key = session_access.public_key()?;
         if local_public_key == counterparty {
-            return Err(PaykitSdkError::Policy(
-                "cannot establish an Encrypted Link with the local identity".into(),
-            ));
+            return Err(PaykitSdkError::Policy {
+                context: "cannot establish an Encrypted Link with the local identity".into(),
+                source: None,
+            });
         }
         let role = deterministic_handshake_role(&local_public_key, &counterparty);
         let lease = self
@@ -385,9 +416,12 @@ where
                         mark.new_episode,
                     )
                     .await;
-                    return Err(PaykitSdkError::RecoveryRequired(format!(
-                        "missing Encrypted Link Handshake role for counterparty {counterparty}"
-                    )));
+                    return Err(PaykitSdkError::RecoveryRequired {
+                        context: format!(
+                            "missing Encrypted Link Handshake role for counterparty {counterparty}"
+                        ),
+                        source: None,
+                    });
                 }
                 save_linked_peer_state_with_lease(
                     &self.storage,
@@ -461,9 +495,10 @@ where
             })
             .await?
         else {
-            return Err(PaykitSdkError::RecoveryRequired(format!(
-                "no Encrypted Link state for counterparty {counterparty}"
-            )));
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!("no Encrypted Link state for counterparty {counterparty}"),
+                source: None,
+            });
         };
         if stored_link_state.link_snapshot.is_some() {
             save_linked_peer_state_with_lease(
@@ -486,16 +521,22 @@ where
         let Some(handshake_role) = stored_link_state.handshake_role else {
             self.mark_link_recovery_required(&counterparty, lease)
                 .await?;
-            return Err(PaykitSdkError::RecoveryRequired(format!(
-                "missing Encrypted Link Handshake role for counterparty {counterparty}"
-            )));
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "missing Encrypted Link Handshake role for counterparty {counterparty}"
+                ),
+                source: None,
+            });
         };
         let Some(snapshot_bytes) = stored_link_state.handshake_snapshot.as_ref() else {
             self.mark_link_recovery_required(&counterparty, lease)
                 .await?;
-            return Err(PaykitSdkError::RecoveryRequired(format!(
-                "no in-progress Encrypted Link Handshake snapshot for counterparty {counterparty}"
-            )));
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "no in-progress Encrypted Link Handshake snapshot for counterparty {counterparty}"
+                ),
+                source: None,
+            });
         };
 
         let handshake = match self
@@ -574,9 +615,9 @@ where
         matches!(
             err,
             PaykitSdkError::Transport { .. }
-                | PaykitSdkError::NotFound(_)
-                | PaykitSdkError::Protocol(_)
-                | PaykitSdkError::RecoveryRequired(_)
+                | PaykitSdkError::NotFound { .. }
+                | PaykitSdkError::Protocol { .. }
+                | PaykitSdkError::RecoveryRequired { .. }
         )
     }
 
@@ -665,9 +706,10 @@ where
             })
             .await?;
         if matches!(peer_state, Some(LinkedPeerState::Blocked)) {
-            return Err(PaykitSdkError::Policy(format!(
-                "counterparty {counterparty} is blocked"
-            )));
+            return Err(PaykitSdkError::Policy {
+                context: format!("counterparty {counterparty} is blocked"),
+                source: None,
+            });
         }
 
         if !matches!(peer_state, Some(LinkedPeerState::RecoveryRequired)) {
@@ -710,9 +752,12 @@ where
                             mark.new_episode,
                         )
                         .await;
-                        return Err(PaykitSdkError::RecoveryRequired(format!(
-                            "missing Encrypted Link Handshake role for counterparty {counterparty}"
-                        )));
+                        return Err(PaykitSdkError::RecoveryRequired {
+                            context: format!(
+                                "missing Encrypted Link Handshake role for counterparty {counterparty}"
+                            ),
+                            source: None,
+                        });
                     }
                     save_linked_peer_state_with_lease(
                         &self.storage,
@@ -788,8 +833,9 @@ where
     ) -> Result<PeerLinkOperationLease> {
         let now = self.clock.now();
         let lease_timeout = ChronoDuration::from_std(self.config.peer_link_operation_lease_timeout)
-            .map_err(|err| {
-                PaykitSdkError::Policy(format!("invalid peer link lease timeout: {err}"))
+            .map_err(|err| PaykitSdkError::Policy {
+                context: format!("invalid peer link lease timeout: {err}"),
+                source: None,
             })?;
         let expires_at = now + lease_timeout;
         self.storage
@@ -802,10 +848,11 @@ where
                 ))
             })
             .await?
-            .ok_or_else(|| {
-                PaykitSdkError::Policy(format!(
+            .ok_or_else(|| PaykitSdkError::Policy {
+                context: format!(
                     "peer link operation already in progress for counterparty {counterparty}"
-                ))
+                ),
+                source: None,
             })
     }
 

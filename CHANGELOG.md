@@ -7,6 +7,46 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Changed
+- **Breaking (Rust API):** `PaykitSdkError::NotFound`, `Protocol`, `Policy`,
+  and `RecoveryRequired` changed from tuple variants (`NotFound(String)`) to
+  struct variants (`NotFound { context: String, source: Option<anyhow::Error> }`),
+  matching the other four variants. Update constructions to
+  `NotFound { context: msg, source: None }` and patterns to
+  `NotFound { context, .. }`. The generated Swift/Kotlin error shape is
+  unchanged.
+- A missing Encrypted Receipt during `retrieve_receipt` now surfaces as the
+  `not_found` FFI error code instead of `transport_error`.
+- FFI exception messages are redacted:
+  - anyhow cause chains carried in the SDK error's `source` (which can carry
+    request URLs and response bodies) are no longer rendered into exception
+    text; the only `source` that survives the FFI conversion is a
+    `PaykitFfiError` stashed by paykit-ffi's own callback plumbing,
+    recovered by downcast (see Fixed).
+  - Receipt Locations no longer appear in storage/retrieval error messages.
+  - These Receipt and Receipt Access error paths now use static labels: the
+    shared version/kind check (which also backs the Payment Request event
+    wire parsers), the encrypted-envelope serde, base64, and nonce-length
+    checks, the decrypted-plaintext and Receipt Access JSON parses, the
+    fetched-body UTF-8 check, Receipt Decryption Key validation, and
+    backup-restore encrypted-receipt validation. Values from those paths no
+    longer reach generated Swift/Kotlin exception text. Private Payment
+    List parsing and the SDK's outbound private-message validation still
+    embed offending values in error contexts; redacting those is a known
+    follow-up.
+- Rust SDK errors converted from `paykit_lib::PaykitError::InvalidData` no
+  longer retain the structured source chain: the lib-to-SDK conversion drops
+  the `source` before the FFI boundary, so `Error::source()` returns `None`
+  and `Debug` output no longer renders the dropped cause chain. Detail that
+  a lib call site folds into the `context` string itself is unaffected by
+  this conversion and still appears in `Display`/`Debug`.
+
+### Fixed
+- Platform callback errors now survive the FFI -> SDK -> FFI round trip
+  losslessly for all eight error variants: the original variant, custom
+  machine-readable code, and reason are recovered by downcast instead of
+  degrading to the variant's generic code.
+
 ## [0.1.0-rc37] - 2026-07-17
 
 ### Added

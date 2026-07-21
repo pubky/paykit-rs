@@ -164,17 +164,20 @@ impl ReceiptDecryptionKey {
         // failing `decode_vec` writes before erroring is scrubbed on drop.
         let mut key = key.into();
         let mut decoded: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
-        if let Err(err) = URL_SAFE_NO_PAD.decode_vec(&key, &mut decoded) {
-            let message = format!("Receipt Decryption Key must be base64url: {err}");
+        // The base64 DecodeError can render an offending byte of the candidate
+        // key text; this is key material, so the error carries no decode
+        // detail at all, only static messages.
+        if URL_SAFE_NO_PAD.decode_vec(&key, &mut decoded).is_err() {
             key.zeroize();
-            return Err(PaykitError::Validation(message));
+            return Err(PaykitError::Validation(
+                "Receipt Decryption Key must be base64url".into(),
+            ));
         }
         if decoded.len() != 32 {
-            let len = decoded.len();
             key.zeroize();
-            return Err(PaykitError::Validation(format!(
-                "Receipt Decryption Key must decode to 32 bytes, got {len}"
-            )));
+            return Err(PaykitError::Validation(
+                "Receipt Decryption Key must decode to 32 bytes".into(),
+            ));
         }
         // Move the validated base64url form into the type; its Drop zeroizes it
         // later. `decoded` scrubs its 32 bytes on drop at end of scope.
@@ -189,17 +192,19 @@ impl ReceiptDecryptionKey {
     }
 
     pub(super) fn bytes(&self) -> Result<[u8; 32]> {
+        // The base64 DecodeError can render an offending byte of the stored
+        // key text; this is key material, so drop the detail entirely rather
+        // than retaining it in `source`.
         let mut decoded =
             URL_SAFE_NO_PAD
                 .decode(&self.0)
-                .map_err(|err| PaykitError::InvalidData {
-                    context: format!("Receipt Decryption Key is not valid base64url: {err}"),
-                    source: Some(err.into()),
+                .map_err(|_| PaykitError::InvalidData {
+                    context: "Receipt Decryption Key is not valid base64url".into(),
+                    source: None,
                 })?;
-        let len = decoded.len();
         let key_bytes =
             <[u8; 32]>::try_from(decoded.as_slice()).map_err(|_| PaykitError::InvalidData {
-                context: format!("Receipt Decryption Key must decode to 32 bytes, got {len}"),
+                context: "Receipt Decryption Key must decode to 32 bytes".into(),
                 source: None,
             });
         // Scrub the transient decoded buffer; the returned array is the caller's

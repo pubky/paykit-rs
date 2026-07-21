@@ -306,38 +306,53 @@ pub(crate) fn validate_queued_outbound_private_message(
 ) -> Result<()> {
     let kind = validate_outbound_private_message(&record.raw_json)?;
     if kind != record.kind {
-        return Err(PaykitSdkError::Protocol(format!(
-            "queued private message kind '{}' does not match payload kind '{kind}'",
-            record.kind
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "queued private message kind '{}' does not match payload kind '{kind}'",
+                record.kind
+            ),
+            source: None,
+        });
     }
     Ok(())
 }
 
 pub(crate) fn validate_outbound_private_message(raw_json: &str) -> Result<String> {
     if raw_json.len() > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
-        return Err(PaykitSdkError::Protocol(
-            "Private Application Message exceeds pubky-noise message size".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "Private Application Message exceeds pubky-noise message size".into(),
+            source: None,
+        });
     }
 
-    let value: serde_json::Value = serde_json::from_str(raw_json)
-        .map_err(|err| PaykitSdkError::Protocol(format!("invalid private message JSON: {err}")))?;
+    let value: serde_json::Value =
+        serde_json::from_str(raw_json).map_err(|err| PaykitSdkError::Protocol {
+            context: format!("invalid private message JSON: {err}"),
+            source: None,
+        })?;
     let version = value
         .get("version")
         .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| PaykitSdkError::Protocol("private message version is missing".into()))?;
+        .ok_or_else(|| PaykitSdkError::Protocol {
+            context: "private message version is missing".into(),
+            source: None,
+        })?;
     if version != 1 {
-        return Err(PaykitSdkError::Protocol(format!(
-            "unsupported private message version {version}"
-        )));
+        return Err(PaykitSdkError::Protocol {
+            context: format!("unsupported private message version {version}"),
+            source: None,
+        });
     }
     let kind = value
         .get("kind")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| PaykitSdkError::Protocol("private message kind is missing".into()))?;
-    let parsed_kind = PrivateMessageKind::parse(kind).ok_or_else(|| {
-        PaykitSdkError::Protocol(format!("unsupported private message kind '{kind}'"))
+        .ok_or_else(|| PaykitSdkError::Protocol {
+            context: "private message kind is missing".into(),
+            source: None,
+        })?;
+    let parsed_kind = PrivateMessageKind::parse(kind).ok_or_else(|| PaykitSdkError::Protocol {
+        context: format!("unsupported private message kind '{kind}'"),
+        source: None,
     })?;
     validate_outbound_private_message_body(parsed_kind, raw_json)?;
 
@@ -353,12 +368,17 @@ fn validate_outbound_private_message_body(kind: PrivateMessageKind, raw_json: &s
             let message = private_application_message(kind, raw_json);
             let event =
                 paykit_lib::parse_receipt_access_event_message(&message).ok_or_else(|| {
-                    PaykitSdkError::Protocol(
-                        "Receipt Access payload does not match private message kind".into(),
-                    )
+                    PaykitSdkError::Protocol {
+                        context: "Receipt Access payload does not match private message kind"
+                            .into(),
+                        source: None,
+                    }
                 })?;
             if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol(error.to_owned()));
+                return Err(PaykitSdkError::Protocol {
+                    context: error.to_owned(),
+                    source: None,
+                });
             }
         }
         PrivateMessageKind::PaymentRequest
@@ -369,12 +389,18 @@ fn validate_outbound_private_message_body(kind: PrivateMessageKind, raw_json: &s
             let message = private_application_message(kind, raw_json);
             let event =
                 paykit_lib::parse_payment_request_event_message(&message).ok_or_else(|| {
-                    PaykitSdkError::Protocol(
-                        "Payment Request event payload does not match private message kind".into(),
-                    )
+                    PaykitSdkError::Protocol {
+                        context:
+                            "Payment Request event payload does not match private message kind"
+                                .into(),
+                        source: None,
+                    }
                 })?;
             if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol(error.to_owned()));
+                return Err(PaykitSdkError::Protocol {
+                    context: error.to_owned(),
+                    source: None,
+                });
             }
         }
     }

@@ -257,17 +257,19 @@ where
                 Ok(tx.encrypted_link_state(counterparty, &lease.counterparty_receiver_path))
             })
             .await?
-            .ok_or_else(|| {
-                PaykitSdkError::RecoveryRequired(format!(
-                    "no Encrypted Link state for counterparty {counterparty}"
-                ))
+            .ok_or_else(|| PaykitSdkError::RecoveryRequired {
+                context: format!("no Encrypted Link state for counterparty {counterparty}"),
+                source: None,
             })?;
         let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
             self.mark_outbound_link_recovery_required(counterparty, lease, session_access)
                 .await?;
-            return Err(PaykitSdkError::RecoveryRequired(format!(
-                "no active Encrypted Link snapshot for counterparty {counterparty}"
-            )));
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "no active Encrypted Link snapshot for counterparty {counterparty}"
+                ),
+                source: None,
+            });
         };
         let snapshot = match paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes) {
             Ok(snapshot) => snapshot,
@@ -329,14 +331,14 @@ where
         let lease_timeout = ChronoDuration::from_std(
             self.config.outbound_private_send_lease_timeout,
         )
-        .map_err(|err| {
-            PaykitSdkError::Policy(format!(
-                "invalid outbound private send lease timeout: {err}"
-            ))
+        .map_err(|err| PaykitSdkError::Policy {
+            context: format!("invalid outbound private send lease timeout: {err}"),
+            source: None,
         })?;
         let retry_backoff = ChronoDuration::from_std(self.config.outbound_private_retry_backoff)
-            .map_err(|err| {
-                PaykitSdkError::Policy(format!("invalid outbound private retry backoff: {err}"))
+            .map_err(|err| PaykitSdkError::Policy {
+                context: format!("invalid outbound private retry backoff: {err}"),
+                source: None,
             })?;
         Ok((now - lease_timeout, now - retry_backoff))
     }

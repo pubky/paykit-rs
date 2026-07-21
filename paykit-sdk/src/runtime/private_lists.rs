@@ -641,9 +641,12 @@ where
                         .cancel_reservations_after_queue_error(&cancellations, &counterparty)
                         .await
                     {
-                        return Err(PaykitSdkError::Policy(format!(
+                        return Err(PaykitSdkError::Policy {
+                            context: format!(
                             "failed to queue reserved receiving details: {err}; reservation cleanup also failed: {cancellation_err}"
-                        )));
+                        ),
+                            source: None,
+                        });
                     }
                     Err(err)
                 }
@@ -705,10 +708,13 @@ where
         if cancellation_errors.is_empty() {
             Ok(())
         } else {
-            Err(PaykitSdkError::Policy(format!(
-                "failed to cancel reserved receiving details: {}",
-                cancellation_errors.join("; ")
-            )))
+            Err(PaykitSdkError::Policy {
+                context: format!(
+                    "failed to cancel reserved receiving details: {}",
+                    cancellation_errors.join("; ")
+                ),
+                source: None,
+            })
         }
     }
 
@@ -722,9 +728,12 @@ where
             .cancel_reservations_after_queue_error(cancellations, counterparty)
             .await
         {
-            return Err(PaykitSdkError::Policy(format!(
+            return Err(PaykitSdkError::Policy {
+                context: format!(
                 "failed to queue reserved receiving details: {err}; reservation cleanup also failed: {cancellation_err}"
-            )));
+            ),
+                source: None,
+            });
         }
         Err(err)
     }

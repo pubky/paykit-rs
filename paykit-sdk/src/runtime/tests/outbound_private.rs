@@ -549,7 +549,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
         .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_path())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
     assert_eq!(
         *canceled.lock().unwrap(),
         vec!["conflicting-reservation".to_string()]
@@ -665,7 +665,10 @@ async fn test_process_outbound_private_messages_blocks_recovery_required_peer() 
         .process_outbound_private_messages(counterparty.clone(), receiver_path())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
+    assert!(matches!(
+        result,
+        Err(PaykitSdkError::RecoveryRequired { .. })
+    ));
     let queued = crate::domain::outbound_private::queued_outbound_private_messages(
         &storage,
         &counterparty,

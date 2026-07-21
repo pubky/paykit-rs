@@ -3,7 +3,10 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
     shared_wire::{deserialize_optional_no_null, BillingPeriodWire, PaymentAmountWire},
-    validation::{invalid_data, validate_wire_version_kind, validate_wire_version_kind_str},
+    validation::{
+        invalid_data, invalid_plaintext_json, validate_wire_version_kind,
+        validate_wire_version_kind_str,
+    },
     BillingPeriod, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier,
     PaymentReference, PaymentRequestId, PrivateApplicationMessage, PrivateMessageKind, PublicKey,
     Result,
@@ -118,9 +121,12 @@ impl TryFrom<ReceiptWire> for Receipt {
                     source: Some(err.into()),
                 })?;
         }
+        // The parse error's Debug output can echo the offending decrypted field
+        // value; keep the context static and leave the detail in `source`,
+        // which stays local.
         let recipient_public_key = PublicKey::try_from(wire.recipient_public_key.as_str())
             .map_err(|err| PaykitError::InvalidData {
-                context: format!("Receipt contains invalid recipient public key: {err:?}"),
+                context: "Receipt contains invalid recipient public key".into(),
                 source: anyhow::anyhow!("invalid recipient public key: {err:?}").into(),
             })?;
         let payment_endpoint_identifier = wire
@@ -260,12 +266,13 @@ pub fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<String> {
 /// Use [`parse_receipt_access_event_message`] when parsing from the raw private
 /// stream.
 pub fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
-    let wire: ReceiptAccessWire = serde_json::from_str(json).map_err(|err| {
-        invalid_data(
-            format!("failed to parse Receipt Access JSON: {err}"),
-            Some(err.into()),
-        )
-    })?;
+    // SECURITY / REDACTION: `json` is decrypted private-message plaintext
+    // carrying the Receipt Decryption Key and Receipt Location. The serde
+    // error's Display embeds field values on type mismatches, so it must not
+    // be folded into the context or kept as `source` -- this error can cross
+    // the FFI boundary as exception text.
+    let wire: ReceiptAccessWire = serde_json::from_str(json)
+        .map_err(|_| invalid_plaintext_json("failed to parse Receipt Access JSON"))?;
     ReceiptAccess::try_from(wire)
 }
 

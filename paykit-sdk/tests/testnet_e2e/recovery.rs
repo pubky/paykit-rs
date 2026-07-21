@@ -47,7 +47,7 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         .await
         .expect_err("private automation must be blocked during recovery");
     assert!(
-        matches!(err, PaykitSdkError::RecoveryRequired(_)),
+        matches!(err, PaykitSdkError::RecoveryRequired { .. }),
         "unexpected error: {err:?}"
     );
 
@@ -194,7 +194,7 @@ async fn test_publish_recovery_marker_without_private_link_state_fails() {
         .await
         .expect_err("publishing a marker without private link state must fail");
     assert!(
-        matches!(err, PaykitSdkError::Policy(_)),
+        matches!(err, PaykitSdkError::Policy { .. }),
         "unexpected error: {err:?}"
     );
 }

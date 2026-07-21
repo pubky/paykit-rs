@@ -35,49 +35,80 @@ impl From<PaykitSdkError> for PaykitFfiError {
             PaykitSdkError::Storage { context, source } => callback_ffi_error(source.as_ref())
                 .unwrap_or_else(|| Self::Storage {
                     code: "storage_error".into(),
-                    context: format_context(context, source),
+                    context: format_context(context),
                 }),
             PaykitSdkError::Identity { context, source } => callback_ffi_error(source.as_ref())
                 .unwrap_or_else(|| Self::Identity {
                     code: "identity_error".into(),
-                    context: format_context(context, source),
+                    context: format_context(context),
                 }),
             PaykitSdkError::Transport { context, source } => callback_ffi_error(source.as_ref())
                 .unwrap_or_else(|| Self::Transport {
                     code: "transport_error".into(),
-                    context: format_context(context, source),
+                    context: format_context(context),
                 }),
-            PaykitSdkError::NotFound(context) => Self::NotFound {
-                code: "not_found".into(),
-                context,
-            },
-            PaykitSdkError::Protocol(context) => Self::Protocol {
-                code: "protocol_error".into(),
-                context,
-            },
-            PaykitSdkError::Policy(context) => Self::Policy {
-                code: "policy_error".into(),
-                context,
-            },
+            PaykitSdkError::NotFound { context, source } => callback_ffi_error(source.as_ref())
+                .unwrap_or_else(|| Self::NotFound {
+                    code: "not_found".into(),
+                    context: format_context(context),
+                }),
+            PaykitSdkError::Protocol { context, source } => callback_ffi_error(source.as_ref())
+                .unwrap_or_else(|| Self::Protocol {
+                    code: "protocol_error".into(),
+                    context: format_context(context),
+                }),
+            PaykitSdkError::Policy { context, source } => callback_ffi_error(source.as_ref())
+                .unwrap_or_else(|| Self::Policy {
+                    code: "policy_error".into(),
+                    context: format_context(context),
+                }),
             PaykitSdkError::PaymentAdapter { context, source } => {
                 callback_ffi_error(source.as_ref()).unwrap_or_else(|| Self::PaymentAdapter {
                     code: "payment_adapter_error".into(),
-                    context: format_context(context, source),
+                    context: format_context(context),
                 })
             }
-            PaykitSdkError::RecoveryRequired(context) => Self::RecoveryRequired {
-                code: "recovery_required".into(),
-                context,
-            },
-            _ => Self::Protocol {
+            PaykitSdkError::RecoveryRequired { context, source } => {
+                callback_ffi_error(source.as_ref()).unwrap_or_else(|| Self::RecoveryRequired {
+                    code: "recovery_required".into(),
+                    context: format_context(context),
+                })
+            }
+            other => Self::Protocol {
                 code: "unsupported_sdk_error".into(),
-                context: "unsupported SDK error".into(),
+                context: other.to_string(),
             },
         }
     }
 }
 
-fn format_context(context: String, _source: Option<anyhow::Error>) -> String {
+// SECURITY / REDACTION: the returned `context` is rendered verbatim into the
+// generated Kotlin/Swift exception message (see the `#[error("...: {context}")]`
+// attributes above), so it crosses the FFI boundary into user-facing app code.
+// We therefore MUST NOT fold the raw `source` cause chain into it: anyhow's
+// `{:#}` alternate form expands the full chain, which for Pubky transport/storage
+// failures can carry the request URL (recovery-marker URLs embed a DH-derived
+// PRIVATE storage path) and a non-2xx HTTP response body. Those are sensitive and
+// must stay out of shipped exception text.
+//
+// The raw `source` cause is therefore dropped entirely: it is neither folded into
+// `context` nor logged anywhere (no `tracing`/telemetry sink), so an enabled debug
+// subscriber cannot capture the URL / DH path / response body. Only the redacted
+// outer label survives in `context`. The caller retains the original
+// `PaykitSdkError` (with its `source`) at the point of failure if it needs the
+// cause for local, non-shipped handling.
+//
+// The single exception is `callback_ffi_error`: when `source` downcasts to a
+// `PaykitFfiError`, that error is returned verbatim so the platform app gets
+// back exactly the error its own callback raised (variant, custom code, and
+// reason). This is safe by provenance, not by redaction: only paykit-ffi's
+// callback plumbing (`ffi_error_to_sdk` and the payment-adapter wrapper)
+// stashes a `PaykitFfiError` in `source`, and those wrap errors the app
+// itself authored, which already crossed the boundary once. paykit-lib and
+// paykit-sdk never construct a `PaykitFfiError`, so network-derived or
+// decrypted-plaintext causes can never satisfy the downcast and are always
+// dropped (pinned by `test_string_variant_sources_never_reach_context`).
+fn format_context(context: String) -> String {
     context
 }
 
@@ -109,29 +140,46 @@ pub(crate) fn ffi_error_to_sdk(err: PaykitFfiError, context: &'static str) -> Pa
             context: format!("{context}: {code}"),
             source,
         },
+        // Every arm stashes the original callback error in `source`, so the
+        // reverse conversion recovers the exact variant, custom code, and
+        // reason by downcast. The callback's machine-readable code is never
+        // degraded to the variant's generic one; the round-trip tests pin
+        // lossless recovery for all eight variants.
         PaykitFfiError::NotFound {
             code,
             context: _reason,
-        } => PaykitSdkError::NotFound(format!("{context}: {code}")),
+        } => PaykitSdkError::NotFound {
+            context: format!("{context}: {code}"),
+            source,
+        },
         PaykitFfiError::Protocol {
             code,
             context: _reason,
-        } => PaykitSdkError::Protocol(format!("{context}: {code}")),
+        } => PaykitSdkError::Protocol {
+            context: format!("{context}: {code}"),
+            source,
+        },
         PaykitFfiError::Policy {
             code,
             context: _reason,
-        } => PaykitSdkError::Policy(format!("{context}: {code}")),
+        } => PaykitSdkError::Policy {
+            context: format!("{context}: {code}"),
+            source,
+        },
         PaykitFfiError::PaymentAdapter {
             code,
             context: _reason,
         } => PaykitSdkError::PaymentAdapter {
             context: format!("{context}: {code}"),
-            source: None,
+            source,
         },
         PaykitFfiError::RecoveryRequired {
             code,
             context: _reason,
-        } => PaykitSdkError::RecoveryRequired(format!("{context}: {code}")),
+        } => PaykitSdkError::RecoveryRequired {
+            context: format!("{context}: {code}"),
+            source,
+        },
     }
 }
 
@@ -158,3 +206,6 @@ pub(crate) fn validation_error(reason: impl Into<String>) -> PaykitFfiError {
         context: reason.into(),
     }
 }
+
+#[cfg(test)]
+mod tests;

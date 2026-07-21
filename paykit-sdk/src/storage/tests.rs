@@ -1091,7 +1091,7 @@ async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
         })
         .await;
 
-    assert!(matches!(stale_result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(stale_result, Err(PaykitSdkError::Policy { .. })));
     let snapshot = storage.snapshot().unwrap();
     assert_eq!(
         snapshot.outbound_private_messages[0].status,

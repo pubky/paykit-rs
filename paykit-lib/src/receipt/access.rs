@@ -200,15 +200,26 @@ pub async fn store_prepared_receipt(
             prepared.encrypted_receipt.clone(),
         )
         .await
-        .map_err(|err| PaykitError::Transport {
-            context: format!(
-                "failed to store encrypted receipt at {}",
-                prepared.access.location
-            ),
-            source: err.into(),
-        })?;
+        .map_err(|err| store_prepared_receipt_error(&prepared.access.location, err.into()))?;
 
     Ok(())
+}
+
+/// Build the transport error returned when storing a Prepared Receipt fails.
+///
+/// SECURITY / REDACTION: `location` is the Receipt Location
+/// (`/pub/paykit/v0/private/.../receipts/{id}`), a PRIVATE storage path whose
+/// folder prefix is DH-derived per counterparty. This `context` can be rendered
+/// verbatim into a caller-facing error message (and, once wired, the FFI
+/// Kotlin/Swift exception), so the Receipt Location MUST NOT be embedded in it.
+/// The location is accepted here only to make the redaction explicit and
+/// testable; it is deliberately dropped, leaving a static, non-sensitive label.
+/// The concrete cause stays in `source`, which is not rendered across the FFI.
+pub(crate) fn store_prepared_receipt_error(_location: &str, source: anyhow::Error) -> PaykitError {
+    PaykitError::Transport {
+        context: "failed to store encrypted receipt".into(),
+        source,
+    }
 }
 
 pub(super) fn validate_prepared_receipt(prepared: &PreparedReceipt) -> Result<()> {

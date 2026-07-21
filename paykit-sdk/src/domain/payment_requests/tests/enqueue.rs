@@ -85,6 +85,6 @@ async fn test_enqueue_payment_request_rejects_invalid_terms() {
         .await
         .unwrap();
 
-    assert!(matches!(err, crate::PaykitSdkError::Protocol(_)));
+    assert!(matches!(err, crate::PaykitSdkError::Protocol { .. }));
     assert!(queued.is_empty());
 }

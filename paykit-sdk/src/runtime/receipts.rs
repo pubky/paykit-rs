@@ -36,20 +36,26 @@ where
                 if existing.counterparty != counterparty
                     || existing.counterparty_receiver_path != counterparty_receiver_path
                 {
-                    return Err(PaykitSdkError::Protocol(format!(
-                        "Receipt issuance {} already exists for a different counterparty receiver",
-                        existing.receipt_id
-                    )));
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!(
+                            "Receipt issuance {} already exists for a different counterparty receiver",
+                            existing.receipt_id
+                        ),
+                        source: None,
+                    });
                 }
                 if !receipt_issuance_record_matches_draft(
                     &existing,
                     &counterparty_receiver_path,
                     &draft,
                 )? {
-                    return Err(PaykitSdkError::Protocol(format!(
-                        "Receipt issuance {} for counterparty {} already exists with different fields",
-                        existing.receipt_id, counterparty
-                    )));
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!(
+                            "Receipt issuance {} for counterparty {} already exists with different fields",
+                            existing.receipt_id, counterparty
+                        ),
+                        source: None,
+                    });
                 }
                 return Ok(ReceiptIssuanceView::from(&existing));
             }
@@ -76,10 +82,13 @@ where
                         .receipt_issuance_record_by_receipt_id(&record.receipt_id)
                         .is_some()
                     {
-                        return Err(PaykitSdkError::Protocol(format!(
-                            "Receipt issuance {} already exists",
-                            record.receipt_id
-                        )));
+                        return Err(PaykitSdkError::Protocol {
+                            context: format!(
+                                "Receipt issuance {} already exists",
+                                record.receipt_id
+                            ),
+                            source: None,
+                        });
                     }
                     tx.save_receipt_issuance_record(record);
                     Ok(())
@@ -101,9 +110,10 @@ where
         draft: ReceiptDraft,
     ) -> Result<ReceiptIssuanceView> {
         if draft.receipt_id.is_none() {
-            return Err(PaykitSdkError::Protocol(
-                "issue_receipt requires a caller-provided Receipt ID for retry-safe issuance; use prepare_receipt_issuance first when the SDK should generate one".into(),
-            ));
+            return Err(PaykitSdkError::Protocol {
+                context: "issue_receipt requires a caller-provided Receipt ID for retry-safe issuance; use prepare_receipt_issuance first when the SDK should generate one".into(),
+                source: None,
+            });
         }
         let record = self
             .prepare_receipt_issuance(
@@ -132,9 +142,12 @@ where
         )
         .await?
         .ok_or_else(|| {
-                PaykitSdkError::NotFound(format!(
-                    "Receipt issuance {receipt_id} for counterparty {counterparty}/{counterparty_receiver_path} was not found"
-                ))
+                PaykitSdkError::NotFound {
+                    context: format!(
+                        "Receipt issuance {receipt_id} for counterparty {counterparty}/{counterparty_receiver_path} was not found"
+                    ),
+                    source: None,
+                }
             })?;
         self.ensure_private_outbound_ready(&counterparty, &record.counterparty_receiver_path)
             .await?;
@@ -315,9 +328,10 @@ where
                 .await?;
         if let Some(record) = stored_receipt {
             if record.recipient_public_key != local_public_key {
-                return Err(PaykitSdkError::Protocol(
-                    "stored Receipt recipient does not match local identity".into(),
-                ));
+                return Err(PaykitSdkError::Protocol {
+                    context: "stored Receipt recipient does not match local identity".into(),
+                    source: None,
+                });
             }
             if stored_receipt_conflicted {
                 return Err(Self::conflicted_receipt_access_error(receipt_id));
@@ -337,9 +351,12 @@ where
             return Err(Self::conflicted_receipt_access_error(receipt_id));
         }
         if access_records.is_empty() {
-            return Err(PaykitSdkError::RecoveryRequired(format!(
-                "no Receipt Access record for receipt {receipt_id} from {counterparty}"
-            )));
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "no Receipt Access record for receipt {receipt_id} from {counterparty}"
+                ),
+                source: None,
+            });
         }
         let public_storage =
             self.pubky
@@ -362,6 +379,13 @@ where
             {
                 Ok(Some(encrypted_json)) => encrypted_json,
                 Ok(None) => {
+                    // The persisted record error may carry the Receipt
+                    // Location: it stays in local storage, is redacted from
+                    // record Debug output, and the record carries the location
+                    // as a field anyway. The error returned to the caller must
+                    // not: it crosses the FFI boundary, where its message is
+                    // rendered verbatim into the generated Kotlin/Swift
+                    // exception.
                     let error = format!(
                         "encrypted receipt {} was not found at {}",
                         access.receipt_id, access.location
@@ -370,13 +394,13 @@ where
                         &access,
                         ReceiptRetrievalStatus::NotFound,
                         now,
-                        error.clone(),
+                        error,
                     )
                     .await?;
-                    last_error = Some(PaykitSdkError::Transport {
-                        context: error,
-                        source: None,
-                    });
+                    last_error = Some(merge_retrieval_error(
+                        last_error.take(),
+                        missing_encrypted_receipt_error(&access.location),
+                    ));
                     continue;
                 }
                 Err(err) => {
@@ -429,11 +453,14 @@ where
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            PaykitSdkError::RecoveryRequired(format!(
-                "no usable Receipt Access record for receipt {receipt_id} from {counterparty}"
-            ))
-        }))
+        Err(
+            last_error.unwrap_or_else(|| PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "no usable Receipt Access record for receipt {receipt_id} from {counterparty}"
+                ),
+                source: None,
+            }),
+        )
     }
 
     /// List indexed Receipt Access records for one counterparty.
@@ -631,15 +658,21 @@ where
     }
 
     fn conflicted_receipt_access_error(receipt_id: &str) -> PaykitSdkError {
-        PaykitSdkError::Protocol(format!(
-            "Receipt Access event for receipt {receipt_id} has a conflicting Event ID"
-        ))
+        PaykitSdkError::Protocol {
+            context: format!(
+                "Receipt Access event for receipt {receipt_id} has a conflicting Event ID"
+            ),
+            source: None,
+        }
     }
 
     fn mismatched_receipt_access_error(receipt_id: &str) -> PaykitSdkError {
-        PaykitSdkError::Protocol(format!(
-            "Receipt Access descriptor for receipt {receipt_id} conflicts with stored Receipt"
-        ))
+        PaykitSdkError::Protocol {
+            context: format!(
+                "Receipt Access descriptor for receipt {receipt_id} conflicts with stored Receipt"
+            ),
+            source: None,
+        }
     }
 
     async fn save_receipt_retrieval_error(

@@ -51,14 +51,14 @@ fn test_paykit_profile_json_rejects_wrong_kind() {
         r#"{"version":1,"kind":"paykit.other","display_name":"Alice","image_uri":null}"#,
     );
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[test]
 fn test_paykit_profile_json_rejects_empty_body() {
     let result = parse_profile_json("");
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn test_paykit_profile_rejects_empty_display_name() {
 
     assert!(matches!(
         profile.validate(),
-        Err(PaykitSdkError::Protocol(_))
+        Err(PaykitSdkError::Protocol { .. })
     ));
 }
 
@@ -95,7 +95,7 @@ fn test_paykit_profile_rejects_control_characters() {
 
     assert!(matches!(
         profile.validate(),
-        Err(PaykitSdkError::Protocol(_))
+        Err(PaykitSdkError::Protocol { .. })
     ));
 }
 
@@ -112,7 +112,7 @@ fn test_paykit_profile_rejects_oversized_extra() {
 
     assert!(matches!(
         profile.validate(),
-        Err(PaykitSdkError::Protocol(_))
+        Err(PaykitSdkError::Protocol { .. })
     ));
 }
 
@@ -132,7 +132,7 @@ fn test_pubky_profile_json_parses_bitkit_shape() {
 fn test_pubky_profile_json_rejects_control_characters_in_name() {
     let result = parse_pubky_profile_json(r#"{"name":"Alice\nAdmin"}"#);
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn test_contact_update_rejects_control_characters() {
 
     assert!(matches!(
         update.validate(),
-        Err(PaykitSdkError::Protocol(_))
+        Err(PaykitSdkError::Protocol { .. })
     ));
 }
 
@@ -348,11 +348,11 @@ fn test_paykit_blob_path_and_uri_are_scoped_to_configured_prefix() {
 fn test_paykit_blob_name_rejects_path_segments() {
     assert!(matches!(
         paykit_blob_path(&paykit_blob_prefix(), "../avatar.jpg"),
-        Err(PaykitSdkError::Protocol(_))
+        Err(PaykitSdkError::Protocol { .. })
     ));
     assert!(matches!(
         paykit_blob_path(&paykit_blob_prefix(), "avatars/avatar.jpg"),
-        Err(PaykitSdkError::Protocol(_))
+        Err(PaykitSdkError::Protocol { .. })
     ));
 }
 
@@ -392,11 +392,11 @@ fn test_paykit_blob_path_from_uri_or_path_accepts_owned_blob_only() {
                 other_public_key
             )
         ),
-        Err(PaykitSdkError::Protocol(_))
+        Err(PaykitSdkError::Protocol { .. })
     ));
     assert!(matches!(
         paykit_blob_path_from_uri_or_path(&owner_public_key, &prefix, &paykit_profile_path()),
-        Err(PaykitSdkError::Protocol(_))
+        Err(PaykitSdkError::Protocol { .. })
     ));
 }
 

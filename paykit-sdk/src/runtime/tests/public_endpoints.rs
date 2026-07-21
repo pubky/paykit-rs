@@ -41,7 +41,7 @@ async fn test_sync_public_endpoints_rejects_reentrant_call() {
 
     let result = sdk.sync_public_endpoints().await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }
 
 #[tokio::test]

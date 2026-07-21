@@ -84,7 +84,7 @@ async fn test_enqueue_private_message_rejects_unknown_kind() {
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -99,7 +99,7 @@ async fn test_enqueue_private_message_rejects_malformed_known_body() {
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn test_validate_queued_outbound_private_message_rejects_malformed_known_body() 
 
     let result = validate_queued_outbound_private_message(&record);
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]
@@ -238,7 +238,7 @@ async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
         .await
         .unwrap();

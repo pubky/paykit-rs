@@ -303,7 +303,7 @@ async fn test_sign_out_rejects_concurrent_identity_operation() {
 
     let result = sdk.sign_out().await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }
 
 #[tokio::test]

@@ -77,10 +77,9 @@ where
                 Ok(tx.encrypted_link_state(&counterparty, &lease.counterparty_receiver_path))
             })
             .await?
-            .ok_or_else(|| {
-                PaykitSdkError::RecoveryRequired(format!(
-                    "no Encrypted Link state for counterparty {counterparty}"
-                ))
+            .ok_or_else(|| PaykitSdkError::RecoveryRequired {
+                context: format!("no Encrypted Link state for counterparty {counterparty}"),
+                source: None,
             })?;
         let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
             let now = self.clock.now();
@@ -99,9 +98,12 @@ where
                     mark.new_episode,
                 )
                 .await;
-            return Err(PaykitSdkError::RecoveryRequired(format!(
-                "no active Encrypted Link snapshot for counterparty {counterparty}"
-            )));
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "no active Encrypted Link snapshot for counterparty {counterparty}"
+                ),
+                source: None,
+            });
         };
         let snapshot = match paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes) {
             Ok(snapshot) => snapshot,

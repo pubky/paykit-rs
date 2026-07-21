@@ -144,7 +144,10 @@ async fn test_private_queue_readiness_rejects_linking_peer_without_handshake_rol
         .private_queue_readiness(&counterparty, &receiver_path())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
+    assert!(matches!(
+        result,
+        Err(PaykitSdkError::RecoveryRequired { .. })
+    ));
 }
 
 #[tokio::test]
@@ -398,7 +401,10 @@ async fn test_advance_link_handshake_rejects_recovery_required_peer() {
         .advance_link_handshake(counterparty.clone(), receiver_path())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::RecoveryRequired(_))));
+    assert!(matches!(
+        result,
+        Err(PaykitSdkError::RecoveryRequired { .. })
+    ));
     assert_eq!(
         crate::load_encrypted_link_state(&storage, &counterparty, &receiver_path())
             .await

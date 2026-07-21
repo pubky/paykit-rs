@@ -88,7 +88,8 @@ use crate::{
     domain::publication::PublicationStatus,
     domain::receipts::{
         decrypt_receipt_record_from_access, enqueue_receipt_access_for_issuance,
-        fetch_encrypted_receipt_json, receipt_issuance_record as load_receipt_issuance_record,
+        fetch_encrypted_receipt_json, merge_retrieval_error, missing_encrypted_receipt_error,
+        receipt_issuance_record as load_receipt_issuance_record,
         receipt_issuance_record_by_receipt_id as load_receipt_issuance_record_by_receipt_id,
         receipt_issuance_record_matches_draft,
         receipt_issuance_records as load_receipt_issuance_records, receipt_record_matches_access,
@@ -216,14 +217,20 @@ where
     }
 
     fn claim_identity_operation(&self, context: &str) -> Result<RuntimeOperationGuard> {
-        let mut in_progress = self
-            .identity_operation_in_progress
-            .lock()
-            .map_err(|_| PaykitSdkError::Policy("identity operation lock poisoned".into()))?;
+        let mut in_progress =
+            self.identity_operation_in_progress
+                .lock()
+                .map_err(|_| PaykitSdkError::Policy {
+                    context: "identity operation lock poisoned".into(),
+                    source: None,
+                })?;
         if *in_progress {
-            return Err(PaykitSdkError::Policy(format!(
-                "cannot {context} while another identity-scoped operation is in progress"
-            )));
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "cannot {context} while another identity-scoped operation is in progress"
+                ),
+                source: None,
+            });
         }
         *in_progress = true;
         Ok(RuntimeOperationGuard {
@@ -430,9 +437,10 @@ where
         if self.config.encrypted_link_recovery_markers
             == EncryptedLinkRecoveryMarkerPolicy::Disabled
         {
-            Err(PaykitSdkError::Policy(
-                "Encrypted Link recovery marker publishing is disabled".into(),
-            ))
+            Err(PaykitSdkError::Policy {
+                context: "Encrypted Link recovery marker publishing is disabled".into(),
+                source: None,
+            })
         } else {
             Ok(())
         }
@@ -523,7 +531,10 @@ async fn fetch_public_text(
                 })?;
             String::from_utf8(bytes.to_vec())
                 .map(Some)
-                .map_err(|err| PaykitSdkError::Protocol(format!("{context}: invalid UTF-8: {err}")))
+                .map_err(|err| PaykitSdkError::Protocol {
+                    context: format!("{context}: invalid UTF-8: {err}"),
+                    source: None,
+                })
         }
         Err(err) if is_pubky_not_found(&err) => Ok(None),
         Err(err) => Err(map_pubky_transport_error(context, err)),
@@ -537,7 +548,10 @@ async fn fetch_public_file_uri(
 ) -> Result<Option<Vec<u8>>> {
     let resource = uri
         .parse::<pubky::PubkyResource>()
-        .map_err(|err| PaykitSdkError::Protocol(format!("{context}: invalid Pubky URI: {err}")))?;
+        .map_err(|err| PaykitSdkError::Protocol {
+            context: format!("{context}: invalid Pubky URI: {err}"),
+            source: None,
+        })?;
     match storage.get(resource).await {
         Ok(resp) => resp
             .bytes()

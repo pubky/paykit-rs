@@ -346,8 +346,10 @@ impl PubkySessionBootstrap {
 
 /// Parse an auth deep link into public request details.
 pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
-    let deep_link = DeepLink::from_str(auth_url)
-        .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky auth URL: {err}")))?;
+    let deep_link = DeepLink::from_str(auth_url).map_err(|err| PaykitSdkError::Protocol {
+        context: format!("invalid Pubky auth URL: {err}"),
+        source: None,
+    })?;
 
     match deep_link {
         DeepLink::Signin(link) => Ok(PubkyAuthDetails {
@@ -375,13 +377,18 @@ pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
 pub fn resolve_pubky_url(uri: &str) -> Result<String> {
     pubky::resolve_pubky(uri)
         .map(|url| url.to_string())
-        .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky URI: {err}")))
+        .map_err(|err| PaykitSdkError::Protocol {
+            context: format!("invalid Pubky URI: {err}"),
+            source: None,
+        })
 }
 
 /// Parse a `pubky://<public-key>/<path>` resource into stable parts.
 pub fn parse_pubky_resource(uri: &str) -> Result<PubkyResourceRef> {
-    let resource = PubkyResource::from_str(uri)
-        .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky resource: {err}")))?;
+    let resource = PubkyResource::from_str(uri).map_err(|err| PaykitSdkError::Protocol {
+        context: format!("invalid Pubky resource: {err}"),
+        source: None,
+    })?;
     let public_key = PubkyPublicKey::from_public_key(&resource.owner);
     let path = resource.path.as_str().to_string();
     let normalized = resource.to_pubky_url();
@@ -415,18 +422,22 @@ pub(crate) fn parse_capabilities(value: &str) -> Result<Capabilities> {
     let mut capabilities = Vec::new();
     for entry in value.split(',').map(str::trim) {
         if entry.is_empty() {
-            return Err(PaykitSdkError::Protocol(
-                "Pubky capabilities must not contain empty entries".into(),
-            ));
+            return Err(PaykitSdkError::Protocol {
+                context: "Pubky capabilities must not contain empty entries".into(),
+                source: None,
+            });
         }
-        let capability = Capability::try_from(entry)
-            .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky capability: {err}")))?;
+        let capability = Capability::try_from(entry).map_err(|err| PaykitSdkError::Protocol {
+            context: format!("invalid Pubky capability: {err}"),
+            source: None,
+        })?;
         capabilities.push(capability);
     }
     if capabilities.is_empty() {
-        return Err(PaykitSdkError::Protocol(
-            "Pubky capabilities must contain at least one valid entry".into(),
-        ));
+        return Err(PaykitSdkError::Protocol {
+            context: "Pubky capabilities must contain at least one valid entry".into(),
+            source: None,
+        });
     }
     Ok(Capabilities::from(capabilities).normalize())
 }
@@ -434,9 +445,11 @@ pub(crate) fn parse_capabilities(value: &str) -> Result<Capabilities> {
 fn validate_sign_in_or_sign_up_auth_url(auth_url: &str) -> Result<()> {
     match parse_pubky_auth_url(auth_url)?.kind {
         PubkyAuthRequestKind::SignIn | PubkyAuthRequestKind::SignUp => Ok(()),
-        PubkyAuthRequestKind::SecretExport => Err(PaykitSdkError::Protocol(
-            "Pubky secret-export auth URLs cannot be resumed or approved as sessions".into(),
-        )),
+        PubkyAuthRequestKind::SecretExport => Err(PaykitSdkError::Protocol {
+            context: "Pubky secret-export auth URLs cannot be resumed or approved as sessions"
+                .into(),
+            source: None,
+        }),
     }
 }
 
@@ -461,30 +474,38 @@ fn validate_auth_url_capabilities(auth_url: &str, expected_capabilities: &str) -
     let actual = parse_auth_url_capabilities(auth_url)?;
     let expected = parse_capabilities(expected_capabilities)?;
     if actual != expected {
-        return Err(PaykitSdkError::Policy(format!(
-            "Pubky auth URL requested capabilities `{actual}`, expected `{expected}`"
-        )));
+        return Err(PaykitSdkError::Policy {
+            context: format!(
+                "Pubky auth URL requested capabilities `{actual}`, expected `{expected}`"
+            ),
+            source: None,
+        });
     }
     Ok(())
 }
 
 fn parse_auth_url_capabilities(auth_url: &str) -> Result<Capabilities> {
-    let url = Url::parse(auth_url)
-        .map_err(|err| PaykitSdkError::Protocol(format!("invalid Pubky auth URL: {err}")))?;
+    let url = Url::parse(auth_url).map_err(|err| PaykitSdkError::Protocol {
+        context: format!("invalid Pubky auth URL: {err}"),
+        source: None,
+    })?;
     let mut caps = None;
     for (key, value) in url.query_pairs() {
         if key != "caps" {
             continue;
         }
         if caps.is_some() {
-            return Err(PaykitSdkError::Protocol(
-                "Pubky auth URL must not contain duplicate caps parameters".into(),
-            ));
+            return Err(PaykitSdkError::Protocol {
+                context: "Pubky auth URL must not contain duplicate caps parameters".into(),
+                source: None,
+            });
         }
         caps = Some(value.into_owned());
     }
-    let caps =
-        caps.ok_or_else(|| PaykitSdkError::Protocol("Pubky auth URL missing caps".into()))?;
+    let caps = caps.ok_or_else(|| PaykitSdkError::Protocol {
+        context: "Pubky auth URL missing caps".into(),
+        source: None,
+    })?;
     parse_capabilities(&caps)
 }
 

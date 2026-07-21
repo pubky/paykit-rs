@@ -105,7 +105,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_stale_lease()
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     let snapshot = storage.snapshot().unwrap();
     assert!(snapshot.outbound_private_messages.is_empty());
     assert!(snapshot.payment_endpoint_reservations.is_empty());
@@ -124,7 +124,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_duplicate_ide
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
     assert!(storage
         .snapshot()
         .unwrap()
@@ -148,7 +148,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_invalid_ids()
         )
         .await;
 
-        assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+        assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
     }
     assert!(storage
         .snapshot()
@@ -245,7 +245,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_cancellation_
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }
 
 #[tokio::test]
@@ -419,7 +419,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_conflicting_e
     )
     .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 #[tokio::test]

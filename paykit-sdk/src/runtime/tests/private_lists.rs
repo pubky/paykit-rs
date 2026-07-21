@@ -302,7 +302,7 @@ async fn test_enqueue_private_payment_list_waits_for_peer_operation_lease() {
         .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_path())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }
 
 #[tokio::test]
@@ -363,7 +363,7 @@ async fn test_enqueue_private_payment_list_cancels_invalid_reservations() {
         .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_path())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
     assert_eq!(
         *canceled.lock().unwrap(),
         vec!["reservation-1".to_string(), "reservation-2".to_string()]
@@ -394,7 +394,7 @@ async fn test_enqueue_private_payment_list_cancels_unpersisted_reservations_afte
         .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_path())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     assert_eq!(
         *canceled.lock().unwrap(),
         vec!["reservation-1".to_string(), "reservation-2".to_string()]
@@ -958,7 +958,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
         .enqueue_private_payment_list_from_receiving_details(counterparty, receiver_path())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
     assert_eq!(
         *canceled.lock().unwrap(),
         vec!["conflicting-reservation".to_string()]

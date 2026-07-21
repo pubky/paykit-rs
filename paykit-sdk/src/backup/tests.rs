@@ -127,7 +127,7 @@ async fn assert_restore_rejects_outbound_record(record: OutboundPrivateMessageRe
 
     let result = restore_backup_state(&storage, backup).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol(_))));
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
 
 fn receipt_access_raw_with_context(

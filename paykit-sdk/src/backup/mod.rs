@@ -585,16 +585,19 @@ impl SdkBackupState {
         local_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
         if self.version != SDK_BACKUP_VERSION {
-            return Err(PaykitSdkError::Protocol(format!(
-                "unsupported SDK backup version {}",
-                self.version
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!("unsupported SDK backup version {}", self.version),
+                source: None,
+            });
         }
         if &self.local_receiver_path != local_receiver_path {
-            return Err(PaykitSdkError::Protocol(format!(
-                "backup receiver path '{}' does not match local receiver path '{}'",
-                self.local_receiver_path, local_receiver_path
-            )));
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "backup receiver path '{}' does not match local receiver path '{}'",
+                    self.local_receiver_path, local_receiver_path
+                ),
+                source: None,
+            });
         }
 
         if let Some(current_public_key) =
@@ -632,9 +635,10 @@ impl SdkBackupState {
             .as_ref()
             .and_then(|state| state.local_pubky_public_key.as_ref());
         if backup_public_key.is_none() && self.has_identity_scoped_state() {
-            return Err(PaykitSdkError::Protocol(
-                "backup has SDK state but no local public identity".into(),
-            ));
+            return Err(PaykitSdkError::Protocol {
+                context: "backup has SDK state but no local public identity".into(),
+                source: None,
+            });
         }
 
         Ok(())
