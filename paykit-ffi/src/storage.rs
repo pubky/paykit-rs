@@ -27,8 +27,10 @@ pub struct FfiSdkStateBlobSnapshot {
 ///
 /// Each store instance is bound to one complete logical SDK state record.
 /// Callbacks receive no identity or Paykit Receiver Path key, so apps must use
-/// separately namespaced store instances for different identities or configured
-/// Paykit Receiver Paths. Share a store between handles only when they
+/// separately namespaced store instances when identities or configured Paykit
+/// Receiver Paths need to retain distinct state. A store may be reused after
+/// clearing the previous identity's data when intentionally switching the
+/// logical state it represents. Share a store between handles only when they
 /// intentionally operate on the same logical state.
 ///
 /// Callbacks execute synchronously on the thread executing or polling the SDK
