@@ -25,6 +25,12 @@ pub struct FfiSdkStateBlobSnapshot {
 
 /// Platform-owned durable blob store for SDK state.
 ///
+/// Each store instance is bound to one complete logical SDK state record.
+/// Callbacks receive no identity or Paykit Receiver Path key, so apps must use
+/// separately namespaced store instances for different identities or configured
+/// Paykit Receiver Paths. Share a store between handles only when they
+/// intentionally operate on the same logical state.
+///
 /// Callbacks execute synchronously on the thread executing or polling the SDK
 /// call. Each SDK handle owns a transaction mutex shared by that handle's
 /// storage clones. The mutex serializes callbacks made inside SDK storage
