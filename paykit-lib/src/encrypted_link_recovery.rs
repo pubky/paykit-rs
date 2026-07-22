@@ -374,4 +374,31 @@ mod tests {
 
         assert_ne!(write_to_bob_receiver, write_to_bob_other_receiver);
     }
+
+    // CLAUDE.md contract: public reads treat 404/GONE as absence, never as errors.
+    fn server_error(status: StatusCode) -> PubkyError {
+        PubkyError::Request(RequestError::Server {
+            status,
+            message: "test response".into(),
+        })
+    }
+
+    #[test]
+    fn test_is_not_found_matches_not_found_and_gone() {
+        assert!(is_not_found(&server_error(StatusCode::NOT_FOUND)));
+        assert!(is_not_found(&server_error(StatusCode::GONE)));
+    }
+
+    #[test]
+    fn test_is_not_found_rejects_other_statuses_and_variants() {
+        assert!(!is_not_found(&server_error(
+            StatusCode::INTERNAL_SERVER_ERROR
+        )));
+        assert!(!is_not_found(&server_error(StatusCode::FORBIDDEN)));
+
+        let validation_error = PubkyError::Request(RequestError::Validation {
+            message: "invalid request".into(),
+        });
+        assert!(!is_not_found(&validation_error));
+    }
 }
