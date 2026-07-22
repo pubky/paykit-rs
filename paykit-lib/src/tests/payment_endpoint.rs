@@ -334,3 +334,50 @@ async fn removing_missing_endpoint_is_idempotent() {
 
     setup.raw_session.signout().await.unwrap();
 }
+
+#[tokio::test]
+async fn test_invalid_utf8_endpoint_returns_invalid_data() {
+    let setup = TestSetup::new().await;
+    let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+    let path = crate::pubky_routing::payment_endpoint_path(&receiver_path(), &identifier);
+
+    setup
+        .session
+        .storage()
+        .put(path, vec![0xff])
+        .await
+        .expect("invalid UTF-8 fixture should be stored");
+
+    let result = get_payment_endpoint(
+        &setup.public_storage,
+        &setup.public_key,
+        &receiver_path(),
+        &identifier,
+    )
+    .await;
+    assert!(matches!(result, Err(PaykitError::InvalidData { .. })));
+
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_invalid_payment_endpoint_listing_entry_returns_invalid_data() {
+    let setup = TestSetup::new().await;
+    let invalid_identifier = "a".repeat(65);
+    let path = format!(
+        "{}{invalid_identifier}",
+        crate::pubky_routing::payment_endpoint_path_prefix(&receiver_path())
+    );
+
+    setup
+        .session
+        .storage()
+        .put(path, "non-empty payload".to_string())
+        .await
+        .expect("invalid listing entry fixture should be stored");
+
+    let result = get_payment_list(&setup.public_storage, &setup.public_key, &receiver_path()).await;
+    assert!(matches!(result, Err(PaykitError::InvalidData { .. })));
+
+    setup.raw_session.signout().await.unwrap();
+}
