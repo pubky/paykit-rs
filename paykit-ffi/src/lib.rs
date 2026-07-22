@@ -1,6 +1,7 @@
 #![doc = "UniFFI bindings for Paykit SDK."]
 
 mod config;
+mod conversions_common;
 mod errors;
 mod json;
 mod payment_adapter;
