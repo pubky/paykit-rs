@@ -132,6 +132,11 @@ validate_16kb_segments() {
     local abi="$1"
     local lib="$2"
     local display_path="${3:-$lib}"
+    local elf_header
+    local elf_class
+    local elf_machine
+    local expected_elf_class
+    local expected_elf_machine
     local headers
     local load_alignments
     local load_summary=""
@@ -146,6 +151,40 @@ validate_16kb_segments() {
     local relro_memsz_value
     local relro_end_value
     local invalid=false
+
+    elf_header=$("$READELF_BIN" -h "$lib")
+    elf_class=$(printf '%s\n' "$elf_header" \
+        | sed -n -E 's/^[[:space:]]*Class:[[:space:]]*([^[:space:]]+).*$/\1/p' \
+        | head -n 1)
+    elf_machine=$(printf '%s\n' "$elf_header" \
+        | sed -n -E 's/^[[:space:]]*Machine:[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' \
+        | head -n 1)
+    case "$abi" in
+        armeabi-v7a)
+            expected_elf_class="ELF32"
+            expected_elf_machine="ARM"
+            ;;
+        arm64-v8a)
+            expected_elf_class="ELF64"
+            expected_elf_machine="AArch64"
+            ;;
+        x86)
+            expected_elf_class="ELF32"
+            expected_elf_machine="Intel 80386"
+            ;;
+        x86_64)
+            expected_elf_class="ELF64"
+            expected_elf_machine="Advanced Micro Devices X86-64"
+            ;;
+        *)
+            echo "Error: Unsupported Android ABI for ELF validation: abi=$abi path=$display_path"
+            return 1
+            ;;
+    esac
+    if [ "$elf_class" != "$expected_elf_class" ] || [ "$elf_machine" != "$expected_elf_machine" ]; then
+        echo "Error: Android ELF ABI mismatch: abi=$abi path=$display_path expected_class=$expected_elf_class actual_class=${elf_class:-missing} expected_machine='$expected_elf_machine' actual_machine='${elf_machine:-missing}'"
+        return 1
+    fi
 
     headers=$(readelf_program_headers "$lib")
     load_alignments=$(printf '%s\n' "$headers" | awk '$1 == "LOAD" { print $NF }')
@@ -196,7 +235,7 @@ EOF
         return 1
     fi
 
-    echo "Android 16 KB ELF validation passed: abi=$abi path=$display_path LOAD_ALIGNMENTS=[$load_summary] GNU_RELRO_START=$relro_start GNU_RELRO_MEMSZ=$relro_memsz GNU_RELRO_END=$relro_end"
+    echo "Android 16 KB ELF validation passed: abi=$abi path=$display_path ELF_CLASS=$elf_class ELF_MACHINE='$elf_machine' LOAD_ALIGNMENTS=[$load_summary] GNU_RELRO_START=$relro_start GNU_RELRO_MEMSZ=$relro_memsz GNU_RELRO_END=$relro_end"
 }
 
 validate_android_library() {
@@ -239,6 +278,38 @@ validate_android_symbols() {
 
         validate_android_library "$abi" "$lib"
     done
+}
+
+validate_android_abi_mismatch_fixtures() {
+    local fixture_output
+
+    if fixture_output=$(validate_16kb_segments \
+        "x86_64" \
+        "$JNILIBS_DIR/arm64-v8a/libpaykit.so" \
+        "negative-fixture: arm64-v8a/libpaykit.so labeled x86_64" 2>&1); then
+        echo "Error: Android ELF ABI mismatch fixture unexpectedly passed: arm64-v8a labeled x86_64"
+        exit 1
+    fi
+    if ! printf '%s\n' "$fixture_output" | grep -Fq "Android ELF ABI mismatch"; then
+        printf '%s\n' "$fixture_output"
+        echo "Error: Android ELF ABI mismatch fixture failed for an unexpected reason: arm64-v8a labeled x86_64"
+        exit 1
+    fi
+    echo "Android ELF ABI mismatch fixture passed: arm64-v8a labeled x86_64"
+
+    if fixture_output=$(validate_16kb_segments \
+        "arm64-v8a" \
+        "$JNILIBS_DIR/x86_64/libpaykit.so" \
+        "negative-fixture: x86_64/libpaykit.so labeled arm64-v8a" 2>&1); then
+        echo "Error: Android ELF ABI mismatch fixture unexpectedly passed: x86_64 labeled arm64-v8a"
+        exit 1
+    fi
+    if ! printf '%s\n' "$fixture_output" | grep -Fq "Android ELF ABI mismatch"; then
+        printf '%s\n' "$fixture_output"
+        echo "Error: Android ELF ABI mismatch fixture failed for an unexpected reason: x86_64 labeled arm64-v8a"
+        exit 1
+    fi
+    echo "Android ELF ABI mismatch fixture passed: x86_64 labeled arm64-v8a"
 }
 
 create_native_debug_symbols_archive() {
@@ -454,6 +525,7 @@ cargo ndk \
     -t x86_64 \
     build --release
 validate_android_symbols
+validate_android_abi_mismatch_fixtures
 create_native_debug_symbols_archive
 strip_android_libraries
 validate_stripped_android_symbols

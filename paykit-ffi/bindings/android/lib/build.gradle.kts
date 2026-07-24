@@ -133,6 +133,18 @@ dependencies {
 
 val androidNativeAbis = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
 
+data class ExpectedElfIdentity(
+    val elfClass: String,
+    val machine: String
+)
+
+val expectedAndroidElfIdentities = mapOf(
+    "armeabi-v7a" to ExpectedElfIdentity("ELF32", "ARM"),
+    "arm64-v8a" to ExpectedElfIdentity("ELF64", "AArch64"),
+    "x86" to ExpectedElfIdentity("ELF32", "Intel 80386"),
+    "x86_64" to ExpectedElfIdentity("ELF64", "Advanced Micro Devices X86-64")
+)
+
 fun executableFromPath(name: String): String? {
     return System.getenv("PATH")
         ?.split(File.pathSeparator)
@@ -269,6 +281,33 @@ fun Project.validateAndroidNativeLibrary(
         throw GradleException("Android native library missing: ABI='$abi' path='$displayPath'")
     }
 
+    val expectedIdentity = expectedAndroidElfIdentities[abi]
+        ?: throw GradleException(
+            "Unsupported Android ABI for ELF validation: ABI='$abi' path='$displayPath'"
+        )
+    val (headerExit, elfHeader) = runReadelf(readelf, "-h", lib.absolutePath)
+    if (headerExit != 0) {
+        throw GradleException(
+            "Unable to inspect Android ELF identity: ABI='$abi' path='$displayPath'"
+        )
+    }
+    val elfClass = Regex("""(?m)^\s*Class:\s*(\S+).*$""")
+        .find(elfHeader)
+        ?.groupValues
+        ?.get(1)
+    val elfMachine = Regex("""(?m)^\s*Machine:\s*(.*?)\s*$""")
+        .find(elfHeader)
+        ?.groupValues
+        ?.get(1)
+    if (elfClass != expectedIdentity.elfClass || elfMachine != expectedIdentity.machine) {
+        throw GradleException(
+            "Android ELF ABI mismatch: ABI='$abi' path='$displayPath' " +
+                "expectedClass=${expectedIdentity.elfClass} actualClass=${elfClass ?: "missing"} " +
+                "expectedMachine='${expectedIdentity.machine}' " +
+                "actualMachine='${elfMachine ?: "missing"}'"
+        )
+    }
+
     val (sectionsExit, sections) = runReadelf(readelf, "-S", lib.absolutePath)
     if (sectionsExit != 0) {
         throw GradleException("Unable to inspect Android native library sections: ABI='$abi' path='$displayPath'")
@@ -316,7 +355,32 @@ fun Project.validateAndroidNativeLibrary(
     }
 
     logger.lifecycle(
-        "Android 16 KB ELF validation passed: ABI='$abi' path='$displayPath' ${info.detectedValues()}"
+        "Android 16 KB ELF validation passed: ABI='$abi' path='$displayPath' " +
+            "ELF_CLASS=$elfClass ELF_MACHINE='$elfMachine' ${info.detectedValues()}"
+    )
+}
+
+fun Project.validateAndroidAbiMismatchFixture(
+    readelf: String,
+    labeledAbi: String,
+    lib: File,
+    actualAbi: String
+) {
+    val displayPath = "negative-fixture: $actualAbi/libpaykit.so labeled $labeledAbi"
+    val failure = runCatching {
+        validateAndroidNativeLibrary(readelf, labeledAbi, lib, displayPath)
+    }.exceptionOrNull()
+    if (failure !is GradleException ||
+        failure.message?.startsWith("Android ELF ABI mismatch:") != true
+    ) {
+        throw GradleException(
+            "Android ELF ABI mismatch fixture failed for an unexpected reason: " +
+                "actualABI='$actualAbi' labeledABI='$labeledAbi'",
+            failure
+        )
+    }
+    logger.lifecycle(
+        "Android ELF ABI mismatch fixture passed: actualABI='$actualAbi' labeledABI='$labeledAbi'"
     )
 }
 
@@ -515,6 +579,23 @@ val validateReleaseNativeLibraries by tasks.registering {
         val nm = findLlvmTool("llvm-nm")
         val objdump = findLlvmTool("llvm-objdump")
         val kotlinIntegrity = kotlinUniffiIntegrity()
+
+        validateAndroidAbiMismatchFixture(
+            readelf,
+            "x86_64",
+            layout.projectDirectory.file(
+                "src/main/jniLibs/arm64-v8a/libpaykit.so"
+            ).asFile,
+            "arm64-v8a"
+        )
+        validateAndroidAbiMismatchFixture(
+            readelf,
+            "arm64-v8a",
+            layout.projectDirectory.file(
+                "src/main/jniLibs/x86_64/libpaykit.so"
+            ).asFile,
+            "x86_64"
+        )
 
         androidNativeAbis.forEach { abi ->
             val lib = layout.projectDirectory.file("src/main/jniLibs/$abi/libpaykit.so").asFile
