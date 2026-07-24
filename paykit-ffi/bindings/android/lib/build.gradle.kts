@@ -174,6 +174,19 @@ fun Project.runReadelf(readelf: String, vararg args: String): Pair<Int, String> 
     return result.exitValue to stdout.toString().ifBlank { stderr.toString() }
 }
 
+fun Project.gnuBuildId(readelf: String, lib: File): String {
+    val (notesExit, notes) = runReadelf(readelf, "-n", lib.absolutePath)
+    val buildId = Regex("""(?s)NT_GNU_BUILD_ID.*?Build ID:\s*([0-9a-fA-F]+)""")
+        .find(notes)
+        ?.groupValues
+        ?.get(1)
+    if (notesExit != 0 || buildId.isNullOrEmpty()) {
+        throw GradleException("Android native library has no NT_GNU_BUILD_ID: '${lib.path}'")
+    }
+
+    return buildId
+}
+
 fun String.parseElfAlignment(): Long {
     return if (startsWith("0x")) {
         removePrefix("0x").toLong(16)
@@ -184,12 +197,11 @@ fun String.parseElfAlignment(): Long {
 
 val validateReleaseNativeLibraries by tasks.registering {
     group = "verification"
-    description = "Validates release JNI libraries are stripped and keep 16 KB LOAD alignment."
+    description = "Validates release JNI libraries are stripped, 16 KB aligned, and carry GNU build IDs."
 
     doLast {
         val readelf = findReadelf()
         val loadAlignmentRegex = Regex("""^\s*LOAD\s+.*\s+(0x[0-9a-fA-F]+|\d+)\s*$""")
-
         androidNativeAbis.forEach { abi ->
             val lib = layout.projectDirectory.file("src/main/jniLibs/$abi/libpaykit.so").asFile
             if (!lib.isFile) {
@@ -203,6 +215,8 @@ val validateReleaseNativeLibraries by tasks.registering {
             if (Regex("""\.debug_""").containsMatchIn(sections)) {
                 throw GradleException("Android release native library still contains .debug_* sections: '${lib.path}'")
             }
+
+            gnuBuildId(readelf, lib)
 
             val wideHeaders = runReadelf(readelf, "-W", "-l", lib.absolutePath)
             val headers = if (wideHeaders.first == 0) {
@@ -227,8 +241,74 @@ val validateReleaseNativeLibraries by tasks.registering {
     }
 }
 
-tasks.matching { it.name == "bundleReleaseAar" || it.name.startsWith("publish") }.configureEach {
+val validatePublishedNativeArtifacts by tasks.registering {
+    group = "verification"
+    description = "Validates final AAR and full-DWARF symbol build IDs match for every Android ABI."
+    dependsOn("bundleReleaseAar", validateReleaseNativeLibraries)
+
+    doLast {
+        val readelf = findReadelf()
+        val aar = layout.buildDirectory.dir("outputs/aar").get().asFile
+            .listFiles()
+            ?.singleOrNull { it.name.endsWith("-release.aar") }
+            ?: throw GradleException("Exactly one release AAR is required for native build-ID validation")
+        val symbolArchive = rootProject.layout.projectDirectory.file("native-debug-symbols.zip").asFile
+        if (!symbolArchive.isFile) {
+            throw GradleException("Native debug symbol archive missing at '${symbolArchive.path}'")
+        }
+
+        val validationDir = layout.buildDirectory.dir("tmp/validatePublishedNativeArtifacts").get().asFile
+        validationDir.deleteRecursively()
+        validationDir.mkdirs()
+
+        fun extract(zip: ZipFile, entryName: String, output: File): File {
+            val entry = zip.getEntry(entryName)
+                ?: throw GradleException("Native artifact entry missing: '$entryName'")
+            output.parentFile.mkdirs()
+            zip.getInputStream(entry).use { input ->
+                output.outputStream().use { input.copyTo(it) }
+            }
+            return output
+        }
+
+        ZipFile(aar).use { aarZip ->
+            ZipFile(symbolArchive).use { symbolZip ->
+                androidNativeAbis.forEach { abi ->
+                    val packaged = extract(
+                        aarZip,
+                        "jni/$abi/libpaykit.so",
+                        File(validationDir, "aar/$abi/libpaykit.so")
+                    )
+                    val symbols = extract(
+                        symbolZip,
+                        "$abi/libpaykit.so",
+                        File(validationDir, "symbols/$abi/libpaykit.so")
+                    )
+                    val (sectionsExit, sections) = runReadelf(readelf, "-S", symbols.absolutePath)
+                    if (sectionsExit != 0 || !sections.contains(".debug_info")) {
+                        throw GradleException("Full DWARF .debug_info missing for '$abi/libpaykit.so'")
+                    }
+
+                    val packagedBuildId = gnuBuildId(readelf, packaged)
+                    val symbolBuildId = gnuBuildId(readelf, symbols)
+                    if (packagedBuildId != symbolBuildId) {
+                        throw GradleException(
+                            "Native build ID mismatch for '$abi/libpaykit.so': " +
+                                "aar=$packagedBuildId symbols=$symbolBuildId"
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+tasks.matching { it.name == "bundleReleaseAar" }.configureEach {
     dependsOn(validateReleaseNativeLibraries)
+}
+
+tasks.matching { it.name == "build" || it.name == "check" || it.name.startsWith("publish") }.configureEach {
+    dependsOn(validatePublishedNativeArtifacts)
 }
 
 afterEvaluate {

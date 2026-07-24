@@ -7,6 +7,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Fixed
+- Published Android libraries with stable GNU build IDs and matching unstripped
+  native debug symbols for store crash symbolication.
+
 ## [0.1.0-rc33] - 2026-07-08
 
 ### Changed
