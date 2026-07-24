@@ -7,6 +7,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.1-rc1] - 2026-07-24
+
+### Fixed
+- The Android package now builds `libpaykit.so` for devices that use a 16 KB
+  runtime page size while preserving the `0.1.0-rc33` mobile API.
+
 ## [0.1.0-rc33] - 2026-07-08
 
 ### Changed
@@ -265,7 +271,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc32...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.1-rc1...HEAD
+[0.1.1-rc1]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.1-rc1
+[0.1.0-rc33]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc33
 [0.1.0-rc32]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc32
 [0.1.0-rc31]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc31
 [0.1.0-rc30]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc30

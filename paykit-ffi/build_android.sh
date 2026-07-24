@@ -13,12 +13,23 @@ BASE_DIR="$ANDROID_LIB_DIR/lib/src/main/kotlin/com/synonym/paykit"
 JNILIBS_DIR="$ANDROID_LIB_DIR/lib/src/main/jniLibs"
 NATIVE_DEBUG_SYMBOLS_ZIP="$ANDROID_LIB_DIR/native-debug-symbols.zip"
 
-echo "Installing gobley-uniffi-bindgen fork..."
 GOBLEY_REV="82a0f93ad552d0c45e185f728f14c3c60b1ed707"
-cargo install --git https://github.com/ovitrif/gobley.git --rev "$GOBLEY_REV" gobley-uniffi-bindgen --force
+GOBLEY_INSTALL_ROOT="$TARGET_DIR/build-tools/gobley-$GOBLEY_REV"
+GOBLEY_BINDGEN_BIN="$GOBLEY_INSTALL_ROOT/bin/gobley-uniffi-bindgen"
+
+echo "Installing pinned gobley-uniffi-bindgen fork into $GOBLEY_INSTALL_ROOT..."
+cargo install \
+    --git https://github.com/ovitrif/gobley.git \
+    --rev "$GOBLEY_REV" \
+    --root "$GOBLEY_INSTALL_ROOT" \
+    --locked \
+    --force \
+    gobley-uniffi-bindgen
+"$GOBLEY_BINDGEN_BIN" --version
 
 # Install the cargo-ndk version used by the mobile release scripts.
 CARGO_NDK_VERSION="3.5.4"
+echo "Checking cargo-ndk $CARGO_NDK_VERSION..."
 if ! command -v cargo-ndk &> /dev/null || ! cargo ndk --version | grep -q "cargo-ndk $CARGO_NDK_VERSION"; then
     echo "Installing cargo-ndk $CARGO_NDK_VERSION..."
     cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked --force
@@ -86,6 +97,30 @@ find_strip() {
     exit 1
 }
 
+find_llvm_tool() {
+    local tool_name="$1"
+
+    if command -v "$tool_name" >/dev/null 2>&1; then
+        command -v "$tool_name"
+        return
+    fi
+
+    for ndk_dir in "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK_HOME:-}" "${NDK_HOME:-}"; do
+        if [ -z "$ndk_dir" ] || [ ! -d "$ndk_dir/toolchains/llvm/prebuilt" ]; then
+            continue
+        fi
+
+        tool_path=$(find "$ndk_dir/toolchains/llvm/prebuilt" -path "*/bin/$tool_name" | head -n 1)
+        if [ -n "$tool_path" ]; then
+            echo "$tool_path"
+            return
+        fi
+    done
+
+    echo "Error: $tool_name is required to validate the UniFFI Kotlin/native contract"
+    exit 1
+}
+
 has_dwarf_debug_metadata() {
     "$READELF_BIN" -S "$1" | grep -Eq '\.debug_'
 }
@@ -103,49 +138,101 @@ readelf_program_headers() {
     "$READELF_BIN" -l "$1"
 }
 
-has_16kb_load_alignment() {
-    alignments=$(readelf_program_headers "$1" | awk '$1 == "LOAD" { print $NF }')
-    if [ -z "$alignments" ]; then
+validate_16kb_segments() {
+    local abi="$1"
+    local lib="$2"
+    local display_path="${3:-$lib}"
+    local headers
+    local load_alignments
+    local load_summary=""
+    local relro_fields
+    local relro_start="missing"
+    local relro_memsz="missing"
+    local relro_end="missing"
+    local alignment
+    local alignment_value
+    local alignment_hex
+    local relro_start_value
+    local relro_memsz_value
+    local relro_end_value
+    local invalid=false
+
+    headers=$(readelf_program_headers "$lib")
+    load_alignments=$(printf '%s\n' "$headers" | awk '$1 == "LOAD" { print $NF }')
+    if [ -z "$load_alignments" ]; then
+        invalid=true
+        load_summary="missing"
+    else
+        while read -r alignment; do
+            if [ -z "$alignment" ]; then
+                continue
+            fi
+
+            alignment_value=$((alignment))
+            printf -v alignment_hex '0x%x' "$alignment_value"
+            if [ -n "$load_summary" ]; then
+                load_summary="$load_summary,"
+            fi
+            load_summary="$load_summary$alignment_hex"
+
+            if [ "$alignment_value" -lt 16384 ]; then
+                invalid=true
+            fi
+        done <<EOF
+$load_alignments
+EOF
+    fi
+
+    relro_fields=$(printf '%s\n' "$headers" | awk '$1 == "GNU_RELRO" { print $3, $6; exit }')
+    if [ -z "$relro_fields" ]; then
+        invalid=true
+    else
+        read -r relro_start_value relro_memsz_value <<EOF
+$relro_fields
+EOF
+        relro_end_value=$((relro_start_value + relro_memsz_value))
+        printf -v relro_start '0x%x' "$((relro_start_value))"
+        printf -v relro_memsz '0x%x' "$((relro_memsz_value))"
+        printf -v relro_end '0x%x' "$relro_end_value"
+
+        if [ "$((relro_end_value % 16384))" -ne 0 ]; then
+            invalid=true
+        fi
+    fi
+
+    if [ "$invalid" = true ]; then
+        echo "Error: Android 16 KB ELF validation failed: abi=$abi path=$display_path LOAD_ALIGNMENTS=[$load_summary] GNU_RELRO_START=$relro_start GNU_RELRO_MEMSZ=$relro_memsz GNU_RELRO_END=$relro_end required_LOAD_min=0x4000 required_GNU_RELRO_end_alignment=0x4000"
+        printf '%s\n' "$headers" | grep -E '(^|[[:space:]])(LOAD|GNU_RELRO)[[:space:]]' || true
         return 1
     fi
 
-    while read -r alignment; do
-        if [ -z "$alignment" ]; then
-            continue
-        fi
-
-        if [ "$((alignment))" -lt 16384 ]; then
-            return 1
-        fi
-    done <<EOF
-$alignments
-EOF
+    echo "Android 16 KB ELF validation passed: abi=$abi path=$display_path LOAD_ALIGNMENTS=[$load_summary] GNU_RELRO_START=$relro_start GNU_RELRO_MEMSZ=$relro_memsz GNU_RELRO_END=$relro_end"
 }
 
 validate_android_library() {
-    lib="$1"
+    local abi="$1"
+    local lib="$2"
+    local display_path="${3:-$lib}"
     if ! has_dwarf_debug_metadata "$lib"; then
-        echo "Error: Android native library has no full DWARF debug metadata: $lib"
+        echo "Error: Android native library has no full DWARF debug metadata: abi=$abi path=$display_path"
         exit 1
     fi
 
-    if ! has_16kb_load_alignment "$lib"; then
-        echo "Error: Android native library is not 16 KB page-size aligned: $lib"
-        readelf_program_headers "$lib" | grep LOAD || true
+    if ! validate_16kb_segments "$abi" "$lib" "$display_path"; then
         exit 1
     fi
 }
 
 validate_stripped_android_library() {
-    lib="$1"
+    local abi="$1"
+    local lib="$2"
+    local display_path="${3:-$lib}"
     if has_dwarf_sections "$lib"; then
-        echo "Error: Android release native library still contains .debug_* sections: $lib"
+        echo "Error: Android release native library still contains .debug_* sections: abi=$abi path=$display_path"
         exit 1
     fi
 
-    if ! has_16kb_load_alignment "$lib"; then
-        echo "Error: Android native library is not 16 KB page-size aligned: $lib"
-        readelf_program_headers "$lib" | grep LOAD || true
+    if ! validate_16kb_segments "$abi" "$lib" "$display_path"; then
         exit 1
     fi
 }
@@ -160,7 +247,7 @@ validate_android_symbols() {
             exit 1
         fi
 
-        validate_android_library "$lib"
+        validate_android_library "$abi" "$lib"
     done
 }
 
@@ -194,7 +281,7 @@ validate_stripped_android_symbols() {
     READELF_BIN=$(find_readelf)
 
     for abi in armeabi-v7a arm64-v8a x86 x86_64; do
-        validate_stripped_android_library "$JNILIBS_DIR/$abi/libpaykit.so"
+        validate_stripped_android_library "$abi" "$JNILIBS_DIR/$abi/libpaykit.so"
     done
 }
 
@@ -217,10 +304,94 @@ validate_android_aar_symbols() {
             exit 1
         fi
 
-        validate_stripped_android_library "$lib"
+        validate_stripped_android_library "$abi" "$lib" "$aar!/jni/$abi/libpaykit.so"
     done
 
     rm -rf "$tmp_dir"
+}
+
+extract_kotlin_contract_version() {
+    local kotlin_file="$BASE_DIR/paykit.android.kt"
+    local contract_version
+
+    contract_version=$(sed -nE \
+        's/^[[:space:]]*val bindings_?[Cc]ontract_?[Vv]ersion = ([0-9]+).*$/\1/p' \
+        "$kotlin_file" | head -n 1)
+    if [ -z "$contract_version" ]; then
+        echo "Error: Unable to extract the UniFFI contract version from $kotlin_file"
+        exit 1
+    fi
+
+    echo "$contract_version"
+}
+
+extract_native_contract_version() {
+    local abi="$1"
+    local lib="$2"
+    local symbol="ffi_paykit_uniffi_contract_version"
+    local symbol_fields
+    local symbol_address
+    local symbol_size
+    local start_address
+    local stop_address
+    local disassembly
+    local immediate
+    local objdump_args=()
+
+    symbol_fields=$("$LLVM_NM_BIN" -D -S "$lib" | awk -v symbol="$symbol" '$NF == symbol { print $1, $2; exit }')
+    if [ -z "$symbol_fields" ]; then
+        echo "Error: UniFFI contract symbol missing: abi=$abi path=$lib"
+        exit 1
+    fi
+
+    read -r symbol_address symbol_size <<EOF
+$symbol_fields
+EOF
+    start_address=$((16#$symbol_address))
+    stop_address=$((start_address + 16#$symbol_size))
+    if [ "$abi" = "armeabi-v7a" ]; then
+        objdump_args+=(--triple=thumbv7-none-linux-android)
+    fi
+
+    disassembly=$("$LLVM_OBJDUMP_BIN" \
+        -d \
+        --no-show-raw-insn \
+        "--start-address=$start_address" \
+        "--stop-address=$stop_address" \
+        "${objdump_args[@]}" \
+        "$lib")
+    immediate=$(printf '%s\n' "$disassembly" \
+        | grep -E 'movs?[[:space:]]+r0,[[:space:]]*#0x|mov[[:space:]]+w0,[[:space:]]*#0x|movl[[:space:]]+\$0x[0-9a-fA-F]+,[[:space:]]*%eax' \
+        | grep -Eo '[#$]0x[0-9a-fA-F]+' \
+        | head -n 1 \
+        | sed -E 's/^[#$]//')
+    if [ -z "$immediate" ]; then
+        echo "Error: Unable to decode the UniFFI contract version: abi=$abi path=$lib"
+        printf '%s\n' "$disassembly"
+        exit 1
+    fi
+
+    echo "$((immediate))"
+}
+
+validate_uniffi_contract() {
+    local kotlin_contract_version
+    local native_contract_version
+
+    LLVM_NM_BIN=$(find_llvm_tool llvm-nm)
+    LLVM_OBJDUMP_BIN=$(find_llvm_tool llvm-objdump)
+    kotlin_contract_version=$(extract_kotlin_contract_version)
+    echo "UniFFI Kotlin contract version: $kotlin_contract_version"
+
+    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+        lib="$JNILIBS_DIR/$abi/libpaykit.so"
+        native_contract_version=$(extract_native_contract_version "$abi" "$lib")
+        if [ "$kotlin_contract_version" -ne "$native_contract_version" ]; then
+            echo "Error: UniFFI Kotlin/native contract mismatch: abi=$abi Kotlin=$kotlin_contract_version native=$native_contract_version path=$lib"
+            exit 1
+        fi
+        echo "UniFFI Kotlin/native contract validation passed: abi=$abi Kotlin=$kotlin_contract_version native=$native_contract_version path=$lib"
+    done
 }
 
 echo "Building for Android architectures..."
@@ -258,7 +429,7 @@ fi
 echo "Generating Kotlin bindings..."
 TMP_DIR=$(mktemp -d)
 
-gobley-uniffi-bindgen \
+"$GOBLEY_BINDGEN_BIN" \
     --library "$LIBRARY_PATH" \
     --config ./uniffi-android.toml \
     --out-dir "$TMP_DIR"
@@ -284,6 +455,7 @@ fi
 
 echo "Generated $KT_COUNT Kotlin binding file(s):"
 ls -la "$BASE_DIR"
+validate_uniffi_contract
 
 echo "Syncing version from Cargo.toml..."
 CARGO_VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/' | head -1)

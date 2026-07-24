@@ -1,6 +1,7 @@
 import groovy.json.JsonSlurper
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.file.Files
 import java.util.zip.ZipFile
 
 plugins {
@@ -161,6 +162,25 @@ fun findReadelf(): String {
         )
 }
 
+fun findLlvmTool(name: String): String {
+    executableFromPath(name)?.let { return it }
+
+    return listOf("ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "NDK_HOME")
+        .mapNotNull { System.getenv(it) }
+        .map { File(it, "toolchains/llvm/prebuilt") }
+        .firstNotNullOfOrNull { prebuiltDir ->
+            if (!prebuiltDir.isDirectory) return@firstNotNullOfOrNull null
+
+            prebuiltDir
+                .walkTopDown()
+                .firstOrNull { it.name == name && it.canExecute() }
+                ?.absolutePath
+        }
+        ?: throw GradleException(
+            "$name is required to validate the UniFFI Kotlin/native contract"
+        )
+}
+
 fun Project.runReadelf(readelf: String, vararg args: String): Pair<Int, String> {
     val stdout = ByteArrayOutputStream()
     val stderr = ByteArrayOutputStream()
@@ -174,7 +194,20 @@ fun Project.runReadelf(readelf: String, vararg args: String): Pair<Int, String> 
     return result.exitValue to stdout.toString().ifBlank { stderr.toString() }
 }
 
-fun String.parseElfAlignment(): Long {
+fun Project.runTool(tool: String, vararg args: String): Pair<Int, String> {
+    val stdout = ByteArrayOutputStream()
+    val stderr = ByteArrayOutputStream()
+    val result = exec {
+        commandLine(tool, *args)
+        standardOutput = stdout
+        errorOutput = stderr
+        isIgnoreExitValue = true
+    }
+
+    return result.exitValue to stdout.toString().ifBlank { stderr.toString() }
+}
+
+fun String.parseElfNumber(): Long {
     return if (startsWith("0x")) {
         removePrefix("0x").toLong(16)
     } else {
@@ -182,54 +215,270 @@ fun String.parseElfAlignment(): Long {
     }
 }
 
+fun Long.toElfHex(): String = "0x${toString(16)}"
+
+data class ElfPageSizeInfo(
+    val loadAlignments: List<Long>,
+    val relroStart: Long?,
+    val relroSize: Long?
+) {
+    val relroEnd: Long?
+        get() = if (relroStart != null && relroSize != null) relroStart + relroSize else null
+
+    fun detectedValues(): String {
+        val loads = if (loadAlignments.isEmpty()) {
+            "missing"
+        } else {
+            loadAlignments.joinToString(",") { it.toElfHex() }
+        }
+        return "LOAD_ALIGNMENTS=[$loads] " +
+            "GNU_RELRO_START=${relroStart?.toElfHex() ?: "missing"} " +
+            "GNU_RELRO_MEMSZ=${relroSize?.toElfHex() ?: "missing"} " +
+            "GNU_RELRO_END=${relroEnd?.toElfHex() ?: "missing"}"
+    }
+}
+
+fun parseElfPageSizeInfo(headers: String): ElfPageSizeInfo {
+    val loadAlignments = mutableListOf<Long>()
+    var relroStart: Long? = null
+    var relroSize: Long? = null
+
+    headers.lineSequence().forEach { line ->
+        val columns = line.trim().split(Regex("""\s+"""))
+        when (columns.firstOrNull()) {
+            "LOAD" -> columns.lastOrNull()?.let { loadAlignments += it.parseElfNumber() }
+            "GNU_RELRO" -> {
+                if (columns.size >= 6) {
+                    relroStart = columns[2].parseElfNumber()
+                    relroSize = columns[5].parseElfNumber()
+                }
+            }
+        }
+    }
+
+    return ElfPageSizeInfo(loadAlignments, relroStart, relroSize)
+}
+
+fun Project.validateAndroidNativeLibrary(
+    readelf: String,
+    abi: String,
+    lib: File,
+    displayPath: String = lib.path
+) {
+    if (!lib.isFile) {
+        throw GradleException("Android native library missing: ABI='$abi' path='$displayPath'")
+    }
+
+    val (sectionsExit, sections) = runReadelf(readelf, "-S", lib.absolutePath)
+    if (sectionsExit != 0) {
+        throw GradleException("Unable to inspect Android native library sections: ABI='$abi' path='$displayPath'")
+    }
+    if (Regex("""\.debug_""").containsMatchIn(sections)) {
+        throw GradleException(
+            "Android release native library still contains .debug_* sections: ABI='$abi' path='$displayPath'"
+        )
+    }
+
+    val wideHeaders = runReadelf(readelf, "-W", "-l", lib.absolutePath)
+    val headers = if (wideHeaders.first == 0) {
+        wideHeaders.second
+    } else {
+        val fallbackHeaders = runReadelf(readelf, "-l", lib.absolutePath)
+        if (fallbackHeaders.first != 0) {
+            throw GradleException(
+                "Unable to inspect Android native library headers: ABI='$abi' path='$displayPath'"
+            )
+        }
+        fallbackHeaders.second
+    }
+
+    val pageSize = 16_384L
+    val info = parseElfPageSizeInfo(headers)
+    val relroEnd = info.relroEnd
+    val failures = buildList {
+        if (info.loadAlignments.isEmpty()) {
+            add("PT_LOAD is missing")
+        } else if (info.loadAlignments.any { it < pageSize }) {
+            add("PT_LOAD alignment is below 0x4000")
+        }
+        if (relroEnd == null) {
+            add("PT_GNU_RELRO is missing")
+        } else if (relroEnd % pageSize != 0L) {
+            add("PT_GNU_RELRO end is not aligned to 0x4000")
+        }
+    }
+
+    if (failures.isNotEmpty()) {
+        throw GradleException(
+            "Android 16 KB ELF validation failed: ABI='$abi' path='$displayPath' " +
+                "${info.detectedValues()} failures=${failures.joinToString("; ")}"
+        )
+    }
+
+    logger.lifecycle(
+        "Android 16 KB ELF validation passed: ABI='$abi' path='$displayPath' ${info.detectedValues()}"
+    )
+}
+
+fun kotlinContractVersion(): Int {
+    val generatedBinding = layout.projectDirectory
+        .file("src/main/kotlin/com/synonym/paykit/paykit.android.kt")
+        .asFile
+    if (!generatedBinding.isFile) {
+        throw GradleException(
+            "Generated Kotlin binding is missing at '${generatedBinding.path}'"
+        )
+    }
+
+    val match = Regex(
+        """(?m)^\s*val bindings_?[Cc]ontract_?[Vv]ersion = (\d+).*$"""
+    ).find(generatedBinding.readText())
+        ?: throw GradleException(
+            "Unable to extract the UniFFI contract version from '${generatedBinding.path}'"
+        )
+
+    return match.groupValues[1].toInt()
+}
+
+fun Project.nativeContractVersion(
+    nm: String,
+    objdump: String,
+    abi: String,
+    lib: File,
+    displayPath: String
+): Int {
+    val symbol = "ffi_paykit_uniffi_contract_version"
+    val (nmExit, symbols) = runTool(nm, "-D", "-S", lib.absolutePath)
+    if (nmExit != 0) {
+        throw GradleException(
+            "Unable to inspect UniFFI contract symbol: ABI='$abi' path='$displayPath'"
+        )
+    }
+
+    val symbolFields = symbols.lineSequence()
+        .map { it.trim().split(Regex("""\s+""")) }
+        .firstOrNull { it.lastOrNull() == symbol }
+        ?: throw GradleException(
+            "UniFFI contract symbol is missing: ABI='$abi' path='$displayPath'"
+        )
+    if (symbolFields.size < 4) {
+        throw GradleException(
+            "Unable to parse UniFFI contract symbol: ABI='$abi' path='$displayPath'"
+        )
+    }
+
+    val start = symbolFields[0].toLong(16)
+    val size = symbolFields[1].toLong(16)
+    val objdumpArgs = buildList {
+        add("-d")
+        add("--no-show-raw-insn")
+        add("--start-address=$start")
+        add("--stop-address=${start + size}")
+        if (abi == "armeabi-v7a") {
+            add("--triple=thumbv7-none-linux-android")
+        }
+        add(lib.absolutePath)
+    }
+    val (objdumpExit, disassembly) = runTool(objdump, *objdumpArgs.toTypedArray())
+    if (objdumpExit != 0) {
+        throw GradleException(
+            "Unable to disassemble UniFFI contract symbol: ABI='$abi' path='$displayPath'"
+        )
+    }
+
+    val immediate = sequenceOf(
+        Regex("""\bmovs?\s+r0,\s*#0x([0-9a-fA-F]+)"""),
+        Regex("""\bmov\s+w0,\s*#0x([0-9a-fA-F]+)"""),
+        Regex("""\bmovl\s+\$0x([0-9a-fA-F]+),\s*%eax""")
+    ).mapNotNull { it.find(disassembly)?.groupValues?.get(1) }
+        .firstOrNull()
+        ?: throw GradleException(
+            "Unable to decode UniFFI contract version: ABI='$abi' path='$displayPath'\n$disassembly"
+        )
+
+    return immediate.toInt(16)
+}
+
 val validateReleaseNativeLibraries by tasks.registering {
     group = "verification"
-    description = "Validates release JNI libraries are stripped and keep 16 KB LOAD alignment."
+    description = "Validates source release JNI libraries are stripped and 16 KB compatible."
 
     doLast {
         val readelf = findReadelf()
-        val loadAlignmentRegex = Regex("""^\s*LOAD\s+.*\s+(0x[0-9a-fA-F]+|\d+)\s*$""")
 
         androidNativeAbis.forEach { abi ->
             val lib = layout.projectDirectory.file("src/main/jniLibs/$abi/libpaykit.so").asFile
-            if (!lib.isFile) {
-                throw GradleException("Android native library missing at '${lib.path}'")
-            }
-
-            val (sectionsExit, sections) = runReadelf(readelf, "-S", lib.absolutePath)
-            if (sectionsExit != 0) {
-                throw GradleException("Unable to inspect Android native library sections: '${lib.path}'")
-            }
-            if (Regex("""\.debug_""").containsMatchIn(sections)) {
-                throw GradleException("Android release native library still contains .debug_* sections: '${lib.path}'")
-            }
-
-            val wideHeaders = runReadelf(readelf, "-W", "-l", lib.absolutePath)
-            val headers = if (wideHeaders.first == 0) {
-                wideHeaders.second
-            } else {
-                val fallbackHeaders = runReadelf(readelf, "-l", lib.absolutePath)
-                if (fallbackHeaders.first != 0) {
-                    throw GradleException("Unable to inspect Android native library headers: '${lib.path}'")
-                }
-                fallbackHeaders.second
-            }
-
-            val alignments = headers
-                .lineSequence()
-                .mapNotNull { loadAlignmentRegex.matchEntire(it)?.groupValues?.get(1)?.parseElfAlignment() }
-                .toList()
-
-            if (alignments.isEmpty() || alignments.any { it < 16_384 }) {
-                throw GradleException("Android native library is not 16 KB page-size aligned: '${lib.path}'")
-            }
+            validateAndroidNativeLibrary(readelf, abi, lib)
         }
     }
 }
 
-tasks.matching { it.name == "bundleReleaseAar" || it.name.startsWith("publish") }.configureEach {
+val validateReleaseAarNativeLibraries by tasks.registering {
+    group = "verification"
+    description = "Validates every native library in the final release AAR for 16 KB compatibility."
+    dependsOn("bundleReleaseAar")
+
+    doLast {
+        val readelf = findReadelf()
+        val nm = findLlvmTool("llvm-nm")
+        val objdump = findLlvmTool("llvm-objdump")
+        val kotlinContract = kotlinContractVersion()
+        logger.lifecycle("UniFFI Kotlin contract version: $kotlinContract")
+        val aar = layout.buildDirectory.file("outputs/aar/lib-release.aar").get().asFile
+        if (!aar.isFile) {
+            throw GradleException("Android release AAR missing at '${aar.path}'")
+        }
+
+        val tempDir = Files.createTempDirectory("paykit-release-aar-").toFile()
+        try {
+            ZipFile(aar).use { zip ->
+                androidNativeAbis.forEach { abi ->
+                    val entryPath = "jni/$abi/libpaykit.so"
+                    val entry = zip.getEntry(entryPath)
+                        ?: throw GradleException(
+                            "Android release AAR native library missing: ABI='$abi' path='$entryPath' AAR='${aar.path}'"
+                        )
+                    val extracted = File(tempDir, entryPath)
+                    extracted.parentFile.mkdirs()
+                    zip.getInputStream(entry).use { input ->
+                        extracted.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    validateAndroidNativeLibrary(readelf, abi, extracted, "${aar.path}!/$entryPath")
+                    val nativeContract = nativeContractVersion(
+                        nm,
+                        objdump,
+                        abi,
+                        extracted,
+                        "${aar.path}!/$entryPath"
+                    )
+                    if (nativeContract != kotlinContract) {
+                        throw GradleException(
+                            "UniFFI Kotlin/native contract mismatch: ABI='$abi' " +
+                                "Kotlin=$kotlinContract native=$nativeContract " +
+                                "path='${aar.path}!/$entryPath'"
+                        )
+                    }
+                    logger.lifecycle(
+                        "UniFFI Kotlin/native contract validation passed: ABI='$abi' " +
+                            "Kotlin=$kotlinContract native=$nativeContract " +
+                            "path='${aar.path}!/$entryPath'"
+                    )
+                }
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+}
+
+tasks.matching { it.name == "bundleReleaseAar" }.configureEach {
     dependsOn(validateReleaseNativeLibraries)
 }
+
+tasks.matching { it.name == "build" || it.name == "assembleRelease" || it.name.startsWith("publish") }
+    .configureEach {
+        dependsOn(validateReleaseAarNativeLibraries)
+    }
 
 afterEvaluate {
     publishing {
