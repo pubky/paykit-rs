@@ -103,49 +103,101 @@ readelf_program_headers() {
     "$READELF_BIN" -l "$1"
 }
 
-has_16kb_load_alignment() {
-    alignments=$(readelf_program_headers "$1" | awk '$1 == "LOAD" { print $NF }')
-    if [ -z "$alignments" ]; then
+validate_16kb_segments() {
+    local abi="$1"
+    local lib="$2"
+    local display_path="${3:-$lib}"
+    local headers
+    local load_alignments
+    local load_summary=""
+    local relro_fields
+    local relro_start="missing"
+    local relro_memsz="missing"
+    local relro_end="missing"
+    local alignment
+    local alignment_value
+    local alignment_hex
+    local relro_start_value
+    local relro_memsz_value
+    local relro_end_value
+    local invalid=false
+
+    headers=$(readelf_program_headers "$lib")
+    load_alignments=$(printf '%s\n' "$headers" | awk '$1 == "LOAD" { print $NF }')
+    if [ -z "$load_alignments" ]; then
+        invalid=true
+        load_summary="missing"
+    else
+        while read -r alignment; do
+            if [ -z "$alignment" ]; then
+                continue
+            fi
+
+            alignment_value=$((alignment))
+            printf -v alignment_hex '0x%x' "$alignment_value"
+            if [ -n "$load_summary" ]; then
+                load_summary="$load_summary,"
+            fi
+            load_summary="$load_summary$alignment_hex"
+
+            if [ "$alignment_value" -lt 16384 ]; then
+                invalid=true
+            fi
+        done <<EOF
+$load_alignments
+EOF
+    fi
+
+    relro_fields=$(printf '%s\n' "$headers" | awk '$1 == "GNU_RELRO" { print $3, $6; exit }')
+    if [ -z "$relro_fields" ]; then
+        invalid=true
+    else
+        read -r relro_start_value relro_memsz_value <<EOF
+$relro_fields
+EOF
+        relro_end_value=$((relro_start_value + relro_memsz_value))
+        printf -v relro_start '0x%x' "$((relro_start_value))"
+        printf -v relro_memsz '0x%x' "$((relro_memsz_value))"
+        printf -v relro_end '0x%x' "$relro_end_value"
+
+        if [ "$((relro_end_value % 16384))" -ne 0 ]; then
+            invalid=true
+        fi
+    fi
+
+    if [ "$invalid" = true ]; then
+        echo "Error: Android 16 KB ELF validation failed: abi=$abi path=$display_path LOAD_ALIGNMENTS=[$load_summary] GNU_RELRO_START=$relro_start GNU_RELRO_MEMSZ=$relro_memsz GNU_RELRO_END=$relro_end required_LOAD_min=0x4000 required_GNU_RELRO_end_alignment=0x4000"
+        printf '%s\n' "$headers" | grep -E '(^|[[:space:]])(LOAD|GNU_RELRO)[[:space:]]' || true
         return 1
     fi
 
-    while read -r alignment; do
-        if [ -z "$alignment" ]; then
-            continue
-        fi
-
-        if [ "$((alignment))" -lt 16384 ]; then
-            return 1
-        fi
-    done <<EOF
-$alignments
-EOF
+    echo "Android 16 KB ELF validation passed: abi=$abi path=$display_path LOAD_ALIGNMENTS=[$load_summary] GNU_RELRO_START=$relro_start GNU_RELRO_MEMSZ=$relro_memsz GNU_RELRO_END=$relro_end"
 }
 
 validate_android_library() {
-    lib="$1"
+    local abi="$1"
+    local lib="$2"
+    local display_path="${3:-$lib}"
     if ! has_dwarf_debug_metadata "$lib"; then
-        echo "Error: Android native library has no full DWARF debug metadata: $lib"
+        echo "Error: Android native library has no full DWARF debug metadata: abi=$abi path=$display_path"
         exit 1
     fi
 
-    if ! has_16kb_load_alignment "$lib"; then
-        echo "Error: Android native library is not 16 KB page-size aligned: $lib"
-        readelf_program_headers "$lib" | grep LOAD || true
+    if ! validate_16kb_segments "$abi" "$lib" "$display_path"; then
         exit 1
     fi
 }
 
 validate_stripped_android_library() {
-    lib="$1"
+    local abi="$1"
+    local lib="$2"
+    local display_path="${3:-$lib}"
     if has_dwarf_sections "$lib"; then
-        echo "Error: Android release native library still contains .debug_* sections: $lib"
+        echo "Error: Android release native library still contains .debug_* sections: abi=$abi path=$display_path"
         exit 1
     fi
 
-    if ! has_16kb_load_alignment "$lib"; then
-        echo "Error: Android native library is not 16 KB page-size aligned: $lib"
-        readelf_program_headers "$lib" | grep LOAD || true
+    if ! validate_16kb_segments "$abi" "$lib" "$display_path"; then
         exit 1
     fi
 }
@@ -160,7 +212,7 @@ validate_android_symbols() {
             exit 1
         fi
 
-        validate_android_library "$lib"
+        validate_android_library "$abi" "$lib"
     done
 }
 
@@ -194,7 +246,7 @@ validate_stripped_android_symbols() {
     READELF_BIN=$(find_readelf)
 
     for abi in armeabi-v7a arm64-v8a x86 x86_64; do
-        validate_stripped_android_library "$JNILIBS_DIR/$abi/libpaykit.so"
+        validate_stripped_android_library "$abi" "$JNILIBS_DIR/$abi/libpaykit.so"
     done
 }
 
@@ -217,7 +269,7 @@ validate_android_aar_symbols() {
             exit 1
         fi
 
-        validate_stripped_android_library "$lib"
+        validate_stripped_android_library "$abi" "$lib" "$aar!/jni/$abi/libpaykit.so"
     done
 
     rm -rf "$tmp_dir"

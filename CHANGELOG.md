@@ -7,6 +7,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc40] - 2026-07-24
+
+### Fixed
+- The Android package now builds `libpaykit.so` for devices that use a 16 KB
+  runtime page size.
+
 ## [0.1.0-rc39] - 2026-07-21
 
 ### Fixed

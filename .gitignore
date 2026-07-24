@@ -4,6 +4,7 @@ paykit-ffi/bindings/android/native-debug-symbols.zip
 .DS_Store
 *.swp
 .swiftpm/
+.ai/logs/
 
 # iOS build artifacts (rebuilt by build_ios.sh; sources are committed)
 paykit-ffi/bindings/ios/Paykit.xcframework/
