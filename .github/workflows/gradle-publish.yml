@@ -87,15 +87,24 @@ jobs:
         RELEASE_TAG: ${{ steps.version.outputs.tag }}
       shell: bash
       run: |
-        STATUS=$(
-          gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>/dev/null |
-            awk 'NR == 1 { print $2 }'
-        )
+        set +e
+        RESPONSE=$(gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>/dev/null)
+        API_EXIT=$?
+        set -e
+        STATUS=${RESPONSE%%$'\n'*}
+        STATUS=${STATUS#* }
+        STATUS=${STATUS%% *}
         case "$STATUS" in
-          200) echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+          200)
+            if [ "$API_EXIT" -ne 0 ]; then
+              echo "Release lookup returned HTTP 200 with exit code $API_EXIT" >&2
+              exit 1
+            fi
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            ;;
           404) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
           *)
-            echo "Unable to determine whether release $RELEASE_TAG exists (HTTP ${STATUS:-missing})" >&2
+            echo "Unable to determine whether release $RELEASE_TAG exists (HTTP ${STATUS:-missing}, exit $API_EXIT)" >&2
             exit 1
             ;;
         esac
