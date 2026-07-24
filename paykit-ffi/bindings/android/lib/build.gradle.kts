@@ -145,53 +145,62 @@ val expectedAndroidElfIdentities = mapOf(
     "x86_64" to ExpectedElfIdentity("ELF64", "Advanced Micro Devices X86-64")
 )
 
-fun executableFromPath(name: String): String? {
-    return System.getenv("PATH")
-        ?.split(File.pathSeparator)
-        ?.asSequence()
-        ?.map { File(it, name) }
-        ?.firstOrNull { it.canExecute() }
+val expectedAndroidNdkRevision = "28.2.13676358"
+
+fun selectedAndroidNdkRoot(): File {
+    val ndkHome = System.getenv("ANDROID_NDK_HOME")
+        ?.takeIf { it.isNotBlank() }
+        ?.let(::File)
+        ?: throw GradleException(
+            "ANDROID_NDK_HOME must select Android NDK $expectedAndroidNdkRevision"
+        )
+    val ndkRoot = System.getenv("ANDROID_NDK_ROOT")
+        ?.takeIf { it.isNotBlank() }
+        ?.let(::File)
+        ?: throw GradleException(
+            "ANDROID_NDK_ROOT must select Android NDK $expectedAndroidNdkRevision"
+        )
+    val canonicalHome = ndkHome.canonicalFile
+    val canonicalRoot = ndkRoot.canonicalFile
+    if (canonicalHome != canonicalRoot) {
+        throw GradleException(
+            "ANDROID_NDK_HOME and ANDROID_NDK_ROOT select different NDKs: " +
+                "HOME='${canonicalHome.path}' ROOT='${canonicalRoot.path}'"
+        )
+    }
+
+    val sourceProperties = File(canonicalHome, "source.properties")
+    if (!sourceProperties.isFile) {
+        throw GradleException(
+            "Android NDK source.properties is missing at '${canonicalHome.path}'"
+        )
+    }
+    val expectedRevision = "Pkg.Revision = $expectedAndroidNdkRevision"
+    if (sourceProperties.readLines().none { it == expectedRevision }) {
+        throw GradleException(
+            "Android NDK $expectedAndroidNdkRevision is required: " +
+                "path='${canonicalHome.path}'"
+        )
+    }
+
+    return canonicalHome
+}
+
+fun findSelectedAndroidNdkLlvmTool(name: String): String {
+    val ndkRoot = selectedAndroidNdkRoot()
+    return File(ndkRoot, "toolchains/llvm/prebuilt")
+        .walkTopDown()
+        .firstOrNull { it.name == name && it.canExecute() }
         ?.absolutePath
-}
-
-fun findReadelf(): String {
-    executableFromPath("llvm-readelf")?.let { return it }
-    executableFromPath("readelf")?.let { return it }
-
-    return listOf("ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "NDK_HOME")
-        .mapNotNull { System.getenv(it) }
-        .map { File(it, "toolchains/llvm/prebuilt") }
-        .firstNotNullOfOrNull { prebuiltDir ->
-            if (!prebuiltDir.isDirectory) return@firstNotNullOfOrNull null
-
-            prebuiltDir
-                .walkTopDown()
-                .firstOrNull { it.name == "llvm-readelf" && it.canExecute() }
-                ?.absolutePath
-        }
         ?: throw GradleException(
-            "llvm-readelf or readelf is required to validate Android native debug symbols"
+            "$name is missing from Android NDK $expectedAndroidNdkRevision " +
+                "at '${ndkRoot.path}'"
         )
 }
 
-fun findLlvmTool(name: String): String {
-    executableFromPath(name)?.let { return it }
+fun findReadelf(): String = findSelectedAndroidNdkLlvmTool("llvm-readelf")
 
-    return listOf("ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "NDK_HOME")
-        .mapNotNull { System.getenv(it) }
-        .map { File(it, "toolchains/llvm/prebuilt") }
-        .firstNotNullOfOrNull { prebuiltDir ->
-            if (!prebuiltDir.isDirectory) return@firstNotNullOfOrNull null
-
-            prebuiltDir
-                .walkTopDown()
-                .firstOrNull { it.name == name && it.canExecute() }
-                ?.absolutePath
-        }
-        ?: throw GradleException(
-            "$name is required to validate the UniFFI Kotlin/native contract"
-        )
-}
+fun findLlvmTool(name: String): String = findSelectedAndroidNdkLlvmTool(name)
 
 fun Project.runReadelf(readelf: String, vararg args: String): Pair<Int, String> {
     val stdout = ByteArrayOutputStream()
@@ -579,6 +588,10 @@ val validateReleaseNativeLibraries by tasks.registering {
         val nm = findLlvmTool("llvm-nm")
         val objdump = findLlvmTool("llvm-objdump")
         val kotlinIntegrity = kotlinUniffiIntegrity()
+        logger.lifecycle(
+            "Using Android NDK $expectedAndroidNdkRevision LLVM tools: " +
+                "readelf='$readelf' nm='$nm' objdump='$objdump'"
+        )
 
         validateAndroidAbiMismatchFixture(
             readelf,
@@ -622,6 +635,10 @@ val validateReleaseAarNativeLibraries by tasks.registering {
         val nm = findLlvmTool("llvm-nm")
         val objdump = findLlvmTool("llvm-objdump")
         val kotlinIntegrity = kotlinUniffiIntegrity()
+        logger.lifecycle(
+            "Using Android NDK $expectedAndroidNdkRevision LLVM tools: " +
+                "readelf='$readelf' nm='$nm' objdump='$objdump'"
+        )
         logger.lifecycle(
             "UniFFI Kotlin integrity manifest: contract=${kotlinIntegrity.contractVersion} " +
                 "checksums=${kotlinIntegrity.apiChecksums.size}"
