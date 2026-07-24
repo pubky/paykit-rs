@@ -35,6 +35,35 @@ if ! command -v cargo-ndk &> /dev/null || ! cargo ndk --version | grep -q "cargo
     cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked --force
 fi
 
+EXPECTED_ANDROID_NDK_REVISION="28.2.13676358"
+if [ -z "${ANDROID_NDK_HOME:-}" ] || [ -z "${ANDROID_NDK_ROOT:-}" ]; then
+    echo "Error: ANDROID_NDK_HOME and ANDROID_NDK_ROOT must both select Android NDK $EXPECTED_ANDROID_NDK_REVISION"
+    exit 1
+fi
+ANDROID_NDK_HOME_PATH=$(cd "$ANDROID_NDK_HOME" && pwd -P)
+ANDROID_NDK_ROOT_PATH=$(cd "$ANDROID_NDK_ROOT" && pwd -P)
+if [ "$ANDROID_NDK_HOME_PATH" != "$ANDROID_NDK_ROOT_PATH" ]; then
+    echo "Error: ANDROID_NDK_HOME and ANDROID_NDK_ROOT select different NDKs: HOME=$ANDROID_NDK_HOME_PATH ROOT=$ANDROID_NDK_ROOT_PATH"
+    exit 1
+fi
+if [ ! -f "$ANDROID_NDK_HOME_PATH/source.properties" ]; then
+    echo "Error: Android NDK source.properties is missing at $ANDROID_NDK_HOME_PATH"
+    exit 1
+fi
+cat "$ANDROID_NDK_HOME_PATH/source.properties"
+if ! grep -Fx "Pkg.Revision = $EXPECTED_ANDROID_NDK_REVISION" "$ANDROID_NDK_HOME_PATH/source.properties"; then
+    echo "Error: Android NDK $EXPECTED_ANDROID_NDK_REVISION is required: path=$ANDROID_NDK_HOME_PATH"
+    exit 1
+fi
+echo "Using Android NDK $EXPECTED_ANDROID_NDK_REVISION at $ANDROID_NDK_HOME_PATH"
+ANDROID_NDK_LLVM_READELF=$(find "$ANDROID_NDK_HOME_PATH/toolchains/llvm/prebuilt" -path '*/bin/llvm-readelf' -print -quit)
+if [ -z "$ANDROID_NDK_LLVM_READELF" ]; then
+    echo "Error: llvm-readelf is missing from Android NDK $EXPECTED_ANDROID_NDK_REVISION at $ANDROID_NDK_HOME_PATH"
+    exit 1
+fi
+ANDROID_NDK_LLVM_BIN=$(dirname "$ANDROID_NDK_LLVM_READELF")
+echo "Using Android NDK LLVM tools from $ANDROID_NDK_LLVM_BIN"
+
 mkdir -p "$BASE_DIR"
 mkdir -p "$JNILIBS_DIR"
 
@@ -49,75 +78,36 @@ echo "Adding Rust Android targets..."
 rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 
 find_readelf() {
-    if command -v llvm-readelf >/dev/null 2>&1; then
-        command -v llvm-readelf
+    if [ -x "$ANDROID_NDK_LLVM_BIN/llvm-readelf" ]; then
+        echo "$ANDROID_NDK_LLVM_BIN/llvm-readelf"
         return
     fi
 
-    if command -v readelf >/dev/null 2>&1; then
-        command -v readelf
-        return
-    fi
-
-    for ndk_dir in "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK_HOME:-}" "${NDK_HOME:-}"; do
-        if [ -z "$ndk_dir" ] || [ ! -d "$ndk_dir/toolchains/llvm/prebuilt" ]; then
-            continue
-        fi
-
-        ndk_readelf=$(find "$ndk_dir/toolchains/llvm/prebuilt" -path '*/bin/llvm-readelf' | head -n 1)
-        if [ -n "$ndk_readelf" ]; then
-            echo "$ndk_readelf"
-            return
-        fi
-    done
-
-    echo "Error: llvm-readelf or readelf is required to validate Android native debug symbols"
+    echo "Error: llvm-readelf is missing from Android NDK $EXPECTED_ANDROID_NDK_REVISION at $ANDROID_NDK_HOME_PATH"
     exit 1
 }
 
 find_strip() {
-    if command -v llvm-strip >/dev/null 2>&1; then
-        command -v llvm-strip
+    if [ -x "$ANDROID_NDK_LLVM_BIN/llvm-strip" ]; then
+        echo "$ANDROID_NDK_LLVM_BIN/llvm-strip"
         return
     fi
 
-    for ndk_dir in "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK_HOME:-}" "${NDK_HOME:-}"; do
-        if [ -z "$ndk_dir" ] || [ ! -d "$ndk_dir/toolchains/llvm/prebuilt" ]; then
-            continue
-        fi
-
-        ndk_strip=$(find "$ndk_dir/toolchains/llvm/prebuilt" -path '*/bin/llvm-strip' | head -n 1)
-        if [ -n "$ndk_strip" ]; then
-            echo "$ndk_strip"
-            return
-        fi
-    done
-
-    echo "Error: llvm-strip is required to strip Android native release libraries"
+    echo "Error: llvm-strip is missing from Android NDK $EXPECTED_ANDROID_NDK_REVISION at $ANDROID_NDK_HOME_PATH"
     exit 1
 }
 
 find_llvm_tool() {
     local tool_name="$1"
+    local tool_path
 
-    if command -v "$tool_name" >/dev/null 2>&1; then
-        command -v "$tool_name"
+    tool_path="$ANDROID_NDK_LLVM_BIN/$tool_name"
+    if [ -x "$tool_path" ]; then
+        echo "$tool_path"
         return
     fi
 
-    for ndk_dir in "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK_HOME:-}" "${NDK_HOME:-}"; do
-        if [ -z "$ndk_dir" ] || [ ! -d "$ndk_dir/toolchains/llvm/prebuilt" ]; then
-            continue
-        fi
-
-        tool_path=$(find "$ndk_dir/toolchains/llvm/prebuilt" -path "*/bin/$tool_name" | head -n 1)
-        if [ -n "$tool_path" ]; then
-            echo "$tool_path"
-            return
-        fi
-    done
-
-    echo "Error: $tool_name is required to validate the UniFFI Kotlin/native contract"
+    echo "Error: $tool_name is missing from Android NDK $EXPECTED_ANDROID_NDK_REVISION at $ANDROID_NDK_HOME_PATH"
     exit 1
 }
 
@@ -287,6 +277,8 @@ validate_stripped_android_symbols() {
 
 validate_android_aar_symbols() {
     READELF_BIN=$(find_readelf)
+    LLVM_NM_BIN=$(find_llvm_tool llvm-nm)
+    LLVM_OBJDUMP_BIN=$(find_llvm_tool llvm-objdump)
     aar=$(find "$ANDROID_LIB_DIR" -path '*/build/outputs/aar/*release.aar' -print | head -n 1)
     if [ -z "$aar" ]; then
         echo "Error: Android release AAR missing under $ANDROID_LIB_DIR"
@@ -305,6 +297,7 @@ validate_android_aar_symbols() {
         fi
 
         validate_stripped_android_library "$abi" "$lib" "$aar!/jni/$abi/libpaykit.so"
+        validate_uniffi_integrity_library "$abi" "$lib" "$aar!/jni/$abi/libpaykit.so"
     done
 
     rm -rf "$tmp_dir"
@@ -325,10 +318,25 @@ extract_kotlin_contract_version() {
     echo "$contract_version"
 }
 
-extract_native_contract_version() {
+extract_kotlin_checksum_manifest() {
+    local kotlin_file="$BASE_DIR/paykit.android.kt"
+    local manifest
+
+    manifest=$(perl -ne \
+        'print "$1 $2\n" if /if \((?:lib\.)?(uniffi_paykit_checksum_[A-Za-z0-9_]+)\(\) != ([0-9]+)\.toShort\(\)\)/' \
+        "$kotlin_file")
+    if [ -z "$manifest" ]; then
+        echo "Error: Unable to extract UniFFI API checksums from $kotlin_file"
+        exit 1
+    fi
+
+    echo "$manifest"
+}
+
+extract_native_constant() {
     local abi="$1"
     local lib="$2"
-    local symbol="ffi_paykit_uniffi_contract_version"
+    local symbol="$3"
     local symbol_fields
     local symbol_address
     local symbol_size
@@ -340,7 +348,7 @@ extract_native_contract_version() {
 
     symbol_fields=$("$LLVM_NM_BIN" -D -S "$lib" | awk -v symbol="$symbol" '$NF == symbol { print $1, $2; exit }')
     if [ -z "$symbol_fields" ]; then
-        echo "Error: UniFFI contract symbol missing: abi=$abi path=$lib"
+        echo "Error: UniFFI integrity symbol missing: abi=$abi symbol=$symbol path=$lib"
         exit 1
     fi
 
@@ -361,12 +369,12 @@ EOF
         "${objdump_args[@]}" \
         "$lib")
     immediate=$(printf '%s\n' "$disassembly" \
-        | grep -E 'movs?[[:space:]]+r0,[[:space:]]*#0x|mov[[:space:]]+w0,[[:space:]]*#0x|movl[[:space:]]+\$0x[0-9a-fA-F]+,[[:space:]]*%eax' \
+        | grep -E 'movs?[[:space:]]+r0,[[:space:]]*#0x|movw[[:space:]]+r0,[[:space:]]*#0x|mov\.w[[:space:]]+r0,[[:space:]]*#0x|mov[[:space:]]+w0,[[:space:]]*#0x|mov[wl][[:space:]]+\$0x[0-9a-fA-F]+,[[:space:]]*%e?ax' \
         | grep -Eo '[#$]0x[0-9a-fA-F]+' \
         | head -n 1 \
         | sed -E 's/^[#$]//')
     if [ -z "$immediate" ]; then
-        echo "Error: Unable to decode the UniFFI contract version: abi=$abi path=$lib"
+        echo "Error: Unable to decode UniFFI integrity symbol: abi=$abi symbol=$symbol path=$lib"
         printf '%s\n' "$disassembly"
         exit 1
     fi
@@ -374,23 +382,63 @@ EOF
     echo "$((immediate))"
 }
 
-validate_uniffi_contract() {
-    local kotlin_contract_version
+validate_uniffi_integrity_library() {
+    local abi="$1"
+    local lib="$2"
+    local display_path="${3:-$lib}"
     local native_contract_version
+    local checksum_symbol
+    local expected_checksum
+    local native_checksum
+    local expected_checksum_symbols
+    local native_checksum_symbols
+    local checksum_count
 
-    LLVM_NM_BIN=$(find_llvm_tool llvm-nm)
-    LLVM_OBJDUMP_BIN=$(find_llvm_tool llvm-objdump)
-    kotlin_contract_version=$(extract_kotlin_contract_version)
-    echo "UniFFI Kotlin contract version: $kotlin_contract_version"
+    native_contract_version=$(extract_native_constant "$abi" "$lib" "ffi_paykit_uniffi_contract_version")
+    if [ "$KOTLIN_CONTRACT_VERSION" -ne "$native_contract_version" ]; then
+        echo "Error: UniFFI Kotlin/native contract mismatch: abi=$abi Kotlin=$KOTLIN_CONTRACT_VERSION native=$native_contract_version path=$display_path"
+        exit 1
+    fi
 
-    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
-        lib="$JNILIBS_DIR/$abi/libpaykit.so"
-        native_contract_version=$(extract_native_contract_version "$abi" "$lib")
-        if [ "$kotlin_contract_version" -ne "$native_contract_version" ]; then
-            echo "Error: UniFFI Kotlin/native contract mismatch: abi=$abi Kotlin=$kotlin_contract_version native=$native_contract_version path=$lib"
+    expected_checksum_symbols=$(printf '%s\n' "$KOTLIN_CHECKSUM_MANIFEST" | awk '{print $1}' | sort)
+    native_checksum_symbols=$("$LLVM_NM_BIN" -D "$lib" \
+        | awk '$NF ~ /^uniffi_paykit_checksum_/ {print $NF}' \
+        | sort)
+    if [ "$expected_checksum_symbols" != "$native_checksum_symbols" ]; then
+        echo "Error: UniFFI checksum symbol set mismatch: abi=$abi path=$display_path"
+        diff -u \
+            <(printf '%s\n' "$expected_checksum_symbols") \
+            <(printf '%s\n' "$native_checksum_symbols") || true
+        exit 1
+    fi
+
+    checksum_count=0
+    while read -r checksum_symbol expected_checksum; do
+        if [ -z "$checksum_symbol" ]; then
+            continue
+        fi
+        native_checksum=$(extract_native_constant "$abi" "$lib" "$checksum_symbol")
+        if [ "$expected_checksum" -ne "$native_checksum" ]; then
+            echo "Error: UniFFI API checksum mismatch: abi=$abi symbol=$checksum_symbol Kotlin=$expected_checksum native=$native_checksum path=$display_path"
             exit 1
         fi
-        echo "UniFFI Kotlin/native contract validation passed: abi=$abi Kotlin=$kotlin_contract_version native=$native_contract_version path=$lib"
+        checksum_count=$((checksum_count + 1))
+    done <<EOF
+$KOTLIN_CHECKSUM_MANIFEST
+EOF
+
+    echo "UniFFI Kotlin/native integrity validation passed: abi=$abi contract=$KOTLIN_CONTRACT_VERSION checksums=$checksum_count path=$display_path"
+}
+
+validate_uniffi_integrity() {
+    LLVM_NM_BIN=$(find_llvm_tool llvm-nm)
+    LLVM_OBJDUMP_BIN=$(find_llvm_tool llvm-objdump)
+    KOTLIN_CONTRACT_VERSION=$(extract_kotlin_contract_version)
+    KOTLIN_CHECKSUM_MANIFEST=$(extract_kotlin_checksum_manifest)
+    echo "UniFFI Kotlin integrity manifest: contract=$KOTLIN_CONTRACT_VERSION checksums=$(printf '%s\n' "$KOTLIN_CHECKSUM_MANIFEST" | wc -l | tr -d ' ')"
+
+    for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+        validate_uniffi_integrity_library "$abi" "$JNILIBS_DIR/$abi/libpaykit.so"
     done
 }
 
@@ -455,7 +503,7 @@ fi
 
 echo "Generated $KT_COUNT Kotlin binding file(s):"
 ls -la "$BASE_DIR"
-validate_uniffi_contract
+validate_uniffi_integrity
 
 echo "Syncing version from Cargo.toml..."
 CARGO_VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/' | head -1)

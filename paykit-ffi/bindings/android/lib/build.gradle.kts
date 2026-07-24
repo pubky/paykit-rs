@@ -320,7 +320,12 @@ fun Project.validateAndroidNativeLibrary(
     )
 }
 
-fun kotlinContractVersion(): Int {
+data class KotlinUniffiIntegrity(
+    val contractVersion: Int,
+    val apiChecksums: Map<String, Int>
+)
+
+fun kotlinUniffiIntegrity(): KotlinUniffiIntegrity {
     val generatedBinding = layout.projectDirectory
         .file("src/main/kotlin/com/synonym/paykit/paykit.android.kt")
         .asFile
@@ -330,50 +335,87 @@ fun kotlinContractVersion(): Int {
         )
     }
 
-    val match = Regex(
+    val source = generatedBinding.readText()
+    val contractMatch = Regex(
         """(?m)^\s*val bindings_?[Cc]ontract_?[Vv]ersion = (\d+).*$"""
-    ).find(generatedBinding.readText())
+    ).find(source)
         ?: throw GradleException(
             "Unable to extract the UniFFI contract version from '${generatedBinding.path}'"
         )
+    val checksumMatches = Regex(
+        """if \((?:lib\.)?(uniffi_paykit_checksum_[A-Za-z0-9_]+)\(\) != (\d+)\.toShort\(\)\)"""
+    ).findAll(source).toList()
+    if (checksumMatches.isEmpty()) {
+        throw GradleException(
+            "Unable to extract UniFFI API checksums from '${generatedBinding.path}'"
+        )
+    }
+    val duplicateChecksums = checksumMatches
+        .groupBy { it.groupValues[1] }
+        .filterValues { it.size > 1 }
+        .keys
+    if (duplicateChecksums.isNotEmpty()) {
+        throw GradleException(
+            "Duplicate UniFFI API checksum expectations in '${generatedBinding.path}': " +
+                duplicateChecksums.sorted().joinToString()
+        )
+    }
 
-    return match.groupValues[1].toInt()
+    return KotlinUniffiIntegrity(
+        contractVersion = contractMatch.groupValues[1].toInt(),
+        apiChecksums = checksumMatches.associate {
+            it.groupValues[1] to it.groupValues[2].toInt()
+        }
+    )
 }
 
-fun Project.nativeContractVersion(
+data class NativeSymbol(
+    val address: Long,
+    val size: Long
+)
+
+fun Project.nativeDynamicSymbols(
     nm: String,
-    objdump: String,
     abi: String,
     lib: File,
     displayPath: String
-): Int {
-    val symbol = "ffi_paykit_uniffi_contract_version"
+): Map<String, NativeSymbol> {
     val (nmExit, symbols) = runTool(nm, "-D", "-S", lib.absolutePath)
     if (nmExit != 0) {
         throw GradleException(
-            "Unable to inspect UniFFI contract symbol: ABI='$abi' path='$displayPath'"
+            "Unable to inspect native symbols: ABI='$abi' path='$displayPath'"
         )
     }
 
-    val symbolFields = symbols.lineSequence()
+    return symbols.lineSequence()
         .map { it.trim().split(Regex("""\s+""")) }
-        .firstOrNull { it.lastOrNull() == symbol }
-        ?: throw GradleException(
-            "UniFFI contract symbol is missing: ABI='$abi' path='$displayPath'"
-        )
-    if (symbolFields.size < 4) {
-        throw GradleException(
-            "Unable to parse UniFFI contract symbol: ABI='$abi' path='$displayPath'"
-        )
-    }
+        .filter { it.size >= 4 }
+        .associate { fields ->
+            fields.last() to NativeSymbol(
+                address = fields[0].toLong(16),
+                size = fields[1].toLong(16)
+            )
+        }
+}
 
-    val start = symbolFields[0].toLong(16)
-    val size = symbolFields[1].toLong(16)
+fun Project.nativeConstantValue(
+    objdump: String,
+    abi: String,
+    lib: File,
+    displayPath: String,
+    symbols: Map<String, NativeSymbol>,
+    symbolName: String
+): Int {
+    val symbol = symbols[symbolName]
+        ?: throw GradleException(
+            "UniFFI integrity symbol is missing: ABI='$abi' symbol='$symbolName' path='$displayPath'"
+        )
+
     val objdumpArgs = buildList {
         add("-d")
         add("--no-show-raw-insn")
-        add("--start-address=$start")
-        add("--stop-address=${start + size}")
+        add("--start-address=${symbol.address}")
+        add("--stop-address=${symbol.address + symbol.size}")
         if (abi == "armeabi-v7a") {
             add("--triple=thumbv7-none-linux-android")
         }
@@ -382,48 +424,127 @@ fun Project.nativeContractVersion(
     val (objdumpExit, disassembly) = runTool(objdump, *objdumpArgs.toTypedArray())
     if (objdumpExit != 0) {
         throw GradleException(
-            "Unable to disassemble UniFFI contract symbol: ABI='$abi' path='$displayPath'"
+            "Unable to disassemble UniFFI integrity symbol: " +
+                "ABI='$abi' symbol='$symbolName' path='$displayPath'"
         )
     }
 
     val immediate = sequenceOf(
         Regex("""\bmovs?\s+r0,\s*#0x([0-9a-fA-F]+)"""),
+        Regex("""\bmovw\s+r0,\s*#0x([0-9a-fA-F]+)"""),
+        Regex("""\bmov\.w\s+r0,\s*#0x([0-9a-fA-F]+)"""),
         Regex("""\bmov\s+w0,\s*#0x([0-9a-fA-F]+)"""),
-        Regex("""\bmovl\s+\$0x([0-9a-fA-F]+),\s*%eax""")
+        Regex("""\bmov[wl]\s+\$0x([0-9a-fA-F]+),\s*%e?ax""")
     ).mapNotNull { it.find(disassembly)?.groupValues?.get(1) }
         .firstOrNull()
         ?: throw GradleException(
-            "Unable to decode UniFFI contract version: ABI='$abi' path='$displayPath'\n$disassembly"
+            "Unable to decode UniFFI integrity symbol: " +
+                "ABI='$abi' symbol='$symbolName' path='$displayPath'\n$disassembly"
         )
 
     return immediate.toInt(16)
 }
 
+fun Project.validateUniffiIntegrity(
+    nm: String,
+    objdump: String,
+    expected: KotlinUniffiIntegrity,
+    abi: String,
+    lib: File,
+    displayPath: String
+) {
+    val symbols = nativeDynamicSymbols(nm, abi, lib, displayPath)
+    val nativeChecksumSymbols = symbols.keys.filter {
+        it.startsWith("uniffi_paykit_checksum_")
+    }.toSet()
+    val expectedChecksumSymbols = expected.apiChecksums.keys
+    if (nativeChecksumSymbols != expectedChecksumSymbols) {
+        val missing = expectedChecksumSymbols - nativeChecksumSymbols
+        val extra = nativeChecksumSymbols - expectedChecksumSymbols
+        throw GradleException(
+            "UniFFI API checksum symbol set mismatch: ABI='$abi' path='$displayPath' " +
+                "missing=${missing.sorted()} extra=${extra.sorted()}"
+        )
+    }
+
+    val nativeContract = nativeConstantValue(
+        objdump,
+        abi,
+        lib,
+        displayPath,
+        symbols,
+        "ffi_paykit_uniffi_contract_version"
+    )
+    if (nativeContract != expected.contractVersion) {
+        throw GradleException(
+            "UniFFI Kotlin/native contract mismatch: ABI='$abi' " +
+                "Kotlin=${expected.contractVersion} native=$nativeContract path='$displayPath'"
+        )
+    }
+
+    expected.apiChecksums.toSortedMap().forEach { (symbolName, expectedChecksum) ->
+        val nativeChecksum = nativeConstantValue(
+            objdump,
+            abi,
+            lib,
+            displayPath,
+            symbols,
+            symbolName
+        )
+        if (nativeChecksum != expectedChecksum) {
+            throw GradleException(
+                "UniFFI API checksum mismatch: ABI='$abi' symbol='$symbolName' " +
+                    "Kotlin=$expectedChecksum native=$nativeChecksum path='$displayPath'"
+            )
+        }
+    }
+
+    logger.lifecycle(
+        "UniFFI Kotlin/native integrity validation passed: ABI='$abi' " +
+            "contract=${expected.contractVersion} checksums=${expected.apiChecksums.size} " +
+            "path='$displayPath'"
+    )
+}
+
 val validateReleaseNativeLibraries by tasks.registering {
     group = "verification"
-    description = "Validates source release JNI libraries are stripped and 16 KB compatible."
+    description = "Validates source release JNI libraries for 16 KB and UniFFI integrity."
 
     doLast {
         val readelf = findReadelf()
+        val nm = findLlvmTool("llvm-nm")
+        val objdump = findLlvmTool("llvm-objdump")
+        val kotlinIntegrity = kotlinUniffiIntegrity()
 
         androidNativeAbis.forEach { abi ->
             val lib = layout.projectDirectory.file("src/main/jniLibs/$abi/libpaykit.so").asFile
             validateAndroidNativeLibrary(readelf, abi, lib)
+            validateUniffiIntegrity(
+                nm,
+                objdump,
+                kotlinIntegrity,
+                abi,
+                lib,
+                lib.path
+            )
         }
     }
 }
 
 val validateReleaseAarNativeLibraries by tasks.registering {
     group = "verification"
-    description = "Validates every native library in the final release AAR for 16 KB compatibility."
+    description = "Validates every final-AAR native library for 16 KB and UniFFI integrity."
     dependsOn("bundleReleaseAar")
 
     doLast {
         val readelf = findReadelf()
         val nm = findLlvmTool("llvm-nm")
         val objdump = findLlvmTool("llvm-objdump")
-        val kotlinContract = kotlinContractVersion()
-        logger.lifecycle("UniFFI Kotlin contract version: $kotlinContract")
+        val kotlinIntegrity = kotlinUniffiIntegrity()
+        logger.lifecycle(
+            "UniFFI Kotlin integrity manifest: contract=${kotlinIntegrity.contractVersion} " +
+                "checksums=${kotlinIntegrity.apiChecksums.size}"
+        )
         val aar = layout.buildDirectory.file("outputs/aar/lib-release.aar").get().asFile
         if (!aar.isFile) {
             throw GradleException("Android release AAR missing at '${aar.path}'")
@@ -444,24 +565,13 @@ val validateReleaseAarNativeLibraries by tasks.registering {
                         extracted.outputStream().use { output -> input.copyTo(output) }
                     }
                     validateAndroidNativeLibrary(readelf, abi, extracted, "${aar.path}!/$entryPath")
-                    val nativeContract = nativeContractVersion(
+                    validateUniffiIntegrity(
                         nm,
                         objdump,
+                        kotlinIntegrity,
                         abi,
                         extracted,
                         "${aar.path}!/$entryPath"
-                    )
-                    if (nativeContract != kotlinContract) {
-                        throw GradleException(
-                            "UniFFI Kotlin/native contract mismatch: ABI='$abi' " +
-                                "Kotlin=$kotlinContract native=$nativeContract " +
-                                "path='${aar.path}!/$entryPath'"
-                        )
-                    }
-                    logger.lifecycle(
-                        "UniFFI Kotlin/native contract validation passed: ABI='$abi' " +
-                            "Kotlin=$kotlinContract native=$nativeContract " +
-                            "path='${aar.path}!/$entryPath'"
                     )
                 }
             }
