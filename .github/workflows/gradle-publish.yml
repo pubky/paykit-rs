@@ -79,8 +79,31 @@ jobs:
         name: paykit-native-debug-symbols-${{ steps.version.outputs.version }}
         path: paykit-ffi/bindings/android/native-debug-symbols.zip
 
+    - name: Detect manual release target
+      if: github.event_name == 'workflow_dispatch'
+      id: release-target
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ steps.version.outputs.tag }}
+      shell: bash
+      run: |
+        STATUS=$(
+          gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>/dev/null |
+            awk 'NR == 1 { print $2 }'
+        )
+        case "$STATUS" in
+          200) echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+          404) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+          *)
+            echo "Unable to determine whether release $RELEASE_TAG exists (HTTP ${STATUS:-missing})" >&2
+            exit 1
+            ;;
+        esac
+
     - name: Upload native debug symbols to release
-      if: github.event_name == 'release'
+      if: >-
+        github.event_name == 'release' ||
+        steps.release-target.outputs.exists == 'true'
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh release upload "${{ steps.version.outputs.tag }}" paykit-ffi/bindings/android/native-debug-symbols.zip --clobber
