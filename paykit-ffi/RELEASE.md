@@ -2,6 +2,16 @@
 
 ## 1. Build
 
+Install Android NDK r28c revision `28.2.13676358` and export both required NDK
+variables to its canonical directory before running a release build:
+
+```bash
+sdkmanager "ndk;28.2.13676358"
+export PAYKIT_ANDROID_NDK="$ANDROID_SDK_ROOT/ndk/28.2.13676358"
+export ANDROID_NDK_HOME="$PAYKIT_ANDROID_NDK"
+export ANDROID_NDK_ROOT="$PAYKIT_ANDROID_NDK"
+```
+
 From `paykit-ffi/`:
 
 ```bash

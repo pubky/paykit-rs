@@ -340,6 +340,16 @@ derivable from the Pubky public key alone.
 
 ## Building
 
+Android builds require NDK r28c revision `28.2.13676358`. Install that exact
+revision and select the same canonical directory through both NDK variables:
+
+```bash
+sdkmanager "ndk;28.2.13676358"
+export PAYKIT_ANDROID_NDK="$ANDROID_SDK_ROOT/ndk/28.2.13676358"
+export ANDROID_NDK_HOME="$PAYKIT_ANDROID_NDK"
+export ANDROID_NDK_ROOT="$PAYKIT_ANDROID_NDK"
+```
+
 Always build all platforms together:
 
 ```bash
