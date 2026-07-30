@@ -42,6 +42,11 @@ impl AsRef<str> for PaymentRequestId {
 }
 
 /// Recurrence unit for recurring Payment Requests.
+///
+/// This enum is intentionally exhaustive. Adding a variant must produce
+/// compile-time failures in canonical wire serialization and SDK conversion
+/// matches until the new Recurrence unit is mapped explicitly. Do not add
+/// `#[non_exhaustive]` without a coordinated team decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecurrenceUnit {
     /// Minute-based recurrence.
@@ -408,6 +413,11 @@ impl PaymentProof {
 }
 
 /// One recognized Payment Request protocol Event Message in FIFO receive order.
+///
+/// This enum is intentionally exhaustive. Adding a variant must produce
+/// compile-time failures in serialization, lifecycle, and replay matches until
+/// the new Payment Request Event Message is classified explicitly. Do not add
+/// `#[non_exhaustive]` without a coordinated team decision.
 #[derive(Clone, PartialEq)]
 pub enum PaymentRequestEvent {
     /// `paykit.payment_request` proposal event.
