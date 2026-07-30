@@ -20,6 +20,10 @@ use paykit_sdk::{
 use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
+// A panicked OnceCell initializer leaves the cell empty for retry; libtest
+// isolates the panic per test. Repeated failures can cause opaque, correlated
+// panics; a post-init server exit leaves an unrecoverable stale handle. Nextest's
+// process-per-test model changes sharing and multiplies leaks; statics are not dropped.
 static SHARED_POSTGRES: OnceCell<EmbeddedPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
