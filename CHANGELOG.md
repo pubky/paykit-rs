@@ -389,7 +389,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 [0.1.0-rc27]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc27
 [0.1.0-rc26]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc26
 [0.1.0-rc25]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc25
-[0.1.0-rc24]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc24
 [0.1.0-rc23]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc23
 [0.1.0-rc21]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc21
 [0.1.0-rc19]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc19
