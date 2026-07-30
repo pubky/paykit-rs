@@ -89,6 +89,16 @@ impl Receipt {
     /// `key` and `location` normally come from a [`ReceiptAccess`] message. The
     /// location path is authenticated as AEAD associated data and the decrypted
     /// Receipt ID must match the canonical path.
+    ///
+    /// # Access control
+    ///
+    /// The Receipt Decryption Key is a possession-based access secret. A matching
+    /// Receipt Location is required as AEAD associated data, but the location is
+    /// not itself an authorization credential. The stateless Paykit Library has
+    /// no caller identity and does not compare `recipient_public_key`; callers
+    /// must compare it with the expected local Pubky identity. The SDK retrieval
+    /// path applies `validate_receipt_matches_access` to the plaintext Receipt
+    /// after decryption.
     pub fn decrypt(
         encrypted_json: &str,
         key: &ReceiptDecryptionKey,
@@ -174,6 +184,16 @@ impl Receipt {
 /// normally come from a [`ReceiptAccess`] message. The `location` path is
 /// authenticated as additional data, and the decrypted Receipt ID must match
 /// that path.
+///
+/// # Access control
+///
+/// The Receipt Decryption Key is a possession-based access secret. A matching
+/// Receipt Location is required as AEAD associated data, but the location is
+/// not itself an authorization credential. The stateless Paykit Library has
+/// no caller identity and does not compare `recipient_public_key`; callers
+/// must compare it with the expected local Pubky identity. The SDK retrieval
+/// path applies `validate_receipt_matches_access` to the plaintext Receipt
+/// after decryption.
 ///
 /// Receipt Decryption Keys are sensitive. [`ReceiptDecryptionKey`] redacts its
 /// `Debug` and `Display` output, but callers must still avoid logging raw values
