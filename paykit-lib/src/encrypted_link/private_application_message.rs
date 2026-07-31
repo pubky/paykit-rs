@@ -16,6 +16,11 @@ const INVALID_UTF8_PRIVATE_MESSAGE_PREFIX: &str = "paykit.invalid_utf8_private_m
 const LIST_PAGE_LIMIT: u16 = 100;
 
 /// Private Message Kind values understood by Paykit.
+///
+/// This enum is intentionally exhaustive. Adding a variant must produce
+/// compile-time failures in routing, validation, and backup-validation matches
+/// until the new Private Message Kind is classified explicitly. Do not add
+/// `#[non_exhaustive]` without a coordinated team decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivateMessageKind {
     /// Private Payment List Latest-State Message (`paykit.private_payment_list`).
