@@ -135,4 +135,11 @@ if [ "$DO_RELEASE" = true ]; then
     bump_version "$BUMP_TYPE" "$USE_RC"
 fi
 
-./build_ios.sh && ./build_android.sh
+./build_ios.sh
+
+if [ "${CI:-}" = "true" ]; then
+    echo "Removing iOS build intermediates before the Android build..."
+    rm -rf ../target/aarch64-apple-ios ../target/aarch64-apple-ios-sim ../target/debug
+fi
+
+./build_android.sh

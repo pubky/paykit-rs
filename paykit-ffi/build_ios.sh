@@ -49,6 +49,21 @@ fi
 echo "Normalizing generated Swift and header whitespace..."
 find ./bindings/ios -type f \( -name "*.swift" -o -name "*.h" -o -name "*.modulemap" \) -exec perl -0pi -e 's/[ \t]+(?=\n)//g; s/[ \t]+\z//; s/\n+\z/\n/; $_ .= "\n" unless /\n\z/' {} \;
 
+echo "Type-checking generated Swift bindings..."
+IOS_SIMULATOR_SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+SWIFT_MODULE_CACHE="${TARGET_DIR}/swift-binding-module-cache"
+rm -rf "$SWIFT_MODULE_CACHE"
+mkdir -p "$SWIFT_MODULE_CACHE"
+xcrun --sdk iphonesimulator swiftc \
+    -typecheck \
+    -target arm64-apple-ios15.0-simulator \
+    -sdk "$IOS_SIMULATOR_SDK" \
+    -module-cache-path "$SWIFT_MODULE_CACHE" \
+    -I ./bindings/ios \
+    ./bindings/ios/paykit.swift \
+    ./bindings/ios/PaykitPublicKeys.swift \
+    || { echo "Failed to type-check generated Swift bindings"; exit 1; }
+
 echo "Cleaning up existing XCFramework..."
 rm -rf "bindings/ios/Paykit.xcframework"
 rm -rf "bindings/ios/Headers"
