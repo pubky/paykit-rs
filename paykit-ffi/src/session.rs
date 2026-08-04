@@ -11,7 +11,7 @@ use pubky::{Pubky, PubkyHttpClient, PubkySession};
 use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
 
-use crate::config::{default_pubky_client_config, FfiPubkyClientConfig};
+use crate::config::{default_pubky_client_config, FfiPubkyClientConfig, FfiPubkyClientEnvironment};
 use crate::errors::{ffi_error_to_sdk, identity_error, validation_error, PaykitFfiError};
 use crate::secrets::{FfiPubkyLocalSecretKey, FfiReceiverNoiseSecretKey};
 
@@ -578,6 +578,31 @@ pub(crate) fn pubky_from_config(config: &FfiPubkyClientConfig) -> Result<Pubky, 
     }
 
     let mut builder = PubkyHttpClient::builder();
+    match config.environment {
+        FfiPubkyClientEnvironment::Production => {
+            if config.testnet_host.is_some() {
+                return Err(validation_error(
+                    "pubky testnet host requires the local testnet environment",
+                ));
+            }
+        }
+        FfiPubkyClientEnvironment::LocalTestnet => {
+            let host = config.testnet_host.as_deref().unwrap_or("localhost");
+            let is_valid_host = matches!(
+                url::Host::parse(host),
+                Ok(url::Host::Domain(_) | url::Host::Ipv4(_))
+            );
+            if host.is_empty() || host.trim() != host || !is_valid_host {
+                return Err(validation_error("pubky testnet host is invalid"));
+            }
+            builder.testnet_with_host(host);
+        }
+        FfiPubkyClientEnvironment::Unknown => {
+            return Err(validation_error(
+                "pubky client environment cannot be unknown",
+            ));
+        }
+    }
     builder.request_timeout(Duration::from_secs(config.request_timeout_secs));
     builder
         .build()

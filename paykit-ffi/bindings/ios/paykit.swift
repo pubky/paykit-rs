@@ -11383,14 +11383,30 @@ public struct PubkyClientConfig {
      * Request timeout for Pubky HTTP operations in seconds.
      */
     public var requestTimeoutSecs: UInt64
+    /**
+     * Pubky network environment used by the client.
+     */
+    public var environment: PubkyClientEnvironment
+    /**
+     * DNS hostname or IPv4 address running local testnet services, or `None` for localhost.
+     */
+    public var testnetHost: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * Request timeout for Pubky HTTP operations in seconds.
-         */requestTimeoutSecs: UInt64) {
+         */requestTimeoutSecs: UInt64,
+        /**
+         * Pubky network environment used by the client.
+         */environment: PubkyClientEnvironment,
+        /**
+         * DNS hostname or IPv4 address running local testnet services, or `None` for localhost.
+         */testnetHost: String?) {
         self.requestTimeoutSecs = requestTimeoutSecs
+        self.environment = environment
+        self.testnetHost = testnetHost
     }
 }
 
@@ -11404,11 +11420,19 @@ extension PubkyClientConfig: Equatable, Hashable {
         if lhs.requestTimeoutSecs != rhs.requestTimeoutSecs {
             return false
         }
+        if lhs.environment != rhs.environment {
+            return false
+        }
+        if lhs.testnetHost != rhs.testnetHost {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(requestTimeoutSecs)
+        hasher.combine(environment)
+        hasher.combine(testnetHost)
     }
 }
 
@@ -11423,12 +11447,16 @@ public struct FfiConverterTypePubkyClientConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyClientConfig {
         return
             try PubkyClientConfig(
-                requestTimeoutSecs: FfiConverterUInt64.read(from: &buf)
+                requestTimeoutSecs: FfiConverterUInt64.read(from: &buf),
+                environment: FfiConverterTypePubkyClientEnvironment.read(from: &buf),
+                testnetHost: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: PubkyClientConfig, into buf: inout [UInt8]) {
         FfiConverterUInt64.write(value.requestTimeoutSecs, into: &buf)
+        FfiConverterTypePubkyClientEnvironment.write(value.environment, into: &buf)
+        FfiConverterOptionString.write(value.testnetHost, into: &buf)
     }
 }
 
@@ -15321,6 +15349,97 @@ public func FfiConverterTypePubkyAuthRequestKind_lower(_ value: PubkyAuthRequest
 extension PubkyAuthRequestKind: Equatable, Hashable {}
 
 extension PubkyAuthRequestKind: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Pubky network environment used by binding-layer clients.
+ */
+
+public enum PubkyClientEnvironment {
+
+    /**
+     * Use the public Pubky network.
+     */
+    case production
+    /**
+     * Use standard Pubky testnet ports, on localhost unless a host is configured.
+     */
+    case localTestnet
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension PubkyClientEnvironment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyClientEnvironment: FfiConverterRustBuffer {
+    typealias SwiftType = PubkyClientEnvironment
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyClientEnvironment {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .production
+
+        case 2: return .localTestnet
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PubkyClientEnvironment, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .production:
+            writeInt(&buf, Int32(1))
+
+
+        case .localTestnet:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyClientEnvironment_lift(_ buf: RustBuffer) throws -> PubkyClientEnvironment {
+    return try FfiConverterTypePubkyClientEnvironment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyClientEnvironment_lower(_ value: PubkyClientEnvironment) -> RustBuffer {
+    return FfiConverterTypePubkyClientEnvironment.lower(value)
+}
+
+
+extension PubkyClientEnvironment: Equatable, Hashable {}
+
+extension PubkyClientEnvironment: Codable {}
 
 
 

@@ -32,6 +32,60 @@ fn test_default_config_round_trips_to_sdk_config() {
 }
 
 #[test]
+fn test_default_pubky_client_config_uses_production() {
+    let config = default_pubky_client_config();
+
+    assert_eq!(config.environment, FfiPubkyClientEnvironment::Production);
+    assert!(pubky_from_config(&config).is_ok());
+}
+
+#[test]
+fn test_pubky_client_config_accepts_local_testnet() {
+    let mut config = default_pubky_client_config();
+    config.environment = FfiPubkyClientEnvironment::LocalTestnet;
+    config.testnet_host = Some("10.0.2.2".into());
+
+    let result = pubky_from_config(&config);
+    assert!(
+        result.is_ok(),
+        "expected local testnet client, got: {result:?}"
+    );
+}
+
+#[test]
+fn test_pubky_client_config_rejects_invalid_testnet_host() {
+    let mut config = default_pubky_client_config();
+    config.environment = FfiPubkyClientEnvironment::LocalTestnet;
+    config.testnet_host = Some("not a host".into());
+
+    let err = pubky_from_config(&config).unwrap_err();
+
+    assert!(err.to_string().contains("testnet host is invalid"));
+}
+
+#[test]
+fn test_pubky_client_config_rejects_testnet_host_in_production() {
+    let mut config = default_pubky_client_config();
+    config.testnet_host = Some("localhost".into());
+
+    let err = pubky_from_config(&config).unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("testnet host requires the local testnet environment"));
+}
+
+#[test]
+fn test_pubky_client_config_rejects_unknown_environment() {
+    let mut config = default_pubky_client_config();
+    config.environment = FfiPubkyClientEnvironment::Unknown;
+
+    let err = pubky_from_config(&config).unwrap_err();
+
+    assert!(err.to_string().contains("environment cannot be unknown"));
+}
+
+#[test]
 fn test_required_capabilities_include_custom_namespace_scope() {
     let mut config = default_config("bitkit/wallet".into()).unwrap();
     config.public_contact_sharing = FfiPublicContactSharingPolicy::ConfiguredPublicNamespace;

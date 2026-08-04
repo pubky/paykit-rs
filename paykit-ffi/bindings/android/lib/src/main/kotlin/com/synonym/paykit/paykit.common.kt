@@ -2764,7 +2764,15 @@ public data class PubkyClientConfig (
     /**
      * Request timeout for Pubky HTTP operations in seconds.
      */
-    val `requestTimeoutSecs`: kotlin.ULong
+    val `requestTimeoutSecs`: kotlin.ULong,
+    /**
+     * Pubky network environment used by the client.
+     */
+    val `environment`: PubkyClientEnvironment,
+    /**
+     * DNS hostname or IPv4 address running local testnet services, or `None` for localhost.
+     */
+    val `testnetHost`: kotlin.String?
 ) {
     public companion object
 }
@@ -4106,6 +4114,33 @@ public enum class PubkyAuthRequestKind {
      * Export a secret from a signer.
      */
     SECRET_EXPORT,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Pubky network environment used by binding-layer clients.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class PubkyClientEnvironment {
+
+    /**
+     * Use the public Pubky network.
+     */
+    PRODUCTION,
+    /**
+     * Use standard Pubky testnet ports, on localhost unless a host is configured.
+     */
+    LOCAL_TESTNET,
     /**
      * SDK returned a value this binding version does not understand.
      */
