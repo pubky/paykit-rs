@@ -7,6 +7,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc41] - 2026-08-04
+
+### Added
+- Exposed explicit production and local-testnet Pubky client configuration to
+  Swift and Kotlin consumers, including custom DNS hostname and IPv4 support
+  for emulator-hosted test environments.
+
 ## [0.1.0-rc40] - 2026-07-27
 
 ### Fixed
