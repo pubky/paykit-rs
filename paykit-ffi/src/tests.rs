@@ -52,6 +52,21 @@ fn test_pubky_client_config_accepts_local_testnet() {
 }
 
 #[test]
+fn test_pubky_client_config_rejects_invalid_local_testnet_host() {
+    for host in ["", " not-a-host", "not a host", "::1"] {
+        let mut config = default_pubky_client_config();
+        config.local_testnet_host = Some(host.into());
+
+        let err = pubky_from_config(&config).unwrap_err();
+
+        assert!(
+            err.to_string().contains("local testnet host is invalid"),
+            "expected validation error for {host:?}, got: {err}"
+        );
+    }
+}
+
+#[test]
 fn test_required_capabilities_include_custom_namespace_scope() {
     let mut config = default_config("bitkit/wallet".into()).unwrap();
     config.public_contact_sharing = FfiPublicContactSharingPolicy::ConfiguredPublicNamespace;

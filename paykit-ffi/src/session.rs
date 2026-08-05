@@ -579,6 +579,7 @@ pub(crate) fn pubky_from_config(config: &FfiPubkyClientConfig) -> Result<Pubky, 
 
     let mut builder = PubkyHttpClient::builder();
     if let Some(host) = config.local_testnet_host.as_deref() {
+        validate_local_testnet_host(host)?;
         builder.testnet_with_host(host);
     }
     builder.request_timeout(Duration::from_secs(config.request_timeout_secs));
@@ -586,6 +587,17 @@ pub(crate) fn pubky_from_config(config: &FfiPubkyClientConfig) -> Result<Pubky, 
         .build()
         .map(Pubky::with_client)
         .map_err(|_err| identity_error("pubky_client", "create Pubky client failed"))
+}
+
+fn validate_local_testnet_host(host: &str) -> Result<(), PaykitFfiError> {
+    let is_supported_host = matches!(
+        url::Host::parse(host),
+        Ok(url::Host::Domain(_) | url::Host::Ipv4(_))
+    );
+    if host.is_empty() || host.trim() != host || !is_supported_host {
+        return Err(validation_error("pubky local testnet host is invalid"));
+    }
+    Ok(())
 }
 
 pub(crate) fn local_secret_from_bytes(
