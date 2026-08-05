@@ -10982,21 +10982,18 @@ public object FfiConverterTypePubkyClientConfig: FfiConverterRustBuffer<PubkyCli
     override fun read(buf: ByteBuffer): PubkyClientConfig {
         return PubkyClientConfig(
             FfiConverterULong.read(buf),
-            FfiConverterTypePubkyClientEnvironment.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: PubkyClientConfig): ULong = (
             FfiConverterULong.allocationSize(value.`requestTimeoutSecs`) +
-            FfiConverterTypePubkyClientEnvironment.allocationSize(value.`environment`) +
-            FfiConverterOptionalString.allocationSize(value.`testnetHost`)
+            FfiConverterOptionalString.allocationSize(value.`localTestnetHost`)
     )
 
     override fun write(value: PubkyClientConfig, buf: ByteBuffer) {
         FfiConverterULong.write(value.`requestTimeoutSecs`, buf)
-        FfiConverterTypePubkyClientEnvironment.write(value.`environment`, buf)
-        FfiConverterOptionalString.write(value.`testnetHost`, buf)
+        FfiConverterOptionalString.write(value.`localTestnetHost`, buf)
     }
 }
 
@@ -12037,24 +12034,6 @@ public object FfiConverterTypePubkyAuthRequestKind: FfiConverterRustBuffer<Pubky
     override fun allocationSize(value: PubkyAuthRequestKind): ULong = 4UL
 
     override fun write(value: PubkyAuthRequestKind, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-public object FfiConverterTypePubkyClientEnvironment: FfiConverterRustBuffer<PubkyClientEnvironment> {
-    override fun read(buf: ByteBuffer): PubkyClientEnvironment = try {
-        PubkyClientEnvironment.entries[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: PubkyClientEnvironment): ULong = 4UL
-
-    override fun write(value: PubkyClientEnvironment, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }

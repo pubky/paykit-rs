@@ -62,26 +62,13 @@ pub struct FfiPaykitSdkConfig {
     pub outbound_private_retry_backoff_secs: u64,
 }
 
-/// Pubky network environment used by binding-layer clients.
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FfiPubkyClientEnvironment {
-    /// Use the public Pubky network.
-    Production,
-    /// Use standard Pubky testnet ports, on localhost unless a host is configured.
-    LocalTestnet,
-    /// SDK returned a value this binding version does not understand.
-    Unknown,
-}
-
 /// Pubky client configuration owned by the binding layer.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiPubkyClientConfig {
     /// Request timeout for Pubky HTTP operations in seconds.
     pub request_timeout_secs: u64,
-    /// Pubky network environment used by the client.
-    pub environment: FfiPubkyClientEnvironment,
-    /// DNS hostname or IPv4 address running local testnet services, or `None` for localhost.
-    pub testnet_host: Option<String>,
+    /// Host running local testnet services, or `None` to use the public Pubky network.
+    pub local_testnet_host: Option<String>,
 }
 
 /// Return the default SDK policy for an explicit Paykit receiver path.
@@ -98,8 +85,7 @@ pub fn default_config(receiver_path: String) -> Result<FfiPaykitSdkConfig, Payki
 pub fn default_pubky_client_config() -> FfiPubkyClientConfig {
     FfiPubkyClientConfig {
         request_timeout_secs: DEFAULT_PUBKY_REQUEST_TIMEOUT_SECS,
-        environment: FfiPubkyClientEnvironment::Production,
-        testnet_host: None,
+        local_testnet_host: None,
     }
 }
 
