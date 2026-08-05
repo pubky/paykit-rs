@@ -7,6 +7,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc43] - 2026-08-05
+
+### Fixed
+- Rejected invalid local Pubky testnet hosts before constructing the native
+  client, avoiding a panic for malformed configuration.
+
 ## [0.1.0-rc42] - 2026-08-05
 
 ### Changed
@@ -386,7 +392,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc42...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc43...HEAD
+[0.1.0-rc43]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc43
 [0.1.0-rc42]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc42
 [0.1.0-rc41]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc41
 [0.1.0-rc40]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc40
