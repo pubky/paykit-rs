@@ -10982,15 +10982,18 @@ public object FfiConverterTypePubkyClientConfig: FfiConverterRustBuffer<PubkyCli
     override fun read(buf: ByteBuffer): PubkyClientConfig {
         return PubkyClientConfig(
             FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: PubkyClientConfig): ULong = (
-            FfiConverterULong.allocationSize(value.`requestTimeoutSecs`)
+            FfiConverterULong.allocationSize(value.`requestTimeoutSecs`) +
+            FfiConverterOptionalString.allocationSize(value.`localTestnetHost`)
     )
 
     override fun write(value: PubkyClientConfig, buf: ByteBuffer) {
         FfiConverterULong.write(value.`requestTimeoutSecs`, buf)
+        FfiConverterOptionalString.write(value.`localTestnetHost`, buf)
     }
 }
 

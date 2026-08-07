@@ -67,6 +67,8 @@ pub struct FfiPaykitSdkConfig {
 pub struct FfiPubkyClientConfig {
     /// Request timeout for Pubky HTTP operations in seconds.
     pub request_timeout_secs: u64,
+    /// Host running local testnet services, or `None` to use the public Pubky network.
+    pub local_testnet_host: Option<String>,
 }
 
 /// Return the default SDK policy for an explicit Paykit receiver path.
@@ -83,6 +85,7 @@ pub fn default_config(receiver_path: String) -> Result<FfiPaykitSdkConfig, Payki
 pub fn default_pubky_client_config() -> FfiPubkyClientConfig {
     FfiPubkyClientConfig {
         request_timeout_secs: DEFAULT_PUBKY_REQUEST_TIMEOUT_SECS,
+        local_testnet_host: None,
     }
 }
 

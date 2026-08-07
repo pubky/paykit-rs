@@ -11383,14 +11383,22 @@ public struct PubkyClientConfig {
      * Request timeout for Pubky HTTP operations in seconds.
      */
     public var requestTimeoutSecs: UInt64
+    /**
+     * Host running local testnet services, or `None` to use the public Pubky network.
+     */
+    public var localTestnetHost: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * Request timeout for Pubky HTTP operations in seconds.
-         */requestTimeoutSecs: UInt64) {
+         */requestTimeoutSecs: UInt64,
+        /**
+         * Host running local testnet services, or `None` to use the public Pubky network.
+         */localTestnetHost: String?) {
         self.requestTimeoutSecs = requestTimeoutSecs
+        self.localTestnetHost = localTestnetHost
     }
 }
 
@@ -11404,11 +11412,15 @@ extension PubkyClientConfig: Equatable, Hashable {
         if lhs.requestTimeoutSecs != rhs.requestTimeoutSecs {
             return false
         }
+        if lhs.localTestnetHost != rhs.localTestnetHost {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(requestTimeoutSecs)
+        hasher.combine(localTestnetHost)
     }
 }
 
@@ -11423,12 +11435,14 @@ public struct FfiConverterTypePubkyClientConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyClientConfig {
         return
             try PubkyClientConfig(
-                requestTimeoutSecs: FfiConverterUInt64.read(from: &buf)
+                requestTimeoutSecs: FfiConverterUInt64.read(from: &buf),
+                localTestnetHost: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: PubkyClientConfig, into buf: inout [UInt8]) {
         FfiConverterUInt64.write(value.requestTimeoutSecs, into: &buf)
+        FfiConverterOptionString.write(value.localTestnetHost, into: &buf)
     }
 }
 

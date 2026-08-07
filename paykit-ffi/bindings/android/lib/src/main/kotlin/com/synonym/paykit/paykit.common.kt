@@ -2764,7 +2764,11 @@ public data class PubkyClientConfig (
     /**
      * Request timeout for Pubky HTTP operations in seconds.
      */
-    val `requestTimeoutSecs`: kotlin.ULong
+    val `requestTimeoutSecs`: kotlin.ULong,
+    /**
+     * Host running local testnet services, or `None` to use the public Pubky network.
+     */
+    val `localTestnetHost`: kotlin.String?
 ) {
     public companion object
 }
