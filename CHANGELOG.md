@@ -14,8 +14,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   including the client proof-of-possession key in Rust, Swift, and Kotlin.
 
 ### Changed
-- Upgraded Pubky to `0.10.0` and `pubky-noise` to `0.1.0-rc6`; the workspace
-  pins the exact upstream `pubky-noise` compatibility commit for reproducible builds.
+- Upgraded Pubky to `0.10.0` and `pubky-noise` to `0.1.0-rc6`.
 - **Breaking:** session bootstrap now requires a stable Pubky client ID, direct
   signup/signin creates grant sessions, session export/import uses the grant
   plus proof-of-possession secret, and auth-flow resume accepts securely saved

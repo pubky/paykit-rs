@@ -64,7 +64,7 @@ async fn test_pending_grant_auth_survives_secure_state_restore() {
 }
 
 #[tokio::test]
-async fn test_grant_session_exports_restores_and_rejects_cookie_secret() {
+async fn test_grant_session_persistence_contract() {
     let testnet = build_testnet().await;
     let pubky = testnet.sdk().expect("testnet Pubky client");
     let identity_keypair = Keypair::random();

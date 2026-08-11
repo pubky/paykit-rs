@@ -176,7 +176,7 @@ fn test_pubky_auth_request_state_round_trips_and_redacts_secrets() {
 }
 
 #[test]
-fn test_pubky_auth_request_state_rejects_invalid_or_mismatched_secrets() {
+fn test_pubky_auth_request_state_rejects_invalid_client_secrets() {
     let authorization_url = grant_auth_url(&[42; 32]);
 
     assert!(FfiPubkyAuthRequestState::new(authorization_url.clone(), vec![42; 31]).is_err());

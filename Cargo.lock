@@ -3875,7 +3875,8 @@ dependencies = [
 [[package]]
 name = "pubky-noise"
 version = "0.1.0-rc6"
-source = "git+https://github.com/pubky/pubky-noise?rev=169152059b5e21ac0bcee3eb40c09f731009d84f#169152059b5e21ac0bcee3eb40c09f731009d84f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ac4c19c86847494fec3e0549406a6d354bccc8e21cf5c0746a51e9f05f6c9ca"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "ed25519-dalek",
