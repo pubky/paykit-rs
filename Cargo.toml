@@ -4,3 +4,4 @@ members = ["paykit-lib", "paykit-ffi", "paykit-sdk"]
 
 [patch.crates-io]
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }
+pubky-noise = { git = "https://github.com/pubky/pubky-noise", rev = "169152059b5e21ac0bcee3eb40c09f731009d84f" }

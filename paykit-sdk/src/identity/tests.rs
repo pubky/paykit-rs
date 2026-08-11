@@ -85,24 +85,30 @@ fn test_receiver_noise_secret_key_returns_independent_public_key() {
 fn test_session_capabilities_cover_required_paykit_scopes() {
     let root = pubky::Capabilities::builder()
         .read_write("/")
+        .unwrap()
         .finish()
         .as_slice()
         .to_vec();
     let paykit_only = pubky::Capabilities::builder()
         .read_write("/pub/paykit/")
+        .unwrap()
         .finish()
         .as_slice()
         .to_vec();
     let bitkit_namespace = pubky::Capabilities::builder()
         .read_write("/pub/paykit/v0/paykit/wallet/")
+        .unwrap()
         .read_write("/pub/paykit/v0/private/paykit/wallet/")
+        .unwrap()
         .read_write("/pub/bitkit.to/")
+        .unwrap()
         .finish()
         .as_slice()
         .to_vec();
     let bitkit_required = "/pub/paykit/v0/paykit/wallet/:rw,/pub/paykit/v0/private/paykit/wallet/:rw,/pub/bitkit.to/paykit/wallet/:rw";
     let read_only = pubky::Capabilities::builder()
         .read("/pub/paykit/")
+        .unwrap()
         .finish()
         .as_slice()
         .to_vec();
