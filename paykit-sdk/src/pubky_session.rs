@@ -7,8 +7,8 @@ pub use companion_claim::{PubkyAuthCompanionClaim, PubkyAuthCompanionClaimApprov
 use std::{fmt, str::FromStr};
 
 use pubky::{
-    deep_links::DeepLink, AuthFlowKind, Capabilities, Capability, Pubky, PubkyAuthFlow,
-    PubkyResource, PubkySession,
+    deep_links::DeepLink, AuthFlowKind, Capabilities, Capability, ClientId, GrantAuthFlowState,
+    Pubky, PubkyGrantAuthFlow, PubkyResource, PubkySession,
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -38,8 +38,6 @@ pub enum PubkyAuthRequestKind {
     SignIn,
     /// Sign up on a Pubky homeserver.
     SignUp,
-    /// Export a secret from a signer.
-    SecretExport,
 }
 
 /// Public details parsed from a Pubky auth deep link.
@@ -48,9 +46,11 @@ pub struct PubkyAuthDetails {
     /// Auth request kind.
     pub kind: PubkyAuthRequestKind,
     /// Requested capabilities as canonical Pubky capability text.
-    pub capabilities: Option<String>,
+    pub capabilities: String,
     /// Relay URL used by the auth flow.
-    pub relay_url: Option<String>,
+    pub relay_url: String,
+    /// Application identifier that will own the grant.
+    pub client_id: String,
     /// Homeserver requested by a signup flow.
     pub homeserver_public_key: Option<PubkyPublicKey>,
 }
@@ -61,12 +61,17 @@ impl fmt::Debug for PubkyAuthDetails {
             .field("kind", &self.kind)
             .field("capabilities", &self.capabilities)
             .field("relay_url", &self.relay_url)
+            .field("client_id", &self.client_id)
             .field("homeserver_public_key", &self.homeserver_public_key)
             .finish()
     }
 }
 
-/// Exported Pubky session bearer secret.
+/// Portable secret material used to restore a Pubky grant session.
+///
+/// The value contains the signed grant and its proof-of-possession key. Treat
+/// it as bearer-equivalent secret material until the grant expires or is
+/// revoked.
 pub struct PubkySessionSecret(String);
 
 impl PubkySessionSecret {
@@ -105,6 +110,8 @@ pub struct PubkySessionBootstrapResult {
     pub access: crate::PubkySessionAccess,
     /// Local public key for the session.
     pub public_key: PubkyPublicKey,
+    /// Application identifier recorded in the grant.
+    pub client_id: String,
 }
 
 impl fmt::Debug for PubkySessionBootstrapResult {
@@ -112,21 +119,91 @@ impl fmt::Debug for PubkySessionBootstrapResult {
         f.debug_struct("PubkySessionBootstrapResult")
             .field("access", &"<redacted>")
             .field("public_key", &self.public_key)
+            .field("client_id", &self.client_id)
             .finish()
     }
 }
 
 impl PubkySessionBootstrapResult {
-    /// Export the bearer secret token used to restore this Pubky session later.
-    pub fn export_session_secret(&self) -> PubkySessionSecret {
-        PubkySessionSecret::new(self.access.session.export_secret())
+    /// Export the secret token used to restore this grant session later.
+    pub async fn export_session_secret(&self) -> Result<PubkySessionSecret> {
+        let grant = self.access.session.as_grant().ok_or_else(|| {
+            unsupported_session_error("cannot export a legacy Pubky cookie session")
+        })?;
+        let secret = grant.export_local_secret().await.ok_or_else(|| {
+            unsupported_session_error("cannot export a delegated Pubky grant session")
+        })?;
+        Ok(PubkySessionSecret::new(secret))
+    }
+}
+
+/// Sensitive state required to resume a pending Pubky grant auth request.
+///
+/// Persist this only in secure, temporary storage and delete it after the
+/// request completes, expires, or is abandoned. The authorization URL carries
+/// the relay secret and `client_key_secret` is the proof-of-possession key.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PubkyAuthRequestState {
+    authorization_url: String,
+    client_key_secret: [u8; 32],
+}
+
+impl PubkyAuthRequestState {
+    /// Reconstruct persisted pending-request state.
+    pub fn new(authorization_url: String, client_key_secret: [u8; 32]) -> Result<Self> {
+        validate_grant_auth_url(&authorization_url)?;
+        validate_auth_state_client_key(&authorization_url, &client_key_secret)?;
+        Ok(Self {
+            authorization_url,
+            client_key_secret,
+        })
+    }
+
+    /// Borrow the grant authorization URL.
+    pub fn authorization_url(&self) -> &str {
+        &self.authorization_url
+    }
+
+    /// Borrow the proof-of-possession secret for secure persistence.
+    pub fn client_key_secret(&self) -> &[u8; 32] {
+        &self.client_key_secret
+    }
+
+    fn from_grant_state(state: GrantAuthFlowState) -> Self {
+        Self {
+            authorization_url: state.authorization_url,
+            client_key_secret: state.client_key_secret,
+        }
+    }
+
+    fn to_grant_state(&self) -> GrantAuthFlowState {
+        GrantAuthFlowState {
+            authorization_url: self.authorization_url.clone(),
+            client_key_secret: self.client_key_secret,
+        }
+    }
+}
+
+impl fmt::Debug for PubkyAuthRequestState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PubkyAuthRequestState")
+            .field("authorization_url", &"<redacted>")
+            .field("client_key_secret", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for PubkyAuthRequestState {
+    fn drop(&mut self) {
+        self.authorization_url.zeroize();
+        self.client_key_secret.zeroize();
     }
 }
 
 /// Handle for a pending Pubky auth flow.
 pub struct PubkyAuthRequest {
     pubky: Pubky,
-    flow: PubkyAuthFlow,
+    flow: PubkyGrantAuthFlow,
     authorization_url: String,
 }
 
@@ -134,6 +211,14 @@ impl PubkyAuthRequest {
     /// Short-lived secret-bearing auth URL to show as a deeplink or QR code.
     pub fn authorization_url(&self) -> &str {
         &self.authorization_url
+    }
+
+    /// Export the sensitive state required to resume this pending request.
+    pub fn save_state(&self) -> Result<PubkyAuthRequestState> {
+        self.flow
+            .save_local()
+            .map(PubkyAuthRequestState::from_grant_state)
+            .ok_or_else(|| unsupported_session_error("grant auth flow key is not exportable"))
     }
 
     /// Wait for auth approval and validate the resulting session capabilities.
@@ -148,6 +233,7 @@ impl PubkyAuthRequest {
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         validate_auth_url_capabilities(&self.authorization_url, required_capabilities)?;
+        let client_id = parse_client_id(&parse_pubky_auth_url(&self.authorization_url)?.client_id)?;
         let session = self
             .flow
             .await_approval()
@@ -160,7 +246,9 @@ impl PubkyAuthRequest {
             local_secret_key,
             receiver_noise_secret_key,
             required_capabilities,
+            &client_id,
         )
+        .await
     }
 }
 
@@ -176,20 +264,32 @@ impl fmt::Debug for PubkyAuthRequest {
 #[derive(Clone, Debug)]
 pub struct PubkySessionBootstrap {
     pubky: Pubky,
+    client_id: ClientId,
 }
 
 impl PubkySessionBootstrap {
     /// Create a bootstrap helper with a default Pubky client.
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            pubky: Pubky::new()
-                .map_err(|err| map_pubky_identity_error("create Pubky client", err))?,
-        })
+    ///
+    /// `client_id` is the stable application identifier recorded in every
+    /// grant, typically a domain name controlled by the integrating app.
+    pub fn new(client_id: &str) -> Result<Self> {
+        let client_id = parse_client_id(client_id)?;
+        let pubky =
+            Pubky::new().map_err(|err| map_pubky_identity_error("create Pubky client", err))?;
+        Ok(Self { pubky, client_id })
     }
 
     /// Create a bootstrap helper from an existing Pubky client.
-    pub fn with_pubky(pubky: Pubky) -> Self {
-        Self { pubky }
+    pub fn with_pubky(pubky: Pubky, client_id: &str) -> Result<Self> {
+        Ok(Self {
+            pubky,
+            client_id: parse_client_id(client_id)?,
+        })
+    }
+
+    /// Return the stable application identifier used for new grants.
+    pub fn client_id(&self) -> &str {
+        self.client_id.as_str()
     }
 
     /// Sign up on a homeserver and return validated session access.
@@ -205,19 +305,24 @@ impl PubkySessionBootstrap {
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         let homeserver = homeserver_public_key.to_public_key()?;
-        let session = self
-            .pubky
-            .signer(secret_key.keypair())
+        let signer = self.pubky.signer(secret_key.keypair());
+        signer
             .signup(&homeserver, signup_code)
             .await
             .map_err(|err| map_pubky_identity_error("sign up Pubky session", err))?;
+        let session = signer
+            .signin(self.client_id.clone())
+            .await
+            .map_err(|err| map_pubky_identity_error("create Pubky grant session", err))?;
         session_result(
             session,
             self.pubky.clone(),
             Some(secret_key.clone()),
             receiver_noise_secret_key,
             required_capabilities,
+            &self.client_id,
         )
+        .await
     }
 
     /// Sign in with a local Pubky secret key and return validated session access.
@@ -234,7 +339,7 @@ impl PubkySessionBootstrap {
         let session = self
             .pubky
             .signer(secret_key.keypair())
-            .signin()
+            .signin(self.client_id.clone())
             .await
             .map_err(|err| map_pubky_identity_error("sign in Pubky session", err))?;
         session_result(
@@ -243,10 +348,12 @@ impl PubkySessionBootstrap {
             Some(secret_key.clone()),
             receiver_noise_secret_key,
             required_capabilities,
+            &self.client_id,
         )
+        .await
     }
 
-    /// Import an exported Pubky session secret and validate its capabilities.
+    /// Restore an exported Pubky grant-session secret and validate its capabilities.
     ///
     /// Pass the same persisted receiver Noise key returned with the original
     /// session access. Generating a replacement rotates the public key and
@@ -258,17 +365,20 @@ impl PubkySessionBootstrap {
         receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
-        let session =
-            PubkySession::import_secret(session_secret, Some(self.pubky.client().clone()))
-                .await
-                .map_err(|err| map_pubky_identity_error("import Pubky session", err))?;
+        let session = self
+            .pubky
+            .restore_session(session_secret)
+            .await
+            .map_err(|err| map_pubky_identity_error("restore Pubky grant session", err))?;
         session_result(
             session,
             self.pubky.clone(),
             local_secret_key,
             receiver_noise_secret_key,
             required_capabilities,
+            &self.client_id,
         )
+        .await
     }
 
     /// Start a sign-in auth flow for an external signer such as Pubky Ring.
@@ -290,24 +400,22 @@ impl PubkySessionBootstrap {
         .await
     }
 
-    /// Resume a short-lived auth flow from its authorization URL.
+    /// Resume a short-lived grant auth flow from securely persisted state.
     ///
     /// The requested capabilities must exactly match `expected_capabilities`.
     pub async fn resume_auth(
         &self,
-        authorization_url: &str,
+        state: &PubkyAuthRequestState,
         expected_capabilities: &str,
     ) -> Result<PubkyAuthRequest> {
-        validate_sign_in_or_sign_up_auth_url(authorization_url)?;
-        validate_auth_url_capabilities(authorization_url, expected_capabilities)?;
-        let flow = self
-            .pubky
-            .resume_auth_flow(authorization_url)
+        validate_auth_url_capabilities(state.authorization_url(), expected_capabilities)?;
+        validate_auth_url_client_id(state.authorization_url(), &self.client_id)?;
+        let flow = PubkyGrantAuthFlow::restore(state.to_grant_state(), self.pubky.client().clone())
             .map_err(|err| map_pubky_identity_error("resume Pubky auth flow", err))?;
         Ok(PubkyAuthRequest {
             pubky: self.pubky.clone(),
             flow,
-            authorization_url: authorization_url.to_string(),
+            authorization_url: state.authorization_url().to_string(),
         })
     }
 
@@ -320,7 +428,7 @@ impl PubkySessionBootstrap {
         expected_capabilities: &str,
         secret_key: &PubkyLocalSecretKey,
     ) -> Result<()> {
-        validate_sign_in_or_sign_up_auth_url(auth_url)?;
+        validate_grant_auth_url(auth_url)?;
         validate_auth_url_capabilities(auth_url, expected_capabilities)?;
         self.pubky
             .signer(secret_key.keypair())
@@ -333,7 +441,7 @@ impl PubkySessionBootstrap {
         let capabilities = parse_capabilities(capabilities)?;
         let flow = self
             .pubky
-            .start_auth_flow(&capabilities, kind)
+            .start_grant_auth_flow(&capabilities, kind, self.client_id.clone())
             .map_err(|err| map_pubky_identity_error("start Pubky auth flow", err))?;
         let authorization_url = flow.authorization_url().to_string();
         Ok(PubkyAuthRequest {
@@ -352,24 +460,40 @@ pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
     })?;
 
     match deep_link {
-        DeepLink::Signin(link) => Ok(PubkyAuthDetails {
-            kind: PubkyAuthRequestKind::SignIn,
-            capabilities: Some(parse_auth_url_capabilities(auth_url)?.to_string()),
-            relay_url: Some(link.relay().to_string()),
-            homeserver_public_key: None,
-        }),
-        DeepLink::Signup(link) => Ok(PubkyAuthDetails {
-            kind: PubkyAuthRequestKind::SignUp,
-            capabilities: Some(parse_auth_url_capabilities(auth_url)?.to_string()),
-            relay_url: Some(link.relay().to_string()),
-            homeserver_public_key: Some(PubkyPublicKey::from_public_key(link.homeserver())),
-        }),
-        DeepLink::SeedExport(_) => Ok(PubkyAuthDetails {
-            kind: PubkyAuthRequestKind::SecretExport,
-            capabilities: None,
-            relay_url: None,
-            homeserver_public_key: None,
-        }),
+        DeepLink::SigninGrant(link) => {
+            validate_unique_query_parameters(auth_url, &["caps", "relay", "secret", "cid", "cpk"])?;
+            let params = link.params();
+            Ok(PubkyAuthDetails {
+                kind: PubkyAuthRequestKind::SignIn,
+                capabilities: params.capabilities.clone().normalize().to_string(),
+                relay_url: params.relay.to_string(),
+                client_id: params.client_id.to_string(),
+                homeserver_public_key: None,
+            })
+        }
+        DeepLink::SignupGrant(link) => {
+            validate_unique_query_parameters(
+                auth_url,
+                &["caps", "relay", "secret", "hs", "st", "cid", "cpk"],
+            )?;
+            let params = link.params();
+            Ok(PubkyAuthDetails {
+                kind: PubkyAuthRequestKind::SignUp,
+                capabilities: params.capabilities.clone().normalize().to_string(),
+                relay_url: params.relay.to_string(),
+                client_id: params.client_id.to_string(),
+                homeserver_public_key: Some(PubkyPublicKey::from_public_key(&params.homeserver)),
+            })
+        }
+        DeepLink::Signin(_) | DeepLink::Signup(_) => Err(unsupported_auth_url_error(
+            "legacy Pubky cookie auth URLs are not supported",
+        )),
+        DeepLink::DirectSignup(_) => Err(unsupported_auth_url_error(
+            "direct-signup URLs do not create grant sessions",
+        )),
+        DeepLink::SeedExport(_) => Err(unsupported_auth_url_error(
+            "secret-export URLs do not create grant sessions",
+        )),
     }
 }
 
@@ -399,13 +523,15 @@ pub fn parse_pubky_resource(uri: &str) -> Result<PubkyResourceRef> {
     })
 }
 
-fn session_result(
+async fn session_result(
     session: PubkySession,
     outbox_client: Pubky,
     local_secret_key: Option<PubkyLocalSecretKey>,
     receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
     required_capabilities: &str,
+    expected_client_id: &ClientId,
 ) -> Result<PubkySessionBootstrapResult> {
+    validate_grant_session(&session, expected_client_id).await?;
     let local_secret_key = validate_local_secret_for_session(&session, local_secret_key)?;
     let access = crate::PubkySessionAccess {
         session,
@@ -415,7 +541,11 @@ fn session_result(
     };
     let public_key = access.public_key()?;
     access.validate_for_capabilities(required_capabilities)?;
-    Ok(PubkySessionBootstrapResult { access, public_key })
+    Ok(PubkySessionBootstrapResult {
+        access,
+        public_key,
+        client_id: expected_client_id.to_string(),
+    })
 }
 
 pub(crate) fn parse_capabilities(value: &str) -> Result<Capabilities> {
@@ -442,15 +572,72 @@ pub(crate) fn parse_capabilities(value: &str) -> Result<Capabilities> {
     Ok(Capabilities::from(capabilities).normalize())
 }
 
-fn validate_sign_in_or_sign_up_auth_url(auth_url: &str) -> Result<()> {
-    match parse_pubky_auth_url(auth_url)?.kind {
-        PubkyAuthRequestKind::SignIn | PubkyAuthRequestKind::SignUp => Ok(()),
-        PubkyAuthRequestKind::SecretExport => Err(PaykitSdkError::Protocol {
-            context: "Pubky secret-export auth URLs cannot be resumed or approved as sessions"
+fn parse_client_id(value: &str) -> Result<ClientId> {
+    ClientId::new(value).map_err(|err| PaykitSdkError::Protocol {
+        context: format!("invalid Pubky client ID: {err}"),
+        source: None,
+    })
+}
+
+fn validate_grant_auth_url(auth_url: &str) -> Result<()> {
+    parse_pubky_auth_url(auth_url).map(|_| ())
+}
+
+fn validate_auth_state_client_key(auth_url: &str, client_key_secret: &[u8; 32]) -> Result<()> {
+    let deep_link = DeepLink::from_str(auth_url).map_err(|err| PaykitSdkError::Protocol {
+        context: format!("invalid Pubky auth URL: {err}"),
+        source: None,
+    })?;
+    let expected = match deep_link {
+        DeepLink::SigninGrant(link) => link.params().client_pk.clone(),
+        DeepLink::SignupGrant(link) => link.params().client_pk.clone(),
+        _ => {
+            return Err(unsupported_auth_url_error(
+                "expected a Pubky grant auth URL",
+            ))
+        }
+    };
+    let actual = pubky::Keypair::from_secret(client_key_secret).public_key();
+    if actual != expected {
+        return Err(PaykitSdkError::Protocol {
+            context: "Pubky auth request state client key does not match the authorization URL"
                 .into(),
             source: None,
-        }),
+        });
     }
+    Ok(())
+}
+
+fn validate_auth_url_client_id(auth_url: &str, expected_client_id: &ClientId) -> Result<()> {
+    let actual = parse_pubky_auth_url(auth_url)?.client_id;
+    if actual != expected_client_id.as_str() {
+        return Err(PaykitSdkError::Policy {
+            context: format!(
+                "Pubky auth URL client ID `{actual}` did not match `{expected_client_id}`"
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+async fn validate_grant_session(
+    session: &PubkySession,
+    expected_client_id: &ClientId,
+) -> Result<()> {
+    let grant = session.as_grant().ok_or_else(|| {
+        unsupported_session_error("legacy Pubky cookie sessions are not supported")
+    })?;
+    let actual_client_id = grant.session_info().await.client_id;
+    if actual_client_id != *expected_client_id {
+        return Err(PaykitSdkError::Identity {
+            context: format!(
+                "Pubky grant client ID `{actual_client_id}` did not match `{expected_client_id}`"
+            ),
+            source: None,
+        });
+    }
+    Ok(())
 }
 
 fn validate_session_exact_capabilities(
@@ -485,28 +672,23 @@ fn validate_auth_url_capabilities(auth_url: &str, expected_capabilities: &str) -
 }
 
 fn parse_auth_url_capabilities(auth_url: &str) -> Result<Capabilities> {
+    parse_capabilities(&parse_pubky_auth_url(auth_url)?.capabilities)
+}
+
+fn validate_unique_query_parameters(auth_url: &str, names: &[&str]) -> Result<()> {
     let url = Url::parse(auth_url).map_err(|err| PaykitSdkError::Protocol {
         context: format!("invalid Pubky auth URL: {err}"),
         source: None,
     })?;
-    let mut caps = None;
-    for (key, value) in url.query_pairs() {
-        if key != "caps" {
-            continue;
-        }
-        if caps.is_some() {
+    for name in names {
+        if url.query_pairs().filter(|(key, _)| key == *name).count() > 1 {
             return Err(PaykitSdkError::Protocol {
-                context: "Pubky auth URL must not contain duplicate caps parameters".into(),
+                context: format!("Pubky auth URL must not contain duplicate {name} parameters"),
                 source: None,
             });
         }
-        caps = Some(value.into_owned());
     }
-    let caps = caps.ok_or_else(|| PaykitSdkError::Protocol {
-        context: "Pubky auth URL missing caps".into(),
-        source: None,
-    })?;
-    parse_capabilities(&caps)
+    Ok(())
 }
 
 fn validate_local_secret_for_session(
@@ -538,6 +720,20 @@ fn map_pubky_identity_error(context: &'static str, err: pubky::Error) -> PaykitS
     PaykitSdkError::Identity {
         context: context.into(),
         source: Some(err.into()),
+    }
+}
+
+fn unsupported_auth_url_error(context: impl Into<String>) -> PaykitSdkError {
+    PaykitSdkError::Protocol {
+        context: context.into(),
+        source: None,
+    }
+}
+
+fn unsupported_session_error(context: impl Into<String>) -> PaykitSdkError {
+    PaykitSdkError::Identity {
+        context: context.into(),
+        source: None,
     }
 }
 

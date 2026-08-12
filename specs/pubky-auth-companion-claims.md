@@ -15,7 +15,7 @@ or relay delivery.
 
 `approve_auth_with_companion_claim` accepts:
 
-- a normal sign-in or signup `pubkyauth://` URL
+- a sign-in-grant or signup-grant `pubkyauth://` URL
 - the exact expected Pubky capability text
 - the approving Pubky local identity key
 - a `PubkyAuthCompanionClaim` containing:
@@ -56,8 +56,8 @@ The signed plaintext is therefore:
 unsigned_payload || ed25519_signature[64]
 ```
 
-The recipient verifies the signature with the creator Pubky public key from the
-normal AuthToken. This binds the payload to the approving identity, the claim
+The recipient verifies the signature with the issuer Pubky public key from the
+grant. This binds the payload to the approving identity, the claim
 protocol, and the individual auth request. Learning only the auth/relay secret
 does not allow a third party to substitute a different signed payload.
 
@@ -90,14 +90,14 @@ The SDK performs these steps in order:
    and relay.
 2. Sign the application-provided unsigned payload for this auth request.
 3. Encrypt and deliver the signed claim to its derived relay channel.
-4. Only after successful claim delivery, approve the normal Pubky AuthToken.
+4. Only after successful claim delivery, approve the Pubky grant.
 
-The normal AuthToken is never delivered when claim validation, encryption, or
-relay delivery fails. If normal authorization fails, the companion claim may
+The grant is never delivered when claim validation, encryption, or relay
+delivery fails. If grant authorization fails, the companion claim may
 already be present on the relay, but it is not authorization by itself.
 
 Callers receive distinct invalid-auth-URL, invalid-claim, encryption,
-relay-delivery, and normal-authorization errors. Platform adapters may also
+relay-delivery, and grant-authorization errors. Platform adapters may also
 report an invalid local identity key before entering the protocol operation.
 
 Auth URLs, decoded secrets, local Pubky secret keys, signed claims, and

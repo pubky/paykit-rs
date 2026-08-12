@@ -1,6 +1,6 @@
 [package]
 name = "paykit-lib"
-version = "0.1.0-rc43"
+version = "0.1.0-rc44"
 authors = ["denys@synonym.to"]
 description = "Paykit library implementation"
 license = "MIT"
@@ -18,8 +18,8 @@ anyhow = "1.0.102"
 base64 = "0.22"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
-pubky = "0.8.0"
-pubky-noise = "0.1.0-rc5"
+pubky = "0.10.0"
+pubky-noise = "0.1.0-rc6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0.18"
@@ -29,5 +29,5 @@ zeroize = "1"
 
 [dev-dependencies]
 proptest = "1"
-pubky-testnet = { version = "0.8.0", features = ["embedded-postgres"] }
+pubky-testnet = { version = "0.10.0", features = ["docker-postgres"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }

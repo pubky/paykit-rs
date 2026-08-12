@@ -7,6 +7,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc44] - 2026-08-12
+
+### Added
+- Added secure pending-state export and restore for Pubky grant auth flows,
+  including the client proof-of-possession key in Rust, Swift, and Kotlin.
+
+### Changed
+- Upgraded Pubky to `0.10.0` and `pubky-noise` to `0.1.0-rc6`.
+- **Breaking:** session bootstrap now requires a stable Pubky client ID, direct
+  signup/signin creates grant sessions, session export/import uses the grant
+  plus proof-of-possession secret, and auth-flow resume accepts securely saved
+  request state instead of an authorization URL alone.
+- Companion claims are delivered before approving the Pubky grant and now
+  validate grant auth URLs exclusively.
+
+### Removed
+- Removed legacy Pubky cookie-auth URL/session support and secret-export auth
+  URL handling from the SDK and platform bindings.
+
 ## [0.1.0-rc43] - 2026-08-05
 
 ### Fixed
@@ -392,7 +411,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc43...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc44...HEAD
+[0.1.0-rc44]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc44
 [0.1.0-rc43]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc43
 [0.1.0-rc42]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc42
 [0.1.0-rc41]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc41

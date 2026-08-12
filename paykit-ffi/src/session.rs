@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use paykit_sdk::{
     PaykitReceiverPath, PaykitSdkError, PubkyAuthCompanionClaim,
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
-    PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
-    PubkySessionBootstrapResult, PubkySessionProvider, ReceiverNoiseSecretKey,
+    PubkyAuthRequestState, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
+    PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionProvider,
+    ReceiverNoiseSecretKey,
 };
-use pubky::{Pubky, PubkyHttpClient, PubkySession};
+use pubky::{ClientId, Pubky, PubkyHttpClient};
 use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
 
@@ -38,8 +39,6 @@ pub enum FfiPubkyAuthRequestKind {
     SignIn,
     /// Sign up on a Pubky homeserver.
     SignUp,
-    /// Export a secret from a signer.
-    SecretExport,
     /// SDK returned a value this binding version does not understand.
     Unknown,
 }
@@ -47,6 +46,7 @@ pub enum FfiPubkyAuthRequestKind {
 /// Live Pubky access material supplied by platform session storage.
 #[derive(uniffi::Object)]
 pub struct FfiPubkySessionAccess {
+    pub(crate) client_id: String,
     pub(crate) session_secret: String,
     pub(crate) local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
     pub(crate) receiver_noise_secret_key: Arc<FfiReceiverNoiseSecretKey>,
@@ -56,6 +56,7 @@ pub struct FfiPubkySessionAccess {
 impl fmt::Debug for FfiPubkySessionAccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FfiPubkySessionAccess")
+            .field("client_id", &self.client_id)
             .field("session_secret", &"<redacted>")
             .field(
                 "local_secret_key",
@@ -81,19 +82,28 @@ impl FfiPubkySessionAccess {
     /// Create session access material from platform secure storage.
     #[uniffi::constructor]
     pub fn new(
+        client_id: String,
         session_secret: String,
         local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
         receiver_noise_secret_key: Arc<FfiReceiverNoiseSecretKey>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, PaykitFfiError> {
+        ClientId::new(&client_id)
+            .map_err(|err| validation_error(format!("invalid Pubky client ID: {err}")))?;
+        Ok(Self {
+            client_id,
             session_secret,
             local_secret_key,
             receiver_noise_secret_key,
             live_access: None,
-        }
+        })
     }
 
-    /// Export the Pubky session bearer secret for platform secure storage.
+    /// Return the application identifier recorded in the Pubky grant.
+    pub fn client_id(&self) -> String {
+        self.client_id.clone()
+    }
+
+    /// Export the Pubky grant and proof-of-possession secret for secure storage.
     pub fn export_session_secret(&self) -> String {
         self.session_secret.clone()
     }
@@ -124,18 +134,67 @@ pub struct FfiPubkyAuthDetails {
     /// Auth request kind.
     pub kind: FfiPubkyAuthRequestKind,
     /// Requested capabilities as canonical Pubky capability text.
-    pub capabilities: Option<String>,
+    pub capabilities: String,
     /// Relay URL used by the auth flow.
-    pub relay_url: Option<String>,
+    pub relay_url: String,
+    /// Application identifier that will own the grant.
+    pub client_id: String,
     /// Homeserver requested by a signup flow.
     pub homeserver_public_key: Option<String>,
+}
+
+/// Sensitive state required to resume a pending Pubky grant auth request.
+///
+/// Persist this only in secure, temporary platform storage. Delete it after
+/// the request completes, expires, or is abandoned.
+#[derive(uniffi::Object)]
+pub struct FfiPubkyAuthRequestState {
+    inner: PubkyAuthRequestState,
+}
+
+impl fmt::Debug for FfiPubkyAuthRequestState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FfiPubkyAuthRequestState(<redacted>)")
+    }
+}
+
+#[uniffi::export]
+impl FfiPubkyAuthRequestState {
+    /// Reconstruct state loaded from secure, temporary platform storage.
+    #[uniffi::constructor]
+    pub fn new(
+        authorization_url: String,
+        client_key_secret: Vec<u8>,
+    ) -> Result<Self, PaykitFfiError> {
+        let client_key_secret = Zeroizing::new(client_key_secret);
+        let client_key_secret: [u8; 32] =
+            client_key_secret.as_slice().try_into().map_err(|_| {
+                validation_error(format!(
+                    "Pubky auth client key secret must be 32 bytes, got {}",
+                    client_key_secret.len()
+                ))
+            })?;
+        Ok(Self {
+            inner: PubkyAuthRequestState::new(authorization_url, client_key_secret)?,
+        })
+    }
+
+    /// Export the secret-bearing authorization URL for secure persistence.
+    pub fn authorization_url(&self) -> String {
+        self.inner.authorization_url().to_owned()
+    }
+
+    /// Export the proof-of-possession key for secure persistence.
+    pub fn export_client_key_secret(&self) -> Vec<u8> {
+        self.inner.client_key_secret().to_vec()
+    }
 }
 
 /// Application-defined input for a Pubky Auth companion claim.
 ///
 /// The application serializes its protocol-specific unsigned payload. Paykit
 /// validates the identifiers, creates the request-bound identity signature,
-/// encrypts the signed payload, and delivers it before normal Pubky Auth.
+/// encrypts the signed payload, and delivers it before grant approval.
 ///
 /// Generated platform record descriptions may include the raw payload. Apps
 /// must not log, interpolate, or otherwise stringify this record.
@@ -180,7 +239,7 @@ pub enum FfiPubkyAuthCompanionClaimApprovalError {
     /// The encrypted companion claim could not be delivered to its relay channel.
     #[error("companion claim relay delivery failed: {reason}")]
     RelayDeliveryFailure { reason: String },
-    /// Normal Pubky Auth approval failed after companion delivery succeeded.
+    /// Pubky grant approval failed after companion delivery succeeded.
     #[error("Pubky Auth approval failed after companion delivery: {reason}")]
     AuthorizationFailure { reason: String },
     /// An unknown SDK failure occurred; no claim-delivery state is implied.
@@ -241,18 +300,21 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
 
         if let Some(live_access) = &access.live_access {
             let mut live_access = live_access.clone();
+            validate_grant_session_client_id(&live_access.session, &access.client_id).await?;
             live_access.local_secret_key = local_secret_key;
             live_access.receiver_noise_secret_key = receiver_noise_secret_key;
             return Ok(Some(live_access));
         }
 
-        let session =
-            PubkySession::import_secret(&access.session_secret, Some(self.pubky.client().clone()))
-                .await
-                .map_err(|err| PaykitSdkError::Identity {
-                    context: "import Pubky session from platform provider".into(),
-                    source: Some(err.into()),
-                })?;
+        let session = self
+            .pubky
+            .restore_session(&access.session_secret)
+            .await
+            .map_err(|err| PaykitSdkError::Identity {
+                context: "restore Pubky grant session from platform provider".into(),
+                source: Some(err.into()),
+            })?;
+        validate_grant_session_client_id(&session, &access.client_id).await?;
 
         Ok(Some(PubkySessionAccess {
             session,
@@ -277,6 +339,26 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
     }
 }
 
+async fn validate_grant_session_client_id(
+    session: &pubky::PubkySession,
+    expected_client_id: &str,
+) -> paykit_sdk::Result<()> {
+    let grant = session.as_grant().ok_or_else(|| PaykitSdkError::Identity {
+        context: "legacy Pubky cookie sessions are not supported".into(),
+        source: None,
+    })?;
+    let actual_client_id = grant.session_info().await.client_id;
+    if actual_client_id.as_str() != expected_client_id {
+        return Err(PaykitSdkError::Identity {
+            context: format!(
+                "Pubky grant client ID `{actual_client_id}` did not match `{expected_client_id}`"
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
 /// Pubky session bootstrap helper.
 #[derive(uniffi::Object)]
 pub struct FfiPubkySessionBootstrap {
@@ -287,17 +369,21 @@ pub struct FfiPubkySessionBootstrap {
 impl FfiPubkySessionBootstrap {
     /// Create a Pubky session bootstrap helper.
     #[uniffi::constructor]
-    pub fn new() -> Result<Self, PaykitFfiError> {
-        Self::with_pubky_client_config(default_pubky_client_config())
+    pub fn new(client_id: String) -> Result<Self, PaykitFfiError> {
+        Self::with_pubky_client_config(client_id, default_pubky_client_config())
     }
 
     /// Create a Pubky session bootstrap helper with explicit Pubky client configuration.
     #[uniffi::constructor]
     pub fn with_pubky_client_config(
+        client_id: String,
         pubky_client: FfiPubkyClientConfig,
     ) -> Result<Self, PaykitFfiError> {
         Ok(Self {
-            inner: PubkySessionBootstrap::with_pubky(pubky_from_config(&pubky_client)?),
+            inner: PubkySessionBootstrap::with_pubky(
+                pubky_from_config(&pubky_client)?,
+                &client_id,
+            )?,
         })
     }
 
@@ -324,7 +410,7 @@ impl FfiPubkySessionBootstrap {
                 &required_capabilities,
             )
             .await?;
-        Ok(bootstrap_result_to_ffi(result, Some(secret)))
+        bootstrap_result_to_ffi(result, Some(secret)).await
     }
 
     /// Sign in with the receiver's persisted Noise key.
@@ -341,7 +427,7 @@ impl FfiPubkySessionBootstrap {
             .inner
             .sign_in(&secret, receiver_noise_secret_key, &required_capabilities)
             .await?;
-        Ok(bootstrap_result_to_ffi(result, Some(secret)))
+        bootstrap_result_to_ffi(result, Some(secret)).await
     }
 
     /// Import an exported Pubky session secret and its persisted receiver Noise key.
@@ -366,7 +452,7 @@ impl FfiPubkySessionBootstrap {
                 &required_capabilities,
             )
             .await?;
-        Ok(bootstrap_result_to_ffi(result, secret))
+        bootstrap_result_to_ffi(result, secret).await
     }
 
     /// Start a sign-in auth flow for an external signer.
@@ -396,16 +482,16 @@ impl FfiPubkySessionBootstrap {
         }))
     }
 
-    /// Resume a short-lived auth flow from its authorization URL.
+    /// Resume a short-lived grant auth flow from securely persisted state.
     pub async fn resume_auth(
         &self,
-        authorization_url: String,
+        state: Arc<FfiPubkyAuthRequestState>,
         expected_capabilities: String,
     ) -> Result<Arc<FfiPubkyAuthRequest>, PaykitFfiError> {
         Ok(Arc::new(FfiPubkyAuthRequest {
             inner: AsyncMutex::new(Some(
                 self.inner
-                    .resume_auth(&authorization_url, &expected_capabilities)
+                    .resume_auth(&state.inner, &expected_capabilities)
                     .await?,
             )),
         }))
@@ -471,6 +557,16 @@ impl FfiPubkyAuthRequest {
             .ok_or_else(|| validation_error("Pubky auth request already completed"))
     }
 
+    /// Export the sensitive state required to resume this pending request.
+    pub async fn save_state(&self) -> Result<Arc<FfiPubkyAuthRequestState>, PaykitFfiError> {
+        let guard = self.inner.lock().await;
+        let state = guard
+            .as_ref()
+            .ok_or_else(|| validation_error("Pubky auth request already completed"))?
+            .save_state()?;
+        Ok(Arc::new(FfiPubkyAuthRequestState { inner: state }))
+    }
+
     /// Wait for auth approval using the receiver's persisted Noise key.
     pub async fn complete(
         &self,
@@ -496,7 +592,7 @@ impl FfiPubkyAuthRequest {
                 &required_capabilities,
             )
             .await?;
-        Ok(bootstrap_result_to_ffi(result, secret))
+        bootstrap_result_to_ffi(result, secret).await
     }
 }
 
@@ -586,7 +682,7 @@ pub(crate) fn pubky_from_config(config: &FfiPubkyClientConfig) -> Result<Pubky, 
     builder
         .build()
         .map(Pubky::with_client)
-        .map_err(|_err| identity_error("pubky_client", "create Pubky client failed"))
+        .map_err(|err| identity_error("pubky_client", format!("create Pubky client failed: {err}")))
 }
 
 fn validate_local_testnet_host(host: &str) -> Result<(), PaykitFfiError> {
@@ -633,22 +729,23 @@ fn receiver_noise_secret_to_ffi(secret: &ReceiverNoiseSecretKey) -> Arc<FfiRecei
     Arc::new(FfiReceiverNoiseSecretKey::new(secret.as_bytes().to_vec()))
 }
 
-fn bootstrap_result_to_ffi(
+async fn bootstrap_result_to_ffi(
     result: PubkySessionBootstrapResult,
     local_secret_key: Option<PubkyLocalSecretKey>,
-) -> FfiPubkySessionBootstrapResult {
-    let session_secret = result.export_session_secret().into_inner();
+) -> Result<FfiPubkySessionBootstrapResult, PaykitFfiError> {
+    let session_secret = result.export_session_secret().await?.into_inner();
     let receiver_noise_secret_key = &result.access.receiver_noise_secret_key;
     let live_access = result.access.clone();
-    FfiPubkySessionBootstrapResult {
+    Ok(FfiPubkySessionBootstrapResult {
         session_access: Arc::new(FfiPubkySessionAccess {
+            client_id: result.client_id,
             session_secret,
             local_secret_key: local_secret_key.as_ref().map(secret_to_ffi),
             receiver_noise_secret_key: receiver_noise_secret_to_ffi(receiver_noise_secret_key),
             live_access: Some(live_access),
         }),
         public_key: app_public_key(&result.public_key),
-    }
+    })
 }
 
 impl From<PubkyAuthRequestKind> for FfiPubkyAuthRequestKind {
@@ -656,7 +753,6 @@ impl From<PubkyAuthRequestKind> for FfiPubkyAuthRequestKind {
         match value {
             PubkyAuthRequestKind::SignIn => Self::SignIn,
             PubkyAuthRequestKind::SignUp => Self::SignUp,
-            PubkyAuthRequestKind::SecretExport => Self::SecretExport,
             _ => Self::Unknown,
         }
     }
@@ -668,6 +764,7 @@ impl From<PubkyAuthDetails> for FfiPubkyAuthDetails {
             kind: value.kind.into(),
             capabilities: value.capabilities,
             relay_url: value.relay_url,
+            client_id: value.client_id,
             homeserver_public_key: value.homeserver_public_key.map(|key| key.to_app_key()),
         }
     }
