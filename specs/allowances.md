@@ -4,67 +4,56 @@ This document describes the product model and ownership boundaries for Allowance
 
 ## TL;DR
 
-1. Payment Requests define what a payer is being asked to pay.
-2. An Allowance defines payer-controlled rules for automatically paying qualifying Payment Requests.
-3. Subscriptions are Allowances with schedule-related rules, created by accepting a Recurring Payment Request.
+1. A Payment Request asks a Payer to make a payment. A Subscription is an accepted Recurring Payment Request.
+2. An Allowance gives an Allowee limited permission to request payments from an Allower's wallet without fresh approval each time.
+3. The Payee may be the Allowee or another party. Paykit coordinates the Allowance; the wallet decides whether and how to execute each payment.
 
 ## The idea
 
-An Allowance is a policy approved by a payer. It lets the payer's wallet handle qualifying payments without asking the payer to approve every payment.
+An Allowance is shared permission from an Allower to an Allowee. The Allower keeps control of the funds and approves the terms in advance. The Allowee can then request payments that fit those terms.
 
-All payments are still push payments initiated by the payer's wallet. A payee can propose terms or send a Payment Request, but cannot extract funds, hold payment credentials, or bypass the wallet.
+An Allowance creates no payment by itself and does not schedule payments. It is used only when the Allowee submits a payment instruction. The Payee named by that instruction may be the Allowee or another party.
 
-An Allowance is not a balance, a reservation of funds, or a guarantee of payment. It also does not replace wallet security, transaction signing, Payment Proofs, or Receipts.
+All payments remain push payments initiated by the Allower's wallet. The Allowee cannot extract funds, hold payment credentials, sign payments, or bypass the wallet.
 
-## Two kinds of Allowance
+An Allowance is not a balance, a reservation of funds, or a guarantee of payment. It does not replace wallet security, transaction signing, payment-method-specific validation, or Receipts.
 
-Each Allowance is either scheduled or request-driven. It cannot be both, which prevents the same payment from being triggered twice.
+## Roles and payment flow
 
-### Scheduled
+- **Allower:** owns or controls the funds and grants the permission. The Allower is the Payer when a payment is executed.
+- **Allowee:** is authorized to use the Allowance by submitting payment instructions.
+- **Payee:** receives a particular payment. The Payee may be the Allowee or another party.
 
-A Subscription remains an accepted Recurring Payment Request. Accepting it also lets the payer's SDK derive a scheduled Allowance locally. There is no separate Allowance proposal or acceptance.
+```mermaid
+flowchart LR
+    A["Allower<br/>controls the funds"] -- "grants Allowance through Paykit" --> B["Allowee<br/>may request payments"]
+    B -- "payment instruction through Paykit" --> W["Allower's wallet<br/>checks and decides"]
+    W -- "if approved, pushes payment" --> P["Payee<br/>Allowee or another party"]
+```
 
-The payee proposes the recurring terms once. The payer's wallet then:
+This document uses **payment instruction** as plain language for one request made under an Allowance. A future protocol specification must decide its message shape and final name.
 
-1. derives each Billing Period from the accepted Recurrence;
-2. pushes the exact accepted Payment Amount during the allowed window; and
-3. includes the Payment Request ID, Payment Reference, and Billing Period in a Payment Proof, when one is sent.
+## Relationship to Payment Requests and Subscriptions
 
-For each Billing Period, the payee sends a new Payment Request linked to the accepted Recurring Payment Request. The payer's wallet may automatically accept and pay it only when it satisfies the scheduled Allowance. A push notification may wake the wallet, but it carries no payment authority. Changing the amount or another accepted term requires canceling the old Recurring Payment Request and proposing a new one. Proposal Expiry is only the acceptance deadline; it is not the lifetime of the Subscription.
+A Payment Request asks a Payer to make a payment. It may be one-time or recurring. In the current Payment Request protocol, the Payee sends the request and expects to receive the payment.
 
-This is new SDK behavior. Today's Payment Request Acceptance message does not grant automatic-payment authority. No existing users so no migration to worry about for now.
+A Subscription is product shorthand for an accepted Recurring Payment Request. It describes repeated payments to the requesting Payee and is separate from Allowances.
 
-### Request-driven
+An Allowance grants authority before any particular payment instruction exists. The Allowee can request a payment to itself or to another Payee, subject to the Allowance terms and the Allower's wallet checks.
 
-A request-driven Allowance covers separate one-time Payment Requests from an identified payee. Each request has its own Payment Request ID, an exact Payment Amount, and no Recurrence. The payer's wallet evaluates each request and may accept and pay it automatically.
+A wallet may apply private automatic-handling rules to ordinary Payment Requests. Those rules are wallet policy, not an Allowance.
 
-This supports rules such as a maximum amount or number of requests within a period. Its Payment Proof has no Billing Period.
+## Shared Allowances and wallet safeguards
 
-Payment Proof remains optional and payment-method-specific in both modes. It is not proof of settlement or Allowance compliance.
+An Allowance is shared between its exact Allower and Allowee. It has a stable Allowance ID and shared terms.
 
-## Shared and local Allowances
+Either party may propose exact terms. Both parties must accept them, and no Allowance can grant or increase authority without the Allower's explicit approval. There are no counteroffers; changed terms require a new proposal and ending the old Allowance.
 
-Scheduled Allowances use the terms already shared in the accepted Recurring Payment Request. Their automation state stays local to the payer.
+Either party may end an accepted Allowance. The Allower revokes the authority; the Allowee relinquishes it. An Allowance may also expire at a time defined in its terms.
 
-A request-driven Allowance can be shared or local.
+Shared terms describe the maximum authority communicated to the Allowee. The Allower's wallet may enforce stricter private safeguards that are not shared. Once accepted, an Allowance lets the Allowee submit instructions without fresh approval, but the wallet may still decline any instruction.
 
-### Shared
-
-A shared Allowance is exchanged between the payer and payee. Either may propose exact terms. The other may accept or reject them; there are no counteroffers. Either may cancel an active Allowance. Changed terms require a new proposal and cancellation of the old Allowance.
-
-A shared Allowance has a stable Allowance ID and is bound to the payee's exact Paykit Receiver Reference and one asset. A Payment Request must reference that ID to ask for automatic handling.
-
-If a request passes, the SDK queues the standard Payment Request Acceptance before preparing the payment. If it fails, the SDK sends a standard rejection containing only the failed rule category, such as amount, timing, count, endpoint, validity, or capacity. It does not reveal usage, remaining capacity, or wallet state.
-
-An active shared Allowance only says that a qualifying request is eligible for automatic handling. Payment can still fail because of funds, fees, connectivity, routing, or settlement.
-
-### Local
-
-A local Allowance exists only in the payer's wallet. The payee does not need to know about it, and a Payment Request does not reference it.
-
-If a request passes, the wallet may follow the normal acceptance and payment flow. If it fails, the wallet sends no automatic response and leaves the request for normal app handling.
-
-Only one local Allowance may be active for a given payee's Paykit Receiver Reference and asset. The wallet may update it atomically while keeping its identity and audit history.
+Private safeguards are not separate local Allowances. They do not need to be shared, and they cannot expand the authority in the shared terms.
 
 ## Policy rules
 
@@ -73,65 +62,53 @@ An Allowance contains a set of rules. Every configured rule must pass. The first
 Rules may cover:
 
 - an inclusive amount range for each payment;
-- total amount or request count within a period;
+- total amount or instruction count within a period;
 - a lifetime amount limit;
-- a schedule or payment window;
 - activation and expiry times;
-- allowed Payment Endpoint Identifiers; and
-- the exact payer and payee relationship.
+- whether the Allowee may pay itself, other Payees, or both;
+- restrictions on Payees; and
+- allowed Payment Endpoint Identifiers.
 
-Each Allowance uses one asset. Amounts reuse PaymentAmount and use exact decimal arithmetic. Asset values must match exactly; Paykit does not convert currencies or define asset precision.
+Each Allowance uses one asset. Amounts reuse Payment Amount and use exact decimal arithmetic. Asset values must match exactly; Paykit does not convert assets or define asset precision.
 
 Period limits may use anchored periods or rolling windows. Months and years are UTC calendar periods with deterministic end-of-month handling. Rolling windows use fixed minutes, hours, days, or weeks.
 
-An accounting period is not a Billing Period. A Billing Period identifies one occurrence of a Recurring Payment Request.
-
-Only the requested Payment Amount consumes capacity. Fees do not count, and refunds do not restore capacity. An Allowance without an expiry remains active until canceled.
+Only the instruction's Payment Amount consumes capacity. Fees do not count, and refunds do not restore capacity. An Allowance without an expiry remains active until ended.
 
 ## Evaluation and execution
 
-Paykit Library should provide pure, stateless evaluation. Given validated terms, a trusted time, and caller-supplied history, it returns:
+The intended flow is:
 
-- whether the payment is eligible;
-- a safe failure category when it is not; and
-- the usage that must be reserved when it is.
+1. The Allowee submits a payment instruction that references the Allowance ID and identifies the exact Payment Amount, Payee, payment destination, and a unique instruction ID.
+2. Paykit Library parses and structurally validates the message. Paykit SDK checks that it came from the Allowee bound to the Allowance and that the event-derived lifecycle is accepted and not ended, then persists, correlates, and deduplicates it.
+3. The wallet evaluates activation and expiry, the other shared terms, private safeguards, trusted time, durable history, current usage, replay protection, and payment capability.
+4. If approved, the wallet uses its payment integration to pay the Payee directly.
+5. Paykit SDK may communicate the result and any supported proof information to the Allowee.
 
-That result does not reserve anything. Before signing or sending, the stateful SDK must recheck current state and atomically store the reservation. A pending or unknown payment keeps the reservation. A definitive failure releases it, and a verified payment commits it. Payment-method code determines the outcome.
-
-This keeps the library reusable while leaving concurrency and cross-device state with the wallet.
-
-Canonical schedule expansion is not defined by Payment Request v0.2. Before schedule evaluation becomes public API, Paykit must define time-boundary and missed-period behavior. Evaluation must receive a trusted time rather than read a clock.
+The future protocol specification must define how Payees and payment destinations are represented, how instructions and results are correlated, and which lifecycle messages are required. The existing Payment Proof is tied to a Payment Request, so its direct reuse is not assumed here.
 
 ## Who owns what
 
-Paykit Protocol and Paykit Library own:
+This is the intended responsibility split for a future Allowance protocol:
 
-- shared Allowance terms, IDs, lifecycle messages, parsing, serialization, and structural validation;
-- the relationship between Allowances and Payment Requests;
-- pure schedule and policy evaluation; and
-- the existing Recurring Payment Request, Recurrence, Acceptance, Payment Proof, and Billing Period shapes.
+| Component | Intended responsibility |
+| --- | --- |
+| Paykit Protocol and Paykit Library | Shared Allowance terms, IDs, lifecycle and payment-instruction shapes, parsing, serialization, structural validation, and stateless correlation. |
+| Paykit SDK | Durable lifecycle state, ordered event handling, message queues, sender and lifecycle checks, message deduplication, recovery, and app-facing records. |
+| Wallet | Consent, supported terms, private safeguards, trusted time, policy evaluation, usage accounting, capacity, concurrency, execution replay protection, authentication, and the decision to execute. |
+| Payment integration | Payment Endpoint and funding selection, fees, balances, routing, credentials, signing, broadcasting, monitoring, settlement, and method-specific proof validation. |
 
-Paykit SDK owns:
+Paykit Library does not provide a universal Allowance policy evaluator or reserve capacity. Paykit SDK does not decide to pay on the wallet's behalf. Paykit provides validated coordination data and durable workflow; the wallet applies the rules and controls execution.
 
-- one app-facing Allowance model with scheduled and request-driven variants;
-- shared and local lifecycle state, usage, reservations, and payment correlation;
-- due and active-state views built with library evaluation;
-- deduplication by Payment Request ID, plus Billing Period for scheduled payments; and
-- lifecycle message queues and crash recovery.
+The library remains stateless and payment-method-neutral. It does not move funds. An Allowance ID is a correlation identifier, not a bearer credential. No Allowance grants authority, and no authority increases, without the Allower's explicit approval. An accepted Allowance records prior authority to submit qualifying instructions; it does not promise acceptance, funds, execution, or settlement.
 
-The wallet and payment-method integrations own:
-
-- consent, authentication, notifications, and other UX;
-- durable storage, a trusted clock, timers, and background work;
-- endpoint and funding selection, fees, balances, routing, and credentials;
-- building, signing, broadcasting, monitoring, and reconciling payments; and
-- method-specific Payment Proof validation and execution outcomes.
-
-The library remains stateless and payment-method-neutral. It does not move funds. Canceling a Recurring Payment Request stops new scheduled executions. Disabling local automation alone does not send a Payment Request Cancellation.
+Wire formats, public APIs, and atomicity are out of scope for this document.
 
 ## Decision log
 
 This is the audit trail for the product discussion, not required reading for the main concept. Later decisions take precedence where noted.
+
+Entries 1 through 37 are retained as history. Decisions 38 through 47 state the current direction and identify which earlier decisions they supersede.
 
 1. **How do Payment Requests, Allowances, and Subscriptions relate?** Initial answer: automatic charges use one-time Payment Requests, and a scheduled Allowance is a Subscription. Decisions 29 and 30 later kept Recurring Payment Requests for scheduled payments.
 2. **Who may propose a shared Allowance?** Either payer or payee.
@@ -170,3 +147,13 @@ This is the audit trail for the product discussion, not required reading for the
 35. **What does request evaluation return?** Eligibility and the exact reservation intent.
 36. **What does a shared Allowance promise?** Eligibility for automatic handling, not guaranteed payment.
 37. **How is a scheduled occurrence identified?** By the existing Billing Period on its Payment Proof.
+38. **What is an Allowance?** Scoped permission granted by an Allower to an Allowee to request qualifying payments from the Allower's wallet without fresh approval each time. This supersedes the Subscription-oriented model in 1 and 30.
+39. **Who are the parties?** The Allower controls the funds, the Allowee may use the Allowance, and the Payee receives each payment.
+40. **Must the Allowee be the Payee?** No. A payment may go to the Allowee or another Payee.
+41. **How do Allowances relate to Subscriptions?** They are separate. A Subscription is an accepted Recurring Payment Request; an Allowance does not schedule payments and creates no payment by itself. This supersedes the schedule-related parts of 7, 16, 29 through 34, and 37.
+42. **Is an Allowance shared?** Yes. The grant, stable Allowance ID, terms, and lifecycle are shared between the exact Allower and Allowee. Private wallet safeguards are not a separate Allowance. This supersedes the local-Allowance model in 10 and 19 through 21.
+43. **Who may propose, approve, or end an Allowance?** Either party may propose exact terms, both must accept them, and either may end the relationship. No Allowance can grant or increase authority without the Allower's explicit approval. This replaces the earlier payer and payee role wording in 2 and 4.
+44. **How is an Allowance used?** The Allowee submits a uniquely identified payment instruction referencing the Allowance ID and identifying the exact Payment Amount, Payee, and destination. Its wire shape remains for a future specification. This supersedes the Payment Request flow in 10, 15, 17, and 18.
+45. **Who evaluates an instruction?** The Allower's wallet evaluates shared terms, private safeguards, usage, replay protection, and payment capability. Paykit owns structural validation, correlation, and durable coordination. Earlier implementation details in 13 through 18, 34, and 35 are not current requirements where they assign policy or execution decisions to Paykit Library or Paykit SDK.
+46. **What does an accepted Allowance promise?** Prior authority to submit qualifying instructions, not guaranteed acceptance, funds, execution, or settlement. This supersedes 36.
+47. **Does this document define atomicity?** No. Atomicity is out of scope.

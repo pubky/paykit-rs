@@ -262,21 +262,49 @@
 - **Definition**: The party attempting to send value in a payment flow.
 - **NOT**: Always a Linked Peer.
 - **Synonyms to AVOID**: sender when it obscures payment role
-- **Related terms**: Payee, Counterparty
+- **Related terms**: Payee, Counterparty, Allower, Allowance
 
 ### Payee
-- **Definition**: The party receiving value in a payment flow and publishing or sharing Payment Endpoints.
+- **Definition**: The party receiving value in a payment flow. Payment Endpoints used for the payment identify how to pay the Payee but may be supplied by another party. In an Allowance payment, the Payee may be the Allowee or another party.
 - **NOT**: Always a Linked Peer.
 - **Synonyms to AVOID**: receiver when it obscures payment role
-- **Related terms**: Payer, Payment List, Payment Endpoint
+- **Related terms**: Payer, Payment List, Payment Endpoint, Allowee, Allowance
+
+## Allowances
+
+> Proposed vocabulary for Paykit Allowances. These product roles are canonical for the proposal; wire formats and public APIs remain to be specified.
+
+### Allowance
+- **Definition**: Shared, scoped permission granted through Paykit by an Allower to an Allowee to request qualifying payments from the Allower's wallet without fresh approval each time. The Payee for each payment may be the Allowee or another party.
+- **NOT**: A balance, transfer of custody, Payment Request, Subscription, wallet-local auto-approval rule, bearer credential, or guarantee of payment.
+- **Synonyms to AVOID**: subscription, standing order, spending account
+- **Related terms**: Allower, Allowee, Allowance ID, Payer, Payee, Payment Amount
+
+### Allower
+- **Definition**: The party that grants an Allowance and whose wallet controls the funds used by it. The Allower is the Payer when an Allowance payment is executed.
+- **NOT**: The Allowee, necessarily the Payee, or a party that gives the Allowee custody of funds or payment credentials.
+- **Synonyms to AVOID**: allowance payer, grantor when naming the Paykit role
+- **Related terms**: Allowance, Allowee, Payer, Payee
+
+### Allowee
+- **Definition**: The party authorized to use an Allowance by requesting qualifying payments under its terms.
+- **NOT**: Necessarily the Payee, a custodian of the Allower's funds, or a holder of the Allower's payment credentials.
+- **Synonyms to AVOID**: beneficiary, payee when only the Allowance role is meant
+- **Related terms**: Allowance, Allower, Payee, Allowance ID
+
+### Allowance ID
+- **Definition**: A stable identifier for the lifetime of one Allowance, used to correlate its shared terms, lifecycle, and payment instructions.
+- **NOT**: A bearer credential, secret, Payment Request ID, Event ID, or Payment Reference. Possession of an Allowance ID alone grants no authority.
+- **Synonyms to AVOID**: allowance token, spending key
+- **Related terms**: Allowance, Allower, Allowee, Payment Request ID, Event ID
 
 ## Payment Requests
 
 ### Payment Request
 - **Definition**: A private Paykit protocol object where a payee asks a payer for payment. A Payment Request may be one-time or recurring.
-- **NOT**: A Payment Endpoint, Payment List, payment execution, public invoice URL, or payer-initiated standing order.
+- **NOT**: An Allowance, Payment Endpoint, Payment List, payment execution, public invoice URL, or payer-initiated standing order.
 - **Synonyms to AVOID**: SubscriptionAgreement, subscription proposal when naming the base protocol object
-- **Related terms**: Recurring Payment Request, Payment Request ID, Payment Reference, Payment Amount, Payment Proof, Linked Peer
+- **Related terms**: Recurring Payment Request, Payment Request ID, Payment Reference, Payment Amount, Payment Proof, Linked Peer, Allowance
 
 ### Recurring Payment Request
 - **Definition**: A payee-initiated Payment Request with non-null Recurrence that can lead to repeated payer-controlled payments after acceptance.
@@ -286,9 +314,9 @@
 
 ### Subscription
 - **Definition**: Product shorthand for an accepted Recurring Payment Request.
-- **NOT**: The base protocol family or a separate message namespace.
+- **NOT**: An Allowance, the base protocol family, or a separate message namespace.
 - **Synonyms to AVOID**: subscription agreement, subscription protocol when Payment Request is the intended protocol concept
-- **Related terms**: Recurring Payment Request, Payment Request
+- **Related terms**: Recurring Payment Request, Payment Request, Allowance
 
 ### Payment Request ID
 - **Definition**: A stable UUID-v4 identifier for the lifetime of one Payment Request. All lifecycle Event Messages for the same request share the same Payment Request ID.
@@ -391,6 +419,10 @@ Protocol concepts:
 - Encrypted Link Handshake
 
 Future/planned:
+- Allowance
+- Allowance ID
+- Allower
+- Allowee
 - Paykit SDK platform bindings
 
 Implementation details:
