@@ -7,113 +7,6 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
-    /// List public Paykit receiver paths published by a Pubky identity.
-    ///
-    /// This is a discovery helper. Callers still choose the exact receiver path
-    /// they want to use for public/private payment workflows.
-    pub async fn paykit_receiver_paths(
-        &self,
-        owner: PubkyPublicKey,
-    ) -> Result<Vec<PaykitReceiverPath>> {
-        let public_storage =
-            self.pubky
-                .load_public_storage()
-                .await?
-                .ok_or_else(|| PaykitSdkError::Identity {
-                    context: "no Pubky public storage available".into(),
-                    source: None,
-                })?;
-        Ok(
-            paykit_lib::list_paykit_receiver_paths(&public_storage, &owner.to_public_key()?)
-                .await?,
-        )
-    }
-
-    /// Fetch one public Paykit receiver marker, if present.
-    pub async fn paykit_receiver_marker(
-        &self,
-        owner: PubkyPublicKey,
-        receiver_path: PaykitReceiverPath,
-    ) -> Result<Option<PaykitReceiverMarker>> {
-        let public_storage =
-            self.pubky
-                .load_public_storage()
-                .await?
-                .ok_or_else(|| PaykitSdkError::Identity {
-                    context: "no Pubky public storage available".into(),
-                    source: None,
-                })?;
-        Ok(paykit_lib::get_paykit_receiver_marker(
-            &public_storage,
-            &owner.to_public_key()?,
-            &receiver_path,
-        )
-        .await?)
-    }
-
-    pub(super) async fn receiver_noise_public_key(
-        &self,
-        owner: &PubkyPublicKey,
-        receiver_path: &PaykitReceiverPath,
-    ) -> Result<paykit_lib::PublicKey> {
-        let public_storage =
-            self.pubky
-                .load_public_storage()
-                .await?
-                .ok_or_else(|| PaykitSdkError::Identity {
-                    context: "no Pubky public storage available for receiver marker lookup".into(),
-                    source: None,
-                })?;
-        let marker = paykit_lib::get_paykit_receiver_marker(
-            &public_storage,
-            &owner.to_public_key()?,
-            receiver_path,
-        )
-        .await?
-        .ok_or_else(|| PaykitSdkError::NotFound {
-            context: format!("Paykit receiver marker for {owner}/{receiver_path}"),
-            source: None,
-        })?;
-        Ok(marker.noise_public_key)
-    }
-
-    /// Publish the configured local receiver marker.
-    pub async fn publish_paykit_receiver_marker(
-        &self,
-        capabilities: PaykitReceiverCapabilities,
-    ) -> Result<PaykitReceiverMarker> {
-        let _identity_guard = self.claim_identity_operation("publish Paykit receiver marker")?;
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
-        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
-            context: "no Pubky session available".into(),
-            source: None,
-        })?;
-        let noise_public_key = session_access.receiver_noise_secret_key.public_key();
-        let marker = PaykitReceiverMarker::new(
-            self.config.receiver_path.clone(),
-            capabilities,
-            noise_public_key,
-        );
-        paykit_lib::publish_paykit_receiver_marker(&session_access.session, &marker).await?;
-        Ok(marker)
-    }
-
-    /// Remove the configured local receiver marker.
-    pub async fn remove_paykit_receiver_marker(&self) -> Result<()> {
-        let _identity_guard = self.claim_identity_operation("remove Paykit receiver marker")?;
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
-        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
-            context: "no Pubky session available".into(),
-            source: None,
-        })?;
-        paykit_lib::remove_paykit_receiver_marker(
-            &session_access.session,
-            &self.config.receiver_path,
-        )
-        .await?;
-        Ok(())
-    }
-
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     pub async fn sync_public_endpoints(&self) -> Result<EndpointSyncReport> {
         let details = self.payment.current_public_receiving_details().await?;
@@ -132,6 +25,30 @@ where
             context: "no Pubky session available".into(),
             source: None,
         })?;
+        self.storage
+            .transaction({
+                let app_id = self.config.app_id.clone();
+                move |tx| crate::storage::require_paykit_app_active(tx, &app_id)
+            })
+            .await?;
+        let registry = paykit_lib::get_paykit_app_registry(
+            &session_access.outbox_client.public_storage(),
+            session_access.session.info().public_key(),
+        )
+        .await?
+        .ok_or_else(|| PaykitSdkError::Policy {
+            context: "publish the local Paykit app before syncing public Payment Endpoints".into(),
+            source: None,
+        })?;
+        if !registry.apps().contains_key(&self.config.app_id) {
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "Paykit app '{}' must be registered before syncing public Payment Endpoints",
+                    self.config.app_id
+                ),
+                source: None,
+            });
+        }
         let desired = normalize_receiving_details(details)?;
         let now = self.clock.now();
         let mut report = EndpointSyncReport::default();
@@ -141,7 +58,8 @@ where
         for (identifier, payload) in desired_entries {
             self.storage
                 .transaction({
-                    let record = pending_publication_record(identifier, payload, now);
+                    let record =
+                        pending_publication_record(&self.config.app_id, identifier, payload, now);
                     move |tx| {
                         tx.save_public_endpoint_record(record);
                         Ok(())
@@ -150,7 +68,7 @@ where
                 .await?;
             match paykit_lib::set_payment_endpoint(
                 &session_access.session,
-                &self.config.receiver_path,
+                &self.config.app_id,
                 identifier.clone(),
                 payload.clone(),
             )
@@ -159,7 +77,8 @@ where
                 Ok(()) => {
                     self.storage
                         .transaction({
-                            let record = published_record(identifier, payload, now);
+                            let record =
+                                published_record(&self.config.app_id, identifier, payload, now);
                             move |tx| {
                                 tx.save_public_endpoint_record(record);
                                 Ok(())
@@ -177,6 +96,7 @@ where
                     self.storage
                         .transaction({
                             let record = failed_record(
+                                &self.config.app_id,
                                 identifier.as_str().to_owned(),
                                 Some(payload.as_str().to_owned()),
                                 error.clone(),
@@ -204,19 +124,20 @@ where
                 .await?
                 .into_iter()
                 .filter(|record| {
-                    record.status != PublicationStatus::Removed
+                    record.app_id == self.config.app_id
+                        && record.status != PublicationStatus::Removed
                         && !desired
                             .keys()
                             .any(|identifier| identifier.as_str() == record.identifier)
                 })
                 .map(|record| (record.identifier, record.payload))
                 .collect::<Vec<_>>(),
-            EndpointManagementScope::FullPaykitNamespace => {
+            EndpointManagementScope::FullAppEndpointNamespace => {
                 let local_public_key = session_access.session.info().public_key().clone();
                 let current = paykit_lib::get_payment_list(
                     &session_access.outbox_client.public_storage(),
                     &local_public_key,
-                    &self.config.receiver_path,
+                    &self.config.app_id,
                 )
                 .await?;
                 let remote_identifiers = current
@@ -230,10 +151,12 @@ where
                     .await?
                     .into_iter()
                     .filter(|record| {
-                        matches!(
-                            record.status,
-                            PublicationStatus::PendingRemoval | PublicationStatus::Failed
-                        ) && !remote_identifiers.contains(&record.identifier)
+                        record.app_id == self.config.app_id
+                            && matches!(
+                                record.status,
+                                PublicationStatus::PendingRemoval | PublicationStatus::Failed
+                            )
+                            && !remote_identifiers.contains(&record.identifier)
                             && !desired
                                 .keys()
                                 .any(|identifier| identifier.as_str() == record.identifier)
@@ -244,7 +167,8 @@ where
                 for record in already_removed {
                     self.storage
                         .transaction({
-                            let removed = removed_record(record.identifier.clone(), now);
+                            let removed =
+                                removed_record(&self.config.app_id, record.identifier.clone(), now);
                             move |tx| {
                                 tx.save_public_endpoint_record(removed);
                                 Ok(())
@@ -275,6 +199,7 @@ where
             self.storage
                 .transaction({
                     let record = pending_removal_record(
+                        &self.config.app_id,
                         identifier_text.clone(),
                         previous_payload.clone(),
                         now,
@@ -287,7 +212,7 @@ where
                 .await?;
             match paykit_lib::remove_payment_endpoint(
                 &session_access.session,
-                &self.config.receiver_path,
+                &self.config.app_id,
                 identifier,
             )
             .await
@@ -295,7 +220,8 @@ where
                 Ok(()) => {
                     self.storage
                         .transaction({
-                            let record = removed_record(identifier_text.clone(), now);
+                            let record =
+                                removed_record(&self.config.app_id, identifier_text.clone(), now);
                             move |tx| {
                                 tx.save_public_endpoint_record(record);
                                 Ok(())
@@ -313,6 +239,7 @@ where
                     self.storage
                         .transaction({
                             let record = failed_record(
+                                &self.config.app_id,
                                 identifier_text.clone(),
                                 previous_payload,
                                 error.clone(),

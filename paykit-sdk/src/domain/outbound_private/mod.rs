@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     storage::{
-        require_peer_link_operation_lease, NewOutboundPrivateMessage, OutboundPrivateMessageRecord,
-        PeerLinkOperationLease, StorageAdapter,
+        require_paykit_app_capability, require_peer_link_operation_lease,
+        NewOutboundPrivateMessage, OutboundPrivateMessageRecord, PeerLinkOperationLease,
+        StorageAdapter,
     },
-    PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
+    PaykitSdkError, PubkyPublicKey, Result,
 };
 
 /// Delivery status for one outbound Private Application Message.
@@ -66,7 +67,10 @@ impl fmt::Debug for ReservationCleanupFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let error = redacted_error(&self.error);
         f.debug_struct("ReservationCleanupFailure")
-            .field("reservation_id", &self.reservation_id)
+            .field(
+                "reservation_id",
+                &self.reservation_id.as_ref().map(|_| "<redacted>"),
+            )
             .field("error", &error)
             .finish()
     }
@@ -114,8 +118,6 @@ pub struct OutboundPrivateSendReport {
 pub struct OutboundPrivateCounterpartySendReport {
     /// Counterparty whose queue was processed.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Successful send report, when processing completed.
     pub report: Option<OutboundPrivateSendReport>,
     /// Error text, when processing failed for this counterparty.
@@ -141,19 +143,21 @@ fn redacted_error(error: &str) -> String {
 pub(crate) async fn enqueue_private_message<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
-    counterparty_receiver_path: PaykitReceiverPath,
     raw_json: String,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
 where
     S: StorageAdapter,
 {
-    let kind = validate_outbound_private_message(&raw_json)?;
+    let (app_id, kind) = validate_outbound_private_message(&raw_json)?;
+    let parsed_kind = PrivateMessageKind::parse(&kind)
+        .expect("validated private message kind must remain recognized");
     storage
         .transaction(move |tx| {
+            require_paykit_app_capability(tx, &app_id, parsed_kind)?;
             let record = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 counterparty,
-                counterparty_receiver_path,
+                app_id,
                 kind,
                 raw_json,
                 now,
@@ -175,13 +179,16 @@ pub(crate) async fn enqueue_private_message_with_link_lease<S>(
 where
     S: StorageAdapter,
 {
-    let kind = validate_outbound_private_message(&raw_json)?;
+    let (app_id, kind) = validate_outbound_private_message(&raw_json)?;
+    let parsed_kind = PrivateMessageKind::parse(&kind)
+        .expect("validated private message kind must remain recognized");
     storage
         .transaction(move |tx| {
             require_peer_link_operation_lease(tx, lease)?;
+            require_paykit_app_capability(tx, &app_id, parsed_kind)?;
             let record = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 counterparty,
-                lease.counterparty_receiver_path.clone(),
+                app_id,
                 kind,
                 raw_json,
                 now,
@@ -195,15 +202,12 @@ where
 pub(crate) async fn queued_outbound_private_messages<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Result<Vec<OutboundPrivateMessageRecord>>
 where
     S: StorageAdapter,
 {
     storage
-        .transaction(|tx| {
-            Ok(tx.queued_outbound_private_messages(counterparty, counterparty_receiver_path))
-        })
+        .transaction(|tx| Ok(tx.queued_outbound_private_messages(counterparty)))
         .await
 }
 
@@ -211,7 +215,6 @@ where
 pub(crate) async fn claim_next_outbound_private_message<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
     now: DateTime<Utc>,
     stale_before: DateTime<Utc>,
     failed_retry_after: DateTime<Utc>,
@@ -223,7 +226,6 @@ where
         .transaction(|tx| {
             Ok(tx.claim_next_outbound_private_message(
                 counterparty,
-                counterparty_receiver_path,
                 now,
                 stale_before,
                 failed_retry_after,
@@ -248,7 +250,6 @@ where
             require_peer_link_operation_lease(tx, &lease)?;
             Ok(tx.claim_next_outbound_private_message(
                 counterparty,
-                &lease.counterparty_receiver_path,
                 now,
                 stale_before,
                 failed_retry_after,
@@ -304,20 +305,19 @@ pub(crate) fn mark_outbound_recovery_required(
 pub(crate) fn validate_queued_outbound_private_message(
     record: &OutboundPrivateMessageRecord,
 ) -> Result<()> {
-    let kind = validate_outbound_private_message(&record.raw_json)?;
-    if kind != record.kind {
+    let (app_id, kind) = validate_outbound_private_message(&record.raw_json)?;
+    if kind != record.kind || app_id != record.app_id {
         return Err(PaykitSdkError::Protocol {
-            context: format!(
-                "queued private message kind '{}' does not match payload kind '{kind}'",
-                record.kind
-            ),
+            context: "queued private message metadata does not match its payload".into(),
             source: None,
         });
     }
     Ok(())
 }
 
-pub(crate) fn validate_outbound_private_message(raw_json: &str) -> Result<String> {
+pub(crate) fn validate_outbound_private_message(
+    raw_json: &str,
+) -> Result<(paykit_lib::PaykitAppId, String)> {
     if raw_json.len() > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
         return Err(PaykitSdkError::Protocol {
             context: "Private Application Message exceeds pubky-noise message size".into(),
@@ -354,9 +354,17 @@ pub(crate) fn validate_outbound_private_message(raw_json: &str) -> Result<String
         context: format!("unsupported private message kind '{kind}'"),
         source: None,
     })?;
+    let app_id = value
+        .get("app_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| PaykitSdkError::Protocol {
+            context: "private message App ID is missing".into(),
+            source: None,
+        })?;
+    let app_id = paykit_lib::PaykitAppId::new(app_id)?;
     validate_outbound_private_message_body(parsed_kind, raw_json)?;
 
-    Ok(kind.to_owned())
+    Ok((app_id, kind.to_owned()))
 }
 
 fn validate_outbound_private_message_body(kind: PrivateMessageKind, raw_json: &str) -> Result<()> {
@@ -415,6 +423,9 @@ fn private_application_message(
     paykit_lib::PrivateApplicationMessage {
         version: Some(1),
         kind: Some(kind.as_str().to_owned()),
+        app_id: serde_json::from_str::<serde_json::Value>(raw_json)
+            .ok()
+            .and_then(|value| value.get("app_id")?.as_str().map(str::to_owned)),
         raw_json: raw_json.to_owned(),
     }
 }

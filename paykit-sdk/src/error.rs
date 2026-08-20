@@ -1,7 +1,9 @@
+use std::fmt;
+
 use thiserror::Error;
 
 /// Error type for stateful Paykit SDK workflows.
-#[derive(Debug, Error)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum PaykitSdkError {
     /// Durable storage failed.
@@ -85,6 +87,45 @@ pub enum PaykitSdkError {
     },
 }
 
+impl fmt::Debug for PaykitSdkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage { context, source } => debug_error_variant(f, "Storage", context, source),
+            Self::Identity { context, source } => {
+                debug_error_variant(f, "Identity", context, source)
+            }
+            Self::Transport { context, source } => {
+                debug_error_variant(f, "Transport", context, source)
+            }
+            Self::NotFound { context, source } => {
+                debug_error_variant(f, "NotFound", context, source)
+            }
+            Self::Protocol { context, source } => {
+                debug_error_variant(f, "Protocol", context, source)
+            }
+            Self::Policy { context, source } => debug_error_variant(f, "Policy", context, source),
+            Self::PaymentAdapter { context, source } => {
+                debug_error_variant(f, "PaymentAdapter", context, source)
+            }
+            Self::RecoveryRequired { context, source } => {
+                debug_error_variant(f, "RecoveryRequired", context, source)
+            }
+        }
+    }
+}
+
+fn debug_error_variant(
+    f: &mut fmt::Formatter<'_>,
+    name: &'static str,
+    context: &str,
+    source: &Option<anyhow::Error>,
+) -> fmt::Result {
+    f.debug_struct(name)
+        .field("context", &context)
+        .field("source", &source.as_ref().map(|_| "<redacted>"))
+        .finish()
+}
+
 impl From<paykit_lib::PaykitError> for PaykitSdkError {
     fn from(err: paykit_lib::PaykitError) -> Self {
         match err {
@@ -96,15 +137,8 @@ impl From<paykit_lib::PaykitError> for PaykitSdkError {
                 context: msg,
                 source: None,
             },
-            // SECURITY / REDACTION: drop lib `InvalidData` sources entirely.
-            // They carry raw parse/decode causes derived from network data or
-            // decrypted plaintext. A retained cause would stay out of FFI
-            // exception text (the conversion drops every `source` that is not
-            // an app-authored `PaykitFfiError` recovered by downcast), but
-            // `PaykitSdkError` derives field-wise `Debug`, so it would still
-            // surface in `format!("{err:?}")` and structured Rust logs.
-            // Dropping it keeps that local logging channel structurally
-            // closed; only the lib-supplied `context` string survives.
+            // Network parse causes can contain raw private payload fragments.
+            // Keep only the curated context when crossing into SDK errors.
             paykit_lib::PaykitError::InvalidData { context, source: _ } => Self::Protocol {
                 context,
                 source: None,

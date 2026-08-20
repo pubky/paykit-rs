@@ -1,29 +1,21 @@
 use super::*;
-use crate::{PaykitReceiverPath, PaykitSdkConfig};
-
 fn public_key() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
-fn receiver_path() -> PaykitReceiverPath {
-    PaykitReceiverPath::new("bitkit/wallet").unwrap()
-}
-
 fn paykit_profile_path() -> String {
-    crate::PaykitSdkConfig::new(crate::PaykitReceiverPath::new("paykit/wallet").unwrap())
-        .paykit_profile_path()
+    PAYKIT_PROFILE_PATH.to_owned()
 }
 
 fn paykit_blob_prefix() -> String {
-    crate::PaykitSdkConfig::new(crate::PaykitReceiverPath::new("paykit/wallet").unwrap())
-        .paykit_profile_blob_path_prefix()
+    PAYKIT_PROFILE_BLOB_PATH_PREFIX.to_owned()
 }
 
 #[test]
 fn test_paykit_profile_json_round_trips() {
     let profile = PaykitProfile {
         display_name: Some("Alice".into()),
-        image_uri: Some("/pub/paykit/v0/paykit/wallet/blobs/avatar.png".into()),
+        image_uri: Some("/pub/paykit/blobs/avatar.png".into()),
         extra: Some(serde_json::Map::from_iter([(
             "bio".into(),
             serde_json::Value::String("Builder".into()),
@@ -158,17 +150,17 @@ fn test_contact_profile_resolution_from_paykit_profile() {
         public_key: public_key.clone(),
         profile: PaykitProfile {
             display_name: Some("Alice".into()),
-            image_uri: Some("/pub/paykit/v0/paykit/wallet/blobs/avatar.png".into()),
+            image_uri: Some("/pub/paykit/blobs/avatar.png".into()),
             extra: None,
         },
         path: paykit_profile_path(),
         updated_at: chrono::Utc::now(),
     };
 
-    let resolution = ContactProfileResolution::from_paykit(record);
+    let resolution = ProfileResolution::from_paykit(record);
 
     assert_eq!(resolution.public_key, public_key);
-    assert_eq!(resolution.source, ContactProfileSource::PaykitProfile);
+    assert_eq!(resolution.source, ProfileSource::PaykitProfile);
     assert_eq!(resolution.display_name.as_deref(), Some("Alice"));
     assert!(resolution.paykit_profile.is_some());
     assert!(resolution.pubky_profile.is_none());
@@ -190,10 +182,10 @@ fn test_contact_profile_resolution_from_pubky_profile() {
         fetched_at: chrono::Utc::now(),
     };
 
-    let resolution = ContactProfileResolution::from_pubky(record);
+    let resolution = ProfileResolution::from_pubky(record);
 
     assert_eq!(resolution.public_key, public_key);
-    assert_eq!(resolution.source, ContactProfileSource::PubkyProfile);
+    assert_eq!(resolution.source, ProfileSource::PubkyProfile);
     assert_eq!(resolution.display_name.as_deref(), Some("Alice"));
     assert_eq!(
         resolution.image_uri.as_deref(),
@@ -205,7 +197,7 @@ fn test_contact_profile_resolution_from_pubky_profile() {
 
 #[test]
 fn test_contact_profile_resolution_debug_redacts_display_data() {
-    let resolution = ContactProfileResolution::from_pubky(PubkyProfileRecord {
+    let resolution = ProfileResolution::from_pubky(PubkyProfileRecord {
         public_key: public_key(),
         profile: PubkyProfile {
             name: "Alice".into(),
@@ -228,7 +220,6 @@ fn test_contact_profile_resolution_debug_redacts_display_data() {
 fn test_contact_update_allows_empty_label_to_clear_display_text() {
     let update = ContactUpdate {
         public_key: public_key(),
-        receiver_paths: vec![receiver_path()],
         label: Some(String::new()),
     };
 
@@ -239,7 +230,6 @@ fn test_contact_update_allows_empty_label_to_clear_display_text() {
 fn test_contact_update_rejects_control_characters() {
     let update = ContactUpdate {
         public_key: public_key(),
-        receiver_paths: vec![receiver_path()],
         label: Some("Alice\tLocal".into()),
     };
 
@@ -255,7 +245,6 @@ fn test_contact_update_debug_redacts_label() {
     let public_key_text = public_key.to_string();
     let update = ContactUpdate {
         public_key,
-        receiver_paths: vec![receiver_path()],
         label: Some("Alice Local".into()),
     };
     let debug = format!("{update:?}");
@@ -271,7 +260,6 @@ fn test_contact_record_normalizes_whitespace_labels() {
     let labeled = ContactRecord::from_update(
         ContactUpdate {
             public_key: public_key.clone(),
-            receiver_paths: vec![receiver_path()],
             label: Some("  Alice  ".into()),
         },
         None,
@@ -280,7 +268,6 @@ fn test_contact_record_normalizes_whitespace_labels() {
     let cleared = ContactRecord::from_update(
         ContactUpdate {
             public_key,
-            receiver_paths: vec![receiver_path()],
             label: Some("   ".into()),
         },
         Some(labeled.clone()),
@@ -296,44 +283,37 @@ fn test_pending_public_contact_marker_may_exist_remotely() {
     let record = ContactRecord::from_update(
         ContactUpdate {
             public_key: public_key(),
-            receiver_paths: vec![receiver_path()],
             label: None,
         },
         None,
         chrono::Utc::now(),
     )
-    .mark_public_contact_publication_pending(receiver_path(), chrono::Utc::now());
+    .mark_public_contact_publication_pending(chrono::Utc::now());
 
     assert!(record.may_have_public_marker());
 }
 
 #[test]
-fn test_public_contact_path_uses_default_profile_namespace() {
+fn test_public_contact_path_uses_identity_wide_paykit_namespace() {
     let public_key = public_key();
-    let config = PaykitSdkConfig::new(PaykitReceiverPath::new("bitkit/wallet").unwrap());
 
     assert_eq!(
-        config.public_contact_path(
-            &public_key,
-            &PaykitReceiverPath::new("tether/wallet").unwrap()
-        ),
-        format!(
-            "/pub/paykit/v0/bitkit/wallet/contacts/{}/tether/wallet.json",
-            public_key.as_str()
-        )
+        public_contact_path(&public_key),
+        format!("/pub/paykit/contacts/{}.json", public_key.as_str())
     );
 }
 
 #[test]
-fn test_public_contact_json_includes_receiver_path() {
-    let json = public_contact_json(&public_key(), &receiver_path()).unwrap();
+fn test_public_contact_json_includes_public_key() {
+    let public_key = public_key();
+    let json = public_contact_json(&public_key).unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(value["receiver_path"], "bitkit/wallet");
+    assert_eq!(value["public_key"], public_key.as_str());
 }
 
 #[test]
-fn test_paykit_blob_path_and_uri_are_scoped_to_configured_prefix() {
+fn test_paykit_blob_path_and_uri_use_identity_wide_prefix() {
     let public_key = public_key();
     let path = paykit_blob_path("/pub/bitkit.to/blobs/", "avatar-1.jpg").unwrap();
 
@@ -366,31 +346,25 @@ fn test_paykit_blob_path_from_uri_or_path_accepts_owned_blob_only() {
         paykit_blob_path_from_uri_or_path(
             &owner_public_key,
             &prefix,
-            "/pub/paykit/v0/paykit/wallet/blobs/avatar.jpg"
+            "/pub/paykit/blobs/avatar.jpg"
         )
         .unwrap(),
-        "/pub/paykit/v0/paykit/wallet/blobs/avatar.jpg"
+        "/pub/paykit/blobs/avatar.jpg"
     );
     assert_eq!(
         paykit_blob_path_from_uri_or_path(
             &owner_public_key,
             &prefix,
-            &format!(
-                "pubky://{}/pub/paykit/v0/paykit/wallet/blobs/avatar.jpg",
-                owner_public_key
-            )
+            &format!("pubky://{}/pub/paykit/blobs/avatar.jpg", owner_public_key)
         )
         .unwrap(),
-        "/pub/paykit/v0/paykit/wallet/blobs/avatar.jpg"
+        "/pub/paykit/blobs/avatar.jpg"
     );
     assert!(matches!(
         paykit_blob_path_from_uri_or_path(
             &owner_public_key,
             &prefix,
-            &format!(
-                "pubky://{}/pub/paykit/v0/paykit/wallet/blobs/avatar.jpg",
-                other_public_key
-            )
+            &format!("pubky://{}/pub/paykit/blobs/avatar.jpg", other_public_key)
         ),
         Err(PaykitSdkError::Protocol { .. })
     ));

@@ -14,14 +14,11 @@ where
     pub async fn receive_private_messages(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<PrivateStreamIntakeReport> {
         let (session_access, _) = self.private_link_session_access().await?;
-        self.ensure_peer_allows_private_automation(&counterparty, &counterparty_receiver_path)
+        self.ensure_peer_allows_private_automation(&counterparty)
             .await?;
-        let lease = self
-            .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
-            .await?;
+        let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = self
             .receive_private_messages_with_claim(counterparty, lease.clone(), session_access)
             .await;
@@ -37,23 +34,18 @@ where
             .await?
             .into_iter()
             .filter(|record| record.state == LinkedPeerState::Linked)
-            .map(|record| (record.counterparty, record.counterparty_receiver_path))
+            .map(|record| record.counterparty)
             .collect::<Vec<_>>();
         let mut reports = Vec::with_capacity(counterparties.len());
-        for (counterparty, counterparty_receiver_path) in counterparties {
-            match self
-                .receive_private_messages(counterparty.clone(), counterparty_receiver_path.clone())
-                .await
-            {
+        for counterparty in counterparties {
+            match self.receive_private_messages(counterparty.clone()).await {
                 Ok(report) => reports.push(PrivateStreamCounterpartyIntakeReport {
                     counterparty,
-                    counterparty_receiver_path,
                     report: Some(report),
                     error: None,
                 }),
                 Err(err) => reports.push(PrivateStreamCounterpartyIntakeReport {
                     counterparty,
-                    counterparty_receiver_path,
                     report: None,
                     error: Some(err.to_string()),
                 }),
@@ -68,14 +60,28 @@ where
         lease: PeerLinkOperationLease,
         session_access: PubkySessionAccess,
     ) -> Result<PrivateStreamIntakeReport> {
-        let secret_key = *session_access.receiver_noise_secret_key.as_bytes();
+        let secret_key = session_access
+            .local_secret_key
+            .as_ref()
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
+                source: None,
+            })?
+            .paykit_noise_secret_key();
         let remote_public_key = counterparty.to_public_key()?;
+        let authorized_receipt_apps =
+            match self.authorized_receipt_apps_for_peer(&counterparty).await {
+                Ok(app_ids) => app_ids,
+                Err(_) => {
+                    self.storage
+                        .transaction(|tx| Ok(tx.authorized_receipt_apps(&counterparty)))
+                        .await?
+                }
+            };
 
         let stored_link_state = self
             .storage
-            .transaction(|tx| {
-                Ok(tx.encrypted_link_state(&counterparty, &lease.counterparty_receiver_path))
-            })
+            .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
             .await?
             .ok_or_else(|| PaykitSdkError::RecoveryRequired {
                 context: format!("no Encrypted Link state for counterparty {counterparty}"),
@@ -93,8 +99,8 @@ where
             let _ = self
                 .publish_local_recovery_marker_with_session(
                     &counterparty,
-                    &stored_link_state.counterparty_receiver_path,
                     &session_access,
+                    &lease,
                     mark.new_episode,
                 )
                 .await;
@@ -119,8 +125,8 @@ where
                 let _ = self
                     .publish_local_recovery_marker_with_session(
                         &counterparty,
-                        &stored_link_state.counterparty_receiver_path,
                         &session_access,
+                        &lease,
                         mark.new_episode,
                     )
                     .await;
@@ -132,8 +138,6 @@ where
             session_access.session.clone(),
             secret_key,
             &remote_public_key,
-            &self.config.receiver_path,
-            &stored_link_state.counterparty_receiver_path,
             session_access.outbox_client.clone(),
             snapshot,
         )
@@ -152,8 +156,8 @@ where
                 let _ = self
                     .publish_local_recovery_marker_with_session(
                         &counterparty,
-                        &stored_link_state.counterparty_receiver_path,
                         &session_access,
+                        &lease,
                         mark.new_episode,
                     )
                     .await;
@@ -174,8 +178,8 @@ where
                 let _ = self
                     .publish_local_recovery_marker_with_session(
                         &counterparty,
-                        &stored_link_state.counterparty_receiver_path,
                         &session_access,
+                        &lease,
                         mark.new_episode,
                     )
                     .await;
@@ -186,7 +190,6 @@ where
         let now = self.clock.now();
         let next_link_state = EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
-            counterparty_receiver_path: stored_link_state.counterparty_receiver_path.clone(),
             link_snapshot: Some(link.serialize()),
             handshake_snapshot: None,
             handshake_role: None,
@@ -197,9 +200,9 @@ where
         persist_private_stream_batch_with_link_lease(
             &self.storage,
             counterparty,
-            stored_link_state.counterparty_receiver_path,
             messages,
             Some(next_link_state),
+            authorized_receipt_apps,
             Some(lease),
             now,
         )

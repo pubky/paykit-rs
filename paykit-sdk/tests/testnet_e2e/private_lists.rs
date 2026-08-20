@@ -15,7 +15,7 @@ async fn test_private_payment_list_roundtrip_between_linked_peers() {
     let queued = pair
         .alice
         .sdk
-        .enqueue_private_payment_list(pair.bob.public_key.clone(), pair.bob.receiver_path.clone())
+        .enqueue_private_payment_list(pair.bob.public_key.clone())
         .await
         .expect("enqueue should succeed for a linked peer");
     assert_eq!(queued.status, OutboundPrivateMessageStatus::Pending);
@@ -23,10 +23,7 @@ async fn test_private_payment_list_roundtrip_between_linked_peers() {
     let send_report = pair
         .alice
         .sdk
-        .process_outbound_private_messages(
-            pair.bob.public_key.clone(),
-            pair.bob.receiver_path.clone(),
-        )
+        .process_outbound_private_messages(pair.bob.public_key.clone())
         .await
         .expect("processing the outbound queue should succeed");
     assert_eq!(send_report.sent, vec![queued.outbound_message_id]);
@@ -35,22 +32,22 @@ async fn test_private_payment_list_roundtrip_between_linked_peers() {
     let intake = pair
         .bob
         .sdk
-        .receive_private_messages(
-            pair.alice.public_key.clone(),
-            pair.alice.receiver_path.clone(),
-        )
+        .receive_private_messages(pair.alice.public_key.clone())
         .await
         .expect("receiving private messages should succeed");
     assert!(!intake.stream_item_ids.is_empty());
     assert!(intake.event_conflicts.is_empty());
 
-    let view = pair
+    let views = pair
         .bob
         .sdk
-        .current_private_payment_list(&pair.alice.public_key, &pair.alice.receiver_path)
+        .current_private_payment_lists(&pair.alice.public_key)
         .await
-        .expect("reading the Private Payment List should succeed")
-        .expect("a valid list should be present after receive");
+        .expect("reading Private Payment Lists should succeed");
+    let view = views
+        .iter()
+        .find(|view| view.app_id == pair.alice.app_id)
+        .expect("the sender app's valid list should be present after receive");
     assert_eq!(
         view.payment_endpoints
             .get("btc-lightning-bolt11")
@@ -73,7 +70,7 @@ async fn test_enqueue_private_payment_list_without_link_fails() {
     let err = pair
         .alice
         .sdk
-        .enqueue_private_payment_list(pair.bob.public_key.clone(), pair.bob.receiver_path.clone())
+        .enqueue_private_payment_list(pair.bob.public_key.clone())
         .await
         .expect_err("enqueue without an Encrypted Link must fail");
     assert!(

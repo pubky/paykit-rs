@@ -13,37 +13,27 @@ contact/payment workflows, and ergonomic platform APIs.
 The SDK should be product-neutral and payment-method-neutral. It should support
 payment methods through adapters without baking any one method into the SDK.
 
-## App-Owned Runtime Model
+## Shared Identity Model
 
-The SDK uses an app-owned Paykit runtime model. One SDK runtime represents one
-app, wallet, or receiver runtime that owns its own Paykit state:
-Encrypted Link snapshots, private stream checkpoints, outbound queues, Payment
-Requests, Receipts, Payment Endpoint Reservations, recovery state, and backup
-data.
+Paykit private communication belongs to the Pubky identity, not to one app.
+Apps sharing an identity use one logical set of Encrypted Links, private stream
+checkpoints, outbound queues, Payment Requests, Receipts, recovery state, and
+backup data. Each SDK handle is configured with a `PaykitAppId` so app-owned
+public Payment Endpoints and private messages remain attributable to their
+source. The App ID does not create a separate private channel.
 
-The app or binding layer provides live Pubky session access to that runtime.
-The SDK consumes that access for Paykit workflows, but it is not a shared
-identity coordinator and does not require Ring or another wallet before an app
-can integrate Paykit.
+One public Paykit App Registry lists the apps participating in the identity,
+their display names and capabilities, the identity-wide Noise public key, and
+optional default-app preferences. Public Payment Endpoints are stored per app.
+Private Payment Lists use Latest-State Message semantics per app and their
+current views are aggregated for payment resolution.
 
-Multiple apps that belong to the same human identity can be linked, discovered,
-or aggregated explicitly above the app-owned runtime model. That does not mean
-all apps silently share one private Paykit runtime, one Encrypted Link state
-machine, or one payment execution state.
-
-Each SDK runtime is configured with one local Paykit receiver path. That path
-describes the local app/runtime folder only. Private and payment counterparty
-APIs must receive the counterparty's exact receiver path, because a Pubky key
-alone is not enough information to route private links, private streams,
-receipts, requests, recovery state, or public endpoint reads to one app/runtime
-folder. `paykit_receiver_paths` is a discovery helper; it does not make the SDK
-guess which receiver to use. It returns receiver paths that publish a valid
-Receiver Marker or at least one public Payment Endpoint. Receivers that want to
-be discoverable without public Payment Endpoints can publish a small marker at
-`/pub/paykit/v0/{receiver_path}/receiver.json`. Publishing or removing that
-marker is an explicit app decision, not an automatic SDK setup, auth, or profile
-side effect. The marker also supplies the receiver Noise public key required
-before an Encrypted Link Handshake can start.
+The app or binding layer provides live Pubky session access and durable SDK
+storage. Handles for apps sharing an identity must use the same logical SDK
+state and serialize updates to the shared Encrypted Link checkpoint. The SDK
+storage contract supports checked atomic replacement, but production
+concurrent apps still require a Pubky-hosted encrypted state format,
+pending-send journal, and homeserver locking/conditional writes.
 
 ## Design Principles
 
@@ -52,6 +42,8 @@ before an Encrypted Link Handshake can start.
   policy.
 - Make the SDK stateful and crash-safe. It owns durable event logs, derived
   views, snapshots, retries, recovery state, and app-facing getters.
+- Treat private state as identity-wide. App IDs attribute endpoints and
+  messages; they do not partition Encrypted Links or private streams.
 - Preserve the private stream. Receive all Private Application Messages in
   order and persist them before advancing the Encrypted Link checkpoint.
 - Own the Pubky integration needed by Paykit. Since Pubky is Paykit's only
@@ -84,7 +76,7 @@ The system should have three main layers:
   records.
 
 The SDK may still accept narrow platform hooks for secure session persistence,
-auth UI, custom profile/contact storage, scheduling, and logging. Those hooks
+auth UI, scheduling, and logging. Those hooks
 should not require each app to reimplement Pubky Paykit logic or to depend on a
 separate shared-runtime coordinator.
 
@@ -100,6 +92,7 @@ The current Rust SDK implementation covers:
 - the storage adapter contract and in-memory test storage
 - Pubky identity status tracking and explicit sign-out
 - public Payment Endpoint sync
+- Paykit App Registry publication and app-attributed public endpoints
 - Encrypted Link setup, private stream intake, outbound private queueing,
   retries, and recovery marker workflows
 - Private Payment List publication, caching, and contact payment resolution
@@ -110,10 +103,11 @@ The current Rust SDK implementation covers:
 - SDK backup/export/restore validation
 
 The workspace also exposes Swift and Kotlin SDK bindings through `paykit-ffi`.
-First-party durable mobile storage helpers, payment execution, settlement
-confirmation, product UI, app backup transport, multi-device checkpoint
-synchronization, and recurring payment scheduling remain separate
-implementation areas unless they are explicitly listed above.
+First-party durable mobile storage helpers, Pubky-hosted shared SDK state and
+Noise journaling, payment execution, settlement confirmation, product UI, app
+backup transport, multi-device checkpoint synchronization, and recurring
+payment scheduling remain separate implementation areas unless they are
+explicitly listed above.
 
 ## Crate Layout
 
@@ -191,8 +185,8 @@ top of that binding layer when a platform needs a more idiomatic API.
 
 ## Core Runtime Object
 
-The SDK should expose a single runtime object per app-owned local Paykit
-runtime:
+The SDK should expose a runtime object per app integration. Multiple handles
+for one identity participate in the same logical private state:
 
 ```rust
 pub struct PaykitSdk<S, K, P, C> {
@@ -225,8 +219,10 @@ that the SDK cannot provide generically.
 
 ### StorageAdapter
 
-`StorageAdapter` is required. It must support atomic updates or an equivalent
-crash-recovery contract.
+`StorageAdapter` is required. It presents the authoritative logical SDK state
+to the runtime and must support atomic updates or an equivalent crash-recovery
+contract. Apps sharing one identity must use the same logical state backing;
+separate app-local adapters are not safe substitutes for shared state.
 
 ```rust
 #[async_trait]
@@ -242,7 +238,7 @@ The Rust SDK storage model supports records for:
 
 - identity state
 - linked peer state
-- local Contact Records and cached Paykit Profiles
+- Contact Records and cached Paykit Profiles
 - Encrypted Link snapshots and handshake snapshots
 - endpoint publication records
 - endpoint reservation records
@@ -257,8 +253,7 @@ Production apps should provide a durable implementation.
 
 ### PubkySessionProvider
 
-Required for loading live Pubky session access for the app-owned Paykit
-runtime.
+Required for loading live Pubky session access for the shared Paykit identity.
 
 ```rust
 pub trait PubkySessionProvider {
@@ -269,40 +264,37 @@ pub trait PubkySessionProvider {
 ```
 
 `PubkySessionAccess` provides the live authenticated `PubkySession`, Pubky
-client for counterparty homeserver access, an optional `PubkyLocalSecretKey`
-for local identity operations, and an independent required
-`ReceiverNoiseSecretKey` for Encrypted Links. The provider must persist the
-receiver Noise secret with session access and reuse it after restart. The SDK
-derives and persists public `IdentityState` from that access during
-initialization. The provider is the narrow boundary where the app or bindings
-expose current session access; it is not a Ring dependency or a shared
-identity/runtime coordinator.
+client for counterparty homeserver access, and an optional
+`PubkyLocalSecretKey`. The SDK derives the identity-wide Paykit Noise key from
+the local Pubky secret. Public-only session access can use public workflows but
+cannot establish or advance Encrypted Links. The SDK derives and persists
+public `IdentityState` from that access during initialization.
 
 If `load_session_access` returns `None`, no live session access is currently
-available. Ordinary refreshes must preserve the last identity-scoped state and
-block Pubky-backed workflows until session access is available again. Explicit
-`sign_out` is the path that clears SDK-managed identity-scoped state.
-Sign-out should clear live session access before deleting SDK-managed local
-state. If local storage clearing fails after session access is cleared, the app
-must retry sign-out or clear SDK storage through its adapter.
-Apps that want explicit sign-out to be reversible for the same user must export
-and persist an SDK backup before calling `sign_out`; sign-out must not be used
-when live session access is merely unavailable.
+available. Ordinary refreshes must preserve the shared Paykit state and block
+Pubky-backed workflows until session access is available again. Explicit
+`sign_out` clears this application's live session access without deleting the
+identity's Paykit state. An application that should also withdraw its published
+payment capability calls `remove_paykit_app` while authenticated before
+signing out. Explicit app removal requires app-owned Payment Requests to be
+canceled or otherwise terminal and private financial events and Receipt Access
+delivery to be complete. Any previously shared Private Payment Lists must be
+cleared first. Unanswered identity-addressed requests are not owned by an app
+and remain available to other apps.
 
 `load_public_storage` lets contact resolution fetch public Payment Endpoints
 without requiring authenticated session access. Implementations can reuse the
 Pubky client from `PubkySessionAccess` when they have one, or provide a separate
 public-storage client when only unauthenticated reads are available.
 
-Identity status reports the persisted public key and live-session availability
-directly. No public key means explicit sign-out. A public key with no live
-session means the identity remains initialized but Pubky-backed workflows must
-wait. A matching live session can run public operations and Encrypted Links
-because session access always includes the independent receiver Noise secret.
-This lets Ring- or server-authenticated sessions work without exposing the
-Pubky identity secret. Temporary absence of live session access must preserve
-private SDK state; only explicit sign-out, identity change, or an explicit
-key-loss/key-rotation operation should delete it.
+Identity status reports the last initialized public key and live-session
+availability directly. A public key with no live session identifies the stored
+state but Pubky-backed workflows must wait. A matching live session can run
+public operations. Encrypted Link workflows also require access to the matching
+local Pubky secret. Transient absence of live session access and explicit app
+sign-out must preserve private SDK state. If session access changes to another
+identity, the SDK rejects the existing state backing without modifying it; the
+caller must select the shared state backing for the new identity.
 
 The SDK should provide high-level initialization, backup/export/restore, and
 sign-out APIs itself. The provider is the narrow platform hook for secure
@@ -313,18 +305,15 @@ Rust integrations can use `PubkySessionBootstrap` to create or import the live
 session access consumed by the provider. It covers common Pubky account/session
 workflows: signup, signin, session-secret import, auth handoff
 start/resume/approve helpers, and `pubky://` resource normalization. Full SDK
-runtime auth should use `config.required_session_capabilities()` as the expected
+runtime auth should use `PAYKIT_SESSION_CAPABILITIES` as the expected
 scope for auth start/resume/approve, completion, and session import. The
-required scope covers this runtime's receiver-scoped public and private Paykit
-paths; it adds the configured profile/contact namespace only when that namespace
-is outside the receiver-scoped Paykit default. The app generates one
-`ReceiverNoiseSecretKey` per receiver and supplies that same persisted key to
-signup, signin, auth completion, and session import. The key is required;
-reauthentication must not silently rotate it.
+required scope covers the identity-wide Paykit public and private paths.
+Private-capable auth completion and session import also supply the matching
+`PubkyLocalSecretKey`.
 `PubkyLocalSecretKey` also provides Pubky Core-compatible BIP39 seed and
 mnemonic helpers plus public-key-from-secret helpers. Apps that intentionally
-share the same Pubky identity material should derive the same Pubky key; app
-and runtime separation belongs in receiver folders, Noise keys, and SDK state.
+share the same Pubky identity material derive the same Pubky and Paykit Noise
+keys.
 Exported session secrets and auth URLs are secret-bearing values and must be
 stored or displayed only for their intended short-lived flow.
 Bindings should wrap these helpers so mobile apps do not need a second Pubky
@@ -340,60 +329,69 @@ approved. Bitkit's watch-only account claim is one application of this generic
 operation. The shared protocol is specified in
 [`pubky-auth-companion-claims.md`](pubky-auth-companion-claims.md).
 
-### Paykit Profile And Contact Namespace
+### Paykit Profile And Contacts
 
 The SDK provides default Pubky-backed Paykit-facing profile metadata so
 different Paykit apps can interoperate. This belongs in the SDK, not in
 `paykit-lib` core protocol validation.
 
-The default public profile/contact namespace is receiver-scoped:
+Public profile and contact paths are identity-wide:
 
-- profile record: `/pub/paykit/v0/{receiver_path}/profile.json`
-- Paykit blobs: `/pub/paykit/v0/{receiver_path}/blobs/...`
-- public contact markers: `/pub/paykit/v0/{receiver_path}/contacts/...`
+- profile record: `/pub/paykit/profile.json`
+- Paykit blobs: `/pub/paykit/blobs/...`
+- public contact markers: `/pub/paykit/contacts/...`
 
-Public Payment Endpoints for the same receiver are stored under
-`/pub/paykit/v0/{receiver_path}/endpoints/...`, so SDK profile paths do
-not collide with Payment Endpoint Identifier files. Public receiver discovery
-markers are stored at `/pub/paykit/v0/{receiver_path}/receiver.json`; they
-advertise the receiver path, coarse capabilities, and receiver Noise public
-key, not payment details. The public key is safe and necessary to publish; the
-corresponding receiver Noise secret remains in platform secure storage.
-Marker parsing is strict. Future marker wire changes should use a new version;
-older clients ignore unsupported marker data during receiver-path discovery
-unless the receiver also publishes public Payment Endpoints.
+The identity-wide Paykit App Registry is stored at
+`/pub/paykit/v0/app-registry.json`. Public Payment Endpoints are stored under
+`/pub/paykit/v0/apps/{app_id}/endpoints/...`, so app ownership remains explicit
+without partitioning private communication.
 
-Apps that already have a public product namespace can configure the SDK
-profile/contact namespace segment. For example, `profile_namespace =
-"bitkit.to"` makes Paykit Profile and contact marker helpers use
-`/pub/bitkit.to/{receiver_path}/profile.json`,
-`/pub/bitkit.to/{receiver_path}/blobs/...`, and
-`/pub/bitkit.to/{receiver_path}/contacts/...`. This does not change
-core Paykit Protocol paths or receiver-scoped private runtime paths. The app
-should request the capability scope returned by
-`PaykitSdkConfig::required_session_capabilities()` and validate
-imported/completed sessions against that same scope. The default receiver
-namespace is covered by receiver-scoped public/private Paykit capabilities; a
-custom profile/contact namespace adds the matching
-`/pub/<namespace>/{receiver_path}/:rw` capability.
+The registry uses this closed-world JSON shape:
 
-Remote Paykit Profile fetches use the same configured profile namespace.
-Cross-app profile discovery therefore requires an agreed namespace or explicit
-metadata that describes which profile namespace a receiver path uses.
+```json
+{
+  "version": 1,
+  "kind": "paykit.app_registry",
+  "noise_public_key": "<z32-public-key>",
+  "apps": {
+    "bitkit": {
+      "display_name": "Bitkit",
+      "capabilities": {
+        "private_payments": true,
+        "payment_requests": true,
+        "receipts": true,
+        "outgoing_payments": true
+      }
+    }
+  },
+  "default_app_id": "bitkit",
+  "default_apps_by_endpoint": {
+    "btc-lightning-bolt11": "bitkit"
+  }
+}
+```
 
-`image_uri` may point at the configured blob prefix or another public image
-location. The SDK can publish/delete Paykit blobs under the configured blob
+App IDs are stable path-safe identifiers. Defaults may only refer to registered
+apps. Registries are limited to 64 KiB, 64 applications, and 256
+endpoint-specific defaults. Registry updates replace the complete document;
+concurrent writers need homeserver conditional writes so one app cannot
+overwrite another app's newer registration.
+
+An app must successfully publish its registry entry before creating
+app-attributed private work. Removal preflight reports outstanding requests,
+private delivery, Receipt issuance, and shared Private Payment Lists.
+
+`image_uri` may point at the Paykit blob prefix or another public image
+location. The SDK can publish/delete Paykit blobs under the identity-wide blob
 prefix and can fetch public `pubky://` files referenced by profile metadata as
 bytes or UTF-8 text. Image decoding, resizing, platform cache integration, and
 UI rendering stay in the app/bindings layer. These helpers are not a generic
 Pubky file-management layer.
 
-Paykit Profile has a small shared display core plus an app-owned `extra` JSON
-object for product-specific public fields. The SDK always publishes and fetches
-the Paykit Profile document shape; existing product profile schemas remain
-app-owned unless the app maps the fields into `extra`. The SDK stores and
-returns `extra`, but does not assign protocol meaning to those app-specific
-fields.
+Paykit Profile has a small shared display core plus an application-defined
+`extra` JSON object for additional public identity fields. The SDK stores and
+returns `extra`, but does not assign protocol meaning to those fields. Writers
+replace the complete identity-wide Paykit Profile document.
 
 This is separate from the Pubky app profile namespace:
 
@@ -412,11 +410,12 @@ being silently hidden by fallback.
 
 Default profile records can be public because they are display metadata.
 Contacts need more care because they can reveal a social/payment graph. The SDK
-keeps saved contacts in local/private SDK storage by default. Public contact
-markers under the configured contact marker prefix are opt-in through SDK policy
-and explicit runtime calls.
-One Contact Record represents one Pubky identity and stores the Paykit receiver
-paths that app wants to keep linked for that identity.
+keeps saved contacts in shared private SDK state by default. Public contact
+markers under `/pub/paykit/contacts/` are opt-in through SDK policy and explicit
+runtime calls.
+One Contact Record represents one Pubky identity. Paykit Apps participating in
+that identity are discovered through its Paykit App Registry rather than stored
+as separate contacts.
 
 Profile JSON may ignore unknown fields so the public profile schema can grow
 without breaking older SDKs. Private Paykit protocol messages remain
@@ -457,13 +456,11 @@ pub trait PaymentAdapter {
     async fn current_private_receiving_details(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PrivateReceivingDetail>>;
 
     async fn reserve_private_receiving_details(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>>;
 
     async fn cancel_private_receiving_detail_reservation(
@@ -518,12 +515,13 @@ reservations on SDK-side validation or queueing failure.
 Any adapter that returns reservations must explicitly implement reservation
 cancellation; cleanup must not be silently treated as successful.
 
-Reservation IDs are counterparty-scoped idempotency keys for SDK reservation
-records, not for Private Payment List delivery. Requeueing the same reservation
-details may queue another latest-state Private Payment List and update the
-record to the latest outbound message id. Idempotent repeats preserve the
-original reservation attribution, expiry, and creation time; adapters that want
-new metadata should use a new reservation id.
+Reservation IDs are scoped by counterparty and owner App ID. They are
+idempotency keys for SDK reservation records, not for Private Payment List
+delivery. Requeueing the same reservation details may queue another
+latest-state Private Payment List and update the record to the latest outbound
+message id. Idempotent repeats preserve the original reservation attribution,
+expiry, and creation time; adapters that want new metadata should use a new
+reservation id.
 
 When cleanup starts canceling a persisted reservation through the payment
 adapter, the SDK marks the reservation as cancellation-started in storage before
@@ -554,19 +552,16 @@ records should be stable.
 
 ### IdentityState
 
-Tracks local Pubky identity state:
+Tracks the Pubky identity associated with the logical SDK state:
 
-- local Pubky public key (`local_pubky_public_key`)
-- local receiver-scoped Noise public key (`local_receiver_noise_public_key`)
+- last initialized Pubky public key
 - last successful initialization time
-- sign-out generation
 
 ### LinkedPeerRecord
 
-One record per counterparty receiver/runtime in the current Rust SDK:
+One record per counterparty identity:
 
 - counterparty public key
-- counterparty receiver path
 - relationship state: not linked, linking, linked, recovery required, blocked
 - in-progress handshake role: initiator or responder
 - last sync time
@@ -575,11 +570,8 @@ One record per counterparty receiver/runtime in the current Rust SDK:
 - failure counters
 - policy overrides
 
-Private and payment state is scoped by counterparty Pubky key plus
-counterparty receiver path. APIs that operate on private links, private streams,
-Private Payment Lists, Payment Requests, payment resolution, Receipt Access, and
-recovery markers require that exact receiver path instead of deriving it from the
-local runtime config.
+Private and payment state is scoped by counterparty Pubky key. App IDs inside
+messages preserve source and payment ownership without creating separate links.
 
 ### EncryptedLinkState
 
@@ -587,13 +579,13 @@ One record per linked peer in the current Rust SDK:
 
 - active link snapshot
 - handshake snapshot
-- snapshot recipient public key and receiver scope
+- snapshot recipient public key
 - read/write progress metadata
 - last persisted checkpoint time
 - snapshot generation
 
 Snapshots are opaque `paykit-lib` snapshots. The SDK validates the expected
-counterparty and receiver scope before restoring them.
+counterparty before restoring them.
 
 ### PrivateStreamItem
 
@@ -601,13 +593,13 @@ Append-only raw private stream item:
 
 - local identity
 - counterparty
-- counterparty receiver path
 - stream sequence number assigned by the SDK
 - receive batch id
 - raw UTF-8 payload, or a retained invalid-frame marker when plaintext bytes
   are not UTF-8
 - parsed `version`
 - parsed `kind`
+- parsed source `app_id`
 - known Paykit kind, when recognized
 - parse status: valid, malformed recognized message, unknown kind, invalid JSON
 - parse error, when available
@@ -620,7 +612,6 @@ This is the source of truth for private protocol-derived state.
 Tracks Event Message idempotency:
 
 - counterparty
-- counterparty receiver path
 - event id
 - event kind
 - payload hash of the exact stored payload
@@ -632,8 +623,9 @@ Conflicting reused Event IDs must fail closed for the affected derived state.
 
 ### PrivatePaymentListView
 
-Latest-state view per counterparty receiver/runtime:
+Latest-state view per counterparty and source Paykit App:
 
+- source App ID
 - latest valid stream item id
 - current Payment Endpoint map
 - last refresh time
@@ -645,6 +637,7 @@ view. They remain in the raw log.
 
 Tracks SDK-managed public Payment Endpoint publication:
 
+- owner App ID
 - Payment Endpoint Identifier
 - last payload the SDK tried to publish
 - shared `PublicationStatus`: pending publication, published, pending removal,
@@ -661,7 +654,7 @@ Tracks optional contact-scoped receiving details:
 
 - reservation id
 - counterparty public key
-- counterparty receiver path
+- owner App ID
 - Payment Endpoint Identifier
 - payload hash
 - latest outbound message id used to queue the reservation for sharing
@@ -675,7 +668,6 @@ Derived record per Payment Request:
 
 - payment request id
 - proposer/payee counterparty
-- counterparty receiver path
 - current local role: payer or payee
 - immutable terms
 - proposal event id
@@ -704,7 +696,6 @@ settlement finality unless the payment adapter confirms it.
 know every counterparty in advance:
 
 - optional counterparty
-- optional counterparty receiver path
 - optional local role
 - optional lifecycle states, where an empty list means all states
 - optional recurring/one-time filter
@@ -715,7 +706,7 @@ know every counterparty in advance:
 Receipt issuance records:
 
 - counterparty that should receive Receipt Access
-- counterparty receiver path
+- issuing App ID
 - receipt id and Receipt Access Event ID
 - payment reference and optional Payment Request correlation fields
 - Encrypted Receipt JSON
@@ -727,7 +718,7 @@ Receipt Access records:
 - event id
 - receipt id
 - sender/issuer counterparty
-- sender/issuer receiver path
+- sender/issuer App ID
 - Receipt Location path
 - Receipt Decryption Key
 - optional Payment Request ID
@@ -741,7 +732,7 @@ Receipt records:
 - optional Payment Request ID
 - optional Billing Period
 - issuer context
-- issuer receiver path
+- issuer App ID
 - recipient public key
 - optional Payment Endpoint Identifier
 - optional Payment Amount
@@ -757,7 +748,7 @@ Durable outbound Private Application Message queue:
 
 - outbound id
 - counterparty
-- counterparty receiver path
+- source App ID
 - Private Message Kind
 - exact raw JSON payload, including Event ID when the message kind has one
 - send status
@@ -767,8 +758,9 @@ Durable outbound Private Application Message queue:
 
 The SDK should use one generic outbound Private Application Message record type
 for all Private Application Message kinds. Event Messages are processed as FIFO
-per counterparty receiver/Encrypted Link. Private Payment Lists use latest-state
-semantics, so older unsent lists may be superseded by a newer complete list.
+per counterparty Encrypted Link. Private Payment Lists use latest-state
+semantics per source App ID, so older unsent lists from the same app may be
+superseded by a newer complete list.
 Send workers must claim the next sendable message through storage before
 sending it. A stale `Sending` queue head can be reclaimed after the lease
 timeout, but the SDK must retry that same message before later private messages
@@ -801,11 +793,11 @@ advanced Encrypted Link snapshot.
 
 For each receive cycle:
 
-1. Claim the per-counterparty-receiver peer link operation lease.
+1. Claim the per-counterparty peer link operation lease.
 2. Restore or establish the Encrypted Link.
 3. Receive the full batch from `paykit-lib`.
 4. Persist every received Private Application Message plaintext and parse enough
-   to identify version/kind when the payload is valid JSON.
+   to identify version, kind, and source App ID when the payload is valid JSON.
 5. In one transaction, insert raw stream items, update Event Message dedupe
    records, and then save the advanced link snapshot.
 6. Release the lease.
@@ -825,8 +817,8 @@ Recommended locks:
 - public endpoint lock: serializes publication and cleanup of local public
   Payment Endpoints.
 - storage-backed peer link operation lease: serializes Encrypted Link restore,
-  handshake, send, receive, and snapshot updates per counterparty receiver.
-- outbound queue claim/lock: serializes retry workers per counterparty receiver.
+  handshake, send, receive, and snapshot updates per counterparty identity.
+- outbound queue claim/lock: serializes retry workers per counterparty identity.
 - reservation transaction: stores reservation records and the outbound message
   that shares them atomically. Existing reservation IDs with the same
   counterparty, Payment Endpoint Identifier, and payload hash are idempotent;
@@ -835,12 +827,17 @@ Recommended locks:
   The idempotency applies to reservation records, while Private Payment List
   delivery remains latest-state and may queue another outbound message.
 
-These are local SDK/runtime locks, not protocol messages. They can be in-memory
-with durable recovery markers where needed. If a platform can run multiple
-processes against the same storage, lock ownership must be storage-backed.
-Lease expiry makes a stale operation reclaimable by another worker; durable
-writes still check the stored lease id so an earlier holder cannot commit after
-a newer lease has replaced it.
+These are SDK/runtime coordination mechanisms, not protocol messages. A lock
+that protects only one runtime handle can be in-memory. Any lock protecting
+identity-wide state across apps or processes must be enforced by the shared
+storage backing. Lease expiry makes a stale operation reclaimable by another
+worker; durable writes still check the stored lease id so an earlier holder
+cannot commit after a newer lease has replaced it.
+
+The local lease does not make an already-started remote write safe if its
+holder is suspended past expiry. Shared multi-process operation therefore also
+requires the pending-send journal and homeserver conditional coordination
+listed under future work.
 
 The Rust SDK implementation provides storage-backed per-peer leases for
 Encrypted Link work and serializes `initialize`, `sign_out`, and public endpoint
@@ -858,23 +855,23 @@ public endpoint sync with their own process or storage lock.
 4. Record whether the stored identity has matching live session access.
 5. Load peer records and recovery markers.
 6. Start optional retry workers only after storage is ready.
-7. Return an initialization report with the persisted public key and whether
-   live Pubky session access was available.
+7. Return identity status with the persisted public key and current capability.
 
 ### Import Or Restore Pubky Session
 
 1. Acquire identity lock.
 2. Import or restore the Pubky session through SDK-owned Pubky logic.
 3. Persist resulting session access through SDK storage/session hooks.
-4. Validate session access, including its required receiver Noise key.
+4. Validate session access and matching local Pubky secret availability when
+   private capability is expected.
 5. Persist identity state.
-6. If identity changed, mark old peer/link state inactive instead of silently
-   reusing it.
+6. If identity changed, reject the current state backing without modifying it;
+   select the shared state backing for the new identity before retrying.
 7. Return current identity status.
 
 ### Publish Public Payment Endpoints
 
-1. Ask `PaymentAdapter` for current public receiving details.
+1. Ask `PaymentAdapter` for the configured app's current public receiving details.
 2. Convert receiving details into Payment Endpoint payloads.
 3. Validate identifiers and payloads through `paykit-lib`.
 4. Persist pending-publication endpoint state.
@@ -883,14 +880,14 @@ public endpoint sync with their own process or storage lock.
 7. Persist confirmed/pending/failed state.
 8. Return an `EndpointSyncReport`.
 
-The SDK should not remove endpoints it did not create unless explicitly
-configured to manage the whole Paykit public namespace.
+The SDK should not remove endpoints it did not create for the configured App ID
+unless explicitly configured to manage that app's complete endpoint namespace.
 
 ### Establish Encrypted Link
 
 1. Ensure matching live session access is available.
-2. Fetch the counterparty Receiver Marker from its Pubky identity homeserver
-   and read its receiver Noise public key.
+2. Fetch the counterparty Paykit App Registry and read its identity-wide Noise
+   public key.
 3. Start an initiator or responder Encrypted Link Handshake through
    `paykit-lib`.
 4. Persist the handshake snapshot, role, and `linking` peer state.
@@ -904,22 +901,20 @@ configured to manage the whole Paykit public namespace.
 
 ### Encrypted Link Recovery Markers
 
-When one side can no longer trust its local Encrypted Link state, the SDK should
-fail closed locally and may publish an Encrypted Link Recovery Marker through
-Pubky public storage. The marker is not sent over the broken link. It is a
-minimal public signal that the counterparty should relink.
+When one side can no longer trust its local Encrypted Link state, the SDK fails
+closed locally and publishes an Encrypted Link Recovery Marker through Pubky
+public storage when matching live session access is available. The marker is
+not sent over the broken link. It is a minimal public signal that the
+counterparty should relink.
 
 Marker privacy rules:
 
-- derive marker paths per Paykit Receiver Reference pair from the local
-  receiver Noise secret key and the counterparty receiver Noise public key;
-  retain both Pubky identity keys in the path domain
+- derive marker paths per identity pair from the local identity-wide Noise
+  secret key and the counterparty identity-wide Noise public key
 - keep marker payloads minimal: version, kind, recovery attempt ID, and creation
   time
 - do not include Payment Endpoints, Payment References, message counts, peer
   display metadata, payment state, or detailed recovery stages
-- make marker usage policy-controlled so apps can disable public markers and
-  require manual or out-of-band relink when needed
 
 SDK behavior:
 
@@ -943,14 +938,15 @@ SDK behavior:
 1. Ensure matching live session access is available.
 2. Ensure the counterparty has an active Encrypted Link snapshot.
 3. Ask `PaymentAdapter` for Private Payment List reservations.
-4. If reservations are returned, build the complete Private Payment List and
+4. If reservations are returned, build the configured app's complete Private
+   Payment List and
    persist the outbound record plus linked reservation records atomically.
 5. If reservations are not returned, ask `PaymentAdapter` for private receiving
    details scoped to the counterparty and queue the list normally.
 6. Cancel adapter reservations when SDK-side validation or queueing fails
    before durable queueing.
-7. Let the outbound Private Application Message worker send through Encrypted
-   Link.
+7. Let the identity-wide outbound Private Application Message worker send
+   through the Encrypted Link.
 8. Persist send result and updated link snapshot.
 
 Private Payment Lists publish endpoints only. Payment References come from
@@ -973,16 +969,23 @@ Payment Proofs, and any other Event Message kinds.
 
 ### Resolve Public Payment
 
-`resolve_public_contact_payment` fetches only the counterparty receiver's
-public Payment Endpoints, passes only `PublicPaymentEndpointCandidate` values
-to the public adapter callback, and returns `PublicContactPaymentResolution`.
+`resolve_public_contact_payment` fetches the counterparty App Registry and the
+public Payment Endpoints of every registered app, passes app-attributed
+`PublicPaymentEndpointCandidate` values to the public adapter callback, and
+returns `PublicContactPaymentResolution`. Invalid or unavailable endpoint data
+from one app is reported as an app-specific failure while valid sibling-app
+endpoints remain available. Resolution inspects every registered app while
+bounding the aggregate to 256 endpoints and 4 MiB of payload data. An app whose
+complete list cannot fit the remaining aggregate budget receives a structured
+`ResourceLimit` failure. If no registered app can be loaded, the result is
+`Unavailable`.
 It does not inspect or mutate Linked Peer, Encrypted Link, or Private Payment
 List state.
 
 ### Resolve Private Payment
 
 `resolve_private_contact_payment` checks only Linked Peer and cached Private
-Payment List state. When an active link exists and no cached endpoint is
+Payment List state across source apps. When an active link exists and no cached endpoint is
 available, it may try the private refresh/recovery path. It passes only
 `PrivatePaymentEndpointCandidate` values to the private adapter callback and
 returns `PrivateContactPaymentResolution`, including private state:
@@ -994,24 +997,29 @@ returns `PrivateContactPaymentResolution`, including private state:
 The private resolution input accepts an optional
 `after_private_payment_list_version`. The private result carries the
 `private_payment_list_version` from the same local Private Payment List
-snapshot as its endpoints. When the available version is not newer than the
+aggregated snapshot as its endpoints. When the available version is not newer than the
 input version, resolution returns `WaitingForUpdatedPaymentList` with no
 payable endpoints. These versions are opaque local freshness tokens scoped to
-one SDK state, counterparty, and counterparty receiver path; they are not the
+one SDK state and counterparty; they are not the
 serialized Private Application Message schema version.
 
 The application owns consumption. Submitting, pending, or uncertain payment
 execution should persist the returned version as consumed before another
-payment is resolved for that peer and receiver path. Applications should
-serialize this handoff per counterparty and counterparty receiver path. Using
-one endpoint consumes every endpoint in that Private Payment List. A newer
-list is fresh as a whole and may intentionally repeat reusable Payment
-Endpoints.
+payment is resolved for that peer. Applications should serialize this handoff
+per counterparty. Using one endpoint consumes every endpoint returned with
+that version. A later resolution includes candidates only from application
+lists updated after the consumed version; another application's unchanged
+list does not become fresh merely because one application published an update.
 
 `prepare_and_resolve_private_contact_payment` may first advance the Encrypted
 Link and drain currently available private send/receive work, then invokes the
 same private-only resolution with the optional consumed version. It never
 falls back to public Payment Endpoints.
+
+Payment Request-aware public and private resolution load the request amount
+from durable derived state and filter candidates before adapter selection.
+Only accepted Payment Endpoint Identifiers are eligible, and a non-null
+`required_app_id` limits candidates to that payee App.
 
 Both public and private result statuses use `Payable`, `NoEndpoint`, and
 `UnsupportedEndpoint`; private resolution additionally uses
@@ -1025,7 +1033,8 @@ policy.
 
 Payee flow:
 
-1. Build immutable Payment Request terms.
+1. Build immutable Payment Request terms, optionally requiring one Paykit App
+   to handle the payment.
 2. Validate terms structurally.
 3. Generate Event ID and Payment Request ID.
 4. Serialize exact event payload through `paykit-lib`.
@@ -1041,7 +1050,9 @@ Payer receive flow:
 4. Check duplicate/conflicting Event ID.
 5. Check duplicate/conflicting Payment Request ID terms.
 6. Check proposal expiry.
-7. Derive local state and expose it to the app.
+7. Derive local state and expose valid requests as actionable. A non-null
+   `required_app_id` constrains which payee App's Payment Endpoint may be paid;
+   it does not constrain which payer App may respond.
 
 ### Accept, Reject, Or Cancel Payment Request
 
@@ -1053,7 +1064,10 @@ For outbound lifecycle events:
 4. Serialize and persist exact outbound payload.
 5. Send and retry using the same Event ID and payload.
 
-Cancellation is unilateral. Acceptance and rejection are payer-only in v0.2.
+Cancellation is unilateral. Acceptance and rejection are payer-only.
+The first payer App to accept or reject owns subsequent payer-side events for
+that request. This is tracked separately from the payee-side
+`required_app_id` endpoint constraint.
 Derived records include local outbound delivery status for queued lifecycle
 events. Apps should not treat outbound status as counterparty acceptance or
 settlement confirmation.
@@ -1061,8 +1075,10 @@ settlement confirmation.
 ### Record Payment Proof
 
 1. Load accepted Payment Request.
-2. Ask `PaymentAdapter` for execution result or caller-supplied proof data.
-3. Validate stateless proof/request correlation through `paykit-lib`.
+2. Ask `PaymentAdapter` for execution result or caller-supplied proof data,
+   including the App ID whose endpoint was paid.
+3. Validate stateless proof/request correlation through `paykit-lib`, including
+   any required App ID from the request.
 4. Persist proof event before sending.
 5. Send Payment Proof.
 6. Update local state to `proof_submitted`.
@@ -1080,10 +1096,10 @@ settlement confirmation.
 5. Treat outbound status as local delivery checkpoint state, not counterparty
    acknowledgement.
 
-Receipt IDs are unique per issuer receiver because Receipt Location is derived
-from the issuer's receiver path and Receipt ID. `prepare_receipt_issuance` may
-generate a Receipt ID and return it to the caller; retries should then call
-`process_receipt_issuance` with that ID from the same SDK receiver runtime. The
+Receipt IDs are unique per issuer identity and Receipt Location is derived from
+the Receipt ID. `prepare_receipt_issuance` may generate a Receipt ID and return
+it to the caller; retries should then call `process_receipt_issuance` with that
+ID from the same shared SDK state. The
 one-call `issue_receipt` helper requires the draft to already contain a
 caller-provided Receipt ID so repeating the same call cannot create a second
 receipt after a partial failure.
@@ -1106,7 +1122,6 @@ receipt after a partial failure.
 
 Backup should include SDK-managed state:
 
-- local receiver/runtime path
 - public identity state
 - peer records
 - Encrypted Link snapshots
@@ -1114,25 +1129,24 @@ Backup should include SDK-managed state:
 - Private Payment List cache
 - endpoint publication records
 - endpoint reservations
-- local Contact Records, including local labels, cached Paykit Profiles, public
+- Contact Records, including user labels, cached Paykit Profiles, public
   contact marker status/timestamps, and marker errors
 - raw private stream log or checkpointed subset
 - outbound queue
 - recovery markers
 
-If SDK-managed backup or state blob data is lost, the SDK cannot safely
-reconstruct private runtime state from Pubky homeserver data alone. Public
-Payment Endpoints and Paykit Profiles can be rediscovered, but Encrypted Link
-snapshots/counters, private stream history, Event Message dedupe records,
-Receipt Access keys, outbound queues, local Contact Records, and local Payment
-Request/Receipt history are local SDK state. Without backup, recovery means
-fresh initialization, republishing public state, relinking peers, and receiving
-fresh private data from counterparties.
+If the authoritative SDK state and every backup copy are lost, the SDK cannot
+safely reconstruct private runtime state from encrypted message slots alone.
+Public Payment Endpoints and Paykit Profiles can be rediscovered, but Encrypted
+Link snapshots/counters, private stream history, Event Message dedupe records,
+Receipt Access keys, outbound queues, Contact Records, and Payment
+Request/Receipt history require the durable shared state. Recovery without it
+means fresh initialization, republishing public state, relinking peers, and
+receiving fresh private data from counterparties.
 
-Before explicit sign-out, an app that wants to restore the same user's private
-Paykit state later must keep a separate SDK backup. Sign-out clears the active
-SDK-managed identity-scoped storage; it should not delete caller-managed backup
-copies unless the user explicitly asks for permanent removal.
+Backup export is an optional portable snapshot of the same logical SDK state.
+It is not the live cross-app synchronization mechanism, and sign-out does not
+delete either the shared state or caller-managed backup copies.
 
 Backup should not include:
 
@@ -1143,10 +1157,9 @@ Backup should not include:
 
 Restore flow:
 
-1. Validate local identity and exact receiver path before replacing storage
-   state.
-2. Validate backup record shape plus every link snapshot recipient and receiver
-   scope.
+1. Require an otherwise empty SDK state backing, then validate the local
+   identity. A portable backup must not replace newer shared state.
+2. Validate backup record shape plus every link snapshot recipient.
 3. Preserve valid active Encrypted Link snapshots and in-progress handshake
    snapshots so the SDK can catch up from the restored checkpoint.
 4. Mark peers recovery-required only when no safe restored checkpoint exists,
@@ -1155,31 +1168,32 @@ Restore flow:
 5. Load backup into storage under a restore transaction.
 6. Do not execute automatic payments until private stream and request state are
    consistent.
+7. Republish participating App Registry entries before those apps create new
+   app-attributed work.
 
 Backup restore preserves private history and derived records. Valid restored
 Encrypted Link checkpoints are resumed; missing, malformed, mismatched, or
-otherwise unsafe checkpoints pause private automation until relink. Multi-app
-and multi-device synchronization of active Encrypted Link checkpoints is future
-work and must not be assumed by current restore behavior.
+otherwise unsafe checkpoints pause private automation until relink. Concurrent
+multi-app and multi-device synchronization requires the shared-state protocol
+described in the later design areas.
 
 ## Public SDK API Shape
 
 The Rust SDK exposes initialization, identity status, public endpoint
 sync, linked peer handshakes, private stream receive, Private Payment List
 derivation/publication, Paykit Profile publication/fetching, read-only Pubky
-profile/follows helpers, local Contact Record CRUD/profile refresh, contact
+profile/follows helpers, Contact Record CRUD/profile refresh, contact
 payment resolution, outbound Private
 Application Message processing, Receipt Access indexing/retrieval, Payment
 Request lifecycle derivation plus checked outbound lifecycle queueing, optional
 Payment Endpoint Reservation records, and backup/export/restore for SDK-managed
 state. Use `paykit-sdk` rustdoc for exact signatures.
 
-Use `paykit-sdk` rustdoc for exact signatures. The main public method families
-cover initialization/sign-out, session bootstrap, public endpoint sync, profile
-and blob helpers, local Contact Records, Pubky profile/follows reads, contact
-payment resolution, linked peer setup, private stream receive, outbound private
-delivery, Private Payment Lists, Payment Requests, Receipts, and SDK
-backup/export/restore.
+The main public method families cover initialization/sign-out, session
+bootstrap, public endpoint sync, profile and blob helpers, Contact Records,
+Pubky profile/follows reads, contact payment resolution, linked peer setup,
+private stream receive, outbound private delivery, Private Payment Lists,
+Payment Requests, Receipts, and SDK backup/export/restore.
 
 `ReceiptDraftBuilder` is the ergonomic way to create `ReceiptDraft` values for
 SDK calls. It can generate a Receipt ID before `issue_receipt`, or leave it
@@ -1238,11 +1252,9 @@ belongs to the app.
 
 `PaykitSdkConfig` includes:
 
+- required local Paykit App ID
 - public endpoint management scope
-- Encrypted Link Recovery Marker policy
-- public contact sharing policy, defaulting to local-only Contact Records
-- peer link operation lease timeout
-- outbound private send lease timeout
+- public contact sharing policy, defaulting to private Contact Records
 
 Additional policy configuration can add:
 
@@ -1264,7 +1276,7 @@ These are good candidates to move into Paykit SDK:
 - Encrypted Link snapshot and handshake runtime
 - stale link recovery markers and private refresh/recovery policy
 - ordered private stream receive/persist/route
-- Paykit profile publishing/fetching and local contact records
+- Paykit profile publishing/fetching and Contact Records
 - contact payment resolution and payable endpoint checks
 - endpoint reservation records and attribution helpers
 - SDK-managed backup records
@@ -1281,7 +1293,7 @@ These should stay outside Paykit SDK:
 - localized copy and navigation
 - app backup transport and cloud sync
 - payment-provider seed/secret derivation policy
-- shared identity coordination or cross-app aggregation policy
+- payment execution ownership and product-level app selection policy
 
 ## Test Plan
 
@@ -1293,16 +1305,16 @@ Core tests:
 - conflicting Event IDs fail closed
 - malformed recognized messages remain auditable
 - unknown valid Private Application Messages are retained
-- Private Payment List latest valid message wins
+- Private Payment List latest valid message wins per source App ID
 - stale private link reports recovery or uses public endpoints only when the
   resolution request includes them
-- session construction requires the receiver Noise secret key
+- private-capable session access requires the matching local Pubky secret
 - missing live session access blocks private operations without clearing cached
   private state
 - outbound retries reuse exact Event ID and payload
 - Payment Request role/lifecycle checks
 - Receipt Access dedupe and receipt retrieval
-- profile serialization and local contact storage
+- profile serialization and Contact Record storage
 - backup/restore validates snapshot recipient and pauses unsafe automation
 
 Platform tests:
@@ -1315,10 +1327,13 @@ Platform tests:
 
 ## Later Design Areas
 
+- Pubky-hosted encrypted SDK state and Noise snapshots shared by authorized
+  apps under one identity.
+- Homeserver-backed locks and conditional writes for shared-state updates.
+- A pending-send journal that durably couples exact ciphertext with the
+  advanced Noise snapshot before publication.
 - Durable storage adapters, including whether Paykit should ship a
   SQLite-backed implementation.
-- Custom profile/contact path hooks for apps that already have product-specific
-  Pubky namespaces.
 - Public contact marker discovery and richer contact-sharing policy.
 - App-level policies for when payment resolution should include public Payment
   Endpoints.
@@ -1328,8 +1343,5 @@ Platform tests:
 - Unknown Private Application Message retention defaults for mobile storage
   budgets.
 - higher-level platform wrapper/package policy on top of the SDK bindings
-- Multi-app and multi-device Paykit identity synchronization, including how
-  active Encrypted Link checkpoints, outbound queues, and recurring Payment
-  Request execution coordinate without rewinding private message counters.
-- Explicit connected-key or linked-receiver records for aggregating multiple
-  app-owned Paykit runtimes under one user identity.
+- Multi-device synchronization and recovery policy after the identity-wide
+  shared-state protocol is available.

@@ -6,17 +6,16 @@ use std::{
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use paykit_lib::{
-    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaykitReceiverCapabilities,
-    PaykitReceiverMarker, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
-    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestId,
-    PaymentRequestRejection, PaymentRequestTerms, PrivateMessageKind, ReceiptDraft,
+    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaymentEndpointIdentifier, PaymentProof,
+    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
+    PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms, PrivateMessageKind,
+    ReceiptDraft,
 };
 use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
-use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 #[cfg(test)]
-use paykit_lib::PaymentRequestEvent;
+use crate::domain::payment_requests::enqueue_payment_request_response as enqueue_payment_request_response_message;
 
 use crate::{
     backup::{
@@ -24,16 +23,14 @@ use crate::{
         restore_backup_state_with_identity as restore_sdk_backup_state, RestoreReport,
         SdkBackupState,
     },
-    config::{
-        EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
-        PublicContactSharingPolicy,
-    },
+    config::{EndpointManagementScope, PaykitSdkConfig, PublicContactSharingPolicy},
     domain::contacts::{
         parse_profile_json, parse_pubky_profile_json, paykit_blob_path,
         paykit_blob_path_from_uri_or_path, paykit_blob_uri, profile_json,
-        pubky_follow_keys_from_follow_entries, public_contact_json, ContactProfileResolution,
+        pubky_follow_keys_from_follow_entries, public_contact_json, public_contact_path,
         ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
-        PubkyProfileRecord, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+        ProfileResolution, PubkyProfileRecord, PAYKIT_PROFILE_BLOB_PATH_PREFIX,
+        PAYKIT_PROFILE_PATH, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
     },
     domain::endpoint_reservations::{
         expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
@@ -49,6 +46,7 @@ use crate::{
     domain::linked_peers::{
         default_linked_peer, mark_recovery_required_for_marker_in_transaction,
         mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
+        requeue_recovery_required_outbound_messages,
         save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
         save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
         EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
@@ -62,24 +60,24 @@ use crate::{
         ReservationCleanupFailure,
     },
     domain::payment_requests::{
-        enqueue_payment_proof as enqueue_payment_proof_message,
+        enqueue_checked_payment_request_action,
         enqueue_payment_request as enqueue_payment_request_message,
-        enqueue_payment_request_acceptance as enqueue_payment_request_acceptance_message,
-        enqueue_payment_request_cancellation as enqueue_payment_request_cancellation_message,
-        enqueue_payment_request_rejection as enqueue_payment_request_rejection_message,
+        payment_request_record_blocks_app_removal,
         payment_request_records as derive_payment_request_records,
         received_payment_request_records as derive_received_payment_request_records,
         request_from_record, PaymentRequestFilter, PaymentRequestLifecycleState,
-        PaymentRequestLocalRole, PaymentRequestRecord,
+        PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestTermsRecord,
     },
     domain::payment_resolution::{
         PreparedPrivateContactPayment, PrivateContactPaymentResolution,
         PrivatePaymentResolutionState, PrivatePaymentResolutionStatus,
-        PublicContactPaymentResolution, PublicPaymentResolutionStatus,
+        PublicContactPaymentResolution, PublicPaymentEndpointLoadFailure,
+        PublicPaymentEndpointLoadFailureKind, PublicPaymentResolutionStatus,
         ResolvedPrivatePaymentEndpoint, ResolvedPublicPaymentEndpoint,
     },
     domain::private_lists::{
-        current_private_payment_list as load_current_private_payment_list,
+        counterparties_with_shared_private_payment_lists,
+        current_private_payment_lists as load_current_private_payment_lists,
         enqueue_private_payment_list_with_link_lease as enqueue_private_payment_list_message_with_link_lease,
         PrivatePaymentListDeliveryFailure, PrivatePaymentListDeliveryReport,
         PrivatePaymentListReservationUpdate, PrivatePaymentListSyncChange,
@@ -102,18 +100,27 @@ use crate::{
         ReceiptRetrievalStatus,
     },
     domain::recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
-    identity::{IdentityState, IdentityStatus},
+    identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
     storage::{
         outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
         OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
-    PaykitReceiverPath, PaykitSdkError, PaymentAdapter, PrivatePaymentEndpointCandidate,
+    PaykitSdkError, PaymentAdapter, PrivatePaymentEndpointCandidate,
     PrivatePaymentEndpointReservation, PrivatePaymentEndpointReservationCancellation,
     PrivatePaymentEndpointSelectionRequest, PrivatePaymentListView, PrivateReceivingDetail,
     PubkyPublicKey, PubkySessionAccess, PubkySessionProvider, PublicPaymentEndpointCandidate,
     PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
+    PAYKIT_SESSION_CAPABILITIES,
 };
 
+const PEER_LINK_OPERATION_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const OUTBOUND_PRIVATE_SEND_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const OUTBOUND_PRIVATE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+const RESERVATION_CANCELLATION_CLAIM_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+mod app_registry;
+mod app_removal;
 mod backup;
 mod contacts;
 mod encrypted_links;
@@ -126,6 +133,9 @@ mod profiles;
 mod public_endpoints;
 mod receipts;
 mod recovery;
+mod reservation_cleanup;
+
+pub use app_removal::PaykitAppRemovalBlockers;
 
 /// Clock abstraction used by SDK workflows and tests.
 pub trait Clock: Clone + Send + Sync + 'static {
@@ -143,14 +153,7 @@ impl Clock for SystemClock {
     }
 }
 
-/// Initialization report returned after SDK startup.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InitializationReport {
-    /// Last persisted identity status.
-    pub identity: IdentityStatus,
-}
-
-/// Stateful Paykit SDK runtime for one app-owned local Paykit runtime.
+/// Stateful SDK runtime for one application participating in a Paykit identity.
 pub struct PaykitSdk<S, K, P, C = SystemClock> {
     storage: S,
     pubky: K,
@@ -185,13 +188,8 @@ where
     P: PaymentAdapter,
 {
     /// Create an SDK runtime with the system clock.
-    pub fn new(storage: S, pubky: K, payment: P, config: PaykitSdkConfig) -> Result<Self> {
-        Self::try_with_clock(storage, pubky, payment, config, SystemClock)
-    }
-
-    /// Fallible alias for [`Self::new`].
-    pub fn try_new(storage: S, pubky: K, payment: P, config: PaykitSdkConfig) -> Result<Self> {
-        Self::new(storage, pubky, payment, config)
+    pub fn new(storage: S, pubky: K, payment: P, config: PaykitSdkConfig) -> Self {
+        Self::with_clock(storage, pubky, payment, config, SystemClock)
     }
 }
 
@@ -203,22 +201,15 @@ where
     C: Clock,
 {
     /// Create an SDK runtime with an explicit clock.
-    pub fn try_with_clock(
-        storage: S,
-        pubky: K,
-        payment: P,
-        config: PaykitSdkConfig,
-        clock: C,
-    ) -> Result<Self> {
-        config.validate()?;
-        Ok(Self {
+    pub fn with_clock(storage: S, pubky: K, payment: P, config: PaykitSdkConfig, clock: C) -> Self {
+        Self {
             storage,
             pubky,
             payment,
             config,
             clock,
             identity_operation_in_progress: Arc::new(Mutex::new(false)),
-        })
+        }
     }
 
     fn claim_identity_operation(&self, context: &str) -> Result<RuntimeOperationGuard> {
@@ -243,32 +234,29 @@ where
         })
     }
 
-    #[cfg(test)]
-    fn with_clock(storage: S, pubky: K, payment: P, config: PaykitSdkConfig, clock: C) -> Self {
-        Self::try_with_clock(storage, pubky, payment, config, clock)
-            .expect("test PaykitSdkConfig must be valid")
-    }
-
     /// Initialize durable SDK identity state.
-    pub async fn initialize(&self) -> Result<InitializationReport> {
+    pub async fn initialize(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("initialize")?;
         let (session, state) = self.load_session_access_and_refresh_identity().await?;
         let live_session_available = session.is_some();
+        let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
+        let private_link_capable = session
+            .as_ref()
+            .map(|session| session.private_link_capable_for_capabilities(required_capabilities))
+            .transpose()?
+            .unwrap_or(false);
 
-        Ok(InitializationReport {
-            identity: IdentityStatus::from_state(&state, live_session_available),
-        })
+        Ok(IdentityStatus::from_state(
+            &state,
+            live_session_available,
+            private_link_capable,
+        ))
     }
 
-    /// Clear live Pubky session access and SDK-managed identity-scoped state.
+    /// Clear this application's live Pubky session access.
     ///
-    /// This is an explicit destructive sign-out. Apps that want to restore the
-    /// same user's private Paykit state later should export and persist an SDK
-    /// backup before calling this method.
-    ///
-    /// Missing live session access should be represented by
-    /// [`PubkySessionProvider::load_session_access`] returning `None`; that
-    /// preserves stored SDK state and only blocks Pubky-backed workflows.
+    /// Stored Paykit state remains intact so the same identity can resume it
+    /// later and other applications are not affected.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
         self.pubky.clear_session_access().await?;
@@ -277,33 +265,19 @@ where
         let state = self
             .storage
             .transaction(move |tx| {
-                let previous = tx.load_identity_state();
-                let previous_generation = previous
-                    .as_ref()
-                    .map(|state| state.sign_out_generation)
-                    .unwrap_or_default();
-                let was_signed_in = previous
-                    .as_ref()
-                    .is_some_and(|state| state.local_pubky_public_key.is_some());
-                let generation = if was_signed_in {
-                    previous_generation.saturating_add(1)
-                } else {
-                    previous_generation
-                };
-
-                tx.clear_identity_scoped_state();
+                if let Some(state) = tx.load_identity_state() {
+                    return Ok(state);
+                }
                 let state = IdentityState {
-                    local_pubky_public_key: None,
-                    local_receiver_noise_public_key: None,
+                    public_key: None,
                     initialized_at: now,
-                    sign_out_generation: generation,
                 };
                 tx.save_identity_state(state.clone());
                 Ok(state)
             })
             .await?;
 
-        Ok(IdentityStatus::from_state(&state, false))
+        Ok(IdentityStatus::from_state(&state, false, false))
     }
 
     async fn load_session_access_and_refresh_identity(
@@ -321,10 +295,8 @@ where
                     }
 
                     let state = IdentityState {
-                        local_pubky_public_key: None,
-                        local_receiver_noise_public_key: None,
+                        public_key: None,
                         initialized_at: now,
-                        sign_out_generation: 0,
                     };
                     tx.save_identity_state(state.clone());
                     Ok(state)
@@ -334,15 +306,12 @@ where
             return Ok((session, state));
         };
 
-        let required_capabilities = self.config.required_session_capabilities();
-        let active_identity = ActiveReceiverIdentity {
-            local_pubky_public_key: session_access.public_key()?,
-            local_receiver_noise_public_key: session_access.receiver_noise_public_key(),
-        };
-        session_access.validate_for_capabilities(&required_capabilities)?;
+        let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
+        let public_key = session_access.public_key()?;
+        session_access.capability_for_capabilities(required_capabilities)?;
         let state = self
             .storage
-            .transaction(move |tx| Ok(refresh_active_identity(tx, active_identity, now)))
+            .transaction(move |tx| bind_storage_to_identity(tx, public_key, now))
             .await?;
 
         Ok((session, state))
@@ -352,7 +321,7 @@ where
         self.storage
             .transaction(|tx| {
                 tx.load_identity_state()
-                    .and_then(|state| state.local_pubky_public_key)
+                    .and_then(|state| state.public_key)
                     .ok_or_else(|| PaykitSdkError::Identity {
                         context: format!("cannot {context} without an initialized Pubky identity"),
                         source: None,
@@ -383,7 +352,7 @@ where
                 source: None,
             });
         }
-        session_access.validate_for_capabilities(&self.config.required_session_capabilities())?;
+        session_access.validate_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
         Ok(session_access)
     }
 
@@ -396,16 +365,18 @@ where
         if let Some(session) = &session {
             session.validate()?;
         }
-        let required_capabilities = self.config.required_session_capabilities();
-        let matching_session = session.as_ref().filter(|session| {
-            session.public_key().ok().as_ref() == state.local_pubky_public_key.as_ref()
-        });
-        if let Some(session) = matching_session {
-            session.validate_for_capabilities(&required_capabilities)?;
-        }
+        let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
+        let matching_session = session
+            .as_ref()
+            .filter(|session| session.public_key().ok().as_ref() == state.public_key.as_ref());
+        let private_link_capable = matching_session
+            .map(|session| session.private_link_capable_for_capabilities(required_capabilities))
+            .transpose()?
+            .unwrap_or(false);
         Ok(Some(IdentityStatus::from_state(
             &state,
             matching_session.is_some(),
+            private_link_capable,
         )))
     }
 
@@ -424,98 +395,41 @@ where
                     .into_values()
                     .collect::<Vec<_>>();
                 records.sort_by(|left, right| {
-                    left.counterparty
-                        .as_str()
-                        .cmp(right.counterparty.as_str())
-                        .then_with(|| {
-                            left.counterparty_receiver_path
-                                .as_str()
-                                .cmp(right.counterparty_receiver_path.as_str())
-                        })
+                    left.counterparty.as_str().cmp(right.counterparty.as_str())
                 });
                 Ok(records)
             })
             .await
     }
-
-    fn ensure_recovery_marker_publishing_enabled(&self) -> Result<()> {
-        if self.config.encrypted_link_recovery_markers
-            == EncryptedLinkRecoveryMarkerPolicy::Disabled
-        {
-            Err(PaykitSdkError::Policy {
-                context: "Encrypted Link recovery marker publishing is disabled".into(),
-                source: None,
-            })
-        } else {
-            Ok(())
-        }
-    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ActiveReceiverIdentity {
-    local_pubky_public_key: PubkyPublicKey,
-    local_receiver_noise_public_key: PubkyPublicKey,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IdentityTransition {
-    Initial,
-    PubkyIdentityChanged,
-    ReceiverNoiseKeyChanged,
-    Unchanged,
-}
-
-fn refresh_active_identity(
+fn bind_storage_to_identity(
     tx: &mut dyn StorageTransaction,
-    active: ActiveReceiverIdentity,
+    public_key: PubkyPublicKey,
     initialized_at: DateTime<Utc>,
-) -> IdentityState {
-    let previous = tx.load_identity_state();
-    let transition = identity_transition(previous.as_ref(), &active);
-    let previous_generation = previous
-        .as_ref()
-        .map(|state| state.sign_out_generation)
-        .unwrap_or_default();
-
-    match transition {
-        IdentityTransition::Initial | IdentityTransition::PubkyIdentityChanged => {
-            tx.clear_identity_scoped_state();
+) -> Result<IdentityState> {
+    if let Some(state) = tx.load_identity_state() {
+        if state
+            .public_key
+            .as_ref()
+            .is_some_and(|stored| stored != &public_key)
+        {
+            return Err(PaykitSdkError::Identity {
+                context: "active Pubky session does not match this SDK state backing".into(),
+                source: None,
+            });
         }
-        IdentityTransition::ReceiverNoiseKeyChanged => tx.clear_private_identity_scoped_state(),
-        IdentityTransition::Unchanged => {}
+        if state.public_key.is_some() {
+            return Ok(state);
+        }
     }
 
-    let sign_out_generation = match transition {
-        IdentityTransition::PubkyIdentityChanged => previous_generation.saturating_add(1),
-        _ => previous_generation,
-    };
     let state = IdentityState {
-        local_pubky_public_key: Some(active.local_pubky_public_key),
-        local_receiver_noise_public_key: Some(active.local_receiver_noise_public_key),
+        public_key: Some(public_key),
         initialized_at,
-        sign_out_generation,
     };
     tx.save_identity_state(state.clone());
-    state
-}
-
-fn identity_transition(
-    previous: Option<&IdentityState>,
-    active: &ActiveReceiverIdentity,
-) -> IdentityTransition {
-    let Some(previous) = previous else {
-        return IdentityTransition::Initial;
-    };
-    if previous.local_pubky_public_key.as_ref() != Some(&active.local_pubky_public_key) {
-        return IdentityTransition::PubkyIdentityChanged;
-    }
-    if previous.local_receiver_noise_public_key.as_ref()
-        != Some(&active.local_receiver_noise_public_key)
-    {
-        return IdentityTransition::ReceiverNoiseKeyChanged;
-    }
-    IdentityTransition::Unchanged
+    Ok(state)
 }
 
 async fn fetch_public_text(

@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    InMemoryStorage, LinkedPeerState, PaykitReceiverCapabilities, PaykitReceiverPath, PaykitSdk,
+    InMemoryStorage, LinkedPeerState, PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitSdk,
     PaykitSdkConfig, PaymentAdapter, PaymentTarget, PrivatePaymentEndpointCandidate,
-    PrivatePaymentEndpointSelectionRequest, PrivateReceivingDetail, PubkyLocalSecretKey,
-    PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap, PubkySessionProvider,
-    PublicPaymentEndpointCandidate, PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
-    ReceiverNoiseSecretKey, Result,
+    PrivatePaymentEndpointReservationCancellation, PrivatePaymentEndpointSelectionRequest,
+    PrivateReceivingDetail, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
+    PubkySessionBootstrap, PubkySessionProvider, PublicPaymentEndpointCandidate,
+    PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
+    PAYKIT_SESSION_CAPABILITIES,
 };
 use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
@@ -92,6 +93,7 @@ impl PubkySessionProvider for TestnetSessionProvider {
 pub struct TestnetPaymentAdapter {
     public_details: Arc<Mutex<Vec<PublicReceivingDetail>>>,
     private_details: Arc<Mutex<Vec<PrivateReceivingDetail>>>,
+    fail_reservation_cancellation: Arc<Mutex<bool>>,
 }
 
 impl TestnetPaymentAdapter {
@@ -101,6 +103,13 @@ impl TestnetPaymentAdapter {
 
     pub fn set_private_details(&self, details: Vec<PrivateReceivingDetail>) {
         *self.private_details.lock().expect("details lock poisoned") = details;
+    }
+
+    pub fn set_fail_reservation_cancellation(&self, fail: bool) {
+        *self
+            .fail_reservation_cancellation
+            .lock()
+            .expect("failure flag lock poisoned") = fail;
     }
 }
 
@@ -117,7 +126,6 @@ impl PaymentAdapter for TestnetPaymentAdapter {
     async fn current_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PrivateReceivingDetail>> {
         Ok(self
             .private_details
@@ -157,6 +165,23 @@ impl PaymentAdapter for TestnetPaymentAdapter {
             payload: endpoint.payload.clone(),
         })
     }
+
+    async fn cancel_private_receiving_detail_reservation(
+        &self,
+        _cancellation: &PrivatePaymentEndpointReservationCancellation,
+    ) -> Result<()> {
+        if *self
+            .fail_reservation_cancellation
+            .lock()
+            .expect("failure flag lock poisoned")
+        {
+            return Err(paykit_sdk::PaykitSdkError::Policy {
+                context: "injected reservation cancellation failure".into(),
+                source: None,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// One signed-up testnet user with an initialized SDK runtime.
@@ -170,85 +195,63 @@ pub struct TestUser {
     pub adapter: TestnetPaymentAdapter,
     pub access: PubkySessionAccess,
     pub public_key: PubkyPublicKey,
-    pub receiver_path: PaykitReceiverPath,
+    pub app_id: PaykitAppId,
 }
 
 impl TestUser {
     /// Sign up a fresh keypair on the testnet homeserver through the SDK's own
     /// bootstrap, then build and initialize a runtime around the session.
     ///
-    /// The identity keypair authenticates Pubky while bootstrap creates the
-    /// independent receiver Noise key used for private links.
     pub async fn sign_up(testnet: &EphemeralTestnet) -> TestUser {
-        Self::sign_up_with_receiver(testnet, receiver_path("bitkit/wallet")).await
+        Self::sign_up_with_app(testnet, app_id("bitkit")).await
     }
 
-    pub async fn sign_up_with_receiver(
-        testnet: &EphemeralTestnet,
-        receiver_path: PaykitReceiverPath,
-    ) -> TestUser {
-        Self::sign_up_with_receiver_access(testnet, receiver_path, true).await
-    }
-
-    pub async fn sign_up_with_server_owned_identity(
-        testnet: &EphemeralTestnet,
-        receiver_path: PaykitReceiverPath,
-    ) -> TestUser {
-        Self::sign_up_with_receiver_access(testnet, receiver_path, false).await
-    }
-
-    async fn sign_up_with_receiver_access(
-        testnet: &EphemeralTestnet,
-        receiver_path: PaykitReceiverPath,
-        retain_identity_secret: bool,
-    ) -> TestUser {
+    pub async fn sign_up_with_app(testnet: &EphemeralTestnet, app_id: PaykitAppId) -> TestUser {
         let keypair = Keypair::random();
         let secret_key = PubkyLocalSecretKey::new(keypair.secret_key());
         let homeserver_public_key =
             PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
         let bootstrap =
             PubkySessionBootstrap::with_pubky(testnet.sdk().expect("testnet Pubky client"));
-        let config = PaykitSdkConfig::new(receiver_path.clone());
-        let receiver_noise_secret_key = ReceiverNoiseSecretKey::random();
-        let receiver_noise_public_key = receiver_noise_secret_key.public_key();
+        let config = PaykitSdkConfig::new(app_id.clone()).unwrap();
         let result = bootstrap
             .sign_up(
                 &secret_key,
-                receiver_noise_secret_key,
                 &homeserver_public_key,
                 None,
-                &config.required_session_capabilities(),
+                PAYKIT_SESSION_CAPABILITIES,
             )
             .await
             .expect("testnet sign-up should succeed");
-        assert_eq!(
-            result.access.receiver_noise_secret_key.public_key(),
-            receiver_noise_public_key
-        );
-        let mut access = result.access;
-        if !retain_identity_secret {
-            access.local_secret_key = None;
-        }
+        let access = result.access;
 
         let storage = InMemoryStorage::default();
         let adapter = TestnetPaymentAdapter::default();
         let provider = TestnetSessionProvider::new(access.clone());
-        let sdk = PaykitSdk::new(storage.clone(), provider, adapter.clone(), config)
-            .expect("SDK construction should succeed");
+        let sdk = PaykitSdk::new(storage.clone(), provider, adapter.clone(), config);
 
         let report = sdk
             .initialize()
             .await
             .expect("SDK initialization should succeed");
-        assert!(report.identity.live_session_available);
-        sdk.publish_paykit_receiver_marker(PaykitReceiverCapabilities {
-            private_payments: true,
-            payment_requests: true,
-            receipts: true,
-            outgoing_payments: true,
-        })
+        assert_eq!(
+            report.capability,
+            paykit_sdk::PubkyIdentityCapability::PrivateLinkCapable
+        );
+        sdk.publish_paykit_app(
+            PaykitApp::new(
+                "Paykit Test App",
+                PaykitAppCapabilities {
+                    private_payments: true,
+                    payment_requests: true,
+                    receipts: true,
+                    outgoing_payments: true,
+                },
+            )
+            .unwrap(),
+        )
         .await
-        .expect("receiver marker publication should succeed");
+        .expect("Paykit app publication should succeed");
 
         TestUser {
             sdk,
@@ -256,7 +259,52 @@ impl TestUser {
             adapter,
             access,
             public_key: result.public_key,
-            receiver_path,
+            app_id,
+        }
+    }
+
+    /// Build another application runtime for this identity and shared state.
+    pub async fn additional_app(&self, app_id: PaykitAppId, display_name: &str) -> TestUser {
+        let storage = self.storage.clone();
+        let adapter = TestnetPaymentAdapter::default();
+        let provider = TestnetSessionProvider::new(self.access.clone());
+        let sdk = PaykitSdk::new(
+            storage.clone(),
+            provider,
+            adapter.clone(),
+            PaykitSdkConfig::new(app_id.clone()).unwrap(),
+        );
+
+        let report = sdk
+            .initialize()
+            .await
+            .expect("shared application initialization should succeed");
+        assert_eq!(
+            report.capability,
+            paykit_sdk::PubkyIdentityCapability::PrivateLinkCapable
+        );
+        sdk.publish_paykit_app(
+            PaykitApp::new(
+                display_name,
+                PaykitAppCapabilities {
+                    private_payments: true,
+                    payment_requests: true,
+                    receipts: true,
+                    outgoing_payments: true,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("shared application publication should succeed");
+
+        TestUser {
+            sdk,
+            storage,
+            adapter,
+            access: self.access.clone(),
+            public_key: self.public_key.clone(),
+            app_id,
         }
     }
 }
@@ -270,8 +318,8 @@ pub struct TwoParty {
 
 pub async fn two_party() -> TwoParty {
     let testnet = build_testnet().await;
-    let alice = TestUser::sign_up_with_receiver(&testnet, receiver_path("bitkit/wallet")).await;
-    let bob = TestUser::sign_up_with_receiver(&testnet, receiver_path("bitkit/server")).await;
+    let alice = TestUser::sign_up_with_app(&testnet, app_id("bitkit")).await;
+    let bob = TestUser::sign_up_with_app(&testnet, app_id("paykit-server")).await;
     TwoParty {
         _testnet: testnet,
         alice,
@@ -284,15 +332,12 @@ pub async fn linked_two_party() -> TwoParty {
     let pair = two_party().await;
     pair.alice
         .sdk
-        .initiate_link_with_peer(pair.bob.public_key.clone(), pair.bob.receiver_path.clone())
+        .initiate_link_with_peer(pair.bob.public_key.clone())
         .await
         .expect("initiating the Encrypted Link Handshake should succeed");
     pair.bob
         .sdk
-        .accept_link_with_peer(
-            pair.alice.public_key.clone(),
-            pair.alice.receiver_path.clone(),
-        )
+        .accept_link_with_peer(pair.alice.public_key.clone())
         .await
         .expect("accepting the Encrypted Link Handshake should succeed");
     drive_link_to_linked(&pair.alice, &pair.bob).await;
@@ -317,7 +362,7 @@ pub async fn drive_link_to_linked(alice: &TestUser, bob: &TestUser) {
         if alice_state != LinkedPeerState::Linked {
             alice_state = alice
                 .sdk
-                .advance_link_handshake(bob.public_key.clone(), bob.receiver_path.clone())
+                .advance_link_handshake(bob.public_key.clone())
                 .await
                 .expect("initiator handshake advance should succeed")
                 .state;
@@ -325,7 +370,7 @@ pub async fn drive_link_to_linked(alice: &TestUser, bob: &TestUser) {
         if bob_state != LinkedPeerState::Linked {
             bob_state = bob
                 .sdk
-                .advance_link_handshake(alice.public_key.clone(), alice.receiver_path.clone())
+                .advance_link_handshake(alice.public_key.clone())
                 .await
                 .expect("responder handshake advance should succeed")
                 .state;
@@ -334,8 +379,8 @@ pub async fn drive_link_to_linked(alice: &TestUser, bob: &TestUser) {
     }
 }
 
-pub fn receiver_path(value: &str) -> PaykitReceiverPath {
-    PaykitReceiverPath::new(value).expect("test receiver path should be valid")
+pub fn app_id(value: &str) -> PaykitAppId {
+    PaykitAppId::new(value).expect("test App ID should be valid")
 }
 
 pub fn public_receiving_detail(identifier: &str, payload: &str) -> PublicReceivingDetail {

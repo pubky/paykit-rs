@@ -8,13 +8,11 @@ async fn test_initiate_link_with_peer_requires_pubky_session() {
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let result = sdk
-        .initiate_link_with_peer(counterparty, receiver_path())
-        .await;
+    let result = sdk.initiate_link_with_peer(counterparty).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
 }
@@ -23,18 +21,16 @@ async fn test_initiate_link_with_peer_requires_pubky_session() {
 async fn test_initiate_link_with_peer_requires_session_before_using_stored_link() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    seed_initialized_identity_and_link(&storage, counterparty.clone()).await;
+    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let result = sdk
-        .initiate_link_with_peer(counterparty, receiver_path())
-        .await;
+    let result = sdk.initiate_link_with_peer(counterparty).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     let snapshot = storage.snapshot().unwrap();
@@ -48,7 +44,6 @@ async fn test_initiate_link_with_peer_preserves_untrusted_linking_state_without_
     crate::domain::linked_peers::save_link_handshake_state(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         EncryptedLinkHandshakeRole::Initiator,
         vec![1, 2, 3],
         FixedClock.now(),
@@ -59,40 +54,33 @@ async fn test_initiate_link_with_peer_preserves_untrusted_linking_state_without_
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let result = sdk
-        .initiate_link_with_peer(counterparty.clone(), receiver_path())
-        .await;
+    let result = sdk.initiate_link_with_peer(counterparty.clone()).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    assert!(
-        crate::load_encrypted_link_state(&storage, &counterparty, &receiver_path())
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(crate::load_encrypted_link_state(&storage, &counterparty)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
 async fn test_private_queue_readiness_allows_linking_peer_with_handshake() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    seed_initialized_identity_and_handshake(&storage, counterparty.clone()).await;
+    seed_private_capable_identity_and_handshake(&storage, counterparty.clone()).await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let readiness = sdk
-        .private_queue_readiness(&counterparty, &receiver_path())
-        .await
-        .unwrap();
+    let readiness = sdk.private_queue_readiness(&counterparty).await.unwrap();
 
     assert_eq!(readiness, PrivateQueueReadiness::PendingHandshake);
 }
@@ -107,7 +95,6 @@ async fn test_private_queue_readiness_rejects_linking_peer_without_handshake_rol
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linking,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -120,7 +107,6 @@ async fn test_private_queue_readiness_rejects_linking_peer_without_handshake_rol
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
-                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: None,
                     handshake_snapshot: Some(vec![1, 2, 3]),
                     handshake_role: None,
@@ -136,13 +122,11 @@ async fn test_private_queue_readiness_rejects_linking_peer_without_handshake_rol
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let result = sdk
-        .private_queue_readiness(&counterparty, &receiver_path())
-        .await;
+    let result = sdk.private_queue_readiness(&counterparty).await;
 
     assert!(matches!(
         result,
@@ -157,7 +141,6 @@ async fn test_recovery_required_peer_allows_relink_attempt() {
     crate::domain::linked_peers::save_linked_peer_state(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         LinkedPeerState::RecoveryRequired,
         FixedClock.now(),
     )
@@ -170,7 +153,6 @@ async fn test_recovery_required_peer_allows_relink_attempt() {
                 Ok(tx
                     .claim_peer_link_operation(
                         &counterparty,
-                        &receiver_path(),
                         FixedClock.now(),
                         FixedClock.now() + chrono::Duration::seconds(60),
                     )
@@ -183,7 +165,7 @@ async fn test_recovery_required_peer_allows_relink_attempt() {
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
@@ -204,7 +186,6 @@ async fn test_ensure_link_recovery_required_ignores_stale_link_snapshot() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::RecoveryRequired,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -217,7 +198,6 @@ async fn test_ensure_link_recovery_required_ignores_stale_link_snapshot() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
-                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -236,7 +216,6 @@ async fn test_ensure_link_recovery_required_ignores_stale_link_snapshot() {
                 Ok(tx
                     .claim_peer_link_operation(
                         &counterparty,
-                        &receiver_path(),
                         FixedClock.now(),
                         FixedClock.now() + chrono::Duration::seconds(60),
                     )
@@ -249,7 +228,7 @@ async fn test_ensure_link_recovery_required_ignores_stale_link_snapshot() {
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
@@ -265,11 +244,11 @@ async fn test_ensure_link_recovery_required_ignores_stale_link_snapshot() {
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     let snapshot = storage.snapshot().unwrap();
     assert_eq!(
-        snapshot.linked_peers[&(counterparty.clone(), receiver_path())].state,
+        snapshot.linked_peers[&counterparty].state,
         LinkedPeerState::RecoveryRequired
     );
     assert_eq!(
-        snapshot.encrypted_link_states[&(counterparty.clone(), receiver_path())].link_snapshot,
+        snapshot.encrypted_link_states[&counterparty].link_snapshot,
         Some(vec![1, 2, 3])
     );
 }
@@ -284,7 +263,6 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::RecoveryRequired,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -297,7 +275,6 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
-                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: None,
                     handshake_snapshot: Some(vec![1, 2, 3]),
                     handshake_role: Some(EncryptedLinkHandshakeRole::Responder),
@@ -316,7 +293,6 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
                 Ok(tx
                     .claim_peer_link_operation(
                         &counterparty,
-                        &receiver_path(),
                         FixedClock.now(),
                         FixedClock.now() + chrono::Duration::seconds(60),
                     )
@@ -329,7 +305,7 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
@@ -345,11 +321,11 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     let snapshot = storage.snapshot().unwrap();
     assert_eq!(
-        snapshot.linked_peers[&(counterparty.clone(), receiver_path())].state,
+        snapshot.linked_peers[&counterparty].state,
         LinkedPeerState::RecoveryRequired
     );
     assert_eq!(
-        snapshot.encrypted_link_states[&(counterparty.clone(), receiver_path())].handshake_snapshot,
+        snapshot.encrypted_link_states[&counterparty].handshake_snapshot,
         Some(vec![1, 2, 3])
     );
 }
@@ -364,7 +340,6 @@ async fn test_advance_link_handshake_rejects_recovery_required_peer() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
-                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::RecoveryRequired,
                     last_sync_at: Some(FixedClock.now()),
                     last_private_receive_at: None,
@@ -377,7 +352,6 @@ async fn test_advance_link_handshake_rejects_recovery_required_peer() {
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
-                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: Some(vec![1, 2, 3]),
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -393,20 +367,18 @@ async fn test_advance_link_handshake_rejects_recovery_required_peer() {
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let result = sdk
-        .advance_link_handshake(counterparty.clone(), receiver_path())
-        .await;
+    let result = sdk.advance_link_handshake(counterparty.clone()).await;
 
     assert!(matches!(
         result,
         Err(PaykitSdkError::RecoveryRequired { .. })
     ));
     assert_eq!(
-        crate::load_encrypted_link_state(&storage, &counterparty, &receiver_path())
+        crate::load_encrypted_link_state(&storage, &counterparty)
             .await
             .unwrap()
             .unwrap()
@@ -425,7 +397,6 @@ async fn test_advance_link_handshake_preserves_unusable_link_state_without_sessi
             move |tx| {
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
-                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: None,
                     handshake_snapshot: None,
                     handshake_role: None,
@@ -441,21 +412,17 @@ async fn test_advance_link_handshake_preserves_unusable_link_state_without_sessi
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let result = sdk
-        .advance_link_handshake(counterparty.clone(), receiver_path())
-        .await;
+    let result = sdk.advance_link_handshake(counterparty.clone()).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    assert!(
-        crate::load_encrypted_link_state(&storage, &counterparty, &receiver_path())
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(crate::load_encrypted_link_state(&storage, &counterparty)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -468,7 +435,6 @@ async fn test_advance_link_handshake_preserves_unusable_handshake_snapshot_witho
             move |tx| {
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
-                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: None,
                     handshake_snapshot: Some(vec![1, 2, 3]),
                     handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
@@ -484,21 +450,17 @@ async fn test_advance_link_handshake_preserves_unusable_handshake_snapshot_witho
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let result = sdk
-        .advance_link_handshake(counterparty.clone(), receiver_path())
-        .await;
+    let result = sdk.advance_link_handshake(counterparty.clone()).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    assert!(
-        crate::load_encrypted_link_state(&storage, &counterparty, &receiver_path())
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(crate::load_encrypted_link_state(&storage, &counterparty)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -511,7 +473,6 @@ async fn test_advance_link_handshake_preserves_unusable_handshake_metadata_witho
             move |tx| {
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
-                    counterparty_receiver_path: receiver_path(),
                     link_snapshot: None,
                     handshake_snapshot: Some(vec![1, 2, 3]),
                     handshake_role: None,
@@ -527,19 +488,15 @@ async fn test_advance_link_handshake_preserves_unusable_handshake_metadata_witho
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let result = sdk
-        .advance_link_handshake(counterparty.clone(), receiver_path())
-        .await;
+    let result = sdk.advance_link_handshake(counterparty.clone()).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    assert!(
-        crate::load_encrypted_link_state(&storage, &counterparty, &receiver_path())
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(crate::load_encrypted_link_state(&storage, &counterparty)
+        .await
+        .unwrap()
+        .is_some());
 }

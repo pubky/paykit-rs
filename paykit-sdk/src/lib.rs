@@ -6,6 +6,7 @@ mod config;
 mod domain;
 mod error;
 mod identity;
+mod json_serde;
 mod pubky_session;
 mod runtime;
 /// Durable storage traits and in-memory test storage.
@@ -14,10 +15,7 @@ pub mod storage;
 #[doc(inline)]
 pub use backup::{export_backup_state, RestoreReport, SdkBackupState, SDK_BACKUP_VERSION};
 #[doc(inline)]
-pub use config::{
-    EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
-    PublicContactSharingPolicy, DEFAULT_PROFILE_NAMESPACE,
-};
+pub use config::{EndpointManagementScope, PaykitSdkConfig, PublicContactSharingPolicy};
 #[doc(inline)]
 pub use domain::adapters::{
     PaymentAdapter, PaymentAmountContext, PaymentTarget, PrivatePaymentEndpointCandidate,
@@ -27,8 +25,8 @@ pub use domain::adapters::{
 };
 #[doc(inline)]
 pub use domain::contacts::{
-    ContactProfileResolution, ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord,
-    PaykitProfile, PaykitProfileRecord, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
+    ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
+    ProfileResolution, ProfileSource, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
     PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
 };
 #[doc(inline)]
@@ -53,8 +51,9 @@ pub use domain::payment_requests::{
 #[doc(inline)]
 pub use domain::payment_resolution::{
     PreparedPrivateContactPayment, PrivateContactPaymentResolution, PrivatePaymentResolutionState,
-    PrivatePaymentResolutionStatus, PublicContactPaymentResolution, PublicPaymentResolutionStatus,
-    ResolvedPrivatePaymentEndpoint, ResolvedPublicPaymentEndpoint,
+    PrivatePaymentResolutionStatus, PublicContactPaymentResolution,
+    PublicPaymentEndpointLoadFailure, PublicPaymentEndpointLoadFailureKind,
+    PublicPaymentResolutionStatus, ResolvedPrivatePaymentEndpoint, ResolvedPublicPaymentEndpoint,
 };
 #[doc(inline)]
 pub use domain::private_lists::{
@@ -82,19 +81,20 @@ pub use domain::recovery::EncryptedLinkRecoveryMarkerReport;
 pub use error::PaykitSdkError;
 #[doc(inline)]
 pub use identity::{
-    IdentityState, IdentityStatus, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
-    ReceiverNoiseSecretKey,
+    IdentityState, IdentityStatus, PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey,
+    PubkySessionAccess,
 };
 #[doc(inline)]
-pub use paykit_lib::{PaykitReceiverCapabilities, PaykitReceiverMarker, PaykitReceiverPath};
+pub use paykit_lib::{PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitAppRegistry};
 #[doc(inline)]
 pub use pubky_session::{
     parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthCompanionClaim,
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
     PubkyResourceRef, PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionSecret,
+    PAYKIT_SESSION_CAPABILITIES,
 };
 #[doc(inline)]
-pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
+pub use runtime::{Clock, PaykitAppRemovalBlockers, PaykitSdk, SystemClock};
 #[doc(inline)]
 pub use storage::{InMemoryStorage, StorageAdapter, StorageTransaction};
 

@@ -1,8 +1,8 @@
 use super::*;
 
 #[tokio::test]
-async fn test_payment_requests_with_allows_identity_without_live_session() {
-    let storage = InMemoryStorage::new();
+async fn test_payment_requests_with_allows_public_only_identity() {
+    let storage = registered_test_storage();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -10,10 +10,8 @@ async fn test_payment_requests_with_allows_identity_without_live_session() {
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    local_pubky_public_key: Some(local_public_key),
-                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    public_key: Some(local_public_key),
                     initialized_at: FixedClock.now(),
-                    sign_out_generation: 0,
                 });
                 Ok(())
             }
@@ -23,7 +21,6 @@ async fn test_payment_requests_with_allows_identity_without_live_session() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440000",
             "550e8400-e29b-41d4-a716-446655440000",
@@ -38,14 +35,11 @@ async fn test_payment_requests_with_allows_identity_without_live_session() {
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let records = sdk
-        .payment_requests_with(&counterparty, &receiver_path())
-        .await
-        .unwrap();
+    let records = sdk.payment_requests_with(&counterparty).await.unwrap();
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].state, PaymentRequestLifecycleState::Proposed);
@@ -53,7 +47,7 @@ async fn test_payment_requests_with_allows_identity_without_live_session() {
 
 #[tokio::test]
 async fn test_payment_requests_with_marks_recovery_required_peer_state() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_test_storage();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -62,14 +56,11 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    local_pubky_public_key: Some(local_public_key),
-                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    public_key: Some(local_public_key),
                     initialized_at: FixedClock.now(),
-                    sign_out_generation: 0,
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty,
-                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::RecoveryRequired,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -88,7 +79,6 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440000",
             "550e8400-e29b-41d4-a716-446655440000",
@@ -103,14 +93,11 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let records = sdk
-        .payment_requests_with(&counterparty, &receiver_path())
-        .await
-        .unwrap();
+    let records = sdk.payment_requests_with(&counterparty).await.unwrap();
 
     assert_eq!(records.len(), 1);
     assert_eq!(
@@ -121,7 +108,7 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
 
 #[tokio::test]
 async fn test_list_payment_requests_filters_across_counterparties() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_test_storage();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let first = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let second = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -132,14 +119,11 @@ async fn test_list_payment_requests_filters_across_counterparties() {
             let blocked = blocked.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    local_pubky_public_key: Some(local_public_key),
-                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    public_key: Some(local_public_key),
                     initialized_at: FixedClock.now(),
-                    sign_out_generation: 0,
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: blocked,
-                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Blocked,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -158,7 +142,6 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     persist_private_stream_batch(
         &storage,
         first.clone(),
-        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440000",
             "550e8400-e29b-41d4-a716-446655440000",
@@ -172,7 +155,6 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     persist_private_stream_batch(
         &storage,
         second.clone(),
-        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440001",
             "550e8400-e29b-41d4-a716-446655440001",
@@ -186,7 +168,6 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     persist_private_stream_batch(
         &storage,
         blocked,
-        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440002",
             "550e8400-e29b-41d4-a716-446655440002",
@@ -197,11 +178,13 @@ async fn test_list_payment_requests_filters_across_counterparties() {
     )
     .await
     .unwrap();
+    authorize_payment_request_app(&storage, first.clone(), "bitkit").await;
+    authorize_payment_request_app(&storage, second.clone(), "bitkit").await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
@@ -225,119 +208,98 @@ async fn test_list_payment_requests_filters_across_counterparties() {
 }
 
 #[tokio::test]
-async fn test_actionable_received_payment_requests_excludes_locally_accepted_request() {
-    let storage = InMemoryStorage::new();
+async fn test_actionable_received_payment_requests_includes_all_payment_targets() {
+    let storage = registered_test_storage();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let request_id = "550e8400-e29b-41d4-a716-446655440030";
     storage
-        .save_identity_state(IdentityState {
-            local_pubky_public_key: Some(local_public_key),
-            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
-            initialized_at: FixedClock.now(),
-            sign_out_generation: 0,
+        .transaction({
+            let local_public_key = local_public_key.clone();
+            move |tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_public_key),
+                    initialized_at: FixedClock.now(),
+                });
+                Ok(())
+            }
         })
         .await
         .unwrap();
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
-        vec![payment_request_message(
-            "650e8400-e29b-41d4-a716-446655440030",
-            request_id,
-            None,
-        )],
+        vec![
+            payment_request_message_for_required_app(
+                "650e8400-e29b-41d4-a716-446655440010",
+                "550e8400-e29b-41d4-a716-446655440010",
+                None,
+            ),
+            payment_request_message_for_required_app(
+                "650e8400-e29b-41d4-a716-446655440011",
+                "550e8400-e29b-41d4-a716-446655440011",
+                Some("test-app"),
+            ),
+            payment_request_message_for_required_app(
+                "650e8400-e29b-41d4-a716-446655440012",
+                "550e8400-e29b-41d4-a716-446655440012",
+                Some("other-app"),
+            ),
+        ],
         None,
         FixedClock.now(),
     )
     .await
     .unwrap();
-    let acceptance = parsed_payment_request_event(payment_request_acceptance_raw(
-        "650e8400-e29b-41d4-a716-446655440031",
-        request_id,
-    ));
-    crate::domain::payment_requests::enqueue_payment_request_event(
-        &storage,
-        counterparty,
-        receiver_path(),
-        &acceptance,
-        FixedClock.now(),
-    )
-    .await
-    .unwrap();
+    authorize_payment_request_app(&storage, counterparty.clone(), "paykit-server").await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
     let actionable = sdk.actionable_received_payment_requests().await.unwrap();
 
-    assert!(actionable.is_empty());
+    assert_eq!(actionable.len(), 3);
+    assert!(actionable.iter().any(|record| {
+        record
+            .terms
+            .as_ref()
+            .and_then(|terms| terms.required_app_id.as_ref())
+            .is_some_and(|required_app_id| required_app_id.as_str() == "other-app")
+    }));
+}
+
+#[tokio::test]
+async fn test_actionable_received_payment_requests_excludes_locally_accepted_request() {
+    assert_local_response_is_not_actionable(
+        "550e8400-e29b-41d4-a716-446655440030",
+        "650e8400-e29b-41d4-a716-446655440030",
+        parsed_payment_request_event(payment_request_acceptance_raw(
+            "650e8400-e29b-41d4-a716-446655440031",
+            "550e8400-e29b-41d4-a716-446655440030",
+        )),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn test_actionable_received_payment_requests_excludes_locally_rejected_request() {
-    let storage = InMemoryStorage::new();
-    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let request_id = "550e8400-e29b-41d4-a716-446655440040";
-    storage
-        .save_identity_state(IdentityState {
-            local_pubky_public_key: Some(local_public_key),
-            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
-            initialized_at: FixedClock.now(),
-            sign_out_generation: 0,
-        })
-        .await
-        .unwrap();
-    persist_private_stream_batch(
-        &storage,
-        counterparty.clone(),
-        receiver_path(),
-        vec![payment_request_message(
-            "650e8400-e29b-41d4-a716-446655440040",
-            request_id,
-            None,
-        )],
-        None,
-        FixedClock.now(),
+    assert_local_response_is_not_actionable(
+        "550e8400-e29b-41d4-a716-446655440040",
+        "650e8400-e29b-41d4-a716-446655440040",
+        parsed_payment_request_event(payment_request_rejection_raw(
+            "650e8400-e29b-41d4-a716-446655440041",
+            "550e8400-e29b-41d4-a716-446655440040",
+        )),
     )
-    .await
-    .unwrap();
-    let rejection = parsed_payment_request_event(payment_request_rejection_raw(
-        "650e8400-e29b-41d4-a716-446655440041",
-        request_id,
-    ));
-    crate::domain::payment_requests::enqueue_payment_request_event(
-        &storage,
-        counterparty,
-        receiver_path(),
-        &rejection,
-        FixedClock.now(),
-    )
-    .await
-    .unwrap();
-    let sdk = PaykitSdk::with_clock(
-        storage,
-        TestPubkySessionProvider { session: None },
-        TestPaymentAdapter,
-        PaykitSdkConfig::default(),
-        FixedClock,
-    );
-
-    let actionable = sdk.actionable_received_payment_requests().await.unwrap();
-
-    assert!(actionable.is_empty());
+    .await;
 }
 
 #[tokio::test]
-async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_preserves_blocked_error(
-) {
-    let storage = InMemoryStorage::new();
+async fn test_list_payment_requests_counterparty_filter_preserves_blocked_error() {
+    let storage = registered_test_storage();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let blocked = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -347,14 +309,11 @@ async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_pres
             let blocked = blocked.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
-                    local_pubky_public_key: Some(local_public_key),
-                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    public_key: Some(local_public_key),
                     initialized_at: FixedClock.now(),
-                    sign_out_generation: 0,
                 });
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty: blocked,
-                    counterparty_receiver_path: other_receiver_path(),
                     state: LinkedPeerState::Blocked,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -373,7 +332,6 @@ async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_pres
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440020",
             "550e8400-e29b-41d4-a716-446655440020",
@@ -387,7 +345,6 @@ async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_pres
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        other_receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440021",
             "550e8400-e29b-41d4-a716-446655440021",
@@ -401,7 +358,6 @@ async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_pres
     persist_private_stream_batch(
         &storage,
         blocked.clone(),
-        other_receiver_path(),
         vec![payment_request_message(
             "650e8400-e29b-41d4-a716-446655440022",
             "550e8400-e29b-41d4-a716-446655440022",
@@ -416,7 +372,7 @@ async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_pres
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
@@ -438,27 +394,19 @@ async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_pres
     assert!(records
         .iter()
         .all(|record| record.counterparty == counterparty));
-    assert!(records
-        .iter()
-        .any(|record| record.counterparty_receiver_path == receiver_path()));
-    assert!(records
-        .iter()
-        .any(|record| record.counterparty_receiver_path == other_receiver_path()));
     assert!(matches!(blocked_result, Err(PaykitSdkError::Policy { .. })));
 }
 
 #[tokio::test]
 async fn test_active_recurring_payment_requests_filters_accepted_recurring_requests() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_test_storage();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let recurring_peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let one_time_peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            local_pubky_public_key: Some(local_public_key),
-            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+            public_key: Some(local_public_key),
             initialized_at: FixedClock.now(),
-            sign_out_generation: 0,
         })
         .await
         .unwrap();
@@ -478,11 +426,12 @@ async fn test_active_recurring_payment_requests_filters_accepted_recurring_reque
         "550e8400-e29b-41d4-a716-446655440011",
     )
     .await;
+    authorize_payment_request_app(&storage, recurring_peer.clone(), "bitkit").await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
@@ -502,14 +451,57 @@ async fn test_active_recurring_payment_requests_filters_accepted_recurring_reque
 }
 
 #[tokio::test]
-async fn test_enqueue_payment_request_event_requires_initialized_identity() {
-    let storage = InMemoryStorage::new();
+async fn test_active_recurring_payment_requests_require_current_remote_payer_app() {
+    let storage = registered_test_storage();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local_public_key),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    queue_recurring_request_with_inbound_acceptance(
+        &storage,
+        counterparty.clone(),
+        "650e8400-e29b-41d4-a716-446655440020",
+        "650e8400-e29b-41d4-a716-446655440021",
+        "550e8400-e29b-41d4-a716-446655440020",
+    )
+    .await;
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let historical = sdk.payment_requests_with(&counterparty).await.unwrap();
+    let unauthorized = sdk.active_recurring_payment_requests().await.unwrap();
+    authorize_payment_request_app(&storage, counterparty.clone(), "bitkit").await;
+    let authorized = sdk.active_recurring_payment_requests().await.unwrap();
+
+    assert_eq!(historical.len(), 1);
+    assert_eq!(
+        historical[0].state,
+        PaymentRequestLifecycleState::ActiveRecurring
+    );
+    assert!(unauthorized.is_empty());
+    assert_eq!(authorized.len(), 1);
+    assert_eq!(authorized[0].counterparty, counterparty);
+}
+
+#[tokio::test]
+async fn test_enqueue_payment_request_event_requires_private_capable_identity() {
+    let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
     let event = PaymentRequestAcceptance::new(
@@ -518,7 +510,7 @@ async fn test_enqueue_payment_request_event_requires_initialized_identity() {
     );
 
     let result = sdk
-        .enqueue_raw_payment_request_acceptance(counterparty, receiver_path(), &event)
+        .enqueue_raw_payment_request_acceptance(counterparty, &event)
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -526,13 +518,12 @@ async fn test_enqueue_payment_request_event_requires_initialized_identity() {
 
 #[tokio::test]
 async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         vec![payment_request_message(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
             request_id.as_str(),
@@ -547,13 +538,11 @@ async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let result = sdk
-        .accept_payment_request(counterparty, receiver_path(), &request_id)
-        .await;
+    let result = sdk.accept_payment_request(counterparty, &request_id).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     assert!(storage
@@ -565,13 +554,12 @@ async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
 
 #[tokio::test]
 async fn test_reject_payment_request_allows_expired_proposal_before_readiness_check() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         vec![payment_request_message(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
             request_id.as_str(),
@@ -582,16 +570,17 @@ async fn test_reject_payment_request_allows_expired_proposal_before_readiness_ch
     )
     .await
     .unwrap();
+    authorize_payment_request_app(&storage, counterparty.clone(), "bitkit").await;
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
     let result = sdk
-        .reject_payment_request(counterparty, receiver_path(), &request_id, None)
+        .reject_payment_request(counterparty, &request_id, None)
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -604,13 +593,49 @@ async fn test_reject_payment_request_allows_expired_proposal_before_readiness_ch
 
 #[tokio::test]
 async fn test_accept_payment_request_does_not_queue_without_private_send_readiness() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
+        vec![payment_request_message(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            request_id.as_str(),
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    authorize_payment_request_app(&storage, counterparty.clone(), "bitkit").await;
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let result = sdk.accept_payment_request(counterparty, &request_id).await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert!(storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_accept_payment_request_rejects_unregistered_origin_app() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
         vec![payment_request_message(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
             request_id.as_str(),
@@ -625,20 +650,81 @@ async fn test_accept_payment_request_does_not_queue_without_private_send_readine
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
-    let result = sdk
-        .accept_payment_request(counterparty, receiver_path(), &request_id)
-        .await;
+    let result = sdk.accept_payment_request(counterparty, &request_id).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     assert!(storage
         .snapshot()
         .unwrap()
         .outbound_private_messages
         .is_empty());
+}
+
+async fn assert_local_response_is_not_actionable(
+    request_id: &str,
+    request_event_id: &str,
+    response: PaymentRequestEvent,
+) {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(PubkyPublicKey::from_public_key(
+                &pubky::Keypair::random().public_key(),
+            )),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![payment_request_message(request_event_id, request_id, None)],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    authorize_payment_request_app(&storage, counterparty.clone(), "bitkit").await;
+    crate::domain::payment_requests::enqueue_payment_request_event(
+        &storage,
+        counterparty,
+        &app_id(),
+        &response,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+
+    let actionable = sdk.actionable_received_payment_requests().await.unwrap();
+
+    assert!(actionable.is_empty());
+}
+
+async fn authorize_payment_request_app(
+    storage: &InMemoryStorage,
+    counterparty: PubkyPublicKey,
+    app_id: &str,
+) {
+    let app_id = paykit_lib::PaykitAppId::new(app_id).unwrap();
+    storage
+        .transaction(move |tx| {
+            tx.save_authorized_payment_request_apps(counterparty, vec![app_id]);
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 async fn queue_recurring_request_with_inbound_acceptance(
@@ -695,7 +781,7 @@ async fn queue_request_with_inbound_acceptance(
     crate::domain::payment_requests::enqueue_payment_request_event(
         storage,
         counterparty.clone(),
-        receiver_path(),
+        &app_id(),
         &request_event,
         FixedClock.now(),
     )
@@ -704,7 +790,6 @@ async fn queue_request_with_inbound_acceptance(
     persist_private_stream_batch(
         storage,
         counterparty,
-        receiver_path(),
         vec![payment_request_acceptance_message(
             acceptance_event_id,
             request_id,
@@ -735,14 +820,31 @@ fn private_application_message(raw_json: String) -> PrivateApplicationMessage {
             .get("kind")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        app_id: value
+            .get("app_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
         raw_json,
     }
+}
+
+fn payment_request_message_for_required_app(
+    event_id: &str,
+    request_id: &str,
+    required_app_id: Option<&str>,
+) -> PrivateApplicationMessage {
+    let required_app_id = required_app_id
+        .map(|value| format!(r#""{value}""#))
+        .unwrap_or_else(|| "null".into());
+    private_application_message(format!(
+        r#"{{"version":1,"kind":"paykit.payment_request","app_id":"paykit-server","event_id":"{event_id}","payment_request_id":"{request_id}","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":{required_app_id},"metadata":{{}}}}}}"#
+    ))
 }
 
 fn payment_request_raw(event_id: &str, request_id: &str, recurrence: Option<&str>) -> String {
     let recurrence = recurrence.unwrap_or("null");
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_request","event_id":"{event_id}","payment_request_id":"{request_id}","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":{recurrence},"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{{}}}}}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request","app_id":"bitkit","event_id":"{event_id}","payment_request_id":"{request_id}","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":{recurrence},"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{{}}}}}}"#
     )
 }
 
@@ -751,18 +853,18 @@ fn payment_request_acceptance_message(
     request_id: &str,
 ) -> PrivateApplicationMessage {
     private_application_message(format!(
-        r#"{{"version":1,"kind":"paykit.payment_request_acceptance","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request_acceptance","app_id":"bitkit","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
     ))
 }
 
 fn payment_request_acceptance_raw(event_id: &str, request_id: &str) -> String {
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_request_acceptance","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request_acceptance","app_id":"bitkit","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
     )
 }
 
 fn payment_request_rejection_raw(event_id: &str, request_id: &str) -> String {
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_request_rejection","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request_rejection","app_id":"bitkit","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
     )
 }

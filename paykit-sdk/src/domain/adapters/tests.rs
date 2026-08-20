@@ -4,15 +4,11 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
-fn receiver_path() -> PaykitReceiverPath {
-    PaykitReceiverPath::new("bitkit/wallet").unwrap()
-}
-
 #[test]
 fn test_endpoint_debug_redacts_payloads() {
     let candidate = PrivatePaymentEndpointCandidate {
         counterparty: counterparty(),
-        counterparty_receiver_path: receiver_path(),
+        app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
         identifier: "btc-lightning-bolt11".into(),
         payload: "ln-private-secret".into(),
     };

@@ -15,40 +15,41 @@ where
     pub async fn prepare_receipt_issuance(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         draft: ReceiptDraft,
     ) -> Result<ReceiptIssuanceView> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
+        if identity.public_key.is_none() {
             return Err(PaykitSdkError::Identity {
                 context: "no local Pubky identity available for receipt issuance".into(),
                 source: None,
             });
         }
-        self.ensure_peer_not_blocked(&counterparty, &counterparty_receiver_path)
-            .await?;
+        self.ensure_peer_not_blocked(&counterparty).await?;
 
         if let Some(receipt_id) = draft.receipt_id.as_ref() {
             if let Some(existing) =
                 load_receipt_issuance_record_by_receipt_id(&self.storage, receipt_id.as_str())
                     .await?
             {
-                if existing.counterparty != counterparty
-                    || existing.counterparty_receiver_path != counterparty_receiver_path
-                {
+                if existing.app_id != self.config.app_id {
                     return Err(PaykitSdkError::Protocol {
                         context: format!(
-                            "Receipt issuance {} already exists for a different counterparty receiver",
+                            "Receipt issuance {} already exists for another Paykit App",
                             existing.receipt_id
                         ),
                         source: None,
                     });
                 }
-                if !receipt_issuance_record_matches_draft(
-                    &existing,
-                    &counterparty_receiver_path,
-                    &draft,
-                )? {
+                if existing.counterparty != counterparty {
+                    return Err(PaykitSdkError::Protocol {
+                        context: format!(
+                            "Receipt issuance {} already exists for a different counterparty",
+                            existing.receipt_id
+                        ),
+                        source: None,
+                    });
+                }
+                if !receipt_issuance_record_matches_draft(&existing, &draft)? {
                     return Err(PaykitSdkError::Protocol {
                         context: format!(
                             "Receipt issuance {} for counterparty {} already exists with different fields",
@@ -63,21 +64,23 @@ where
 
         let now = self.clock.now();
         let recipient = counterparty.to_public_key()?;
-        let prepared = paykit_lib::prepare_receipt_for_recipient(
-            recipient,
-            &self.config.receiver_path,
-            draft,
-        )?;
+        let prepared = paykit_lib::prepare_receipt_for_recipient(recipient, draft)?;
         let record = ReceiptIssuanceRecord::from_prepared(
             counterparty,
-            counterparty_receiver_path,
+            self.config.app_id.clone(),
             prepared,
             now,
         )?;
         self.storage
             .transaction({
+                let app_id = self.config.app_id.clone();
                 let record = record.clone();
                 move |tx| {
+                    crate::storage::require_paykit_app_capability(
+                        tx,
+                        &app_id,
+                        PrivateMessageKind::ReceiptAccess,
+                    )?;
                     if tx
                         .receipt_issuance_record_by_receipt_id(&record.receipt_id)
                         .is_some()
@@ -106,7 +109,6 @@ where
     pub async fn issue_receipt(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         draft: ReceiptDraft,
     ) -> Result<ReceiptIssuanceView> {
         if draft.receipt_id.is_none() {
@@ -116,13 +118,9 @@ where
             });
         }
         let record = self
-            .prepare_receipt_issuance(
-                counterparty.clone(),
-                counterparty_receiver_path.clone(),
-                draft,
-            )
+            .prepare_receipt_issuance(counterparty.clone(), draft)
             .await?;
-        self.process_receipt_issuance(counterparty, counterparty_receiver_path, &record.receipt_id)
+        self.process_receipt_issuance(counterparty, &record.receipt_id)
             .await
     }
 
@@ -130,30 +128,27 @@ where
     pub async fn process_receipt_issuance(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         receipt_id: &str,
     ) -> Result<ReceiptIssuanceView> {
-        let (session_access, _) = self.private_link_session_access().await?;
-        let record = load_receipt_issuance_record(
-            &self.storage,
-            &counterparty,
-            &counterparty_receiver_path,
-            receipt_id,
-        )
-        .await?
-        .ok_or_else(|| {
-                PaykitSdkError::NotFound {
-                    context: format!(
-                        "Receipt issuance {receipt_id} for counterparty {counterparty}/{counterparty_receiver_path} was not found"
-                    ),
-                    source: None,
-                }
+        let record = load_receipt_issuance_record(&self.storage, &counterparty, receipt_id)
+            .await?
+            .ok_or_else(|| PaykitSdkError::NotFound {
+                context: format!(
+                    "Receipt issuance {receipt_id} for counterparty {counterparty} was not found"
+                ),
+                source: None,
             })?;
-        self.ensure_private_outbound_ready(&counterparty, &record.counterparty_receiver_path)
-            .await?;
+        if record.app_id != self.config.app_id {
+            return Err(PaykitSdkError::Policy {
+                context: format!("Receipt issuance {receipt_id} belongs to another Paykit App"),
+                source: None,
+            });
+        }
         if record.status == ReceiptIssuanceStatus::AccessQueued {
             return Ok(ReceiptIssuanceView::from(&record));
         }
+        self.ensure_private_outbound_ready(&counterparty).await?;
+        let (session_access, _) = self.private_link_session_access().await?;
 
         let record = if record.stored_at.is_some() {
             record
@@ -212,20 +207,17 @@ where
     pub async fn receipt_issuance_records(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptIssuanceView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
+        if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
-        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
-            .await?;
-        let mut records =
-            load_receipt_issuance_records(&self.storage, counterparty, counterparty_receiver_path)
-                .await?
-                .iter()
-                .map(ReceiptIssuanceView::from)
-                .collect::<Vec<_>>();
+        self.ensure_peer_not_blocked(counterparty).await?;
+        let mut records = load_receipt_issuance_records(&self.storage, counterparty)
+            .await?
+            .iter()
+            .map(ReceiptIssuanceView::from)
+            .collect::<Vec<_>>();
         records.sort_by_key(|record| Reverse(record.created_at));
         Ok(records)
     }
@@ -234,16 +226,14 @@ where
     pub async fn issued_receipts_to(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptIssuanceView>> {
-        self.receipt_issuance_records(counterparty, counterparty_receiver_path)
-            .await
+        self.receipt_issuance_records(counterparty).await
     }
 
     /// List issued receipts across non-blocked counterparties, newest first.
     pub async fn issued_receipts(&self) -> Result<Vec<ReceiptIssuanceView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
+        if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
         self.storage
@@ -255,10 +245,7 @@ where
                     .filter(|record| {
                         !snapshot
                             .linked_peers
-                            .get(&(
-                                record.counterparty.clone(),
-                                record.counterparty_receiver_path.clone(),
-                            ))
+                            .get(&record.counterparty)
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
                     .map(|record| ReceiptIssuanceView::from(&record))
@@ -278,55 +265,57 @@ where
     pub async fn retrieve_receipt(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         receipt_id: &str,
     ) -> Result<ReceiptRecord> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let local_public_key =
-            identity
-                .local_pubky_public_key
-                .ok_or_else(|| PaykitSdkError::Identity {
-                    context: "no local Pubky identity available for receipt retrieval".into(),
-                    source: None,
-                })?;
-        self.ensure_peer_not_blocked(&counterparty, &counterparty_receiver_path)
-            .await?;
-        let (stored_receipt, access_records, conflicted_access_count, stored_receipt_conflicted) =
-            self.storage
-                .transaction(|tx| {
-                    let stored_receipt =
-                        tx.receipt_record(&counterparty, &counterparty_receiver_path, receipt_id);
-                    let stored_receipt_conflicted = stored_receipt.as_ref().is_some_and(|record| {
-                        tx.event_dedup_record(
-                            &counterparty,
-                            &counterparty_receiver_path,
-                            &record.receipt_access_event_id,
-                        )
+        let local_public_key = identity
+            .public_key
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context: "no local Pubky identity available for receipt retrieval".into(),
+                source: None,
+            })?;
+        self.ensure_peer_not_blocked(&counterparty).await?;
+        let (
+            stored_receipt,
+            mut access_records,
+            conflicted_access_records,
+            stored_receipt_conflicted,
+        ) = self
+            .storage
+            .transaction(|tx| {
+                let stored_receipt = tx.receipt_record(&counterparty, receipt_id);
+                let stored_receipt_conflicted = stored_receipt.as_ref().is_some_and(|record| {
+                    tx.event_dedup_record(&counterparty, &record.receipt_access_event_id)
                         .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
-                    });
-                    let mut access_records = Vec::new();
-                    let mut conflicted_access_count = 0usize;
-                    for record in tx
-                        .receipt_access_records(&counterparty, &counterparty_receiver_path)
-                        .into_iter()
-                        .filter(|record| record.receipt_id == receipt_id)
-                    {
-                        if Self::receipt_access_event_is_conflicted(tx, &record) {
-                            conflicted_access_count += 1;
-                        } else {
-                            access_records.push(record);
-                        }
+                });
+                let mut access_records = Vec::new();
+                let mut conflicted_access_records = Vec::new();
+                for record in tx
+                    .receipt_access_records(&counterparty)
+                    .into_iter()
+                    .filter(|record| record.receipt_id == receipt_id)
+                {
+                    if Self::receipt_access_event_is_conflicted(tx, &record) {
+                        conflicted_access_records.push(record);
+                    } else {
+                        access_records.push(record);
                     }
-                    access_records.sort_by_key(|record| Reverse(record.stream_item_id));
-                    Ok((
-                        stored_receipt,
-                        access_records,
-                        conflicted_access_count,
-                        stored_receipt_conflicted,
-                    ))
-                })
-                .await?;
+                }
+                access_records.sort_by_key(|record| Reverse(record.stream_item_id));
+                Ok((
+                    stored_receipt,
+                    access_records,
+                    conflicted_access_records,
+                    stored_receipt_conflicted,
+                ))
+            })
+            .await?;
         if let Some(record) = stored_receipt {
+            access_records.retain(|access| access.app_authorized);
+            let conflicted_access_count = conflicted_access_records
+                .iter()
+                .filter(|access| access.app_authorized)
+                .count();
             if record.recipient_public_key != local_public_key {
                 return Err(PaykitSdkError::Protocol {
                     context: "stored Receipt recipient does not match local identity".into(),
@@ -347,6 +336,27 @@ where
             .await?;
             return Ok(record);
         }
+        let authorized_app_ids = self.authorized_receipt_apps_for_peer(&counterparty).await?;
+        self.persist_receipt_app_authorization(&counterparty, authorized_app_ids.as_deref())
+            .await?;
+        for record in &mut access_records {
+            if authorized_app_ids
+                .as_ref()
+                .is_some_and(|app_ids| app_ids.contains(&record.app_id))
+            {
+                *record = record.mark_app_authorized();
+            }
+        }
+        access_records.retain(|record| record.app_authorized);
+        let conflicted_access_count = conflicted_access_records
+            .into_iter()
+            .filter(|record| {
+                record.app_authorized
+                    || authorized_app_ids
+                        .as_ref()
+                        .is_some_and(|app_ids| app_ids.contains(&record.app_id))
+            })
+            .count();
         if access_records.is_empty() && conflicted_access_count > 0 {
             return Err(Self::conflicted_receipt_access_error(receipt_id));
         }
@@ -467,19 +477,26 @@ where
     pub async fn receipt_access_records(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptAccessView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
+        if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
-        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
+        self.ensure_peer_not_blocked(counterparty).await?;
+        let authorized_app_ids = self.authorized_receipt_apps_for_peer(counterparty).await?;
+        self.persist_receipt_app_authorization(counterparty, authorized_app_ids.as_deref())
             .await?;
         self.storage
             .transaction(|tx| {
                 let mut records = tx
-                    .receipt_access_records(counterparty, counterparty_receiver_path)
+                    .receipt_access_records(counterparty)
                     .into_iter()
+                    .filter(|record| {
+                        record.app_authorized
+                            || authorized_app_ids
+                                .as_ref()
+                                .is_some_and(|app_ids| app_ids.contains(&record.app_id))
+                    })
                     .filter(|record| !Self::receipt_access_event_is_conflicted(tx, record))
                     .map(|record| ReceiptAccessView::from(&record))
                     .collect::<Vec<_>>();
@@ -493,17 +510,33 @@ where
     pub async fn receipt_access_from(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptAccessView>> {
-        self.receipt_access_records(counterparty, counterparty_receiver_path)
-            .await
+        self.receipt_access_records(counterparty).await
     }
 
     /// List Receipt Access across non-blocked counterparties, newest first.
     pub async fn receipt_access(&self) -> Result<Vec<ReceiptAccessView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
+        if identity.public_key.is_none() {
             return Ok(Vec::new());
+        }
+        let counterparties = self
+            .storage
+            .transaction(|tx| {
+                Ok(tx
+                    .export_storage_state()
+                    .receipt_access_records
+                    .into_values()
+                    .map(|record| record.counterparty)
+                    .collect::<HashSet<_>>())
+            })
+            .await?;
+        let mut authorized_by_counterparty = HashMap::new();
+        for counterparty in counterparties {
+            let authorized = self.authorized_receipt_apps_for_peer(&counterparty).await?;
+            self.persist_receipt_app_authorization(&counterparty, authorized.as_deref())
+                .await?;
+            authorized_by_counterparty.insert(counterparty, authorized);
         }
         self.storage
             .transaction(|tx| {
@@ -514,11 +547,15 @@ where
                     .filter(|record| {
                         !snapshot
                             .linked_peers
-                            .get(&(
-                                record.counterparty.clone(),
-                                record.counterparty_receiver_path.clone(),
-                            ))
+                            .get(&record.counterparty)
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                    })
+                    .filter(|record| {
+                        record.app_authorized
+                            || authorized_by_counterparty
+                                .get(&record.counterparty)
+                                .and_then(Option::as_ref)
+                                .is_some_and(|app_ids| app_ids.contains(&record.app_id))
                     })
                     .filter(|record| !Self::receipt_access_event_is_conflicted(tx, record))
                     .map(|record| ReceiptAccessView::from(&record))
@@ -530,17 +567,12 @@ where
     }
 
     /// List decrypted Receipt records for one issuer, newest first.
-    pub async fn receipt_records(
-        &self,
-        issuer: &PubkyPublicKey,
-        issuer_receiver_path: &PaykitReceiverPath,
-    ) -> Result<Vec<ReceiptRecord>> {
+    pub async fn receipt_records(&self, issuer: &PubkyPublicKey) -> Result<Vec<ReceiptRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let Some(local_public_key) = identity.local_pubky_public_key else {
+        let Some(local_public_key) = identity.public_key else {
             return Ok(Vec::new());
         };
-        self.ensure_peer_not_blocked(issuer, issuer_receiver_path)
-            .await?;
+        self.ensure_peer_not_blocked(issuer).await?;
         self.storage
             .transaction(|tx| {
                 let mut records = tx
@@ -548,7 +580,6 @@ where
                     .receipt_records
                     .into_values()
                     .filter(|record| &record.issuer == issuer)
-                    .filter(|record| &record.issuer_receiver_path == issuer_receiver_path)
                     .filter(|record| record.recipient_public_key == local_public_key)
                     .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
                     .collect::<Vec<_>>();
@@ -559,18 +590,14 @@ where
     }
 
     /// List decrypted receipts from one issuer, newest first.
-    pub async fn receipts_from(
-        &self,
-        issuer: &PubkyPublicKey,
-        issuer_receiver_path: &PaykitReceiverPath,
-    ) -> Result<Vec<ReceiptRecord>> {
-        self.receipt_records(issuer, issuer_receiver_path).await
+    pub async fn receipts_from(&self, issuer: &PubkyPublicKey) -> Result<Vec<ReceiptRecord>> {
+        self.receipt_records(issuer).await
     }
 
     /// List decrypted receipts across non-blocked issuers, newest first.
     pub async fn receipts(&self) -> Result<Vec<ReceiptRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let Some(local_public_key) = identity.local_pubky_public_key else {
+        let Some(local_public_key) = identity.public_key else {
             return Ok(Vec::new());
         };
         self.storage
@@ -583,13 +610,33 @@ where
                     .filter(|record| {
                         !snapshot
                             .linked_peers
-                            .get(&(record.issuer.clone(), record.issuer_receiver_path.clone()))
+                            .get(&record.issuer)
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
                     .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.retrieved_at));
                 Ok(records)
+            })
+            .await
+    }
+
+    async fn persist_receipt_app_authorization(
+        &self,
+        counterparty: &PubkyPublicKey,
+        authorized_app_ids: Option<&[paykit_lib::PaykitAppId]>,
+    ) -> Result<()> {
+        let Some(authorized_app_ids) = authorized_app_ids else {
+            return Ok(());
+        };
+        self.storage
+            .transaction(|tx| {
+                for record in tx.receipt_access_records(counterparty) {
+                    if !record.app_authorized && authorized_app_ids.contains(&record.app_id) {
+                        tx.save_receipt_access_record(record.mark_app_authorized());
+                    }
+                }
+                Ok(())
             })
             .await
     }
@@ -637,24 +684,16 @@ where
         tx: &dyn crate::storage::StorageTransaction,
         access: &ReceiptAccessRecord,
     ) -> bool {
-        tx.event_dedup_record(
-            &access.counterparty,
-            &access.counterparty_receiver_path,
-            &access.event_id,
-        )
-        .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
+        tx.event_dedup_record(&access.counterparty, &access.event_id)
+            .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
     }
 
     fn receipt_record_access_event_is_conflicted(
         tx: &dyn crate::storage::StorageTransaction,
         record: &ReceiptRecord,
     ) -> bool {
-        tx.event_dedup_record(
-            &record.issuer,
-            &record.issuer_receiver_path,
-            &record.receipt_access_event_id,
-        )
-        .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
+        tx.event_dedup_record(&record.issuer, &record.receipt_access_event_id)
+            .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
     }
 
     fn conflicted_receipt_access_error(receipt_id: &str) -> PaykitSdkError {

@@ -18,8 +18,12 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
-fn receiver_path() -> PaykitReceiverPath {
-    PaykitReceiverPath::new("bitkit/wallet").unwrap()
+fn app_id() -> paykit_lib::PaykitAppId {
+    paykit_lib::PaykitAppId::new("bitkit").unwrap()
+}
+
+fn registered_storage() -> InMemoryStorage {
+    InMemoryStorage::with_registered_apps([app_id()])
 }
 
 fn private_message(raw_json: String) -> PrivateApplicationMessage {
@@ -31,6 +35,10 @@ fn private_message(raw_json: String) -> PrivateApplicationMessage {
             .and_then(|version| u8::try_from(version).ok()),
         kind: value
             .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        app_id: value
+            .get("app_id")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
         raw_json,
@@ -57,41 +65,59 @@ fn request_raw(
         .unwrap_or_else(|| "null".into());
     let recurrence = recurrence.unwrap_or("null");
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_request","event_id":"{event_id}","payment_request_id":"{request_id}","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"{reference}","proposal_expires_at":{expiry},"recurrence":{recurrence},"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{{"note":"private"}}}}}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request","app_id":"bitkit","event_id":"{event_id}","payment_request_id":"{request_id}","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"{reference}","proposal_expires_at":{expiry},"recurrence":{recurrence},"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{{"note":"private"}}}}}}"#
     )
 }
 
 fn acceptance_raw(event_id: &str, request_id: &str) -> String {
+    acceptance_raw_for_app(event_id, request_id, "bitkit")
+}
+
+fn acceptance_raw_for_app(event_id: &str, request_id: &str, app_id: &str) -> String {
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_request_acceptance","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request_acceptance","app_id":"{app_id}","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
     )
 }
 
 fn rejection_raw(event_id: &str, request_id: &str) -> String {
+    rejection_raw_for_app(event_id, request_id, "bitkit")
+}
+
+fn rejection_raw_for_app(event_id: &str, request_id: &str, app_id: &str) -> String {
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_request_rejection","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request_rejection","app_id":"{app_id}","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
     )
 }
 
 fn cancellation_raw(event_id: &str, request_id: &str) -> String {
+    cancellation_raw_for_app(event_id, request_id, "bitkit")
+}
+
+fn cancellation_raw_for_app(event_id: &str, request_id: &str, app_id: &str) -> String {
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_request_cancellation","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request_cancellation","app_id":"{app_id}","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
     )
 }
 
 fn malformed_cancellation_raw(event_id: &str, request_id: &str) -> String {
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_request_cancellation","event_id":"{event_id}","payment_request_id":"{request_id}","reason":null}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request_cancellation","app_id":"bitkit","event_id":"{event_id}","payment_request_id":"{request_id}","reason":null}}"#
     )
 }
 
 fn malformed_missing_request_id_raw(event_id: &str) -> String {
-    format!(r#"{{"version":1,"kind":"paykit.payment_request_acceptance","event_id":"{event_id}"}}"#)
+    format!(
+        r#"{{"version":1,"kind":"paykit.payment_request_acceptance","app_id":"bitkit","event_id":"{event_id}"}}"#
+    )
 }
 
 fn proof_raw(event_id: &str, request_id: &str, reference: &str) -> String {
+    proof_raw_for_app(event_id, request_id, reference, "bitkit")
+}
+
+fn proof_raw_for_app(event_id: &str, request_id: &str, reference: &str, app_id: &str) -> String {
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_proof","event_id":"{event_id}","payment_request_id":"{request_id}","payment_reference":"{reference}","billing_period":null,"payment_endpoint_identifier":"btc-lightning-bolt11","proof":{{"txid":"secret"}}}}"#
+        r#"{{"version":1,"kind":"paykit.payment_proof","app_id":"{app_id}","event_id":"{event_id}","payment_request_id":"{request_id}","payment_reference":"{reference}","billing_period":null,"payment_endpoint_identifier":"btc-lightning-bolt11","payment_app_id":"{app_id}","proof":{{"txid":"secret"}}}}"#
     )
 }
 
@@ -112,7 +138,6 @@ async fn persist_messages_at(
     persist_private_stream_batch(
         storage,
         counterparty,
-        receiver_path(),
         messages.into_iter().map(private_message).collect(),
         None,
         received_at,
