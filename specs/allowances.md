@@ -1,6 +1,6 @@
 # Paykit Allowances
 
-This document describes the product model and ownership boundaries for Allowances. It does not define wire formats or public APIs.
+This document describes the product model and ownership boundaries for Allowances. Wire formats, public APIs, and atomicity are out of scope.
 
 ## TL;DR
 
@@ -8,7 +8,7 @@ This document describes the product model and ownership boundaries for Allowance
 2. An Allowance gives an Allowee limited permission to request payments from an Allower's wallet without fresh approval each time.
 3. The Payee may be the Allowee or another party. Paykit coordinates the Allowance; the wallet decides whether and how to execute each payment.
 
-## The idea
+## What an Allowance is
 
 An Allowance is shared permission from an Allower to an Allowee. The Allower keeps control of the funds and approves the terms in advance. The Allowee can then request payments that fit those terms.
 
@@ -31,33 +31,29 @@ flowchart LR
     W -- "if approved, pushes payment" --> P["Payee<br/>Allowee or another party"]
 ```
 
-This document uses **payment instruction** as plain language for one request made under an Allowance. A future protocol specification must decide its message shape and final name.
+Here, **payment instruction** is plain language for a request under an Allowance. A future protocol specification will define its final name and message shape.
 
 ## Relationship to Payment Requests and Subscriptions
 
-A Payment Request asks a Payer to make a payment. It may be one-time or recurring. In the current Payment Request protocol, the Payee sends the request and expects to receive the payment.
+In the current protocol, a Payment Request asks a Payer to pay the requesting Payee; it may be one-time or recurring. An accepted Recurring Payment Request is called a Subscription.
 
-A Subscription is product shorthand for an accepted Recurring Payment Request. It describes repeated payments to the requesting Payee and is separate from Allowances.
-
-An Allowance grants authority before any particular payment instruction exists. The Allowee can request a payment to itself or to another Payee, subject to the Allowance terms and the Allower's wallet checks.
+By contrast, an Allowance grants authority before any payment instruction exists. The Allowee may request payment to itself or another Payee, subject to the Allowance terms and the Allower's wallet checks.
 
 A wallet may apply private automatic-handling rules to ordinary Payment Requests. Those rules are wallet policy, not an Allowance.
 
-## Shared Allowances and wallet safeguards
+## Allowance lifecycle and wallet safeguards
 
-An Allowance is shared between its exact Allower and Allowee. It has a stable Allowance ID and shared terms.
+An Allowance is bound to one Allower-Allowee pair and has a stable Allowance ID and shared terms.
 
-Either party may propose exact terms. Both parties must accept them, and no Allowance can grant or increase authority without the Allower's explicit approval. There are no counteroffers; changed terms require a new proposal and ending the old Allowance.
+Either party may propose exact terms, but both must accept them. The Allower must explicitly approve any grant or increase of authority. There are no counteroffers; changing accepted terms requires a new proposal and ending the old Allowance.
 
-Either party may end an accepted Allowance. The Allower revokes the authority; the Allowee relinquishes it. An Allowance may also expire at a time defined in its terms.
+Either party may end an accepted Allowance: the Allower revokes the authority, while the Allowee relinquishes it. An Allowance may also expire as defined in its terms.
 
-Shared terms describe the maximum authority communicated to the Allowee. The Allower's wallet may enforce stricter private safeguards that are not shared. Once accepted, an Allowance lets the Allowee submit instructions without fresh approval, but the wallet may still decline any instruction.
-
-Private safeguards are not separate local Allowances. They do not need to be shared, and they cannot expand the authority in the shared terms.
+Shared terms define the maximum authority communicated to the Allowee. The Allower's wallet may privately enforce stricter safeguards and may decline any instruction. Those safeguards are not Allowances, need not be shared, and cannot expand the shared authority.
 
 ## Policy rules
 
-An Allowance contains a set of rules. Every configured rule must pass. The first version does not need OR groups, ordered allow or deny rules, FX, or cross-asset evaluation.
+Every configured Allowance rule must pass. V1 excludes OR groups, ordered allow or deny rules, FX, and cross-asset evaluation.
 
 Rules may cover:
 
@@ -80,14 +76,14 @@ Only the instruction's Payment Amount consumes capacity. Fees do not count, and 
 The intended flow is:
 
 1. The Allowee submits a payment instruction that references the Allowance ID and identifies the exact Payment Amount, Payee, payment destination, and a unique instruction ID.
-2. Paykit Library parses and structurally validates the message. Paykit SDK checks that it came from the Allowee bound to the Allowance and that the event-derived lifecycle is accepted and not ended, then persists, correlates, and deduplicates it.
-3. The wallet evaluates activation and expiry, the other shared terms, private safeguards, trusted time, durable history, current usage, replay protection, and payment capability.
+2. Paykit Library parses and structurally validates the message. Paykit SDK checks that it came from the bound Allowee and that recorded lifecycle events show the Allowance was accepted and not ended. It then persists, correlates, and deduplicates the instruction.
+3. Using trusted time and durable history, the wallet evaluates activation and expiry, the remaining shared terms, private safeguards, current usage, replay protection, and payment capability.
 4. If approved, the wallet uses its payment integration to pay the Payee directly.
 5. Paykit SDK may communicate the result and any supported proof information to the Allowee.
 
 The future protocol specification must define how Payees and payment destinations are represented, how instructions and results are correlated, and which lifecycle messages are required. The existing Payment Proof is tied to a Payment Request, so its direct reuse is not assumed here.
 
-## Who owns what
+## Component responsibilities
 
 This is the intended responsibility split for a future Allowance protocol:
 
@@ -98,17 +94,17 @@ This is the intended responsibility split for a future Allowance protocol:
 | Wallet | Consent, supported terms, private safeguards, trusted time, policy evaluation, usage accounting, capacity, concurrency, execution replay protection, authentication, and the decision to execute. |
 | Payment integration | Payment Endpoint and funding selection, fees, balances, routing, credentials, signing, broadcasting, monitoring, settlement, and method-specific proof validation. |
 
-Paykit Library does not provide a universal Allowance policy evaluator or reserve capacity. Paykit SDK does not decide to pay on the wallet's behalf. Paykit provides validated coordination data and durable workflow; the wallet applies the rules and controls execution.
+Paykit Library remains stateless and payment-method-neutral: it does not evaluate wallet policy, reserve capacity, or move funds. Paykit SDK coordinates the workflow but does not decide to pay. The wallet applies the rules and controls execution.
 
-The library remains stateless and payment-method-neutral. It does not move funds. An Allowance ID is a correlation identifier, not a bearer credential. No Allowance grants authority, and no authority increases, without the Allower's explicit approval. An accepted Allowance records prior authority to submit qualifying instructions; it does not promise acceptance, funds, execution, or settlement.
-
-Wire formats, public APIs, and atomicity are out of scope for this document.
+An Allowance ID is a correlation identifier, not a bearer credential.
 
 ## Decision log
 
 This is the audit trail for the product discussion, not required reading for the main concept. Later decisions take precedence where noted.
 
-Entries 1 through 37 are retained as history. Decisions 38 through 47 state the current direction and identify which earlier decisions they supersede.
+### Earlier decisions (historical, 1-37)
+
+These entries are retained as history, not as current requirements. Decisions 38 through 47 state the current direction and identify which earlier decisions they supersede.
 
 1. **How do Payment Requests, Allowances, and Subscriptions relate?** Initial answer: automatic charges use one-time Payment Requests, and a scheduled Allowance is a Subscription. Decisions 29 and 30 later kept Recurring Payment Requests for scheduled payments.
 2. **Who may propose a shared Allowance?** Either payer or payee.
@@ -147,6 +143,9 @@ Entries 1 through 37 are retained as history. Decisions 38 through 47 state the 
 35. **What does request evaluation return?** Eligibility and the exact reservation intent.
 36. **What does a shared Allowance promise?** Eligibility for automatic handling, not guaranteed payment.
 37. **How is a scheduled occurrence identified?** By the existing Billing Period on its Payment Proof.
+
+### Current direction (38-47)
+
 38. **What is an Allowance?** Scoped permission granted by an Allower to an Allowee to request qualifying payments from the Allower's wallet without fresh approval each time. This supersedes the Subscription-oriented model in 1 and 30.
 39. **Who are the parties?** The Allower controls the funds, the Allowee may use the Allowance, and the Payee receives each payment.
 40. **Must the Allowee be the Payee?** No. A payment may go to the Allowee or another Payee.

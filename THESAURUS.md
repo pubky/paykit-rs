@@ -265,14 +265,14 @@
 - **Related terms**: Payee, Counterparty, Allower, Allowance
 
 ### Payee
-- **Definition**: The party receiving value in a payment flow. Payment Endpoints used for the payment identify how to pay the Payee but may be supplied by another party. In an Allowance payment, the Payee may be the Allowee or another party.
+- **Definition**: The party receiving value in a payment flow. In an Allowance payment, the Payee need not be the Allowee or the party that supplied the payment destination.
 - **NOT**: Always a Linked Peer.
 - **Synonyms to AVOID**: receiver when it obscures payment role
 - **Related terms**: Payer, Payment List, Payment Endpoint, Allowee, Allowance
 
 ## Allowances
 
-> Proposed vocabulary for Paykit Allowances. These product roles are canonical for the proposal; wire formats and public APIs remain to be specified.
+> Proposed vocabulary for Paykit Allowances. These terms are canonical for the proposal; wire formats and public APIs remain to be specified.
 
 ### Allowance
 - **Definition**: Shared, scoped permission granted through Paykit by an Allower to an Allowee to request qualifying payments from the Allower's wallet without fresh approval each time. The Payee for each payment may be the Allowee or another party.
@@ -281,14 +281,14 @@
 - **Related terms**: Allower, Allowee, Allowance ID, Payer, Payee, Payment Amount
 
 ### Allower
-- **Definition**: The party that grants an Allowance and whose wallet controls the funds used by it. The Allower is the Payer when an Allowance payment is executed.
-- **NOT**: The Allowee, necessarily the Payee, or a party that gives the Allowee custody of funds or payment credentials.
+- **Definition**: The party that grants an Allowance and whose wallet controls the funds. The Allower is the Payer when an Allowance payment is executed.
+- **NOT**: The Allowee. Granting an Allowance does not transfer custody of funds or payment credentials to the Allowee.
 - **Synonyms to AVOID**: allowance payer, grantor when naming the Paykit role
 - **Related terms**: Allowance, Allowee, Payer, Payee
 
 ### Allowee
 - **Definition**: The party authorized to use an Allowance by requesting qualifying payments under its terms.
-- **NOT**: Necessarily the Payee, a custodian of the Allower's funds, or a holder of the Allower's payment credentials.
+- **NOT**: Necessarily the Payee. Holding an Allowance does not grant custody of the Allower's funds or access to the Allower's payment credentials.
 - **Synonyms to AVOID**: beneficiary, payee when only the Allowance role is meant
 - **Related terms**: Allowance, Allower, Payee, Allowance ID
 
