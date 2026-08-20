@@ -172,7 +172,6 @@ where
                 PaymentRequestLifecycleState::Proposed,
                 PaymentRequestLifecycleState::ProposalExpired,
             ],
-            received_only: true,
             ..PaymentRequestFilter::default()
         })
         .await

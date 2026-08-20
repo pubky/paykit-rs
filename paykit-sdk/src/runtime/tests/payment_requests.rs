@@ -225,6 +225,116 @@ async fn test_list_payment_requests_filters_across_counterparties() {
 }
 
 #[tokio::test]
+async fn test_actionable_received_payment_requests_excludes_locally_accepted_request() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = "550e8400-e29b-41d4-a716-446655440030";
+    storage
+        .save_identity_state(IdentityState {
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+            initialized_at: FixedClock.now(),
+            sign_out_generation: 0,
+        })
+        .await
+        .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        vec![payment_request_message(
+            "650e8400-e29b-41d4-a716-446655440030",
+            request_id,
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let acceptance = parsed_payment_request_event(payment_request_acceptance_raw(
+        "650e8400-e29b-41d4-a716-446655440031",
+        request_id,
+    ));
+    crate::domain::payment_requests::enqueue_payment_request_event(
+        &storage,
+        counterparty,
+        receiver_path(),
+        &acceptance,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let actionable = sdk.actionable_received_payment_requests().await.unwrap();
+
+    assert!(actionable.is_empty());
+}
+
+#[tokio::test]
+async fn test_actionable_received_payment_requests_excludes_locally_rejected_request() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = "550e8400-e29b-41d4-a716-446655440040";
+    storage
+        .save_identity_state(IdentityState {
+            local_pubky_public_key: Some(local_public_key),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+            initialized_at: FixedClock.now(),
+            sign_out_generation: 0,
+        })
+        .await
+        .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        vec![payment_request_message(
+            "650e8400-e29b-41d4-a716-446655440040",
+            request_id,
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let rejection = parsed_payment_request_event(payment_request_rejection_raw(
+        "650e8400-e29b-41d4-a716-446655440041",
+        request_id,
+    ));
+    crate::domain::payment_requests::enqueue_payment_request_event(
+        &storage,
+        counterparty,
+        receiver_path(),
+        &rejection,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let actionable = sdk.actionable_received_payment_requests().await.unwrap();
+
+    assert!(actionable.is_empty());
+}
+
+#[tokio::test]
 async fn test_list_payment_requests_counterparty_filter_spans_receivers_and_preserves_blocked_error(
 ) {
     let storage = InMemoryStorage::new();
@@ -643,4 +753,16 @@ fn payment_request_acceptance_message(
     private_application_message(format!(
         r#"{{"version":1,"kind":"paykit.payment_request_acceptance","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
     ))
+}
+
+fn payment_request_acceptance_raw(event_id: &str, request_id: &str) -> String {
+    format!(
+        r#"{{"version":1,"kind":"paykit.payment_request_acceptance","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
+    )
+}
+
+fn payment_request_rejection_raw(event_id: &str, request_id: &str) -> String {
+    format!(
+        r#"{{"version":1,"kind":"paykit.payment_request_rejection","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
+    )
 }
