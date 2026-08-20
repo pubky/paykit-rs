@@ -1,5 +1,6 @@
 #![doc = "UniFFI bindings for Paykit SDK."]
 
+mod app_registry;
 mod config;
 mod conversions_common;
 mod errors;
@@ -19,6 +20,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
+pub use app_registry::*;
 pub use config::*;
 pub use errors::PaykitFfiError;
 pub use json::*;

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use paykit_lib::{
-    BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestTerms,
-    Recurrence, RecurrenceUnit,
+    BillingPeriod, PaykitAppId, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
+    PaymentRequestTerms, Recurrence, RecurrenceUnit,
 };
 use paykit_sdk::{
     AmountRecord, BillingPeriodRecord, PaymentProofRecord, PaymentRequestFilter,
@@ -13,7 +13,7 @@ use paykit_sdk::{
 use crate::{
     errors::validation_error,
     json::FfiPrivateJsonObject,
-    session::{app_public_key, parse_public_key as parse_pubky_public_key, parse_receiver_path},
+    session::{app_public_key, parse_public_key as parse_pubky_public_key},
     PaykitFfiError,
 };
 
@@ -95,10 +95,6 @@ impl TryFrom<FfiPaymentRequestFilter> for PaymentRequestFilter {
     fn try_from(value: FfiPaymentRequestFilter) -> Result<Self, Self::Error> {
         Ok(Self {
             counterparty: value.counterparty.map(parse_public_key).transpose()?,
-            counterparty_receiver_path: value
-                .counterparty_receiver_path
-                .map(parse_receiver_path)
-                .transpose()?,
             local_role: value.local_role.map(TryInto::try_into).transpose()?,
             states: value
                 .states
@@ -182,6 +178,11 @@ impl TryFrom<FfiPaymentRequestTerms> for PaymentRequestTerms {
                 .into_iter()
                 .map(parse_endpoint_identifier)
                 .collect::<Result<Vec<_>, _>>()?,
+            required_app_id: value
+                .required_app_id
+                .map(PaykitAppId::new)
+                .transpose()
+                .map_err(|err| validation_error(err.to_string()))?,
             metadata: value.metadata.parse_map("Payment Request metadata")?,
         })
     }
@@ -199,6 +200,7 @@ impl TryFrom<PaymentRequestTermsRecord> for FfiPaymentRequestTerms {
             proposal_expires_at: value.proposal_expires_at,
             recurrence: value.recurrence.map(Into::into),
             accepted_payment_endpoint_identifiers: value.accepted_payment_endpoint_identifiers,
+            required_app_id: value.required_app_id.map(|app_id| app_id.to_string()),
             metadata: FfiPrivateJsonObject::from_json_map(
                 "Payment Request metadata",
                 &value.metadata,
@@ -220,6 +222,7 @@ impl TryFrom<PaymentProofRecord> for FfiPaymentProofRecord {
                 value.payment_reference,
             )),
             billing_period: value.billing_period.map(Into::into),
+            payment_app_id: value.payment_app_id.to_string(),
             payment_endpoint_identifier: value.payment_endpoint_identifier,
             proof: FfiPrivateJsonObject::from_json_map("Payment Proof proof", &value.proof)?,
             recorded_at: value.recorded_at.to_rfc3339(),
@@ -233,7 +236,6 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
     fn try_from(value: PaymentRequestRecord) -> Result<Self, Self::Error> {
         Ok(Self {
             counterparty: app_public_key(&value.counterparty),
-            counterparty_receiver_path: value.counterparty_receiver_path.to_string(),
             payment_request_id: value.payment_request_id,
             local_role: value.local_role.map(Into::into),
             state: value.state.into(),
@@ -241,6 +243,8 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
             proposal_outbound_message_id: value.proposal_outbound_message_id,
             proposal_outbound_status: value.proposal_outbound_status.map(Into::into),
             proposal_event_id: value.proposal_event_id,
+            proposal_app_id: value.proposal_app_id.map(|app_id| app_id.to_string()),
+            payer_app_id: value.payer_app_id.map(|app_id| app_id.to_string()),
             terms: value.terms.map(TryInto::try_into).transpose()?,
             accepted_event_id: value.accepted_event_id,
             accepted_outbound_status: value.accepted_outbound_status.map(Into::into),
@@ -264,6 +268,7 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
 
 pub(super) struct ParsedPaymentProofSubmission {
     pub(super) billing_period: Option<BillingPeriod>,
+    pub(super) payment_app_id: PaykitAppId,
     pub(super) payment_endpoint_identifier: PaymentEndpointIdentifier,
     pub(super) proof: serde_json::Map<String, serde_json::Value>,
 }
@@ -274,6 +279,8 @@ impl TryFrom<FfiPaymentProofSubmission> for ParsedPaymentProofSubmission {
     fn try_from(value: FfiPaymentProofSubmission) -> Result<Self, Self::Error> {
         Ok(Self {
             billing_period: value.billing_period.map(TryInto::try_into).transpose()?,
+            payment_app_id: PaykitAppId::new(value.payment_app_id)
+                .map_err(|err| validation_error(err.to_string()))?,
             payment_endpoint_identifier: parse_endpoint_identifier(
                 value.payment_endpoint_identifier,
             )?,

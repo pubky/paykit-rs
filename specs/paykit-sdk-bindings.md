@@ -17,9 +17,9 @@ default app API.
   building blocks.
 - Keep the Rust SDK responsible for durable state transitions, ordering,
   dedupe, recovery, and validation.
-- Preserve the app-owned runtime model. One binding handle represents one app,
-  wallet, or receiver runtime; bindings should not require Ring, another
-  wallet, or a shared identity coordinator before an app can use Paykit.
+- Make the configured Paykit App ID explicit while preserving identity-wide
+  private state. Handles for apps sharing one identity must use the same
+  durable SDK state and identity material.
 - Keep platform APIs ergonomic and hard to construct incorrectly.
 - Treat storage, session access, payment execution, and UI as app-provided
   integration points.
@@ -55,8 +55,9 @@ is intentionally not part of the v0 checked-in binding surface.
 
 ## Runtime Handle
 
-Bindings should expose one opaque SDK handle per app-owned local Paykit runtime.
-This handle is the primary mobile API object.
+Bindings should expose one opaque SDK handle per app integration. The handle's
+App ID attributes app-owned endpoints and messages; it does not create a
+separate Encrypted Link or private stream.
 
 The handle should own:
 
@@ -77,8 +78,8 @@ Swift or Kotlin.
 
 ### StateBlobStorageAdapter
 
-The preferred platform storage shape is a durable SDK state blob plus a
-revision token:
+The platform storage boundary is an identity-wide durable SDK state blob plus
+a revision token:
 
 ```text
 load_state_blob() -> { bytes?, revision }
@@ -89,10 +90,11 @@ The Rust side should turn those callbacks into the real SDK storage adapter and
 own transaction semantics internally. Platform code should only provide durable
 loading and checked atomic replacement.
 
-The SDK state blob is an internal, versioned serialization of SDK storage state.
-It is not the public SDK backup export format. Bindings should treat it as an
-opaque `SdkStateBlob`, and Rust should own schema validation and
-version handling.
+The SDK state blob is the authoritative logical runtime state shared by every
+Paykit app using the Pubky identity. It is an internal, versioned serialization
+and is not the public SDK backup export format. Bindings should treat it as an
+opaque `SdkStateBlob`, and Rust should own schema validation and version
+handling.
 
 Each SDK storage transaction should load the current blob, mutate the full
 logical state in Rust, then save the replacement with the loaded revision. If
@@ -112,10 +114,14 @@ Storage requirements for platform apps:
 
 - `save_state_blob_atomically` must either fully replace the previous blob or
   leave the previous blob intact.
-- The blob must be protected as sensitive local Paykit state.
+- Every successful changed write must return a non-empty opaque revision that
+  has never represented an earlier state blob. Revisions must not be reused,
+  even after intervening writes, because reuse permits ABA stale writes.
+- The blob must be encrypted and protected as sensitive Paykit state.
 - Apps should not log, inspect, or partially edit the blob.
-- Multiple runtime instances sharing the same blob need app-level
-  serialization, a platform lock, or revision conflict handling.
+- Every runtime for the same identity must resolve to this same logical blob.
+- Multiple runtime instances need cross-process serialization or checked
+  revision conflict handling.
 
 This keeps platform integrators away from fragile details such as FIFO queue
 ordering, monotonic IDs, Encrypted Link checkpoint coupling, lease validation,
@@ -129,12 +135,12 @@ empty private publication, not the same thing as no adapter response.
 Bindings should also expose a direct reservation publication workflow for apps
 that reserve receiving details outside the SDK callback:
 
-- input: one counterparty receiver plus the complete reserved receiving details
-  for that receiver
+- input: one counterparty plus the complete reserved receiving details for
+  that counterparty
 - empty reservation list: queue an empty Private Payment List for that
-  counterparty receiver
-- output: per-counterparty-receiver queue and delivery failures, so apps do not
-  have to merge queue reports with outbound-send reports manually
+  counterparty
+- output: per-counterparty queue and delivery failures, so apps do not have to
+  merge queue reports with outbound-send reports manually
 
 The app-facing private contact payment preparation helper must document its
 sequence: refresh live session access, ensure or advance the private link when
@@ -147,30 +153,29 @@ List version. Their private-only result returns the version from the same list
 snapshot as the resolved endpoints. If the available list is not newer, the
 binding returns `waitingForUpdatedPaymentList` with no payable endpoints. The
 app must persist the version before handing a payment to the wallet; consuming
-one endpoint consumes the complete list for that counterparty receiver. A
-newer list is fresh even if it repeats a reusable endpoint.
+one endpoint consumes every endpoint returned with that version. A later
+resolution includes candidates only from application lists updated after the
+consumed version. An unchanged list from another application is not made fresh
+by that update.
 
 ## Pubky Session Binding Shape
 
 Bindings should make identity and live-session availability explicit.
 
-The session binding is the boundary where the app exposes live Pubky access to
-its own Paykit runtime. It should not be modeled as a global identity
-coordinator shared by all Paykit apps. A binding may support Ring or other auth
-handoff flows, but ordinary Paykit integration should not require users to
-install or authorize through another app first.
+The session binding is the boundary where an app exposes live Pubky access for
+the shared Paykit identity. A binding may support Ring or another auth handoff
+flow, but Paykit does not prescribe one product's identity UI.
 
 The platform session provider should return one of:
 
 - no live session access
-- live session access with its required receiver Noise key
+- live session access, including local Pubky secret access when private Paykit
+  workflows are required
 
-`None` or `null` means no live session is currently available. It does not mean
-explicit sign-out. Explicit sign-out should be a separate SDK call that clears
-session access first and then clears SDK-managed identity-scoped state.
-Bindings should document that apps must export and persist an SDK backup before
-explicit sign-out if they want to restore the same user's private Paykit state
-later.
+`None` or `null` means no live session is currently available. Explicit
+sign-out is a separate SDK call that clears this application's session access
+without deleting the identity's shared Paykit state. Apps that should also
+withdraw their public Payment Endpoints call `removePaykitApp` before sign-out.
 
 The binding-level session API should not ask Swift or Kotlin to construct Rust
 `pubky::PubkySession` or `pubky::Pubky` values directly. For
@@ -193,7 +198,7 @@ client configuration for platform-owned network policy such as request
 timeouts. The default configuration uses the public network; setting a local
 testnet host switches to standard testnet ports so emulators and other isolated
 runtimes can reach local services.
-`PubkyLocalSecretKey` exposes app/runtime-domain-separated key derivation and
+`PubkyLocalSecretKey` exposes domain-separated key derivation and
 public-key-from-secret helpers. Platform bindings should wrap those helpers
 where the platform has no better native primitive. Auth URLs and exported
 session secrets are secret-bearing values, so bindings should avoid exposing
@@ -212,13 +217,11 @@ The session provider should expose only the platform state the SDK needs:
 - session material or opaque handle needed to build authenticated Pubky writes
 - public storage configuration needed to build unauthenticated reads
 - optional local Pubky identity secret-key access
-- required receiver Noise secret-key access
 - session clear operation for sign-out
 
-Platform identity status should contain an optional public key and a
-`live_session_available` boolean. No public key means explicit sign-out. A
-public key without live session access means the identity is remembered while
-Pubky-backed workflows are temporarily unavailable.
+Platform identity status should contain an optional public key and one
+capability value: signed out, public-only, or private-link-capable. The public
+key is the last initialized identity when known.
 
 ## Payment Adapter Binding Shape
 
@@ -343,19 +346,18 @@ callbacks, that type should be documented as sensitive and must redact default
 debug/string output.
 
 State blobs and exported backups should use explicit object names such as
-`SdkStateBlob` and `SdkBackupBlob`. Bindings should require
-caller-managed encryption before cloud transport or cross-device backup. If a
-blob is not app-encrypted, platform docs should require protected local storage:
-iOS Keychain or protected files with backup exclusion as appropriate, and
-Android encrypted storage or `noBackup` placement unless the app encrypts before
-backup.
+`SdkStateBlob` and `SdkBackupBlob`. Shared state must be encrypted before it is
+stored remotely. Exported backups likewise require caller-managed encryption
+before cloud transport. A device-local implementation must use platform-protected
+storage, but separate device-local blobs are not a valid cross-app shared-state
+implementation.
 
 Platform docs should also make the durability consequence explicit: if the
 sensitive SDK state blob or exported SDK backup is lost, private Paykit runtime
 state cannot be safely reconstructed from homeserver data alone. Apps may
 recover by relinking peers and receiving fresh private data, but they should not
 promise restoration of old private links, Receipt Access keys, private stream
-history, local Contact Records, or Payment Request/Receipt history without SDK
+history, Contact Records, or Payment Request/Receipt history without SDK
 backup data.
 
 ## Default App Workflows
@@ -410,7 +412,7 @@ Binding tests should cover:
 - stale state blob revision conflicts
 - identity and live-session availability transitions
 - missing live session access preserving cached private state
-- required receiver Noise key round trips
+- identity-wide Noise key derivation from local Pubky secret material
 - payment adapter batch selection and reservation release
 - candidate ID mapping across payment adapter callbacks
 - structured error mapping
@@ -442,10 +444,10 @@ misconstruction.
 
 - Start SDK bindings from a clean SDK-first FFI surface. Protocol-only exports
   should be added intentionally, not preserved by default.
-- The first mobile storage implementation should use app-provided state blob
-  callbacks. First-party file/keychain helpers can be added later only if one
-  generic helper clearly fits multiple apps and does not hide platform security
-  decisions.
+- Mobile bindings use app-provided state-blob callbacks until the Pubky-hosted
+  shared-state implementation is available. The callbacks must still represent
+  one logical state backing per identity; first-party local file/keychain
+  helpers are not a substitute for cross-app shared state.
 - Paykit SDK bindings should give integrators one Paykit SDK package/import for
   normal app integration. That package should expose SDK workflows first; any
   lower-level protocol helpers should be intentionally added, documented, and

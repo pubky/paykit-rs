@@ -3,16 +3,18 @@ use std::sync::Arc;
 use paykit_sdk::{
     PaymentTarget, PreparedPrivateContactPayment, PrivateContactPaymentResolution,
     PrivatePaymentResolutionState, PrivatePaymentResolutionStatus, PublicContactPaymentResolution,
+    PublicPaymentEndpointLoadFailure, PublicPaymentEndpointLoadFailureKind,
     PublicPaymentResolutionStatus, ResolvedPrivatePaymentEndpoint, ResolvedPublicPaymentEndpoint,
 };
 
 use crate::{
+    conversions_common::parse_payment_request_id,
     payment_adapter::{FfiPaymentAmountContext, FfiPaymentPayload, FfiPaymentTarget},
     private_links::{
         FfiLinkedPeerHandshakeReport, FfiOutboundPrivateSendReport, FfiPrivateStreamIntakeReport,
     },
     sdk::FfiPaykitSdk,
-    session::{app_public_key, parse_public_key, parse_receiver_path},
+    session::{app_public_key, parse_public_key},
     PaykitFfiError,
 };
 
@@ -25,8 +27,34 @@ pub enum FfiPublicPaymentResolutionStatus {
     NoEndpoint,
     /// Public Payment Endpoints exist but are unsupported.
     UnsupportedEndpoint,
+    /// Registered apps were found, but none of their endpoint lists could be loaded.
+    Unavailable,
     /// SDK returned a value this binding version does not understand.
     Unknown,
+}
+
+/// Category of an app-specific public Payment Endpoint load failure.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiPublicPaymentEndpointLoadFailureKind {
+    /// Pubky storage could not be reached or read.
+    Transport,
+    /// The app's published endpoint data was invalid.
+    InvalidData,
+    /// The bounded aggregate could not include this app's endpoint list.
+    ResourceLimit,
+    /// SDK returned a value this binding version does not understand.
+    Unknown,
+}
+
+/// Failure to load one registered app's public Payment Endpoints.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPublicPaymentEndpointLoadFailure {
+    /// App whose endpoint list could not be loaded.
+    pub app_id: String,
+    /// Stable failure category for application handling.
+    pub kind: FfiPublicPaymentEndpointLoadFailureKind,
+    /// Human-readable context without an underlying transport cause.
+    pub context: String,
 }
 
 /// Result category for private Payment Endpoint resolution.
@@ -62,8 +90,8 @@ pub enum FfiPrivatePaymentResolutionState {
 pub struct FfiResolvedPublicPaymentEndpoint {
     /// Counterparty that published the endpoint.
     pub counterparty: String,
-    /// Counterparty Paykit receiver path.
-    pub counterparty_receiver_path: String,
+    /// Application that published the endpoint.
+    pub app_id: String,
     /// Payment Endpoint Identifier string.
     pub identifier: String,
     /// Serialized endpoint payload.
@@ -77,8 +105,8 @@ pub struct FfiResolvedPublicPaymentEndpoint {
 pub struct FfiResolvedPrivatePaymentEndpoint {
     /// Counterparty that privately shared the endpoint.
     pub counterparty: String,
-    /// Counterparty Paykit receiver path.
-    pub counterparty_receiver_path: String,
+    /// Application that privately shared the endpoint.
+    pub app_id: String,
     /// Payment Endpoint Identifier string.
     pub identifier: String,
     /// Serialized endpoint payload.
@@ -94,6 +122,8 @@ pub struct FfiPublicContactPaymentResolution {
     pub status: FfiPublicPaymentResolutionStatus,
     /// Payable public Payment Endpoints in adapter-preferred order.
     pub payable_endpoints: Vec<FfiResolvedPublicPaymentEndpoint>,
+    /// Registered apps whose endpoint lists could not be loaded.
+    pub failures: Vec<FfiPublicPaymentEndpointLoadFailure>,
 }
 
 /// Result of resolving a Private Payment List for one counterparty.
@@ -132,14 +162,12 @@ impl FfiPaykitSdk {
     pub async fn resolve_private_contact_payment(
         &self,
         counterparty: String,
-        counterparty_receiver_path: String,
         amount: Option<FfiPaymentAmountContext>,
         after_private_payment_list_version: Option<u64>,
     ) -> Result<FfiPrivateContactPaymentResolution, PaykitFfiError> {
         self.runtime
             .resolve_private_contact_payment(
                 parse_public_key(counterparty)?,
-                parse_receiver_path(counterparty_receiver_path)?,
                 amount.map(Into::into),
                 after_private_payment_list_version,
             )
@@ -152,14 +180,43 @@ impl FfiPaykitSdk {
     pub async fn resolve_public_contact_payment(
         &self,
         counterparty: String,
-        counterparty_receiver_path: String,
         amount: Option<FfiPaymentAmountContext>,
     ) -> Result<FfiPublicContactPaymentResolution, PaykitFfiError> {
         self.runtime
-            .resolve_public_contact_payment(
+            .resolve_public_contact_payment(parse_public_key(counterparty)?, amount.map(Into::into))
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Resolve private endpoints allowed by an actionable received Payment Request.
+    pub async fn resolve_private_payment_request(
+        &self,
+        counterparty: String,
+        payment_request_id: String,
+        after_private_payment_list_version: Option<u64>,
+    ) -> Result<FfiPrivateContactPaymentResolution, PaykitFfiError> {
+        self.runtime
+            .resolve_private_payment_request(
                 parse_public_key(counterparty)?,
-                parse_receiver_path(counterparty_receiver_path)?,
-                amount.map(Into::into),
+                &parse_payment_request_id(payment_request_id)?,
+                after_private_payment_list_version,
+            )
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Resolve public endpoints allowed by an actionable received Payment Request.
+    pub async fn resolve_public_payment_request(
+        &self,
+        counterparty: String,
+        payment_request_id: String,
+    ) -> Result<FfiPublicContactPaymentResolution, PaykitFfiError> {
+        self.runtime
+            .resolve_public_payment_request(
+                parse_public_key(counterparty)?,
+                &parse_payment_request_id(payment_request_id)?,
             )
             .await
             .map(Into::into)
@@ -173,7 +230,6 @@ impl FfiPaykitSdk {
     pub async fn prepare_and_resolve_private_contact_payment(
         &self,
         counterparty: String,
-        counterparty_receiver_path: String,
         amount: Option<FfiPaymentAmountContext>,
         after_private_payment_list_version: Option<u64>,
         max_advance_steps: u32,
@@ -181,8 +237,27 @@ impl FfiPaykitSdk {
         self.runtime
             .prepare_and_resolve_private_contact_payment(
                 parse_public_key(counterparty)?,
-                parse_receiver_path(counterparty_receiver_path)?,
                 amount.map(Into::into),
+                after_private_payment_list_version,
+                max_advance_steps,
+            )
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Prepare private state, then resolve endpoints allowed by a Payment Request.
+    pub async fn prepare_and_resolve_private_payment_request(
+        &self,
+        counterparty: String,
+        payment_request_id: String,
+        after_private_payment_list_version: Option<u64>,
+        max_advance_steps: u32,
+    ) -> Result<FfiPreparedPrivateContactPayment, PaykitFfiError> {
+        self.runtime
+            .prepare_and_resolve_private_payment_request(
+                parse_public_key(counterparty)?,
+                &parse_payment_request_id(payment_request_id)?,
                 after_private_payment_list_version,
                 max_advance_steps,
             )
@@ -198,6 +273,7 @@ impl From<PublicPaymentResolutionStatus> for FfiPublicPaymentResolutionStatus {
             PublicPaymentResolutionStatus::Payable => Self::Payable,
             PublicPaymentResolutionStatus::NoEndpoint => Self::NoEndpoint,
             PublicPaymentResolutionStatus::UnsupportedEndpoint => Self::UnsupportedEndpoint,
+            PublicPaymentResolutionStatus::Unavailable => Self::Unavailable,
             _ => Self::Unknown,
         }
     }
@@ -260,7 +336,7 @@ impl From<ResolvedPublicPaymentEndpoint> for FfiResolvedPublicPaymentEndpoint {
     fn from(value: ResolvedPublicPaymentEndpoint) -> Self {
         Self {
             counterparty: app_public_key(&value.endpoint.counterparty),
-            counterparty_receiver_path: value.endpoint.counterparty_receiver_path.to_string(),
+            app_id: value.endpoint.app_id.to_string(),
             identifier: value.endpoint.identifier,
             payload: Arc::new(FfiPaymentPayload::new(value.endpoint.payload)),
             target: value.target.into(),
@@ -272,7 +348,7 @@ impl From<ResolvedPrivatePaymentEndpoint> for FfiResolvedPrivatePaymentEndpoint 
     fn from(value: ResolvedPrivatePaymentEndpoint) -> Self {
         Self {
             counterparty: app_public_key(&value.endpoint.counterparty),
-            counterparty_receiver_path: value.endpoint.counterparty_receiver_path.to_string(),
+            app_id: value.endpoint.app_id.to_string(),
             identifier: value.endpoint.identifier,
             payload: Arc::new(FfiPaymentPayload::new(value.endpoint.payload)),
             target: value.target.into(),
@@ -289,6 +365,28 @@ impl From<PublicContactPaymentResolution> for FfiPublicContactPaymentResolution 
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            failures: value.failures.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<PublicPaymentEndpointLoadFailureKind> for FfiPublicPaymentEndpointLoadFailureKind {
+    fn from(value: PublicPaymentEndpointLoadFailureKind) -> Self {
+        match value {
+            PublicPaymentEndpointLoadFailureKind::Transport => Self::Transport,
+            PublicPaymentEndpointLoadFailureKind::InvalidData => Self::InvalidData,
+            PublicPaymentEndpointLoadFailureKind::ResourceLimit => Self::ResourceLimit,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl From<PublicPaymentEndpointLoadFailure> for FfiPublicPaymentEndpointLoadFailure {
+    fn from(value: PublicPaymentEndpointLoadFailure) -> Self {
+        Self {
+            app_id: value.app_id.to_string(),
+            kind: value.kind.into(),
+            context: value.context,
         }
     }
 }
@@ -320,8 +418,8 @@ mod tests {
         parse_public_key("8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io".into()).unwrap()
     }
 
-    fn receiver_path() -> paykit_sdk::PaykitReceiverPath {
-        paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap()
+    fn app_id() -> paykit_sdk::PaykitAppId {
+        paykit_sdk::PaykitAppId::new("bitkit").unwrap()
     }
 
     #[test]
@@ -331,7 +429,7 @@ mod tests {
             payable_endpoints: vec![ResolvedPublicPaymentEndpoint {
                 endpoint: PublicPaymentEndpointCandidate {
                     counterparty: public_key(),
-                    counterparty_receiver_path: receiver_path(),
+                    app_id: app_id(),
                     identifier: "btc-mainnet-address".into(),
                     payload: "bc1qpublic".into(),
                 },
@@ -339,12 +437,46 @@ mod tests {
                     payload: "public-target".into(),
                 },
             }],
+            failures: Vec::new(),
         };
 
         let ffi = FfiPublicContactPaymentResolution::from(resolution);
 
         assert_eq!(ffi.status, FfiPublicPaymentResolutionStatus::Payable);
         assert_eq!(ffi.payable_endpoints[0].payload.export_text(), "bc1qpublic");
+        assert!(ffi.failures.is_empty());
+    }
+
+    #[test]
+    fn test_public_payment_resolution_maps_app_load_failure() {
+        let resolution = PublicContactPaymentResolution {
+            status: PublicPaymentResolutionStatus::Unavailable,
+            payable_endpoints: Vec::new(),
+            failures: vec![PublicPaymentEndpointLoadFailure {
+                app_id: app_id(),
+                kind: PublicPaymentEndpointLoadFailureKind::InvalidData,
+                context: "invalid endpoint listing".into(),
+            }],
+        };
+
+        let ffi = FfiPublicContactPaymentResolution::from(resolution);
+
+        assert_eq!(ffi.status, FfiPublicPaymentResolutionStatus::Unavailable);
+        assert_eq!(ffi.failures.len(), 1);
+        assert_eq!(ffi.failures[0].app_id, "bitkit");
+        assert_eq!(
+            ffi.failures[0].kind,
+            FfiPublicPaymentEndpointLoadFailureKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn test_public_payment_resolution_maps_resource_limit_failure() {
+        let kind = FfiPublicPaymentEndpointLoadFailureKind::from(
+            PublicPaymentEndpointLoadFailureKind::ResourceLimit,
+        );
+
+        assert_eq!(kind, FfiPublicPaymentEndpointLoadFailureKind::ResourceLimit);
     }
 
     #[test]
@@ -356,7 +488,7 @@ mod tests {
             payable_endpoints: vec![ResolvedPrivatePaymentEndpoint {
                 endpoint: PrivatePaymentEndpointCandidate {
                     counterparty: public_key(),
-                    counterparty_receiver_path: receiver_path(),
+                    app_id: app_id(),
                     identifier: "btc-mainnet-address".into(),
                     payload: "bc1qprivate".into(),
                 },

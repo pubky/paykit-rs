@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use paykit_sdk::{IdentityStatus, InitializationReport, PaykitSdk, RestoreReport};
+use paykit_sdk::{IdentityStatus, PaykitSdk, RestoreReport};
 
 use crate::config::{default_pubky_client_config, FfiPaykitSdkConfig, FfiPubkyClientConfig};
 use crate::errors::{validation_error, PaykitFfiError};
@@ -9,7 +9,7 @@ use crate::payment_adapter::{
 };
 use crate::secrets::FfiSdkBackupBlob;
 use crate::session::{
-    app_public_key, pubky_from_config, FfiSdkPubkySessionProvider,
+    app_public_key, pubky_from_config, FfiPubkyIdentityCapability, FfiSdkPubkySessionProvider,
     FfiSdkPubkySessionProviderAdapter,
 };
 use crate::storage::{
@@ -19,17 +19,10 @@ use crate::storage::{
 /// Current identity status returned to apps.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiIdentityStatus {
-    /// Persisted local public key, or `None` after explicit sign-out.
+    /// Last initialized public key, when known.
     pub public_key: Option<String>,
-    /// Whether live Pubky session access is available for this identity.
-    pub live_session_available: bool,
-}
-
-/// Initialization report returned after SDK startup.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct FfiInitializationReport {
-    /// Last persisted identity status.
-    pub identity: FfiIdentityStatus,
+    /// Current Pubky capability.
+    pub capability: FfiPubkyIdentityCapability,
 }
 
 /// Report returned after restoring SDK-managed backup state.
@@ -41,7 +34,7 @@ pub struct FfiRestoreReport {
     pub restored_identity: bool,
     /// Number of restored Linked Peer records.
     pub linked_peers: u64,
-    /// Number of restored local contact records.
+    /// Number of restored Contact Records.
     pub contact_records: u64,
     /// Number of restored public Payment Endpoint records.
     pub public_endpoint_records: u64,
@@ -61,17 +54,8 @@ pub struct FfiRestoreReport {
     pub receipt_records: u64,
     /// Number of restored local receipt issuance records.
     pub receipt_issuance_records: u64,
-    /// Receiver-scoped peers restored as recovery-required.
-    pub recovery_required_peers: Vec<FfiRestoreRecoveryRequiredPeer>,
-}
-
-/// Receiver-scoped peer restored as recovery-required.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct FfiRestoreRecoveryRequiredPeer {
-    /// Counterparty app public key.
-    pub counterparty: String,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: String,
+    /// Counterparties restored as recovery-required.
+    pub recovery_required_peers: Vec<String>,
 }
 
 pub(crate) type FfiSdkRuntime =
@@ -162,7 +146,7 @@ impl FfiPaykitSdk {
             session_provider,
             payment_adapter,
             config.try_into()?,
-        )?;
+        );
         Ok(Self {
             runtime,
             state_store,
@@ -182,7 +166,7 @@ impl FfiPaykitSdk {
     }
 
     /// Initialize durable SDK identity state.
-    pub async fn initialize(&self) -> Result<FfiInitializationReport, PaykitFfiError> {
+    pub async fn initialize(&self) -> Result<FfiIdentityStatus, PaykitFfiError> {
         self.runtime
             .initialize()
             .await
@@ -199,7 +183,7 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Clear live Pubky session access and SDK-managed identity-scoped state.
+    /// Clear live Pubky session access without deleting shared Paykit state.
     pub async fn sign_out(&self) -> Result<FfiIdentityStatus, PaykitFfiError> {
         self.runtime
             .sign_out()
@@ -252,15 +236,7 @@ impl From<IdentityStatus> for FfiIdentityStatus {
     fn from(value: IdentityStatus) -> Self {
         Self {
             public_key: value.public_key.map(|key| app_public_key(&key)),
-            live_session_available: value.live_session_available,
-        }
-    }
-}
-
-impl From<InitializationReport> for FfiInitializationReport {
-    fn from(value: InitializationReport) -> Self {
-        Self {
-            identity: value.identity.into(),
+            capability: value.capability.into(),
         }
     }
 }
@@ -284,10 +260,7 @@ impl From<RestoreReport> for FfiRestoreReport {
             recovery_required_peers: value
                 .recovery_required_peers
                 .into_iter()
-                .map(|peer| FfiRestoreRecoveryRequiredPeer {
-                    counterparty: app_public_key(&peer.counterparty),
-                    counterparty_receiver_path: peer.counterparty_receiver_path.to_string(),
-                })
+                .map(|key| app_public_key(&key))
                 .collect(),
         }
     }

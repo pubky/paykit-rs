@@ -7,6 +7,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Changed
+- Paykit Apps now participate in one identity-wide App Registry and share one
+  Encrypted Link, private stream, outbound queue, and backup state per
+  counterparty identity. App IDs attribute public endpoints and private
+  messages without creating separate receiver runtimes.
+- Paykit Profiles, blobs, and Public Contact Markers now use the fixed shared
+  `/pub/paykit/` namespace.
+- Explicit Paykit App removal now requires app-owned Payment Requests,
+  financial events, and Receipt issuance to be complete before withdrawing the
+  app's registry entry and endpoints.
+
+### Removed
+- Removed receiver paths, Receiver Markers, receiver-scoped Noise keys, and
+  configurable app-specific profile/contact namespaces.
+
 ## [0.1.0-rc46] - 2026-08-20
 
 ### Fixed

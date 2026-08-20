@@ -5,28 +5,68 @@ use paykit_sdk::PaykitSdkError;
 pub enum PaykitFfiError {
     /// Durable storage failed.
     #[error("storage/{code}: {context}")]
-    Storage { code: String, context: String },
+    Storage {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Redacted human-readable error context.
+        context: String,
+    },
     /// Pubky identity, session, or key capability failed.
     #[error("identity/{code}: {context}")]
-    Identity { code: String, context: String },
+    Identity {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Redacted human-readable error context.
+        context: String,
+    },
     /// Pubky or Encrypted Link transport failed.
     #[error("transport/{code}: {context}")]
-    Transport { code: String, context: String },
+    Transport {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Redacted human-readable error context.
+        context: String,
+    },
     /// Requested Paykit or Pubky resource was not found.
     #[error("not_found/{code}: {context}")]
-    NotFound { code: String, context: String },
+    NotFound {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Redacted human-readable error context.
+        context: String,
+    },
     /// Paykit protocol data is invalid, conflicting, or unsupported.
     #[error("protocol/{code}: {context}")]
-    Protocol { code: String, context: String },
+    Protocol {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Redacted human-readable error context.
+        context: String,
+    },
     /// Operation is blocked by configured SDK policy.
     #[error("policy/{code}: {context}")]
-    Policy { code: String, context: String },
+    Policy {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Redacted human-readable error context.
+        context: String,
+    },
     /// Payment adapter failed.
     #[error("payment_adapter/{code}: {context}")]
-    PaymentAdapter { code: String, context: String },
+    PaymentAdapter {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Redacted human-readable error context.
+        context: String,
+    },
     /// Local state needs explicit recovery before automation can continue.
     #[error("recovery_required/{code}: {context}")]
-    RecoveryRequired { code: String, context: String },
+    RecoveryRequired {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Redacted human-readable error context.
+        context: String,
+    },
 }
 
 impl From<PaykitSdkError> for PaykitFfiError {

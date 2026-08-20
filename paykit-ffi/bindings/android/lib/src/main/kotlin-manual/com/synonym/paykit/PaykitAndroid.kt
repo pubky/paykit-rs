@@ -8,12 +8,8 @@ public object PaykitSdkDefaults {
         EndpointManagementScope.MANAGED_ONLY
 
     @JvmField
-    public val DEFAULT_ENCRYPTED_LINK_RECOVERY_MARKER_POLICY: EncryptedLinkRecoveryMarkerPolicy =
-        EncryptedLinkRecoveryMarkerPolicy.ENABLED
-
-    @JvmField
     public val DEFAULT_PUBLIC_CONTACT_SHARING_POLICY: PublicContactSharingPolicy =
-        PublicContactSharingPolicy.LOCAL_ONLY
+        PublicContactSharingPolicy.PRIVATE_ONLY
 }
 
 public object PaykitAndroid {

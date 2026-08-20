@@ -1,13 +1,15 @@
+use std::fmt;
+
 use paykit_sdk::{
-    ContactProfileResolution, ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord,
-    PaykitProfile, PaykitProfileRecord, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
+    ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
+    ProfileResolution, ProfileSource, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
     PublicationStatus,
 };
 
 use crate::{
     json::parse_json_object,
     sdk::FfiPaykitSdk,
-    session::{app_public_key, parse_public_key, parse_receiver_path},
+    session::{app_public_key, parse_public_key},
     PaykitFfiError,
 };
 
@@ -32,8 +34,8 @@ pub enum FfiPublicationStatus {
 
 /// Source used for a resolved contact profile.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FfiContactProfileSource {
-    /// Resolved from the configured Paykit Profile path.
+pub enum FfiProfileSource {
+    /// Resolved from the identity-wide Paykit Profile path.
     PaykitProfile,
     /// Resolved from the Pubky app profile path.
     PubkyProfile,
@@ -102,13 +104,13 @@ pub struct FfiPubkyProfileRecord {
     pub fetched_at: String,
 }
 
-/// Contact display profile resolved by trying Paykit Profile first.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct FfiContactProfileResolution {
+/// Public profile resolved by trying Paykit Profile first.
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+pub struct FfiProfileResolution {
     /// Profile owner.
     pub public_key: String,
     /// Source that produced this profile.
-    pub source: FfiContactProfileSource,
+    pub source: FfiProfileSource,
     /// Normalized display name for app contact lists.
     pub display_name: Option<String>,
     /// Normalized image pointer for app contact lists.
@@ -121,7 +123,30 @@ pub struct FfiContactProfileResolution {
     pub fetched_at: String,
 }
 
-/// Public blob published under the configured Paykit namespace.
+impl fmt::Debug for FfiProfileResolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FfiProfileResolution")
+            .field("public_key", &"<redacted>")
+            .field("source", &self.source)
+            .field(
+                "display_name",
+                &self.display_name.as_ref().map(|_| "<redacted>"),
+            )
+            .field("image_uri", &self.image_uri.as_ref().map(|_| "<redacted>"))
+            .field(
+                "paykit_profile",
+                &self.paykit_profile.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "pubky_profile",
+                &self.pubky_profile.as_ref().map(|_| "<redacted>"),
+            )
+            .field("fetched_at", &self.fetched_at)
+            .finish()
+    }
+}
+
+/// Public blob published under the identity-wide Paykit namespace.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiPaykitBlobRecord {
     /// Blob owner.
@@ -137,23 +162,28 @@ pub struct FfiPaykitBlobRecord {
 }
 
 /// Local SDK contact update.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiContactUpdate {
     /// Contact public key.
     pub public_key: String,
-    /// Contact Paykit receiver paths.
-    pub receiver_paths: Vec<String>,
     /// Optional local display label.
     pub label: Option<String>,
 }
 
+impl fmt::Debug for FfiContactUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FfiContactUpdate")
+            .field("public_key", &"<redacted>")
+            .field("label", &self.label.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// Local SDK contact record.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiContactRecord {
     /// Contact public key.
     pub public_key: String,
-    /// Contact Paykit receiver paths.
-    pub receiver_paths: Vec<String>,
     /// Optional local display label.
     pub label: Option<String>,
     /// Cached public profile, when fetched.
@@ -162,18 +192,45 @@ pub struct FfiContactRecord {
     pub profile_fetched_at: Option<String>,
     /// Time the contact was first saved locally as RFC3339 text.
     pub created_at: String,
-    /// Time the local contact record last changed as RFC3339 text.
+    /// Time the Contact Record last changed as RFC3339 text.
     pub updated_at: String,
     /// Public Contact Marker publication state.
     pub public_contact_marker_status: FfiPublicationStatus,
-    /// Receiver path for the current public contact marker state.
-    pub public_contact_marker_receiver_path: Option<String>,
     /// Time the contact was last published publicly as RFC3339 text.
     pub public_contact_published_at: Option<String>,
     /// Time the public contact marker was last removed as RFC3339 text.
     pub public_contact_removed_at: Option<String>,
     /// Last public contact marker publication/removal error.
     pub public_contact_last_error: Option<String>,
+}
+
+impl fmt::Debug for FfiContactRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FfiContactRecord")
+            .field("public_key", &"<redacted>")
+            .field("label", &self.label.as_ref().map(|_| "<redacted>"))
+            .field("profile", &self.profile.as_ref().map(|_| "<redacted>"))
+            .field("profile_fetched_at", &self.profile_fetched_at)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field(
+                "public_contact_marker_status",
+                &self.public_contact_marker_status,
+            )
+            .field(
+                "public_contact_published_at",
+                &self.public_contact_published_at,
+            )
+            .field("public_contact_removed_at", &self.public_contact_removed_at)
+            .field(
+                "public_contact_last_error",
+                &self
+                    .public_contact_last_error
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -194,13 +251,9 @@ impl FfiPaykitSdk {
     pub async fn fetch_paykit_profile(
         &self,
         public_key: String,
-        receiver_path: String,
     ) -> Result<Option<FfiPaykitProfileRecord>, PaykitFfiError> {
         self.runtime
-            .fetch_paykit_profile(
-                parse_public_key(public_key)?,
-                parse_receiver_path(receiver_path)?,
-            )
+            .fetch_paykit_profile(parse_public_key(public_key)?)
             .await
             .map(|record| record.map(Into::into))
             .map_err(Into::into)
@@ -214,7 +267,7 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Publish a blob under this identity's Paykit profile namespace.
+    /// Publish a blob under this identity's Paykit blob path.
     pub async fn publish_paykit_blob(
         &self,
         blob_name: String,
@@ -240,7 +293,7 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Delete a blob by `pubky://` URI or configured Paykit profile path.
+    /// Delete a blob by `pubky://` URI or identity-wide Paykit blob path.
     pub async fn delete_paykit_blob(&self, uri_or_path: String) -> Result<(), PaykitFfiError> {
         self.runtime
             .delete_paykit_blob(&uri_or_path)
@@ -288,37 +341,14 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Resolve display metadata for a contact.
-    pub async fn resolve_contact_profile(
-        &self,
-        public_key: String,
-        receiver_path: String,
-        allow_pubky_profile_fallback: bool,
-    ) -> Result<Option<FfiContactProfileResolution>, PaykitFfiError> {
-        self.runtime
-            .resolve_contact_profile(
-                parse_public_key(public_key)?,
-                parse_receiver_path(receiver_path)?,
-                allow_pubky_profile_fallback,
-            )
-            .await
-            .map(|resolution| resolution.map(Into::into))
-            .map_err(Into::into)
-    }
-
     /// Resolve public profile metadata, preferring Paykit Profile.
     pub async fn resolve_profile(
         &self,
         public_key: String,
-        receiver_path: String,
         allow_pubky_profile_fallback: bool,
-    ) -> Result<Option<FfiContactProfileResolution>, PaykitFfiError> {
+    ) -> Result<Option<FfiProfileResolution>, PaykitFfiError> {
         self.runtime
-            .resolve_profile(
-                parse_public_key(public_key)?,
-                parse_receiver_path(receiver_path)?,
-                allow_pubky_profile_fallback,
-            )
+            .resolve_profile(parse_public_key(public_key)?, allow_pubky_profile_fallback)
             .await
             .map(|resolution| resolution.map(Into::into))
             .map_err(Into::into)
@@ -328,7 +358,7 @@ impl FfiPaykitSdk {
     pub async fn current_profile(
         &self,
         allow_pubky_profile_fallback: bool,
-    ) -> Result<Option<FfiContactProfileResolution>, PaykitFfiError> {
+    ) -> Result<Option<FfiProfileResolution>, PaykitFfiError> {
         self.runtime
             .current_profile(allow_pubky_profile_fallback)
             .await
@@ -336,7 +366,7 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Save or update a local Contact Record.
+    /// Save or update a Contact Record.
     pub async fn save_contact(
         &self,
         update: FfiContactUpdate,
@@ -348,7 +378,7 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Return one local Contact Record.
+    /// Return one Contact Record.
     pub async fn contact_record(
         &self,
         public_key: String,
@@ -360,7 +390,7 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Return all local Contact Records.
+    /// Return all Contact Records.
     pub async fn contact_records(&self) -> Result<Vec<FfiContactRecord>, PaykitFfiError> {
         self.runtime
             .contact_records()
@@ -369,7 +399,7 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Remove a local Contact Record when it has no public marker to clean up.
+    /// Remove a Contact Record when it has no public marker to clean up.
     pub async fn remove_contact(
         &self,
         public_key: String,
@@ -381,33 +411,25 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Refresh the cached Paykit Profile for a local Contact Record.
+    /// Refresh the cached Paykit Profile for a Contact Record.
     pub async fn refresh_contact_paykit_profile(
         &self,
         public_key: String,
-        receiver_path: String,
     ) -> Result<Option<FfiContactRecord>, PaykitFfiError> {
         self.runtime
-            .refresh_contact_paykit_profile(
-                parse_public_key(public_key)?,
-                parse_receiver_path(receiver_path)?,
-            )
+            .refresh_contact_paykit_profile(parse_public_key(public_key)?)
             .await
             .map(|record| record.map(Into::into))
             .map_err(Into::into)
     }
 
-    /// Publish a public Contact Marker for a local Contact Record.
+    /// Publish a public Contact Marker for a Contact Record.
     pub async fn publish_public_contact(
         &self,
         public_key: String,
-        receiver_path: String,
     ) -> Result<FfiContactRecord, PaykitFfiError> {
         self.runtime
-            .publish_public_contact(
-                parse_public_key(public_key)?,
-                parse_receiver_path(receiver_path)?,
-            )
+            .publish_public_contact(parse_public_key(public_key)?)
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -417,13 +439,9 @@ impl FfiPaykitSdk {
     pub async fn remove_public_contact(
         &self,
         public_key: String,
-        receiver_path: String,
     ) -> Result<Option<FfiContactRecord>, PaykitFfiError> {
         self.runtime
-            .remove_public_contact(
-                parse_public_key(public_key)?,
-                parse_receiver_path(receiver_path)?,
-            )
+            .remove_public_contact(parse_public_key(public_key)?)
             .await
             .map(|record| record.map(Into::into))
             .map_err(Into::into)
@@ -520,8 +538,8 @@ impl From<PubkyProfileRecord> for FfiPubkyProfileRecord {
     }
 }
 
-impl From<ContactProfileResolution> for FfiContactProfileResolution {
-    fn from(value: ContactProfileResolution) -> Self {
+impl From<ProfileResolution> for FfiProfileResolution {
+    fn from(value: ProfileResolution) -> Self {
         Self {
             public_key: app_public_key(&value.public_key),
             source: value.source.into(),
@@ -552,11 +570,6 @@ impl TryFrom<FfiContactUpdate> for ContactUpdate {
     fn try_from(value: FfiContactUpdate) -> Result<Self, Self::Error> {
         Ok(Self {
             public_key: parse_public_key(value.public_key)?,
-            receiver_paths: value
-                .receiver_paths
-                .into_iter()
-                .map(parse_receiver_path)
-                .collect::<Result<Vec<_>, _>>()?,
             label: value.label,
         })
     }
@@ -566,20 +579,12 @@ impl From<ContactRecord> for FfiContactRecord {
     fn from(value: ContactRecord) -> Self {
         Self {
             public_key: app_public_key(&value.public_key),
-            receiver_paths: value
-                .receiver_paths
-                .into_iter()
-                .map(|receiver_path| receiver_path.to_string())
-                .collect(),
             label: value.label,
             profile: value.profile.map(Into::into),
             profile_fetched_at: value.profile_fetched_at.map(|time| time.to_rfc3339()),
             created_at: value.created_at.to_rfc3339(),
             updated_at: value.updated_at.to_rfc3339(),
             public_contact_marker_status: value.public_contact_marker_status.into(),
-            public_contact_marker_receiver_path: value
-                .public_contact_marker_receiver_path
-                .map(|receiver_path| receiver_path.to_string()),
             public_contact_published_at: value
                 .public_contact_published_at
                 .map(|time| time.to_rfc3339()),
@@ -605,11 +610,11 @@ impl From<PublicationStatus> for FfiPublicationStatus {
     }
 }
 
-impl From<ContactProfileSource> for FfiContactProfileSource {
-    fn from(value: ContactProfileSource) -> Self {
+impl From<ProfileSource> for FfiProfileSource {
+    fn from(value: ProfileSource) -> Self {
         match value {
-            ContactProfileSource::PaykitProfile => Self::PaykitProfile,
-            ContactProfileSource::PubkyProfile => Self::PubkyProfile,
+            ProfileSource::PaykitProfile => Self::PaykitProfile,
+            ProfileSource::PubkyProfile => Self::PubkyProfile,
             _ => Self::Unknown,
         }
     }
@@ -663,5 +668,31 @@ mod tests {
             PaykitProfile::try_from(profile),
             Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"
         ));
+    }
+
+    #[test]
+    fn test_private_contact_debug_is_redacted() {
+        let contact = FfiContactRecord {
+            public_key: "pubky-secret-contact".into(),
+            label: Some("Private label".into()),
+            profile: Some(FfiPaykitProfile {
+                display_name: Some("Alice".into()),
+                image_uri: None,
+                extra_json: None,
+            }),
+            profile_fetched_at: None,
+            created_at: "2026-08-19T00:00:00Z".into(),
+            updated_at: "2026-08-19T00:00:00Z".into(),
+            public_contact_marker_status: FfiPublicationStatus::NotPublished,
+            public_contact_published_at: None,
+            public_contact_removed_at: None,
+            public_contact_last_error: Some("private failure".into()),
+        };
+
+        let debug = format!("{contact:?}");
+        assert!(!debug.contains("pubky-secret-contact"));
+        assert!(!debug.contains("Private label"));
+        assert!(!debug.contains("Alice"));
+        assert!(!debug.contains("private failure"));
     }
 }
