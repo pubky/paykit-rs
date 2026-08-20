@@ -22,15 +22,15 @@ use crate::{
     },
     domain::publication::PublicationStatus,
     domain::receipts::{
-        receipt_access_key_hash, ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptIssuanceStatus,
-        ReceiptRecord, ReceiptRetrievalStatus,
+        receipt_access_key_hash, receipt_record_matches_access, ReceiptAccessRecord,
+        ReceiptIssuanceRecord, ReceiptIssuanceStatus, ReceiptRecord, ReceiptRetrievalStatus,
     },
     domain::records::{AmountRecord, BillingPeriodRecord},
     identity::{IdentityState, PubkyPublicKey},
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
         PaymentEndpointReservationRecord, PrivateStreamItemRecord, PublicEndpointRecord,
-        StorageAdapter, StorageState,
+        StorageAdapter, StorageState, ValidatedStorageState,
     },
     OutboundPrivateMessageStatus, PaykitSdkError, Result,
 };
@@ -165,27 +165,6 @@ pub struct RestoreReport {
     pub receipt_issuance_records: usize,
     /// Counterparties restored as recovery-required.
     pub recovery_required_peers: Vec<PubkyPublicKey>,
-}
-
-/// Backup-validated storage replacement payload.
-///
-/// This type is intentionally opaque to callers. It prevents arbitrary full
-/// storage replacement through [`StorageTransaction`](crate::StorageTransaction)
-/// while still letting storage adapters apply validated backup state.
-pub struct ValidatedStorageState {
-    state: StorageState,
-}
-
-impl ValidatedStorageState {
-    pub(crate) fn new(state: StorageState) -> Result<Self> {
-        validation::validate_storage_state(&state)?;
-        Ok(Self { state })
-    }
-
-    /// Consume the validated wrapper and return the storage state.
-    pub fn into_storage_state(self) -> StorageState {
-        self.state
-    }
 }
 
 /// Export SDK-managed state from storage.
@@ -470,6 +449,7 @@ impl SdkBackupState {
         validate_receipt_records(
             &receipt_records,
             &receipt_access_records,
+            &event_dedup_records,
             expected_receipt_recipient,
         )?;
         let receipt_issuance_records = keyed_by_tuple(
@@ -535,9 +515,7 @@ impl SdkBackupState {
             identity_state,
             linked_peers,
             contact_records,
-            authorized_private_apps: HashMap::new(),
-            authorized_payment_request_apps: HashMap::new(),
-            authorized_receipt_apps: HashMap::new(),
+            authorized_paykit_apps: HashMap::new(),
             registered_paykit_apps: HashSet::new(),
             registered_paykit_app_capabilities: HashMap::new(),
             retired_paykit_apps,
@@ -557,7 +535,8 @@ impl SdkBackupState {
             receipt_issuance_records,
         };
 
-        Ok((ValidatedStorageState::new(state)?, report))
+        validation::validate_storage_state(&state)?;
+        Ok((ValidatedStorageState::new(state), report))
     }
 
     fn validate(&self, current_identity: Option<&IdentityState>) -> Result<()> {
@@ -606,6 +585,19 @@ impl SdkBackupState {
             || !self.contact_records.is_empty()
             || !self.retired_paykit_apps.is_empty()
             || !self.public_endpoint_records.is_empty()
+            || !self.payment_endpoint_reservations.is_empty()
+            || !self.encrypted_link_states.is_empty()
+            || !self.outbound_private_messages.is_empty()
+            || !self.private_stream_items.is_empty()
+            || !self.event_dedup_records.is_empty()
+            || !self.receipt_access_records.is_empty()
+            || !self.receipt_records.is_empty()
+            || !self.receipt_issuance_records.is_empty()
+    }
+
+    pub(crate) fn has_private_state(&self) -> bool {
+        !self.linked_peers.is_empty()
+            || !self.retired_paykit_apps.is_empty()
             || !self.payment_endpoint_reservations.is_empty()
             || !self.encrypted_link_states.is_empty()
             || !self.outbound_private_messages.is_empty()

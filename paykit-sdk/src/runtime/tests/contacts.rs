@@ -1,5 +1,45 @@
 use super::*;
 
+fn public_resource(path: &str) -> pubky::PubkyResource {
+    let owner = pubky::Keypair::random().public_key();
+    format!("pubky://{}{path}", owner.z32()).parse().unwrap()
+}
+
+#[test]
+fn test_public_resource_cursor_must_advance() {
+    let page = vec![public_resource("/pub/pubky.app/follows/alice")];
+    let cursor = next_public_resource_cursor(0, &page, None, 10, "fetch follows").unwrap();
+
+    let error =
+        next_public_resource_cursor(1, &page, Some(&cursor), 10, "fetch follows").unwrap_err();
+
+    assert!(matches!(error, PaykitSdkError::Protocol { .. }));
+}
+
+#[test]
+fn test_public_resource_page_respects_entry_limit() {
+    let page = vec![
+        public_resource("/pub/pubky.app/follows/alice"),
+        public_resource("/pub/pubky.app/follows/bob"),
+    ];
+
+    let error = next_public_resource_cursor(0, &page, None, 1, "fetch follows").unwrap_err();
+
+    assert!(matches!(error, PaykitSdkError::Protocol { .. }));
+    assert!(require_public_resource_entry_limit(0, "fetch follows").is_err());
+}
+
+#[test]
+fn test_public_response_size_is_bounded_with_and_without_content_length() {
+    assert!(require_response_size_within_limit(None, 0, "fetch profile").is_err());
+    assert!(require_response_size_within_limit(Some(5), 4, "fetch profile").is_err());
+    assert!(require_response_size_within_limit(None, 4, "fetch profile").is_ok());
+
+    let mut bytes = vec![1, 2];
+    assert!(append_response_chunk(&mut bytes, &[3, 4], 4, "fetch profile").is_ok());
+    assert!(append_response_chunk(&mut bytes, &[5], 4, "fetch profile").is_err());
+}
+
 #[tokio::test]
 async fn test_contact_records_save_list_and_remove_locally() {
     let storage = InMemoryStorage::new();
@@ -166,7 +206,7 @@ async fn test_fetch_pubky_file_requires_public_storage() {
     );
 
     let result = sdk
-        .fetch_pubky_file("pubky://invalid/pub/paykit/blobs/avatar.jpg")
+        .fetch_pubky_file("pubky://invalid/pub/paykit/blobs/avatar.jpg", 1024)
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));

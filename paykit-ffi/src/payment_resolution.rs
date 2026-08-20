@@ -47,7 +47,7 @@ pub enum FfiPublicPaymentEndpointLoadFailureKind {
 }
 
 /// Failure to load one registered app's public Payment Endpoints.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPublicPaymentEndpointLoadFailure {
     /// App whose endpoint list could not be loaded.
     pub app_id: String,
@@ -86,7 +86,7 @@ pub enum FfiPrivatePaymentResolutionState {
 }
 
 /// Public Payment Endpoint paired with its adapter-built payment target.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiResolvedPublicPaymentEndpoint {
     /// Counterparty that published the endpoint.
     pub counterparty: String,
@@ -101,7 +101,7 @@ pub struct FfiResolvedPublicPaymentEndpoint {
 }
 
 /// Private Payment Endpoint paired with its adapter-built payment target.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiResolvedPrivatePaymentEndpoint {
     /// Counterparty that privately shared the endpoint.
     pub counterparty: String,
@@ -116,7 +116,7 @@ pub struct FfiResolvedPrivatePaymentEndpoint {
 }
 
 /// Result of resolving public Payment Endpoints for one counterparty.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPublicContactPaymentResolution {
     /// Public payment resolution outcome.
     pub status: FfiPublicPaymentResolutionStatus,
@@ -127,7 +127,7 @@ pub struct FfiPublicContactPaymentResolution {
 }
 
 /// Result of resolving a Private Payment List for one counterparty.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPrivateContactPaymentResolution {
     /// Private payment resolution outcome.
     pub status: FfiPrivatePaymentResolutionStatus,
@@ -140,7 +140,7 @@ pub struct FfiPrivateContactPaymentResolution {
 }
 
 /// Result of preparing private contact state and resolving private endpoints.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPreparedPrivateContactPayment {
     /// Private endpoint resolution after preparation.
     pub resolution: FfiPrivateContactPaymentResolution,
@@ -151,6 +151,15 @@ pub struct FfiPreparedPrivateContactPayment {
     /// Outbound private send report, when queued messages were processed.
     pub outbound_report: Option<FfiOutboundPrivateSendReport>,
 }
+
+impl_redacted_debug!(
+    FfiPublicPaymentEndpointLoadFailure,
+    FfiResolvedPublicPaymentEndpoint,
+    FfiResolvedPrivatePaymentEndpoint,
+    FfiPublicContactPaymentResolution,
+    FfiPrivateContactPaymentResolution,
+    FfiPreparedPrivateContactPayment,
+);
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
@@ -506,6 +515,71 @@ mod tests {
         assert_eq!(
             ffi.payable_endpoints[0].payload.export_text(),
             "bc1qprivate"
+        );
+        assert_eq!(
+            format!("{:?}", ffi.payable_endpoints[0]),
+            "FfiResolvedPrivatePaymentEndpoint(<redacted>)"
+        );
+        assert_eq!(
+            format!("{ffi:?}"),
+            "FfiPrivateContactPaymentResolution(<redacted>)"
+        );
+    }
+
+    #[test]
+    fn test_public_payment_resolution_records_redact_debug() {
+        let endpoint = FfiResolvedPublicPaymentEndpoint {
+            counterparty: "counterparty-secret".into(),
+            app_id: "app-secret".into(),
+            identifier: "identifier-secret".into(),
+            payload: Arc::new(FfiPaymentPayload::new("payload-secret".into())),
+            target: FfiPaymentTarget {
+                payload: Arc::new(FfiPaymentPayload::new("target-secret".into())),
+            },
+        };
+        let failure = FfiPublicPaymentEndpointLoadFailure {
+            app_id: "failure-app-secret".into(),
+            kind: FfiPublicPaymentEndpointLoadFailureKind::InvalidData,
+            context: "failure-context-secret".into(),
+        };
+        let resolution = FfiPublicContactPaymentResolution {
+            status: FfiPublicPaymentResolutionStatus::Payable,
+            payable_endpoints: vec![endpoint.clone()],
+            failures: vec![failure.clone()],
+        };
+
+        assert_eq!(
+            format!("{endpoint:?}"),
+            "FfiResolvedPublicPaymentEndpoint(<redacted>)"
+        );
+        assert_eq!(
+            format!("{failure:?}"),
+            "FfiPublicPaymentEndpointLoadFailure(<redacted>)"
+        );
+        assert_eq!(
+            format!("{resolution:?}"),
+            "FfiPublicContactPaymentResolution(<redacted>)"
+        );
+    }
+
+    #[test]
+    fn test_prepared_private_payment_redacts_nested_reports() {
+        let resolution = FfiPrivateContactPaymentResolution {
+            status: FfiPrivatePaymentResolutionStatus::NoEndpoint,
+            state: FfiPrivatePaymentResolutionState::NoPrivateEndpoint,
+            private_payment_list_version: None,
+            payable_endpoints: Vec::new(),
+        };
+        let prepared = FfiPreparedPrivateContactPayment {
+            resolution,
+            link_report: None,
+            receive_report: None,
+            outbound_report: None,
+        };
+
+        assert_eq!(
+            format!("{prepared:?}"),
+            "FfiPreparedPrivateContactPayment(<redacted>)"
         );
     }
 

@@ -64,13 +64,15 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
                 });
-                tx.insert_outbound_private_message(crate::storage::NewOutboundPrivateMessage::new(
-                    counterparty,
-                    app_id(),
-                    "paykit.private_payment_list".into(),
-                    private_list_json(),
-                    FixedClock.now(),
-                ));
+                tx.insert_outbound_private_message(
+                    crate::storage::NewOutboundPrivateMessage::new(
+                        counterparty,
+                        app_id(),
+                        "paykit.private_payment_list".into(),
+                        private_list_json(),
+                        FixedClock.now(),
+                    ),
+                )?;
                 Ok(())
             }
         })
@@ -241,13 +243,15 @@ async fn test_sign_out_preserves_identity_scoped_state() {
                     public_contact_removed_at: None,
                     public_contact_last_error: None,
                 });
-                tx.insert_outbound_private_message(crate::storage::NewOutboundPrivateMessage::new(
-                    counterparty,
-                    app_id(),
-                    "paykit.private_payment_list".into(),
-                    private_list_json(),
-                    FixedClock.now(),
-                ));
+                tx.insert_outbound_private_message(
+                    crate::storage::NewOutboundPrivateMessage::new(
+                        counterparty,
+                        app_id(),
+                        "paykit.private_payment_list".into(),
+                        private_list_json(),
+                        FixedClock.now(),
+                    ),
+                )?;
                 Ok(())
             }
         })
@@ -324,6 +328,64 @@ async fn test_sign_out_waits_for_live_session_operations() {
 
     drop(session_operation);
     sign_out.await.unwrap();
+    assert!(cleared.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn test_identity_status_holds_session_gate_until_provider_load_finishes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Barrier;
+
+    struct BlockingSessionProvider {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+        cleared: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl PubkySessionProvider for BlockingSessionProvider {
+        async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
+            self.entered.wait().await;
+            self.release.wait().await;
+            Ok(None)
+        }
+
+        async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+            Ok(None)
+        }
+
+        async fn clear_session_access(&self) -> Result<()> {
+            self.cleared.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let cleared = Arc::new(AtomicBool::new(false));
+    let sdk = Arc::new(PaykitSdk::with_clock(
+        InMemoryStorage::new(),
+        BlockingSessionProvider {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            cleared: Arc::clone(&cleared),
+        },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    ));
+    let status_sdk = Arc::clone(&sdk);
+    let status = tokio::spawn(async move { status_sdk.identity_status().await });
+    entered.wait().await;
+    let sign_out_sdk = Arc::clone(&sdk);
+    let sign_out = tokio::spawn(async move { sign_out_sdk.sign_out().await });
+    tokio::task::yield_now().await;
+
+    assert!(!cleared.load(Ordering::SeqCst));
+
+    release.wait().await;
+    status.await.unwrap().unwrap();
+    sign_out.await.unwrap().unwrap();
     assert!(cleared.load(Ordering::SeqCst));
 }
 

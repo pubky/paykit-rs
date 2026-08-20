@@ -63,6 +63,24 @@ fn receipt_access_raw_with_location(
     )
 }
 
+#[test]
+fn test_unknown_private_message_requires_valid_app_id() {
+    for raw_json in [
+        r#"{"version":1,"kind":"paykit.future"}"#,
+        r#"{"version":1,"kind":"paykit.future","app_id":"bad/path"}"#,
+    ] {
+        let classification = classify_private_application_message(&private_message(raw_json));
+        assert_eq!(classification.status, PrivateStreamParseStatus::InvalidJson);
+        assert!(classification.app_id.is_none());
+    }
+
+    let classification = classify_private_application_message(&private_message(
+        r#"{"version":1,"kind":"paykit.future","app_id":"bitkit"}"#,
+    ));
+    assert_eq!(classification.status, PrivateStreamParseStatus::UnknownKind);
+    assert_eq!(classification.app_id.unwrap().as_str(), "bitkit");
+}
+
 #[tokio::test]
 async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
     let storage = InMemoryStorage::new();
@@ -453,11 +471,11 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
-                ))
+                )
             }
         })
         .await
@@ -471,7 +489,7 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
                     &counterparty,
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
-                );
+                )?;
                 Ok(())
             }
         })

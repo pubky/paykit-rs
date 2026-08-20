@@ -16,10 +16,7 @@ use super::{
     FfiPrivateReceivingDetailReservationResponse, FfiPrivateReceivingDetailReservationResponseKind,
     FfiPublicPaymentEndpointCandidate, FfiPublicReceivingDetail, FfiReservationAttribution,
 };
-use crate::{
-    errors::{validation_error, PaykitFfiError},
-    session::app_public_key,
-};
+use crate::{errors::PaykitFfiError, session::app_public_key};
 
 impl TryFrom<FfiPublicReceivingDetail> for PublicReceivingDetail {
     type Error = paykit_sdk::PaykitSdkError;
@@ -250,7 +247,9 @@ where
     for selected_id in selected_ids {
         if !seen.insert(selected_id.clone()) {
             return Err(payment_adapter_error(
-                validation_error(format!("duplicate candidate id '{selected_id}'")),
+                invalid_candidate_selection_error(
+                    "payment adapter returned a duplicate candidate id",
+                ),
                 context,
             ));
         }
@@ -260,13 +259,22 @@ where
             .find(|(_, (candidate_id, _))| candidate_id == &selected_id)
         else {
             return Err(payment_adapter_error(
-                validation_error(format!("unknown candidate id '{selected_id}'")),
+                invalid_candidate_selection_error(
+                    "payment adapter returned an unknown candidate id",
+                ),
                 context,
             ));
         };
         selected.push(candidates[index].clone());
     }
     Ok(selected)
+}
+
+fn invalid_candidate_selection_error(context: &'static str) -> PaykitFfiError {
+    PaykitFfiError::PaymentAdapter {
+        code: "invalid_candidate_id".into(),
+        context: context.into(),
+    }
 }
 
 pub(crate) fn parse_rfc3339_utc(value: String) -> paykit_sdk::Result<DateTime<Utc>> {

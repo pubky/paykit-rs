@@ -167,7 +167,7 @@ async fn test_reservation_enqueue_does_not_cancel_when_peer_lease_is_busy() {
                     &counterparty,
                     FixedClock.now(),
                     FixedClock.now() + ChronoDuration::seconds(60),
-                )
+                )?
                 .ok_or_else(|| PaykitSdkError::Policy {
                     context: "failed to seed peer lease".into(),
                     source: None,
@@ -313,7 +313,7 @@ async fn test_enqueue_private_payment_list_waits_for_peer_operation_lease() {
                         &counterparty,
                         FixedClock.now(),
                         FixedClock.now() + ChronoDuration::seconds(60),
-                    )
+                    )?
                     .is_some());
                 Ok(())
             }

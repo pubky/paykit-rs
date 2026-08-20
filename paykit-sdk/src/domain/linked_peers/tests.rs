@@ -116,7 +116,7 @@ async fn test_save_linked_peer_link_state_requeues_recovery_required_messages() 
                             payload,
                             timestamp(),
                         ),
-                    );
+                    )?;
                     message.status = OutboundPrivateMessageStatus::RecoveryRequired;
                     message.attempt_count = 1;
                     message.last_attempt_at = Some(timestamp());
@@ -209,11 +209,11 @@ async fn test_unleased_recovery_rejects_active_peer_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
-                ))
+                )
             }
         })
         .await
@@ -263,11 +263,11 @@ async fn test_lease_checked_recovery_preserves_current_lease_for_caller() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
-                ))
+                )
             }
         })
         .await
@@ -301,11 +301,11 @@ async fn test_unleased_state_save_allows_expired_peer_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
-                ))
+                )
             }
         })
         .await
@@ -474,11 +474,11 @@ async fn test_lease_checked_handshake_save_rejects_stale_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
-                ))
+                )
             }
         })
         .await
@@ -488,11 +488,11 @@ async fn test_lease_checked_handshake_save_rejects_stale_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
-                ))
+                )
             }
         })
         .await
@@ -543,11 +543,11 @@ async fn test_lease_checked_recovery_rejects_stale_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
-                ))
+                )
             }
         })
         .await
@@ -557,11 +557,11 @@ async fn test_lease_checked_recovery_rejects_stale_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
-                ))
+                )
             }
         })
         .await

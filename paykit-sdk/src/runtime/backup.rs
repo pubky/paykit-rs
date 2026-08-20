@@ -45,7 +45,7 @@ where
             });
         }
         session_access.validate_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
-        if backup.has_identity_scoped_state()
+        if backup.has_private_state()
             && session_access.capability_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?
                 != PubkyIdentityCapability::PrivateLinkCapable
         {

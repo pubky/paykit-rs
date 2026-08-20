@@ -63,9 +63,11 @@ async fn test_current_private_payment_list_reads_cached_view_for_public_only_ide
                 )),
                 initialized_at: FixedClock.now(),
             });
-            tx.save_authorized_private_apps(
+            save_authorized_paykit_app(
+                tx,
                 counterparty.clone(),
-                vec![paykit_lib::PaykitAppId::new("bitkit").unwrap()],
+                paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+                private_app_capabilities(),
             );
             Ok(())
         })

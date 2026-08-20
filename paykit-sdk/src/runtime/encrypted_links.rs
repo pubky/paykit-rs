@@ -722,7 +722,7 @@ where
             .expect("fixed peer link lease timeout must fit chrono duration");
         let expires_at = now + lease_timeout;
         self.storage
-            .transaction(|tx| Ok(tx.claim_peer_link_operation(counterparty, now, expires_at)))
+            .transaction(|tx| tx.claim_peer_link_operation(counterparty, now, expires_at))
             .await?
             .ok_or_else(|| PaykitSdkError::Policy {
                 context: format!(

@@ -1,5 +1,17 @@
 #![doc = "UniFFI bindings for Paykit SDK."]
 
+macro_rules! impl_redacted_debug {
+    ($($type:ident),+ $(,)?) => {
+        $(
+            impl std::fmt::Debug for $type {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(concat!(stringify!($type), "(<redacted>)"))
+                }
+            }
+        )+
+    };
+}
+
 mod app_registry;
 mod config;
 mod conversions_common;

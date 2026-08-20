@@ -38,12 +38,28 @@ async fn test_two_apps_read_one_aggregated_private_state() {
         }),
         next_private_stream_item_id: 3,
         next_receive_batch_id: 2,
-        authorized_private_apps: HashMap::from([(
+        authorized_paykit_apps: HashMap::from([(
             counterparty.clone(),
-            vec![
-                paykit_lib::PaykitAppId::new("bitkit").unwrap(),
-                paykit_lib::PaykitAppId::new("paykit-server").unwrap(),
-            ],
+            HashMap::from([
+                (
+                    paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+                    paykit_lib::PaykitAppCapabilities {
+                        private_payments: true,
+                        payment_requests: false,
+                        receipts: false,
+                        outgoing_payments: false,
+                    },
+                ),
+                (
+                    paykit_lib::PaykitAppId::new("paykit-server").unwrap(),
+                    paykit_lib::PaykitAppCapabilities {
+                        private_payments: true,
+                        payment_requests: false,
+                        receipts: false,
+                        outgoing_payments: false,
+                    },
+                ),
+            ]),
         )]),
         ..StorageState::default()
     };

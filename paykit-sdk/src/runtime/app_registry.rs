@@ -1,9 +1,22 @@
 use super::app_removal::{
     app_removal_blockers, begin_paykit_app_removal, detach_shared_app_reservations,
-    reactivate_paykit_app, require_app_capability_downgrade_safe,
-    retire_app_outbound_private_messages,
+    reactivate_paykit_app, restore_app_capabilities, retire_app_outbound_private_messages,
+    stage_app_capability_update,
 };
 use super::*;
+
+fn authorized_app_ids(
+    apps: &HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
+    enabled: impl Fn(paykit_lib::PaykitAppCapabilities) -> bool,
+) -> Vec<paykit_lib::PaykitAppId> {
+    let mut app_ids = apps
+        .iter()
+        .filter(|(_, capabilities)| enabled(**capabilities))
+        .map(|(app_id, _)| app_id.clone())
+        .collect::<Vec<_>>();
+    app_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    app_ids
+}
 
 pub(super) struct CounterpartyAppAuthorizationContext {
     pub(super) registry: Option<paykit_lib::PaykitAppRegistry>,
@@ -29,39 +42,26 @@ where
                 &counterparty.to_public_key()?,
             )
             .await?;
-            let mut private_apps = Vec::new();
-            let mut payment_request_apps = Vec::new();
-            let mut receipt_apps = Vec::new();
-            if let Some(registry) = registry.as_ref() {
-                for (app_id, app) in registry.apps() {
-                    let capabilities = app.capabilities();
-                    if capabilities.private_payments {
-                        private_apps.push(app_id.clone());
-                    }
-                    if capabilities.payment_requests {
-                        payment_request_apps.push(app_id.clone());
-                    }
-                    if capabilities.receipts {
-                        receipt_apps.push(app_id.clone());
-                    }
-                }
-            }
-            private_apps.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-            payment_request_apps.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-            receipt_apps.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            let apps = registry
+                .as_ref()
+                .map(|registry| {
+                    registry
+                        .apps()
+                        .iter()
+                        .map(|(app_id, app)| (app_id.clone(), app.capabilities()))
+                        .collect::<HashMap<_, _>>()
+                })
+                .unwrap_or_default();
+            let private_apps =
+                authorized_app_ids(&apps, |capabilities| capabilities.private_payments);
+            let payment_request_apps =
+                authorized_app_ids(&apps, |capabilities| capabilities.payment_requests);
+            let receipt_apps = authorized_app_ids(&apps, |capabilities| capabilities.receipts);
             self.storage
                 .transaction({
                     let counterparty = counterparty.clone();
-                    let private_apps = private_apps.clone();
-                    let payment_request_apps = payment_request_apps.clone();
-                    let receipt_apps = receipt_apps.clone();
                     move |tx| {
-                        tx.save_authorized_private_apps(counterparty.clone(), private_apps);
-                        tx.save_authorized_payment_request_apps(
-                            counterparty.clone(),
-                            payment_request_apps,
-                        );
-                        tx.save_authorized_receipt_apps(counterparty, receipt_apps);
+                        tx.save_authorized_paykit_apps(counterparty, apps);
                         Ok(())
                     }
                 })
@@ -73,21 +73,21 @@ where
                 receipt_apps: Some(receipt_apps),
             })
         } else {
-            let (private_apps, payment_request_apps, receipt_apps) = self
+            let apps = self
                 .storage
-                .transaction(|tx| {
-                    Ok((
-                        tx.authorized_private_apps(counterparty),
-                        tx.authorized_payment_request_apps(counterparty),
-                        tx.authorized_receipt_apps(counterparty),
-                    ))
-                })
+                .transaction(|tx| Ok(tx.authorized_paykit_apps(counterparty)))
                 .await?;
             Ok(CounterpartyAppAuthorizationContext {
                 registry: None,
-                private_apps,
-                payment_request_apps,
-                receipt_apps,
+                private_apps: apps.as_ref().map(|apps| {
+                    authorized_app_ids(apps, |capabilities| capabilities.private_payments)
+                }),
+                payment_request_apps: apps.as_ref().map(|apps| {
+                    authorized_app_ids(apps, |capabilities| capabilities.payment_requests)
+                }),
+                receipt_apps: apps
+                    .as_ref()
+                    .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.receipts)),
             })
         }
     }
@@ -132,21 +132,33 @@ where
         let _identity_guard = self.claim_identity_operation("publish Paykit app")?;
         let app_id = self.config.app_id.clone();
         let capabilities = app.capabilities();
-        let (session_access, mut registry) = self
-            .paykit_app_registry_update_context("publish Paykit app", true)
-            .await?;
-        if let Some(previous) = registry.apps().get(&app_id) {
-            require_app_capability_downgrade_safe(
-                &self.storage,
-                &app_id,
-                previous.capabilities(),
-                capabilities,
-                self.clock.now(),
-            )
-            .await?;
+        let (session_access, mut registry) = self.paykit_app_registry_update_context(true).await?;
+        let remote_capabilities = registry
+            .apps()
+            .get(&app_id)
+            .map(|previous| previous.capabilities());
+        let staged_capabilities = stage_app_capability_update(
+            &self.storage,
+            &app_id,
+            remote_capabilities,
+            capabilities,
+            self.clock.now(),
+        )
+        .await?;
+        if let Err(err) = registry.register_app(app_id.clone(), app) {
+            if let Some((previous, staged)) = staged_capabilities {
+                restore_app_capabilities(&self.storage, &app_id, staged, previous).await?;
+            }
+            return Err(err.into());
         }
-        registry.register_app(app_id.clone(), app)?;
-        paykit_lib::set_paykit_app_registry(&session_access.session, &registry).await?;
+        if let Err(err) =
+            paykit_lib::set_paykit_app_registry(&session_access.session, &registry).await
+        {
+            if let Some((previous, staged)) = staged_capabilities {
+                restore_app_capabilities(&self.storage, &app_id, staged, previous).await?;
+            }
+            return Err(err.into());
+        }
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
@@ -179,9 +191,7 @@ where
     /// across SDK instances until Pubky supports conditional registry writes.
     pub async fn remove_paykit_app(&self) -> Result<paykit_lib::PaykitAppRegistry> {
         let _identity_guard = self.claim_identity_operation("remove Paykit app")?;
-        let (session_access, mut registry) = self
-            .paykit_app_registry_update_context("remove Paykit app", true)
-            .await?;
+        let (session_access, mut registry) = self.paykit_app_registry_update_context(true).await?;
         let app_id = self.config.app_id.clone();
         let registry_capabilities = registry.apps().get(&app_id).map(|app| app.capabilities());
         let registry_entry_exists = registry_capabilities.is_some();
@@ -385,7 +395,7 @@ where
     {
         let _identity_guard = self.claim_identity_operation(operation)?;
         let (session_access, mut registry) = self
-            .paykit_app_registry_update_context(operation, create_if_missing)
+            .paykit_app_registry_update_context(create_if_missing)
             .await?;
         update(&mut registry)?;
         paykit_lib::set_paykit_app_registry(&session_access.session, &registry).await?;
@@ -394,7 +404,6 @@ where
 
     async fn paykit_app_registry_update_context(
         &self,
-        _operation: &'static str,
         create_if_missing: bool,
     ) -> Result<(GuardedSessionAccess, paykit_lib::PaykitAppRegistry)> {
         let (session_access, _) = self.load_session_access_and_refresh_identity().await?;

@@ -82,16 +82,17 @@ async fn test_resolve_private_payment_request_enforces_request_constraints() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                tx.save_authorized_private_apps(
+                save_authorized_paykit_app(
+                    tx,
                     counterparty.clone(),
-                    vec![
-                        paykit_lib::PaykitAppId::new("bitkit").unwrap(),
-                        paykit_lib::PaykitAppId::new("server").unwrap(),
-                    ],
+                    paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+                    private_app_capabilities(),
                 );
-                tx.save_authorized_payment_request_apps(
+                save_authorized_paykit_app(
+                    tx,
                     counterparty,
-                    vec![paykit_lib::PaykitAppId::new("server").unwrap()],
+                    paykit_lib::PaykitAppId::new("server").unwrap(),
+                    private_app_capabilities(),
                 );
                 Ok(())
             }

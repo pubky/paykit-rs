@@ -162,7 +162,7 @@ async fn test_transaction_commits_records() {
                 tx.save_payment_endpoint_reservation(payment_endpoint_reservation_record(
                     counterparty.clone(),
                 ));
-                tx.insert_outbound_private_message(outbound_private_message(counterparty.clone()));
+                tx.insert_outbound_private_message(outbound_private_message(counterparty.clone()))?;
 
                 let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
                     NewPrivateStreamItemDetails {
@@ -177,7 +177,7 @@ async fn test_transaction_commits_records() {
                         parse_error: None,
                         received_at: timestamp(),
                     },
-                ));
+                ))?;
 
                 tx.save_event_dedup_record(EventDedupRecord {
                     counterparty: counterparty.clone(),
@@ -286,4 +286,85 @@ async fn test_save_outbound_private_message_rejects_missing_record() {
         .unwrap()
         .outbound_private_messages
         .is_empty());
+}
+
+#[tokio::test]
+async fn test_storage_allocators_fail_without_mutating_at_exhaustion() {
+    let counterparty = counterparty();
+
+    let mut state = StorageState {
+        next_peer_link_operation_lease_id: u64::MAX,
+        ..StorageState::default()
+    };
+    let storage = InMemoryStorage::from_state(state.clone());
+    let result = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.claim_peer_link_operation(&counterparty, timestamp(), timestamp())?;
+                Ok(())
+            }
+        })
+        .await;
+    assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
+    assert!(storage
+        .snapshot()
+        .unwrap()
+        .peer_link_operation_leases
+        .is_empty());
+
+    state.next_peer_link_operation_lease_id = 0;
+    state.next_outbound_private_message_id = u64::MAX;
+    let storage = InMemoryStorage::from_state(state.clone());
+    let result = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.insert_outbound_private_message(outbound_private_message(counterparty))?;
+                Ok(())
+            }
+        })
+        .await;
+    assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
+    assert!(storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .is_empty());
+
+    state.next_outbound_private_message_id = 0;
+    state.next_receive_batch_id = u64::MAX;
+    let storage = InMemoryStorage::from_state(state.clone());
+    let result = storage
+        .transaction(|tx| {
+            tx.allocate_receive_batch_id()?;
+            Ok(())
+        })
+        .await;
+    assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
+
+    state.next_receive_batch_id = 0;
+    state.next_private_stream_item_id = u64::MAX;
+    let storage = InMemoryStorage::from_state(state);
+    let result = storage
+        .transaction(move |tx| {
+            tx.insert_private_stream_item(NewPrivateStreamItem::new(
+                NewPrivateStreamItemDetails {
+                    counterparty,
+                    receive_batch_id: 0,
+                    raw_json: "{}".into(),
+                    parsed_version: None,
+                    parsed_kind: None,
+                    parsed_app_id: None,
+                    known_paykit_kind: None,
+                    parse_status: PrivateStreamParseStatus::InvalidJson,
+                    parse_error: None,
+                    received_at: timestamp(),
+                },
+            ))?;
+            Ok(())
+        })
+        .await;
+    assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
+    assert!(storage.snapshot().unwrap().private_stream_items.is_empty());
 }

@@ -1,5 +1,37 @@
 use super::*;
 
+#[test]
+fn test_public_only_backup_records_do_not_require_private_capability() {
+    let identity_key = public_key();
+    let contact_key = public_key();
+    let mut backup = empty_backup(identity(identity_key));
+    backup.contact_records.push(contact_record(contact_key));
+    backup.public_endpoint_records.push(PublicEndpointRecord {
+        app_id: app_id(),
+        identifier: "btc-lightning-bolt11".into(),
+        payload: Some("ln-public".into()),
+        status: crate::PublicationStatus::Published,
+        updated_at: timestamp(),
+        last_error: None,
+    });
+
+    assert!(!backup.has_private_state());
+
+    backup.linked_peers.push(LinkedPeerRecord {
+        counterparty: public_key(),
+        state: crate::LinkedPeerState::NotLinked,
+        last_sync_at: None,
+        last_private_receive_at: None,
+        failure_count: 0,
+        local_recovery_attempt_id: None,
+        local_recovery_marker_created_at: None,
+        local_recovery_marker_last_error: None,
+        remote_recovery_attempt_id: None,
+        remote_recovery_marker_observed_at: None,
+    });
+    assert!(backup.has_private_state());
+}
+
 #[tokio::test]
 async fn test_export_backup_state_redacts_debug() {
     let storage = InMemoryStorage::new();
@@ -25,7 +57,7 @@ async fn test_export_backup_state_redacts_debug() {
                         r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{"btc-lightning-bolt11":"ln-private-payload-marker"}}"#.into(),
                         timestamp(),
                     ),
-                );
+                )?;
                 Ok(())
             }
         })
@@ -78,7 +110,18 @@ async fn test_backup_restore_clears_receipt_app_authorization_cache() {
             let counterparty = counterparty.clone();
             move |tx| {
                 tx.save_identity_state(identity(public_key()));
-                tx.save_authorized_receipt_apps(counterparty, vec![app_id()]);
+                tx.save_authorized_paykit_apps(
+                    counterparty,
+                    HashMap::from([(
+                        app_id(),
+                        paykit_lib::PaykitAppCapabilities {
+                            private_payments: false,
+                            payment_requests: false,
+                            receipts: true,
+                            outgoing_payments: false,
+                        },
+                    )]),
+                );
                 Ok(())
             }
         })
@@ -92,7 +135,7 @@ async fn test_backup_restore_clears_receipt_app_authorization_cache() {
     assert!(restored
         .snapshot()
         .unwrap()
-        .authorized_receipt_apps
+        .authorized_paykit_apps
         .is_empty());
 }
 
@@ -378,7 +421,7 @@ async fn test_restore_backup_state_rejects_active_peer_work() {
                         &counterparty,
                         timestamp(),
                         timestamp() + chrono::Duration::seconds(60),
-                    )
+                    )?
                     .unwrap();
                 assert_eq!(lease.lease_id, 0);
                 Ok(())
@@ -568,7 +611,7 @@ async fn test_restore_backup_state_rejects_advanced_counter_state() {
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(identity(local_public_key));
-                tx.allocate_receive_batch_id();
+                tx.allocate_receive_batch_id()?;
                 Ok(())
             }
         })

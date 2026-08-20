@@ -98,9 +98,6 @@ pub(crate) async fn enqueue_receipt_access_for_issuance<S>(
 where
     S: StorageAdapter,
 {
-    if record.outbound_message_id.is_some() {
-        return Ok(record);
-    }
     let (app_id, kind) = validate_outbound_private_message(&record.access_json)?;
     if kind != paykit_lib::PrivateMessageKind::ReceiptAccess.as_str() {
         return Err(PaykitSdkError::Protocol {
@@ -110,15 +107,36 @@ where
     }
     storage
         .transaction(move |tx| {
+            let current = tx
+                .receipt_issuance_record(&record.counterparty, &record.receipt_id)
+                .ok_or_else(|| PaykitSdkError::NotFound {
+                    context: format!("Receipt issuance {} was not found", record.receipt_id),
+                    source: None,
+                })?;
+            if current.app_id != record.app_id
+                || current.receipt_access_event_id != record.receipt_access_event_id
+                || current.access_json != record.access_json
+            {
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "Receipt issuance {} changed while Receipt Access was being queued",
+                        record.receipt_id
+                    ),
+                    source: None,
+                });
+            }
+            if current.outbound_message_id.is_some() {
+                return Ok(current);
+            }
             require_paykit_app_capability(tx, &app_id, PrivateMessageKind::ReceiptAccess)?;
             let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
-                record.counterparty.clone(),
+                current.counterparty.clone(),
                 app_id,
                 kind,
-                record.access_json.clone(),
+                current.access_json.clone(),
                 now,
-            ));
-            let queued = record.mark_access_queued(outbound.outbound_message_id, now);
+            ))?;
+            let queued = current.mark_access_queued(outbound.outbound_message_id, now);
             tx.save_receipt_issuance_record(queued.clone());
             Ok(queued)
         })

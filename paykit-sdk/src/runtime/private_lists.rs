@@ -247,14 +247,20 @@ where
             .sync_contact_private_payment_lists(clear_unlisted_linked_peers)
             .await?;
         let mut report = delivery_report_from_sync_report(sync);
+        let tracked_message_ids = private_list_delivery_message_ids(&report);
+        let tracked_counterparties = private_list_delivery_counterparties(&report);
         let outbound = self.process_pending_private_messages().await?;
         for counterparty_report in outbound {
+            if !tracked_counterparties.contains(&counterparty_report.counterparty) {
+                continue;
+            }
             if let Some(send_report) = counterparty_report.report {
                 report
                     .failed_to_deliver
                     .extend(delivery_failures_from_send_report(
                         counterparty_report.counterparty.clone(),
                         send_report,
+                        &tracked_message_ids,
                     ));
             }
             if let Some(error) = counterparty_report.error {
@@ -332,9 +338,7 @@ where
                     .await
                 {
                     Ok(()) => error,
-                    Err(cancellation_err) => {
-                        format!("{error}; reservation cleanup also failed: {cancellation_err}")
-                    }
+                    Err(_) => format!("{error}; reservation cleanup also failed"),
                 };
                 report.failed_to_queue.push(PrivatePaymentListSyncChange {
                     counterparty,
@@ -391,6 +395,7 @@ where
 
         queued_counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         queued_counterparties.dedup();
+        let tracked_message_ids = private_list_delivery_message_ids(&report);
         for counterparty in queued_counterparties {
             match self.private_list_delivery_ready(&counterparty).await {
                 Ok(true) => {}
@@ -417,6 +422,7 @@ where
                         .extend(delivery_failures_from_send_report(
                             counterparty,
                             send_report,
+                            &tracked_message_ids,
                         ));
                 }
                 Err(err) => report
@@ -512,17 +518,8 @@ where
             match result {
                 Ok(record) => Ok(record),
                 Err(err) => {
-                    if let Err(cancellation_err) = self
-                        .cancel_reservations_after_queue_error(&cancellations, &counterparty)
-                        .await
-                    {
-                        return Err(PaykitSdkError::Policy {
-                            context: format!(
-                            "failed to queue reserved receiving details: {err}; reservation cleanup also failed: {cancellation_err}"
-                        ),
-                            source: None,
-                        });
-                    }
+                    self.cancel_reservations_after_queue_error(&cancellations, &counterparty)
+                        .await?;
                     Err(err)
                 }
             }
@@ -597,13 +594,38 @@ fn delivery_report_from_sync_report(
     }
 }
 
+fn private_list_delivery_message_ids(report: &PrivatePaymentListDeliveryReport) -> HashSet<u64> {
+    report
+        .queued
+        .iter()
+        .chain(&report.cleared)
+        .filter_map(|change| change.outbound_message_id)
+        .collect()
+}
+
+fn private_list_delivery_counterparties(
+    report: &PrivatePaymentListDeliveryReport,
+) -> HashSet<PubkyPublicKey> {
+    report
+        .queued
+        .iter()
+        .chain(&report.cleared)
+        .map(|change| change.counterparty.clone())
+        .collect()
+}
+
 fn delivery_failures_from_send_report(
     counterparty: PubkyPublicKey,
     report: OutboundPrivateSendReport,
+    tracked_message_ids: &HashSet<u64>,
 ) -> Vec<PrivatePaymentListDeliveryFailure> {
     let mut failures = Vec::new();
 
-    for failure in report.failed {
+    for failure in report
+        .failed
+        .into_iter()
+        .filter(|failure| tracked_message_ids.contains(&failure.outbound_message_id))
+    {
         failures.push(PrivatePaymentListDeliveryFailure {
             counterparty: counterparty.clone(),
             outbound_message_id: Some(failure.outbound_message_id),
@@ -621,7 +643,15 @@ fn delivery_failures_from_send_report(
         });
     }
 
-    for failure in report.recovery_marker_failures {
+    for failure in report
+        .recovery_marker_failures
+        .into_iter()
+        .filter(|failure| {
+            failure
+                .outbound_message_id
+                .is_some_and(|message_id| tracked_message_ids.contains(&message_id))
+        })
+    {
         failures.push(PrivatePaymentListDeliveryFailure {
             counterparty: counterparty.clone(),
             outbound_message_id: failure.outbound_message_id,
@@ -631,4 +661,37 @@ fn delivery_failures_from_send_report(
     }
 
     failures
+}
+
+#[cfg(test)]
+mod delivery_report_tests {
+    use super::*;
+
+    #[test]
+    fn test_private_list_delivery_ignores_unrelated_outbound_failures() {
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let report = OutboundPrivateSendReport {
+            failed: vec![
+                OutboundPrivateSendFailure {
+                    outbound_message_id: 7,
+                    error: "tracked".into(),
+                },
+                OutboundPrivateSendFailure {
+                    outbound_message_id: 8,
+                    error: "unrelated".into(),
+                },
+            ],
+            recovery_marker_failures: vec![RecoveryMarkerPublishFailure {
+                outbound_message_id: Some(8),
+                error: "unrelated marker".into(),
+            }],
+            ..OutboundPrivateSendReport::default()
+        };
+
+        let failures =
+            delivery_failures_from_send_report(counterparty, report, &HashSet::from([7]));
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].outbound_message_id, Some(7));
+    }
 }

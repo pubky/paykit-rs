@@ -77,3 +77,39 @@ async fn test_recovery_marker_fetch_tracing_redacts_derived_address() {
     assert!(!traces.contains("127.0.0.1:1"));
     assert!(!traces.contains("Connection refused"));
 }
+
+#[test]
+fn test_payment_endpoint_failure_tracing_omits_transport_details() {
+    struct SensitiveTransportError;
+
+    impl std::fmt::Display for SensitiveTransportError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("request URL and response body sentinel")
+        }
+    }
+
+    let trace_bytes = Arc::new(Mutex::new(Vec::new()));
+    let writer_bytes = Arc::clone(&trace_bytes);
+    let layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || TraceWriter(Arc::clone(&writer_bytes)))
+        .with_filter(Targets::new().with_target("paykit_lib", tracing::Level::TRACE));
+    let subscriber = registry().with(layer);
+
+    tracing::subscriber::with_default(subscriber, || {
+        crate::pubky_routing::log_payment_endpoint_storage_failure("put", &SensitiveTransportError);
+    });
+
+    let traces = String::from_utf8(
+        trace_bytes
+            .lock()
+            .expect("trace buffer lock poisoned")
+            .clone(),
+    )
+    .unwrap();
+    assert!(traces.contains("payment endpoint storage request failed"));
+    assert!(traces.contains("operation=\"put\""));
+    assert!(!traces.contains("response body sentinel"));
+    assert!(!traces.contains("request URL"));
+}

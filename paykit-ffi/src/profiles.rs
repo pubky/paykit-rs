@@ -180,6 +180,8 @@ impl fmt::Debug for FfiContactUpdate {
 }
 
 /// Local SDK contact record.
+///
+/// Generated platform record descriptions redact the record contents.
 #[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiContactRecord {
     /// Contact public key.
@@ -301,18 +303,32 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Fetch public Pubky file bytes.
-    pub async fn fetch_pubky_file(&self, uri: String) -> Result<Option<Vec<u8>>, PaykitFfiError> {
+    /// Fetch public Pubky file bytes up to `max_bytes`.
+    pub async fn fetch_pubky_file(
+        &self,
+        uri: String,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, PaykitFfiError> {
+        let max_bytes = usize::try_from(max_bytes).map_err(|_| {
+            crate::errors::validation_error("Pubky file byte limit is too large for this platform")
+        })?;
         self.runtime
-            .fetch_pubky_file(&uri)
+            .fetch_pubky_file(&uri, max_bytes)
             .await
             .map_err(Into::into)
     }
 
-    /// Fetch a public Pubky UTF-8 text file.
-    pub async fn fetch_pubky_text(&self, uri: String) -> Result<Option<String>, PaykitFfiError> {
+    /// Fetch a public Pubky UTF-8 text file up to `max_bytes`.
+    pub async fn fetch_pubky_text(
+        &self,
+        uri: String,
+        max_bytes: u64,
+    ) -> Result<Option<String>, PaykitFfiError> {
+        let max_bytes = usize::try_from(max_bytes).map_err(|_| {
+            crate::errors::validation_error("Pubky text byte limit is too large for this platform")
+        })?;
         self.runtime
-            .fetch_pubky_text(&uri)
+            .fetch_pubky_text(&uri, max_bytes)
             .await
             .map_err(Into::into)
     }
@@ -329,13 +345,19 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Fetch public Pubky app follows.
+    /// Fetch public Pubky app follows up to `max_entries`.
     pub async fn fetch_pubky_follows(
         &self,
         public_key: String,
+        max_entries: u64,
     ) -> Result<Vec<String>, PaykitFfiError> {
+        let max_entries = usize::try_from(max_entries).map_err(|_| {
+            crate::errors::validation_error(
+                "Pubky follows entry limit is too large for this platform",
+            )
+        })?;
         self.runtime
-            .fetch_pubky_follows(parse_public_key(public_key)?)
+            .fetch_pubky_follows(parse_public_key(public_key)?, max_entries)
             .await
             .map(|keys| keys.into_iter().map(|key| app_public_key(&key)).collect())
             .map_err(Into::into)

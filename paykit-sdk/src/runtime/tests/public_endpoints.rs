@@ -5,6 +5,16 @@ use crate::runtime::app_removal::{
 };
 use crate::storage::PaymentEndpointReservationRecord;
 
+struct CountingPublicPaymentAdapter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait]
+impl PaymentAdapter for CountingPublicPaymentAdapter {
+    async fn current_public_receiving_details(&self) -> Result<Vec<PublicReceivingDetail>> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+}
+
 #[test]
 fn test_app_removal_blocks_owned_payer_and_payee_subscriptions() {
     let app_id = app_id();
@@ -58,14 +68,14 @@ async fn test_app_removal_blocks_undelivered_events_and_receipts() {
                     PrivateMessageKind::PrivatePaymentList.as_str().into(),
                     private_list_json(),
                     FixedClock.now(),
-                ));
+                ))?;
                 tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                     counterparty.clone(),
                     app_id.clone(),
                     PrivateMessageKind::PaymentProof.as_str().into(),
                     r#"{"version":1,"kind":"paykit.payment_proof","app_id":"bitkit"}"#.into(),
                     FixedClock.now(),
-                ));
+                ))?;
                 tx.save_receipt_issuance_record(ReceiptIssuanceRecord {
                     counterparty,
                     app_id,
@@ -121,7 +131,7 @@ async fn test_app_removal_requires_shared_private_list_to_be_cleared() {
                         r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{"btc-lightning-bolt11":"ln-private"}}"#.into(),
                         FixedClock.now(),
                     ),
-                );
+                )?;
                 shared.status = OutboundPrivateMessageStatus::Sent;
                 shared.attempt_count = 1;
                 shared.last_attempt_at = Some(FixedClock.now());
@@ -150,7 +160,7 @@ async fn test_app_removal_requires_shared_private_list_to_be_cleared() {
                         PrivateMessageKind::PrivatePaymentList.as_str().into(),
                         private_list_json(),
                         FixedClock.now(),
-                    ));
+                    ))?;
                 cleared.status = OutboundPrivateMessageStatus::Sent;
                 cleared.attempt_count = 1;
                 cleared.last_attempt_at = Some(FixedClock.now());
@@ -217,13 +227,14 @@ async fn test_receipt_access_delivery_clears_app_removal_blocker() {
             let counterparty = counterparty.clone();
             let app_id = app_id.clone();
             move |tx| {
-                let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
-                    counterparty.clone(),
-                    app_id,
-                    PrivateMessageKind::ReceiptAccess.as_str().into(),
-                    r#"{"version":1,"kind":"paykit.receipt_access","app_id":"bitkit"}"#.into(),
-                    FixedClock.now(),
-                ));
+                let outbound =
+                    tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                        counterparty.clone(),
+                        app_id,
+                        PrivateMessageKind::ReceiptAccess.as_str().into(),
+                        r#"{"version":1,"kind":"paykit.receipt_access","app_id":"bitkit"}"#.into(),
+                        FixedClock.now(),
+                    ))?;
                 let mut issuance = tx
                     .receipt_issuance_record(&counterparty, "receipt-1")
                     .unwrap();
@@ -292,10 +303,11 @@ async fn test_sync_public_endpoints_requires_pubky_session() {
 async fn test_sync_public_endpoints_rejects_reentrant_call() {
     let storage = InMemoryStorage::new();
     let pubky = TestPubkySessionProvider { session: None };
+    let adapter_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sdk = PaykitSdk::with_clock(
         storage,
         pubky,
-        TestPaymentAdapter,
+        CountingPublicPaymentAdapter(std::sync::Arc::clone(&adapter_calls)),
         PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
@@ -304,6 +316,11 @@ async fn test_sync_public_endpoints_rejects_reentrant_call() {
     let result = sdk.sync_public_endpoints().await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+    assert_eq!(
+        adapter_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a rejected sync must not read an adapter snapshot"
+    );
 }
 
 #[tokio::test]
@@ -328,14 +345,14 @@ async fn test_retire_app_outbound_private_messages_stops_app_queue() {
                     PrivateMessageKind::PrivatePaymentList.as_str().into(),
                     private_list_json(),
                     FixedClock.now(),
-                ));
+                ))?;
                 tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                     counterparty,
                     app_id.clone(),
                     "paykit.payment_request".into(),
                     r#"{"version":1,"kind":"paykit.payment_request","app_id":"bitkit"}"#.into(),
                     FixedClock.now(),
-                ));
+                ))?;
                 retire_app_outbound_private_messages(
                     tx,
                     &app_id,
@@ -383,12 +400,12 @@ async fn test_retire_app_outbound_private_messages_rejects_active_peer_work() {
                     PrivateMessageKind::PrivatePaymentList.as_str().into(),
                     private_list_json(),
                     FixedClock.now(),
-                ));
+                ))?;
                 tx.claim_peer_link_operation(
                     &counterparty,
                     FixedClock.now(),
                     FixedClock.now() + chrono::Duration::seconds(60),
-                )
+                )?
                 .unwrap();
                 Ok(())
             }
@@ -490,24 +507,26 @@ async fn test_detach_shared_app_reservations_keeps_unshared_cleanup_work() {
             let counterparty = counterparty.clone();
             let app_id = app_id.clone();
             move |tx| {
-                let mut sent = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
-                    counterparty.clone(),
-                    app_id.clone(),
-                    PrivateMessageKind::PrivatePaymentList.as_str().into(),
-                    private_list_json(),
-                    FixedClock.now(),
-                ));
+                let mut sent =
+                    tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                        counterparty.clone(),
+                        app_id.clone(),
+                        PrivateMessageKind::PrivatePaymentList.as_str().into(),
+                        private_list_json(),
+                        FixedClock.now(),
+                    ))?;
                 sent.status = OutboundPrivateMessageStatus::Sent;
                 sent.last_attempt_at = Some(FixedClock.now());
                 sent.sent_at = Some(FixedClock.now());
                 tx.save_outbound_private_message(sent.clone())?;
-                let pending = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
-                    counterparty.clone(),
-                    app_id.clone(),
-                    PrivateMessageKind::PrivatePaymentList.as_str().into(),
-                    private_list_json(),
-                    FixedClock.now(),
-                ));
+                let pending =
+                    tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                        counterparty.clone(),
+                        app_id.clone(),
+                        PrivateMessageKind::PrivatePaymentList.as_str().into(),
+                        private_list_json(),
+                        FixedClock.now(),
+                    ))?;
                 for (reservation_id, outbound_message_id) in [
                     ("shared", sent.outbound_message_id),
                     ("unshared", pending.outbound_message_id),

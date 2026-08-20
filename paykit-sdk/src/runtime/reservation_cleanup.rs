@@ -12,7 +12,7 @@ where
         cancellations: &[PrivatePaymentEndpointReservationCancellation],
         counterparty: &PubkyPublicKey,
     ) -> Result<()> {
-        let mut cancellation_errors = Vec::new();
+        let mut first_cancellation_error = None;
         for cancellation in cancellations {
             let app_id = self.config.app_id.clone();
             let can_cancel = self
@@ -44,19 +44,14 @@ where
                 .cancel_private_receiving_detail_reservation(cancellation)
                 .await
             {
-                cancellation_errors.push(format!("{}: {err}", cancellation.reservation_id));
+                if first_cancellation_error.is_none() {
+                    first_cancellation_error = Some(err);
+                }
             }
         }
-        if cancellation_errors.is_empty() {
-            Ok(())
-        } else {
-            Err(PaykitSdkError::Policy {
-                context: format!(
-                    "failed to cancel reserved receiving details: {}",
-                    cancellation_errors.join("; ")
-                ),
-                source: None,
-            })
+        match first_cancellation_error {
+            Some(err) => Err(err),
+            None => Ok(()),
         }
     }
 
@@ -66,17 +61,8 @@ where
         counterparty: &PubkyPublicKey,
         err: PaykitSdkError,
     ) -> Result<T> {
-        if let Err(cancellation_err) = self
-            .cancel_reservations_after_queue_error(cancellations, counterparty)
-            .await
-        {
-            return Err(PaykitSdkError::Policy {
-                context: format!(
-                    "failed to queue reserved receiving details: {err}; reservation cleanup also failed: {cancellation_err}"
-                ),
-                source: None,
-            });
-        }
+        self.cancel_reservations_after_queue_error(cancellations, counterparty)
+            .await?;
         Err(err)
     }
 

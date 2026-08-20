@@ -164,7 +164,7 @@ async fn test_recovery_required_peer_allows_relink_attempt() {
                         &counterparty,
                         FixedClock.now(),
                         FixedClock.now() + chrono::Duration::seconds(60),
-                    )
+                    )?
                     .unwrap())
             }
         })
@@ -227,7 +227,7 @@ async fn test_ensure_link_recovery_required_ignores_stale_link_snapshot() {
                         &counterparty,
                         FixedClock.now(),
                         FixedClock.now() + chrono::Duration::seconds(60),
-                    )
+                    )?
                     .unwrap())
             }
         })
@@ -304,7 +304,7 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
                         &counterparty,
                         FixedClock.now(),
                         FixedClock.now() + chrono::Duration::seconds(60),
-                    )
+                    )?
                     .unwrap())
             }
         })

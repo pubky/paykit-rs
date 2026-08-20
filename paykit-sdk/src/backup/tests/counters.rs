@@ -60,13 +60,31 @@ async fn test_restore_backup_state_advances_counters() {
 }
 
 #[tokio::test]
-async fn test_restore_backup_state_rejects_exhausted_counter() {
+async fn test_restore_backup_state_preserves_exhausted_counter() {
     let storage = InMemoryStorage::new();
-    let identity = identity(public_key());
+    let counterparty = public_key();
+    let identity = identity(counterparty.clone());
     let mut backup = empty_backup(identity);
     backup.next_outbound_private_message_id = u64::MAX;
 
-    let error = restore_backup_state(&storage, backup).await.unwrap_err();
+    restore_backup_state(&storage, backup).await.unwrap();
+    let error = storage
+        .transaction(move |tx| {
+            tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                counterparty,
+                app_id(),
+                "paykit.private_payment_list".into(),
+                r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{}}"#
+                    .into(),
+                timestamp(),
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
 
     assert!(matches!(error, PaykitSdkError::Storage { .. }));
+    let state = storage.snapshot().unwrap();
+    assert_eq!(state.next_outbound_private_message_id, u64::MAX);
+    assert!(state.outbound_private_messages.is_empty());
 }

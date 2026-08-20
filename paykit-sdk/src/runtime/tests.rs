@@ -268,7 +268,7 @@ impl PaymentAdapter for LeaseChangingCancellationPaymentAdapter {
                         &counterparty,
                         FixedClock.now() + ChronoDuration::seconds(11),
                         FixedClock.now() + ChronoDuration::seconds(71),
-                    );
+                    )?;
                     Ok(())
                 }
             })
@@ -301,7 +301,7 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
                         &counterparty,
                         FixedClock.now() + ChronoDuration::seconds(61),
                         FixedClock.now() + ChronoDuration::seconds(121),
-                    );
+                    )?;
                     Ok(())
                 }
             })
@@ -400,6 +400,26 @@ fn private_list_json() -> String {
         .into()
 }
 
+fn save_authorized_paykit_app(
+    tx: &mut dyn StorageTransaction,
+    counterparty: PubkyPublicKey,
+    app_id: paykit_lib::PaykitAppId,
+    capabilities: paykit_lib::PaykitAppCapabilities,
+) {
+    let mut apps = tx.authorized_paykit_apps(&counterparty).unwrap_or_default();
+    apps.insert(app_id, capabilities);
+    tx.save_authorized_paykit_apps(counterparty, apps);
+}
+
+fn private_app_capabilities() -> paykit_lib::PaykitAppCapabilities {
+    paykit_lib::PaykitAppCapabilities {
+        private_payments: true,
+        payment_requests: true,
+        receipts: true,
+        outgoing_payments: false,
+    }
+}
+
 fn receipt_access_record(counterparty: PubkyPublicKey, receipt_id: &str) -> ReceiptAccessRecord {
     ReceiptAccessRecord {
         counterparty,
@@ -426,7 +446,12 @@ fn save_authorized_receipt_access(
     tx: &mut dyn StorageTransaction,
     mut record: ReceiptAccessRecord,
 ) {
-    tx.save_authorized_receipt_apps(record.counterparty.clone(), vec![record.app_id.clone()]);
+    save_authorized_paykit_app(
+        tx,
+        record.counterparty.clone(),
+        record.app_id.clone(),
+        private_app_capabilities(),
+    );
     record.app_authorized = true;
     tx.save_receipt_access_record(record);
 }
@@ -435,7 +460,12 @@ fn save_retrieved_authorized_receipt_access(
     tx: &mut dyn StorageTransaction,
     mut record: ReceiptAccessRecord,
 ) {
-    tx.save_authorized_receipt_apps(record.counterparty.clone(), vec![record.app_id.clone()]);
+    save_authorized_paykit_app(
+        tx,
+        record.counterparty.clone(),
+        record.app_id.clone(),
+        private_app_capabilities(),
+    );
     record.app_authorized = true;
     tx.save_receipt_access_record(record.mark_retrieved(FixedClock.now()));
 }

@@ -251,16 +251,16 @@ public interface PaykitSdkInterface {
     public suspend fun `fetchPaykitProfile`(`publicKey`: kotlin.String): PaykitProfileRecord?
 
     /**
-     * Fetch public Pubky file bytes.
+     * Fetch public Pubky file bytes up to `max_bytes`.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `fetchPubkyFile`(`uri`: kotlin.String): kotlin.ByteArray?
+    public suspend fun `fetchPubkyFile`(`uri`: kotlin.String, `maxBytes`: kotlin.ULong): kotlin.ByteArray?
 
     /**
-     * Fetch public Pubky app follows.
+     * Fetch public Pubky app follows up to `max_entries`.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `fetchPubkyFollows`(`publicKey`: kotlin.String): List<kotlin.String>
+    public suspend fun `fetchPubkyFollows`(`publicKey`: kotlin.String, `maxEntries`: kotlin.ULong): List<kotlin.String>
 
     /**
      * Fetch a public Pubky app profile.
@@ -269,10 +269,10 @@ public interface PaykitSdkInterface {
     public suspend fun `fetchPubkyProfile`(`publicKey`: kotlin.String): PubkyProfileRecord?
 
     /**
-     * Fetch a public Pubky UTF-8 text file.
+     * Fetch a public Pubky UTF-8 text file up to `max_bytes`.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `fetchPubkyText`(`uri`: kotlin.String): kotlin.String?
+    public suspend fun `fetchPubkyText`(`uri`: kotlin.String, `maxBytes`: kotlin.ULong): kotlin.String?
 
     /**
      * Return current identity status, when initialized.
@@ -689,6 +689,9 @@ public interface PaykitSdkInterface {
 
 /**
  * Payment adapter payload text with redacted debug output.
+ *
+ * Android callback implementations should export callback-supplied payloads
+ * and close their generated native wrappers before returning.
  */
 public interface PaymentPayloadInterface {
 
@@ -890,6 +893,9 @@ public interface PubkySessionBootstrapInterface {
 
 /**
  * Reservation attribution metadata with redacted debug output.
+ *
+ * Android callback implementations should export callback-supplied metadata
+ * and close its generated native wrapper before returning.
  */
 public interface ReservationAttributionInterface {
 
@@ -925,6 +931,9 @@ public interface SdkBackupBlobInterface {
  *
  * Public callbacks never receive private values, and private callbacks never
  * receive public values.
+ *
+ * Callbacks must not synchronously call back into the same SDK handle while
+ * the originating SDK call is waiting for them.
  */
 public interface SdkPaymentAdapter {
 
@@ -984,6 +993,9 @@ public interface SdkPaymentAdapter {
 
 /**
  * Platform-owned Pubky session provider.
+ *
+ * Callbacks must not synchronously call back into the same SDK handle. Session
+ * workflows may hold that handle's session-operation gate while invoking them.
  */
 public interface SdkPubkySessionProvider {
 
@@ -1013,6 +1025,9 @@ public interface SdkPubkySessionProvider {
 
 /**
  * Identity-wide SDK state blob owned by the configured storage boundary.
+ *
+ * Android storage callbacks should export callback-supplied blob bytes and
+ * close the generated native wrapper before returning.
  */
 public interface SdkStateBlobInterface {
 
@@ -1029,6 +1044,10 @@ public interface SdkStateBlobInterface {
 
 /**
  * Platform-owned durable blob store for SDK state.
+ *
+ * The SDK invokes these callbacks while holding its per-handle storage lock.
+ * Implementations must not call back into the same SDK handle from either
+ * callback because doing so would deadlock.
  */
 public interface SdkStateBlobStore {
 
@@ -1077,6 +1096,8 @@ public data class BillingPeriod (
 
 /**
  * Local SDK contact record.
+ *
+ * Generated platform record descriptions redact the record contents.
  */
 @kotlinx.serialization.Serializable
 public data class ContactRecord (
@@ -1121,6 +1142,8 @@ public data class ContactRecord (
      */
     val `publicContactLastError`: kotlin.String?
 ) {
+    override fun toString(): kotlin.String = "ContactRecord(<redacted>)"
+
     public companion object
 }
 
@@ -1140,6 +1163,8 @@ public data class ContactUpdate (
      */
     val `label`: kotlin.String?
 ) {
+    override fun toString(): kotlin.String = "ContactUpdate(<redacted>)"
+
     public companion object
 }
 
@@ -1700,6 +1725,8 @@ public data class PaymentAmountContext (
      */
     val `asset`: kotlin.String
 ) {
+    override fun toString(): kotlin.String = "PaymentAmountContext(<redacted>)"
+
     public companion object
 }
 
@@ -2062,6 +2089,8 @@ public data class PaymentRequestTerms (
             this.`metadata`,
         )
     }
+    override fun toString(): kotlin.String = "PaymentRequestTerms(<redacted>)"
+
     public companion object
 }
 
@@ -2082,6 +2111,8 @@ public data class PaymentTarget (
             this.`payload`,
         )
     }
+    override fun toString(): kotlin.String = "PaymentTarget(<redacted>)"
+
     public companion object
 }
 
@@ -2117,6 +2148,8 @@ public data class PreparedPrivateContactPayment (
             this.`outboundReport`,
         )
     }
+    override fun toString(): kotlin.String = "PreparedPrivateContactPayment(<redacted>)"
+
     public companion object
 }
 
@@ -2152,6 +2185,8 @@ public data class PrivateContactPaymentResolution (
             this.`payableEndpoints`,
         )
     }
+    override fun toString(): kotlin.String = "PrivateContactPaymentResolution(<redacted>)"
+
     public companion object
 }
 
@@ -2192,6 +2227,8 @@ public data class PrivatePaymentEndpointCandidate (
             this.`payload`,
         )
     }
+    override fun toString(): kotlin.String = "PrivatePaymentEndpointCandidate(<redacted>)"
+
     public companion object
 }
 
@@ -2227,6 +2264,8 @@ public data class PrivatePaymentEndpointReservation (
             this.`attribution`,
         )
     }
+    override fun toString(): kotlin.String = "PrivatePaymentEndpointReservation(<redacted>)"
+
     public companion object
 }
 
@@ -2267,6 +2306,8 @@ public data class PrivatePaymentEndpointReservationCancellation (
             this.`attribution`,
         )
     }
+    override fun toString(): kotlin.String = "PrivatePaymentEndpointReservationCancellation(<redacted>)"
+
     public companion object
 }
 
@@ -2276,8 +2317,7 @@ public data class PrivatePaymentEndpointReservationCancellation (
  * Plain reservation input for one Payment Endpoint.
  *
  * Endpoint payloads and attribution can contain private payment material.
- * Generated platform descriptions may include these fields; applications
- * must not log or stringify this record.
+ * Generated platform descriptions redact the complete record.
  */
 @kotlinx.serialization.Serializable
 public data class PrivatePaymentEndpointReservationInput (
@@ -2302,6 +2342,8 @@ public data class PrivatePaymentEndpointReservationInput (
      */
     val `attribution`: Map<kotlin.String, kotlin.String>
 ) {
+    override fun toString(): kotlin.String = "PrivatePaymentEndpointReservationInput(<redacted>)"
+
     public companion object
 }
 
@@ -2332,6 +2374,8 @@ public data class PrivatePaymentEndpointSelectionRequest (
             this.`candidates`,
         )
     }
+    override fun toString(): kotlin.String = "PrivatePaymentEndpointSelectionRequest(<redacted>)"
+
     public companion object
 }
 
@@ -2367,6 +2411,8 @@ public data class PrivatePaymentListDeliveryFailure (
             this.`error`,
         )
     }
+    override fun toString(): kotlin.String = "PrivatePaymentListDeliveryFailure(<redacted>)"
+
     public companion object
 }
 
@@ -2478,6 +2524,8 @@ public data class PrivatePaymentListSyncChange (
             this.`error`,
         )
     }
+    override fun toString(): kotlin.String = "PrivatePaymentListSyncChange(<redacted>)"
+
     public companion object
 }
 
@@ -2568,6 +2616,8 @@ public data class PrivateReceivingDetail (
             this.`payload`,
         )
     }
+    override fun toString(): kotlin.String = "PrivateReceivingDetail(<redacted>)"
+
     public companion object
 }
 
@@ -2593,6 +2643,8 @@ public data class PrivateReceivingDetailReservationResponse (
             this.`reservations`,
         )
     }
+    override fun toString(): kotlin.String = "PrivateReceivingDetailReservationResponse(<redacted>)"
+
     public companion object
 }
 
@@ -2685,6 +2737,8 @@ public data class ProfileResolution (
      */
     val `fetchedAt`: kotlin.String
 ) {
+    override fun toString(): kotlin.String = "ProfileResolution(<redacted>)"
+
     public companion object
 }
 
@@ -2697,8 +2751,8 @@ public data class ProfileResolution (
  * validates the identifiers, creates the request-bound identity signature,
  * encrypts the signed payload, and delivers it before normal Pubky Auth.
  *
- * Generated platform record descriptions may include the raw payload. Apps
- * must not log, interpolate, or otherwise stringify this record.
+ * Generated platform record descriptions redact the record contents. Apps
+ * must still treat the payload as sensitive and avoid logging it directly.
  */
 @kotlinx.serialization.Serializable
 public data class PubkyAuthCompanionClaim (
@@ -2732,6 +2786,8 @@ public data class PubkyAuthCompanionClaim (
         result = 31 * result + `unsignedPayload`.contentHashCode()
         return result
     }
+    override fun toString(): kotlin.String = "PubkyAuthCompanionClaim(<redacted>)"
+
     public companion object
 }
 
@@ -2938,6 +2994,8 @@ public data class PublicContactPaymentResolution (
             this.`failures`,
         )
     }
+    override fun toString(): kotlin.String = "PublicContactPaymentResolution(<redacted>)"
+
     public companion object
 }
 
@@ -2978,6 +3036,8 @@ public data class PublicPaymentEndpointCandidate (
             this.`payload`,
         )
     }
+    override fun toString(): kotlin.String = "PublicPaymentEndpointCandidate(<redacted>)"
+
     public companion object
 }
 
@@ -3001,6 +3061,8 @@ public data class PublicPaymentEndpointLoadFailure (
      */
     val `context`: kotlin.String
 ) {
+    override fun toString(): kotlin.String = "PublicPaymentEndpointLoadFailure(<redacted>)"
+
     public companion object
 }
 
@@ -3031,6 +3093,8 @@ public data class PublicPaymentEndpointSelectionRequest (
             this.`candidates`,
         )
     }
+    override fun toString(): kotlin.String = "PublicPaymentEndpointSelectionRequest(<redacted>)"
+
     public companion object
 }
 
@@ -3056,6 +3120,8 @@ public data class PublicReceivingDetail (
             this.`payload`,
         )
     }
+    override fun toString(): kotlin.String = "PublicReceivingDetail(<redacted>)"
+
     public companion object
 }
 
@@ -3265,6 +3331,8 @@ public data class ReceiptDraft (
             this.`metadata`,
         )
     }
+    override fun toString(): kotlin.String = "ReceiptDraft(<redacted>)"
+
     public companion object
 }
 
@@ -3355,6 +3423,8 @@ public data class ReceiptIssuanceView (
             this.`accessQueuedAt`,
         )
     }
+    override fun toString(): kotlin.String = "ReceiptIssuanceView(<redacted>)"
+
     public companion object
 }
 
@@ -3430,6 +3500,8 @@ public data class ReceiptRecord (
             this.`retrievedAt`,
         )
     }
+    override fun toString(): kotlin.String = "ReceiptRecord(<redacted>)"
+
     public companion object
 }
 
@@ -3480,6 +3552,8 @@ public data class ReservationCleanupFailure (
             this.`error`,
         )
     }
+    override fun toString(): kotlin.String = "ReservationCleanupFailure(<redacted>)"
+
     public companion object
 }
 
@@ -3520,6 +3594,8 @@ public data class ResolvedPrivatePaymentEndpoint (
             this.`target`,
         )
     }
+    override fun toString(): kotlin.String = "ResolvedPrivatePaymentEndpoint(<redacted>)"
+
     public companion object
 }
 
@@ -3560,6 +3636,8 @@ public data class ResolvedPublicPaymentEndpoint (
             this.`target`,
         )
     }
+    override fun toString(): kotlin.String = "ResolvedPublicPaymentEndpoint(<redacted>)"
+
     public companion object
 }
 

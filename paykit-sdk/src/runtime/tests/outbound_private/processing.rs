@@ -14,7 +14,7 @@ async fn test_process_pending_private_messages_reports_counterparty_errors() {
                     "paykit.private_payment_list".into(),
                     private_list_json(),
                     FixedClock.now(),
-                ));
+                ))?;
                 Ok(())
             }
         })

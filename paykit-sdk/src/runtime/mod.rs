@@ -389,6 +389,7 @@ where
 
     /// Return the last persisted identity status, if initialized.
     pub async fn identity_status(&self) -> Result<Option<IdentityStatus>> {
+        let _session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
         let session = self.pubky.load_session_access().await?;
         let Some(state) = self.storage.load_identity_state().await? else {
             return Ok(None);
@@ -468,21 +469,27 @@ async fn fetch_public_text(
     public_key: &PubkyPublicKey,
     path: &str,
     context: &'static str,
+    max_bytes: usize,
 ) -> Result<Option<String>> {
     let addr = public_resource_uri(public_key, path);
     match storage.get(addr).await {
-        Ok(resp) => {
-            let bytes = resp
-                .bytes()
+        Ok(mut resp) => {
+            require_response_size_within_limit(resp.content_length(), max_bytes, context)?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
                 .await
                 .map_err(|err| PaykitSdkError::Transport {
                     context: context.into(),
                     source: Some(err.into()),
-                })?;
-            String::from_utf8(bytes.to_vec())
+                })?
+            {
+                append_response_chunk(&mut bytes, &chunk, max_bytes, context)?;
+            }
+            String::from_utf8(bytes)
                 .map(Some)
-                .map_err(|err| PaykitSdkError::Protocol {
-                    context: format!("{context}: invalid UTF-8: {err}"),
+                .map_err(|_| PaykitSdkError::Protocol {
+                    context: format!("{context}: response is not valid UTF-8"),
                     source: None,
                 })
         }
@@ -495,6 +502,7 @@ async fn fetch_public_file_uri(
     storage: &pubky::PublicStorage,
     uri: &str,
     context: &'static str,
+    max_bytes: usize,
 ) -> Result<Option<Vec<u8>>> {
     let resource = uri
         .parse::<pubky::PubkyResource>()
@@ -503,17 +511,60 @@ async fn fetch_public_file_uri(
             source: None,
         })?;
     match storage.get(resource).await {
-        Ok(resp) => resp
-            .bytes()
-            .await
-            .map(|bytes| Some(bytes.to_vec()))
-            .map_err(|err| PaykitSdkError::Transport {
-                context: context.into(),
-                source: Some(err.into()),
-            }),
+        Ok(mut resp) => {
+            require_response_size_within_limit(resp.content_length(), max_bytes, context)?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|err| PaykitSdkError::Transport {
+                    context: context.into(),
+                    source: Some(err.into()),
+                })?
+            {
+                append_response_chunk(&mut bytes, &chunk, max_bytes, context)?;
+            }
+            Ok(Some(bytes))
+        }
         Err(err) if is_pubky_not_found(&err) => Ok(None),
         Err(err) => Err(map_pubky_transport_error(context, err)),
     }
+}
+
+fn require_response_size_within_limit(
+    content_length: Option<u64>,
+    max_bytes: usize,
+    context: &'static str,
+) -> Result<()> {
+    if max_bytes == 0 {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: byte limit must be greater than zero"),
+            source: None,
+        });
+    }
+    if content_length.is_some_and(|length| length > max_bytes as u64) {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: response exceeds the {max_bytes}-byte limit"),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+fn append_response_chunk(
+    bytes: &mut Vec<u8>,
+    chunk: &[u8],
+    max_bytes: usize,
+    context: &'static str,
+) -> Result<()> {
+    if bytes.len().saturating_add(chunk.len()) > max_bytes {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: response exceeds the {max_bytes}-byte limit"),
+            source: None,
+        });
+    }
+    bytes.extend_from_slice(chunk);
+    Ok(())
 }
 
 async fn list_public_resources(
@@ -521,9 +572,11 @@ async fn list_public_resources(
     public_key: &PubkyPublicKey,
     path: &str,
     context: &'static str,
+    max_entries: usize,
 ) -> Result<Vec<pubky::PubkyResource>> {
     const LIST_PAGE_LIMIT: u16 = 100;
 
+    require_public_resource_entry_limit(max_entries, context)?;
     let addr = public_resource_uri(public_key, path);
     let mut entries = Vec::new();
     let mut cursor = None::<String>;
@@ -545,15 +598,59 @@ async fn list_public_resources(
             break;
         }
         let page_len = page.len();
-        cursor = page
-            .last()
-            .map(|entry| format!("{}{}", entry.owner.z32(), entry.path.as_str()));
+        cursor = Some(next_public_resource_cursor(
+            entries.len(),
+            &page,
+            cursor.as_deref(),
+            max_entries,
+            context,
+        )?);
         entries.extend(page);
         if page_len < LIST_PAGE_LIMIT as usize {
             break;
         }
     }
     Ok(entries)
+}
+
+fn next_public_resource_cursor(
+    existing_entries: usize,
+    page: &[pubky::PubkyResource],
+    previous_cursor: Option<&str>,
+    max_entries: usize,
+    context: &'static str,
+) -> Result<String> {
+    require_public_resource_entry_limit(max_entries, context)?;
+    if existing_entries.saturating_add(page.len()) > max_entries {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: directory exceeds the {max_entries}-entry limit"),
+            source: None,
+        });
+    }
+    let next_cursor = page
+        .last()
+        .map(|entry| format!("{}{}", entry.owner.z32(), entry.path.as_str()))
+        .ok_or_else(|| PaykitSdkError::Protocol {
+            context: format!("{context}: non-empty page has no cursor resource"),
+            source: None,
+        })?;
+    if previous_cursor.is_some_and(|previous| next_cursor.as_str() <= previous) {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: directory cursor did not advance"),
+            source: None,
+        });
+    }
+    Ok(next_cursor)
+}
+
+fn require_public_resource_entry_limit(max_entries: usize, context: &'static str) -> Result<()> {
+    if max_entries == 0 {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: entry limit must be greater than zero"),
+            source: None,
+        });
+    }
+    Ok(())
 }
 
 fn map_pubky_transport_error(context: &'static str, err: PubkyError) -> PaykitSdkError {

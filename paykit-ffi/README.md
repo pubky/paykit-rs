@@ -237,12 +237,12 @@ bootstrap.approveAuthWithCompanionClaim(
 - `PaykitSdk.deletePaykitProfile` — remove this identity's Paykit Profile.
 - `PaykitSdk.publishPaykitBlob`, `uploadProfileAvatar`,
   `deletePaykitBlob`, `fetchPubkyFile`, and `fetchPubkyText` — publish profile
-  blobs and read public Pubky resources.
+  blobs and read public Pubky resources with caller-provided size limits.
 - `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
   `removeContact` — manage Contact Records. Each contact is one Pubky
   identity.
-- `PaykitSdk.fetchPubkyProfile` and `fetchPubkyFollows` — read Pubky app
-  profile and follow data.
+- `PaykitSdk.fetchPubkyProfile` and bounded `fetchPubkyFollows` — read Pubky
+  app profile and follow data.
 - `PaykitSdk.resolveProfile` and `currentProfile` — resolve profile display
   metadata for another identity or the current identity.
 - `PaykitSdk.publishPublicContact`, `removePublicContact`, and
@@ -302,6 +302,17 @@ device-local blob is suitable only while one process owns the runtime. If the
 app also stores the SDK blob inside a larger app backup record, compare `stateRevision`
 before and after SDK-mutating workflows and mark the app backup dirty when it
 changes.
+
+State-store callbacks run while the SDK holds its per-handle storage lock. They
+must only load or save the blob and must not call back into that SDK handle.
+Session-provider and payment-adapter callbacks are also synchronous boundaries:
+none of these callbacks may call back into the same SDK handle while the
+originating SDK operation is waiting for it.
+
+Generated Android wrappers for callback-supplied SDK blobs, payment payloads,
+and reservation attribution implement `AutoCloseable`. Callback implementations
+should export the values they need and close those wrappers before returning;
+Swift releases the equivalent objects through ARC.
 
 Each successful changed blob write must return a new non-empty opaque revision
 that is never reused for another state blob. Reusing any earlier revision makes

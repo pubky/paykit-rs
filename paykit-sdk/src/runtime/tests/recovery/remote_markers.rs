@@ -32,7 +32,7 @@ async fn test_remote_recovery_marker_observation_rejects_active_peer_lease() {
                     &counterparty,
                     FixedClock.now(),
                     FixedClock.now() + ChronoDuration::seconds(10),
-                )
+                )?
                 .expect("lease should be available");
                 Ok(())
             }
@@ -76,6 +76,83 @@ async fn test_remote_recovery_marker_observation_rejects_active_peer_lease() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn test_remote_recovery_marker_preflight_does_not_persist_observation() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_linked_peer(LinkedPeerRecord {
+                    counterparty: counterparty.clone(),
+                    state: LinkedPeerState::Linked,
+                    last_sync_at: Some(FixedClock.now()),
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty,
+                    link_snapshot: Some(vec![1, 2, 3]),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 7,
+                    checkpointed_at: FixedClock.now(),
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let attempt_id = "650e8400-e29b-41d4-a716-446655440000";
+    let marker_created_at = FixedClock.now() + ChronoDuration::seconds(1);
+    let lease = sdk.claim_peer_link_operation(&counterparty).await.unwrap();
+
+    assert!(sdk
+        .should_observe_remote_recovery_marker_with_lease(
+            &counterparty,
+            attempt_id,
+            marker_created_at,
+            &lease,
+        )
+        .await
+        .unwrap());
+    let peer = crate::load_linked_peer(&storage, &counterparty)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(peer.state, LinkedPeerState::Linked);
+    assert!(peer.remote_recovery_attempt_id.is_none());
+
+    sdk.release_peer_link_operation(&lease).await.unwrap();
+    assert!(sdk
+        .mark_remote_recovery_marker_observed_if_needed(
+            &counterparty,
+            attempt_id,
+            marker_created_at,
+        )
+        .await
+        .unwrap());
+    let peer = crate::load_linked_peer(&storage, &counterparty)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+    assert_eq!(peer.remote_recovery_attempt_id.as_deref(), Some(attempt_id));
 }
 
 #[tokio::test]
@@ -513,7 +590,7 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
                     &counterparty,
                     FixedClock.now(),
                     FixedClock.now() + ChronoDuration::seconds(10),
-                )
+                )?
                 .expect("lease should be available");
                 Ok(())
             }

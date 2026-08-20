@@ -399,23 +399,30 @@ where
         let marker_created_at = parse_recovery_marker_created_at(&marker)?;
         let lease = self.claim_peer_link_operation(counterparty).await?;
         let result = async {
-            let changed = self
-                .mark_remote_recovery_marker_observed_with_lease(
+            let should_observe = self
+                .should_observe_remote_recovery_marker_with_lease(
                     counterparty,
                     &attempt_id,
                     marker_created_at,
-                    lease.clone(),
+                    &lease,
                 )
                 .await?;
-            if changed {
-                paykit_lib::clear_encrypted_link_outbox(
-                    &session_access.session,
-                    &secret_key,
-                    remote_noise_public_key,
-                )
-                .await?;
+            if !should_observe {
+                return Ok(false);
             }
-            Ok(changed)
+            paykit_lib::clear_encrypted_link_outbox(
+                &session_access.session,
+                &secret_key,
+                remote_noise_public_key,
+            )
+            .await?;
+            self.mark_remote_recovery_marker_observed_with_lease(
+                counterparty,
+                &attempt_id,
+                marker_created_at,
+                lease.clone(),
+            )
+            .await
         }
         .await;
         let changed = self.finish_peer_link_operation(lease, result).await?;
@@ -435,35 +442,13 @@ where
             .transaction(|tx| {
                 let existing_peer = tx.linked_peer(counterparty);
                 let link_state = tx.encrypted_link_state(counterparty);
-                if recovery_handshake_is_recently_in_progress(
-                    link_state.as_ref(),
-                    marker_created_at,
-                    PEER_LINK_OPERATION_LEASE_TIMEOUT,
-                ) {
-                    return Ok(false);
-                }
-                if remote_recovery_marker_is_stale(
+                should_observe_remote_recovery_marker(
                     existing_peer.as_ref(),
                     link_state.as_ref(),
+                    counterparty,
+                    attempt_id,
                     marker_created_at,
-                ) {
-                    return Ok(false);
-                }
-                let has_link_state = link_state.is_some();
-                if !can_publish_recovery_marker(existing_peer.as_ref(), has_link_state) {
-                    return Ok(false);
-                }
-                let peer = recovery_peer_or_default(existing_peer, counterparty);
-                if peer.remote_recovery_attempt_id.as_deref() == Some(attempt_id) {
-                    return Ok(false);
-                }
-                if peer.state == LinkedPeerState::Blocked {
-                    return Err(PaykitSdkError::Policy {
-                        context: format!("counterparty {counterparty} is blocked"),
-                        source: None,
-                    });
-                }
-                Ok(true)
+                )
             })
             .await?;
         if !should_mutate {
@@ -482,6 +467,29 @@ where
         self.finish_peer_link_operation(lease, result).await
     }
 
+    pub(super) async fn should_observe_remote_recovery_marker_with_lease(
+        &self,
+        counterparty: &PubkyPublicKey,
+        attempt_id: &str,
+        marker_created_at: DateTime<Utc>,
+        lease: &PeerLinkOperationLease,
+    ) -> Result<bool> {
+        self.storage
+            .transaction(|tx| {
+                crate::storage::require_peer_link_operation_lease(tx, lease)?;
+                let existing_peer = tx.linked_peer(counterparty);
+                let link_state = tx.encrypted_link_state(counterparty);
+                should_observe_remote_recovery_marker(
+                    existing_peer.as_ref(),
+                    link_state.as_ref(),
+                    counterparty,
+                    attempt_id,
+                    marker_created_at,
+                )
+            })
+            .await
+    }
+
     async fn mark_remote_recovery_marker_observed_with_lease(
         &self,
         counterparty: &PubkyPublicKey,
@@ -495,33 +503,14 @@ where
                 crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                 let existing_peer = tx.linked_peer(counterparty);
                 let link_state = tx.encrypted_link_state(counterparty);
-                if recovery_handshake_is_recently_in_progress(
-                    link_state.as_ref(),
-                    marker_created_at,
-                    PEER_LINK_OPERATION_LEASE_TIMEOUT,
-                ) {
-                    return Ok(false);
-                }
-                if remote_recovery_marker_is_stale(
+                if !should_observe_remote_recovery_marker(
                     existing_peer.as_ref(),
                     link_state.as_ref(),
+                    counterparty,
+                    attempt_id,
                     marker_created_at,
-                ) {
+                )? {
                     return Ok(false);
-                }
-                let has_link_state = link_state.is_some();
-                if !can_publish_recovery_marker(existing_peer.as_ref(), has_link_state) {
-                    return Ok(false);
-                }
-                let peer = recovery_peer_or_default(existing_peer, counterparty);
-                if peer.remote_recovery_attempt_id.as_deref() == Some(attempt_id) {
-                    return Ok(false);
-                }
-                if peer.state == LinkedPeerState::Blocked {
-                    return Err(PaykitSdkError::Policy {
-                        context: format!("counterparty {counterparty} is blocked"),
-                        source: None,
-                    });
                 }
                 mark_recovery_required_in_transaction(tx, counterparty, now)?;
                 let mut peer = recovery_peer_or_default(tx.linked_peer(counterparty), counterparty);
@@ -670,6 +659,33 @@ fn can_publish_recovery_marker(peer: Option<&LinkedPeerRecord>, has_link_state: 
                     | LinkedPeerState::RecoveryRequired
             )
         })
+}
+
+fn should_observe_remote_recovery_marker(
+    existing_peer: Option<&LinkedPeerRecord>,
+    link_state: Option<&EncryptedLinkStateRecord>,
+    counterparty: &PubkyPublicKey,
+    attempt_id: &str,
+    marker_created_at: DateTime<Utc>,
+) -> Result<bool> {
+    if recovery_handshake_is_recently_in_progress(
+        link_state,
+        marker_created_at,
+        PEER_LINK_OPERATION_LEASE_TIMEOUT,
+    ) || remote_recovery_marker_is_stale(existing_peer, link_state, marker_created_at)
+        || !can_publish_recovery_marker(existing_peer, link_state.is_some())
+        || existing_peer.and_then(|peer| peer.remote_recovery_attempt_id.as_deref())
+            == Some(attempt_id)
+    {
+        return Ok(false);
+    }
+    if existing_peer.is_some_and(|peer| peer.state == LinkedPeerState::Blocked) {
+        return Err(PaykitSdkError::Policy {
+            context: format!("counterparty {counterparty} is blocked"),
+            source: None,
+        });
+    }
+    Ok(true)
 }
 
 fn parse_recovery_marker_created_at(marker: &EncryptedLinkRecoveryMarker) -> Result<DateTime<Utc>> {

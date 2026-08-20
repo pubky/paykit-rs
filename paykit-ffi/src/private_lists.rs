@@ -101,8 +101,7 @@ pub struct FfiPrivatePaymentListSyncReport {
 /// Plain reservation input for one Payment Endpoint.
 ///
 /// Endpoint payloads and attribution can contain private payment material.
-/// Generated platform descriptions may include these fields; applications
-/// must not log or stringify this record.
+/// Generated platform descriptions redact the complete record.
 #[derive(uniffi::Record, Clone)]
 pub struct FfiPrivatePaymentEndpointReservationInput {
     /// Adapter-stable reservation id.

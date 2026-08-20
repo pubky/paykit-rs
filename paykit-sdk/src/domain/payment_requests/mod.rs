@@ -511,15 +511,13 @@ where
         .transaction(move |tx| {
             require_paykit_app_capability(tx, &app_id, PrivateMessageKind::PaymentRequest)?;
             require_current_payment_request_action(tx, &counterparty, &app_id, &event, now)?;
-            Ok(
-                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
-                    counterparty,
-                    app_id,
-                    kind.as_str().to_owned(),
-                    raw_json,
-                    now,
-                )),
-            )
+            tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                counterparty,
+                app_id,
+                kind.as_str().to_owned(),
+                raw_json,
+                now,
+            ))
         })
         .await
 }
@@ -685,10 +683,10 @@ fn require_origin_app_authorized(
                 ),
                 source: None,
             })?;
-    if tx
-        .authorized_payment_request_apps(counterparty)
-        .is_some_and(|app_ids| app_ids.contains(proposal_app_id))
-    {
+    if tx.authorized_paykit_apps(counterparty).is_some_and(|apps| {
+        apps.get(proposal_app_id)
+            .is_some_and(|capabilities| capabilities.payment_requests)
+    }) {
         Ok(())
     } else {
         Err(PaykitSdkError::Policy {

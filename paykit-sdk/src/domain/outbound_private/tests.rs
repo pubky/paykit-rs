@@ -141,7 +141,7 @@ async fn test_claim_next_outbound_private_message_skips_unregistered_app() {
                     PrivateMessageKind::PrivatePaymentList.as_str().into(),
                     raw_private_list(),
                     timestamp(),
-                ));
+                ))?;
                 Ok(())
             }
         })
@@ -179,14 +179,14 @@ async fn test_claim_restored_event_head_after_apps_are_republished_out_of_order(
                     PrivateMessageKind::PaymentRequest.as_str().into(),
                     raw_payment_request("bitkit"),
                     timestamp(),
-                ));
+                ))?;
                 let second = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                     counterparty,
                     paykit_lib::PaykitAppId::new("paykit-server")?,
                     PrivateMessageKind::PaymentRequest.as_str().into(),
                     raw_payment_request("paykit-server"),
                     timestamp(),
-                ));
+                ))?;
                 tx.activate_paykit_app(&paykit_lib::PaykitAppId::new("paykit-server").unwrap());
                 Ok((first, second))
             }
@@ -352,7 +352,7 @@ async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
                         &counterparty,
                         timestamp(),
                         timestamp() + chrono::Duration::seconds(10),
-                    )
+                    )?
                     .unwrap())
             }
         })
@@ -366,7 +366,7 @@ async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
                     &counterparty,
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
-                );
+                )?;
                 Ok(())
             }
         })

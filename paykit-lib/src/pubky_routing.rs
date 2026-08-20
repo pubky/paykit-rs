@@ -77,6 +77,13 @@ fn payment_list_limit_exceeded(context: String) -> PaykitError {
     }
 }
 
+pub(crate) fn log_payment_endpoint_storage_failure(
+    operation: &'static str,
+    _error: &impl std::fmt::Display,
+) {
+    error!(operation, "payment endpoint storage request failed");
+}
+
 /// Writes or updates a payment endpoint document in the authenticated Pubky session.
 #[instrument(skip(session, payload), fields(identifier = %identifier))]
 pub async fn upsert_payment_endpoint(
@@ -97,7 +104,7 @@ pub async fn upsert_payment_endpoint(
         .put(path, payload.as_str().to_string())
         .await
         .map_err(|err| {
-            error!(error = %err, "failed to put payment endpoint");
+            log_payment_endpoint_storage_failure("put", &err);
             PaykitError::Transport {
                 context: "put endpoint".into(),
                 source: err.into(),
@@ -122,7 +129,7 @@ pub async fn delete_payment_endpoint(
             debug!("payment endpoint already absent");
         }
         Err(err) => {
-            error!(error = %err, "failed to delete payment endpoint");
+            log_payment_endpoint_storage_failure("delete", &err);
             return Err(PaykitError::Transport {
                 context: "delete endpoint".into(),
                 source: err.into(),

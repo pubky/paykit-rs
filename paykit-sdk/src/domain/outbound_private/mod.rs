@@ -161,7 +161,7 @@ where
                 kind,
                 raw_json,
                 now,
-            ));
+            ))?;
             Ok(record)
         })
         .await
@@ -192,7 +192,7 @@ where
                 kind,
                 raw_json,
                 now,
-            ));
+            ))?;
             Ok(record)
         })
         .await

@@ -569,12 +569,11 @@ pub struct StorageState {
     pub linked_peers: HashMap<PubkyPublicKey, LinkedPeerRecord>,
     /// Local contact records by public key.
     pub contact_records: HashMap<PubkyPublicKey, ContactRecord>,
-    /// Last registry-validated private application ids by counterparty.
-    pub authorized_private_apps: HashMap<PubkyPublicKey, Vec<paykit_lib::PaykitAppId>>,
-    /// Last registry-validated Payment Request application ids by counterparty.
-    pub authorized_payment_request_apps: HashMap<PubkyPublicKey, Vec<paykit_lib::PaykitAppId>>,
-    /// Last registry-validated Receipt application ids by counterparty.
-    pub authorized_receipt_apps: HashMap<PubkyPublicKey, Vec<paykit_lib::PaykitAppId>>,
+    /// Last registry-validated application capabilities by counterparty.
+    pub authorized_paykit_apps: HashMap<
+        PubkyPublicKey,
+        HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
+    >,
     /// Apps explicitly published by this shared state backing.
     pub registered_paykit_apps: HashSet<paykit_lib::PaykitAppId>,
     /// Capabilities last published for each registered Paykit app.
@@ -631,16 +630,8 @@ impl fmt::Debug for StorageState {
                 &format_args!("{} records", self.contact_records.len()),
             )
             .field(
-                "authorized_private_apps",
-                &format_args!("{} records", self.authorized_private_apps.len()),
-            )
-            .field(
-                "authorized_payment_request_apps",
-                &format_args!("{} records", self.authorized_payment_request_apps.len()),
-            )
-            .field(
-                "authorized_receipt_apps",
-                &format_args!("{} records", self.authorized_receipt_apps.len()),
+                "authorized_paykit_apps",
+                &format_args!("{} records", self.authorized_paykit_apps.len()),
             )
             .field(
                 "registered_paykit_apps",

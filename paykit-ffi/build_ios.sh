@@ -37,7 +37,13 @@ cargo run --bin uniffi-bindgen generate \
     || { echo "Failed to generate Swift bindings"; exit 1; }
 
 cp ./src/swift/PaykitPublicKeys.swift ./bindings/ios/PaykitPublicKeys.swift
+cp ./src/swift/PaykitRedaction.swift ./bindings/ios/PaykitRedaction.swift
 ./postprocess_bindings.sh ./bindings/ios/paykit.swift ./bindings/ios/paykitFFI.h
+while IFS= read -r type; do
+    [ -n "$type" ] || continue
+    grep -Fq "extension $type: CustomStringConvertible, CustomDebugStringConvertible" \
+        ./bindings/ios/PaykitRedaction.swift
+done < ./redacted_binding_records.txt
 
 echo "Handling modulemap file..."
 if [ -f bindings/ios/paykitFFI.modulemap ]; then
@@ -62,6 +68,7 @@ xcrun --sdk iphonesimulator swiftc \
     -I ./bindings/ios \
     ./bindings/ios/paykit.swift \
     ./bindings/ios/PaykitPublicKeys.swift \
+    ./bindings/ios/PaykitRedaction.swift \
     || { echo "Failed to type-check generated Swift bindings"; exit 1; }
 
 echo "Cleaning up existing XCFramework..."

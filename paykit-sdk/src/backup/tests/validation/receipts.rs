@@ -1,5 +1,61 @@
 use super::*;
 
+#[test]
+fn test_receipt_validation_rejects_later_mismatched_authorized_access() {
+    let recipient = public_key();
+    let issuer = public_key();
+    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
+    let key = "receipt-secret";
+    let access = ReceiptAccessRecord {
+        app_id: app_id(),
+        app_authorized: true,
+        counterparty: issuer.clone(),
+        stream_item_id: 1,
+        receive_batch_id: 0,
+        event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
+        receipt_id: receipt_id.into(),
+        payment_reference: "invoice-2026-0001".into(),
+        payment_request_id: None,
+        billing_period: None,
+        location: format!("/pub/paykit/v0/private/receipts/{receipt_id}"),
+        key: key.into(),
+        retrieval_status: crate::ReceiptRetrievalStatus::Retrieved,
+        retrieval_attempted_at: Some(timestamp()),
+        retrieved_at: Some(timestamp()),
+        last_retrieval_error: None,
+        received_at: timestamp(),
+    };
+    let receipt = ReceiptRecord {
+        issuer: issuer.clone(),
+        app_id: app_id(),
+        receipt_access_event_id: access.event_id.clone(),
+        receipt_access_key_hash: receipt_access_key_hash(key),
+        receipt_id: receipt_id.into(),
+        payment_reference: access.payment_reference.clone(),
+        payment_request_id: None,
+        billing_period: None,
+        recipient_public_key: recipient.clone(),
+        payment_endpoint_identifier: None,
+        amount: None,
+        metadata: serde_json::Map::new(),
+        location: access.location.clone(),
+        retrieved_at: timestamp(),
+    };
+    let mut mismatched = access.clone();
+    mismatched.event_id = "750e8400-e29b-41d4-a716-446655440000".into();
+    mismatched.stream_item_id = 2;
+    mismatched.payment_reference = "other-invoice".into();
+    let records = HashMap::from([((issuer.clone(), receipt_id.into()), receipt)]);
+    let accesses = HashMap::from([
+        ((issuer.clone(), access.event_id.clone()), access),
+        ((issuer, mismatched.event_id.clone()), mismatched),
+    ]);
+
+    let result = validate_receipt_records(&records, &accesses, &HashMap::new(), Some(&recipient));
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
+}
+
 #[tokio::test]
 async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
     let storage = InMemoryStorage::new();

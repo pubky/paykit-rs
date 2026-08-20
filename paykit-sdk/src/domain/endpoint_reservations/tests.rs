@@ -122,7 +122,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_stale_lease()
                         &counterparty,
                         timestamp(),
                         timestamp() + ChronoDuration::seconds(10),
-                    )
+                    )?
                     .unwrap())
             }
         })
@@ -136,7 +136,7 @@ async fn test_queue_private_payment_list_with_reservations_rejects_stale_lease()
                     &counterparty,
                     timestamp() + ChronoDuration::seconds(11),
                     timestamp() + ChronoDuration::seconds(71),
-                );
+                )?;
                 Ok(())
             }
         })

@@ -290,7 +290,10 @@ async fn test_checked_payment_request_action_rejects_newer_inbound_cancellation(
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                tx.save_authorized_payment_request_apps(counterparty, vec![app_id()]);
+                tx.save_authorized_paykit_apps(
+                    counterparty,
+                    HashMap::from([(app_id(), payment_request_capabilities())]),
+                );
                 Ok(())
             }
         })

@@ -2,6 +2,9 @@ use std::fmt;
 use zeroize::Zeroize;
 
 /// Identity-wide SDK state blob owned by the configured storage boundary.
+///
+/// Android storage callbacks should export callback-supplied blob bytes and
+/// close the generated native wrapper before returning.
 #[derive(uniffi::Object)]
 pub struct FfiSdkStateBlob {
     pub(crate) bytes: Vec<u8>,

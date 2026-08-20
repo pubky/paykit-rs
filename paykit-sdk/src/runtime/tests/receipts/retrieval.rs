@@ -327,8 +327,15 @@ async fn test_receipt_records_hide_conflicted_receipt_access_provenance() {
                     public_key: Some(local_public_key.clone()),
                     initialized_at: FixedClock.now(),
                 });
-                let access = receipt_access_record(issuer.clone(), "receipt-1");
+                save_retrieved_authorized_receipt_access(
+                    tx,
+                    receipt_access_record(issuer.clone(), "receipt-1"),
+                );
+                let mut access = receipt_access_record(issuer.clone(), "receipt-1");
+                access.event_id = "750e8400-e29b-41d4-a716-446655440000".into();
+                access.stream_item_id = 2;
                 tx.save_event_dedup_record(conflicted_event_dedup_record(&access));
+                save_authorized_receipt_access(tx, access);
                 tx.save_receipt_record(receipt_record(issuer, "receipt-1", local_public_key));
                 Ok(())
             }
@@ -346,6 +353,93 @@ async fn test_receipt_records_hide_conflicted_receipt_access_provenance() {
     let records = sdk.receipt_records(&issuer).await.unwrap();
 
     assert!(records.is_empty());
+}
+
+#[tokio::test]
+async fn test_receipt_records_hide_later_mismatched_authorized_access() {
+    let storage = registered_test_storage();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let issuer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let issuer = issuer.clone();
+            let local_public_key = local_public_key.clone();
+            move |tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_public_key.clone()),
+                    initialized_at: FixedClock.now(),
+                });
+                save_retrieved_authorized_receipt_access(
+                    tx,
+                    receipt_access_record(issuer.clone(), "receipt-1"),
+                );
+                let mut mismatched = receipt_access_record(issuer.clone(), "receipt-1");
+                mismatched.event_id = "750e8400-e29b-41d4-a716-446655440000".into();
+                mismatched.stream_item_id = 2;
+                mismatched.payment_reference = "other-invoice".into();
+                save_authorized_receipt_access(tx, mismatched);
+                tx.save_receipt_record(receipt_record(issuer, "receipt-1", local_public_key));
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let records = sdk.receipt_records(&issuer).await.unwrap();
+
+    assert!(records.is_empty());
+}
+
+#[tokio::test]
+async fn test_receipt_retrieval_failure_does_not_regress_retrieved_access() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let pending = receipt_access_record(counterparty.clone(), "receipt-1");
+    storage
+        .transaction({
+            let pending = pending.clone();
+            move |tx| {
+                save_retrieved_authorized_receipt_access(tx, pending);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    sdk.save_receipt_retrieval_error(
+        &pending,
+        ReceiptRetrievalStatus::Failed,
+        FixedClock.now(),
+        "stale failure".into(),
+    )
+    .await
+    .unwrap();
+
+    let access = storage
+        .transaction(move |tx| {
+            Ok(tx
+                .receipt_access_records(&counterparty)
+                .into_iter()
+                .next()
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!(access.retrieval_status, ReceiptRetrievalStatus::Retrieved);
 }
 
 #[tokio::test]

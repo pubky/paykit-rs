@@ -66,9 +66,15 @@ pub(super) fn retire_app_outbound_private_messages(
         .iter()
         .map(|counterparty| {
             tx.claim_peer_link_operation(counterparty, now, expires_at)
-                .expect("unexpired peer leases were rejected before claiming")
+                .and_then(|lease| {
+                    lease.ok_or_else(|| PaykitSdkError::Policy {
+                        context: "cannot remove Paykit app while private delivery is in progress"
+                            .into(),
+                        source: None,
+                    })
+                })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     tx.retire_paykit_app(app_id.clone());
     let mut counterparties = snapshot
         .payment_endpoint_reservations
@@ -241,6 +247,118 @@ where
         ),
         source: None,
     })
+}
+
+pub(super) async fn stage_app_capability_update<S>(
+    storage: &S,
+    app_id: &paykit_lib::PaykitAppId,
+    remote_previous: Option<paykit_lib::PaykitAppCapabilities>,
+    next: paykit_lib::PaykitAppCapabilities,
+    now: DateTime<Utc>,
+) -> Result<
+    Option<(
+        paykit_lib::PaykitAppCapabilities,
+        paykit_lib::PaykitAppCapabilities,
+    )>,
+>
+where
+    S: StorageAdapter,
+{
+    let staged_update = storage
+        .transaction({
+            let app_id = app_id.clone();
+            move |tx| {
+                let local_previous = tx.paykit_app_capabilities(&app_id);
+                let registered = tx.paykit_app_is_registered(&app_id);
+                let retired = tx.paykit_app_is_retired(&app_id);
+                match (registered, retired, local_previous) {
+                    (true, _, Some(previous)) | (false, true, Some(previous)) => {
+                        let staged = capability_intersection(
+                            capability_intersection(previous, next),
+                            remote_previous.unwrap_or_else(no_paykit_app_capabilities),
+                        );
+                        tx.save_paykit_app_capabilities(&app_id, staged);
+                        Ok(Some((previous, staged)))
+                    }
+                    (false, _, None) => Ok(None),
+                    _ => Err(PaykitSdkError::Storage {
+                        context: "Paykit app capability state is inconsistent".into(),
+                        source: None,
+                    }),
+                }
+            }
+        })
+        .await?;
+
+    let local_previous = staged_update.map(|(previous, _)| previous);
+
+    let previous = match (local_previous, remote_previous) {
+        (Some(local), Some(remote)) => paykit_lib::PaykitAppCapabilities {
+            private_payments: local.private_payments || remote.private_payments,
+            payment_requests: local.payment_requests || remote.payment_requests,
+            receipts: local.receipts || remote.receipts,
+            outgoing_payments: local.outgoing_payments || remote.outgoing_payments,
+        },
+        (Some(previous), None) | (None, Some(previous)) => previous,
+        (None, None) => paykit_lib::PaykitAppCapabilities {
+            private_payments: true,
+            payment_requests: true,
+            receipts: true,
+            outgoing_payments: true,
+        },
+    };
+    if let Err(err) =
+        require_app_capability_downgrade_safe(storage, app_id, previous, next, now).await
+    {
+        if let Some((local_previous, staged)) = staged_update {
+            restore_app_capabilities(storage, app_id, staged, local_previous).await?;
+        }
+        return Err(err);
+    }
+    Ok(staged_update)
+}
+
+fn capability_intersection(
+    left: paykit_lib::PaykitAppCapabilities,
+    right: paykit_lib::PaykitAppCapabilities,
+) -> paykit_lib::PaykitAppCapabilities {
+    paykit_lib::PaykitAppCapabilities {
+        private_payments: left.private_payments && right.private_payments,
+        payment_requests: left.payment_requests && right.payment_requests,
+        receipts: left.receipts && right.receipts,
+        outgoing_payments: left.outgoing_payments && right.outgoing_payments,
+    }
+}
+
+fn no_paykit_app_capabilities() -> paykit_lib::PaykitAppCapabilities {
+    paykit_lib::PaykitAppCapabilities {
+        private_payments: false,
+        payment_requests: false,
+        receipts: false,
+        outgoing_payments: false,
+    }
+}
+
+pub(super) async fn restore_app_capabilities<S>(
+    storage: &S,
+    app_id: &paykit_lib::PaykitAppId,
+    staged: paykit_lib::PaykitAppCapabilities,
+    previous: paykit_lib::PaykitAppCapabilities,
+) -> Result<()>
+where
+    S: StorageAdapter,
+{
+    storage
+        .transaction({
+            let app_id = app_id.clone();
+            move |tx| {
+                if tx.paykit_app_capabilities(&app_id) == Some(staged) {
+                    tx.save_paykit_app_capabilities(&app_id, previous);
+                }
+                Ok(())
+            }
+        })
+        .await
 }
 
 /// Work that prevents safe removal of one Paykit application.

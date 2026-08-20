@@ -65,7 +65,7 @@ pub(crate) type FfiSdkRuntime =
 #[derive(uniffi::Object)]
 pub struct FfiPaykitSdk {
     pub(crate) runtime: FfiSdkRuntime,
-    state_store: Arc<dyn FfiSdkStateBlobStore>,
+    storage: FfiSdkStorage,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -129,9 +129,8 @@ impl FfiPaykitSdk {
         pubky_client: FfiPubkyClientConfig,
     ) -> Result<Self, PaykitFfiError> {
         let pubky = pubky_from_config(&pubky_client)?;
-        let state_store_for_runtime = state_store.clone();
         let storage = FfiSdkStorage {
-            store: state_store_for_runtime,
+            store: state_store,
             transaction_lock: Arc::new(Mutex::new(())),
         };
         let session_provider = FfiSdkPubkySessionProviderAdapter {
@@ -143,15 +142,12 @@ impl FfiPaykitSdk {
             adapter: payment_adapter,
         };
         let runtime = PaykitSdk::new(
-            storage,
+            storage.clone(),
             session_provider,
             payment_adapter,
             config.try_into()?,
         );
-        Ok(Self {
-            runtime,
-            state_store,
-        })
+        Ok(Self { runtime, storage })
     }
 
     /// Return this runtime's configuration.
@@ -161,9 +157,7 @@ impl FfiPaykitSdk {
 
     /// Return the current platform SDK state revision, when a state blob exists.
     pub fn state_revision(&self) -> Result<Option<String>, PaykitFfiError> {
-        self.state_store
-            .load_state_blob()
-            .map(|snapshot| snapshot.map(|snapshot| snapshot.revision))
+        self.storage.state_revision()
     }
 
     /// Initialize durable SDK identity state.

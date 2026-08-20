@@ -32,7 +32,7 @@ async fn test_mark_private_recovery_pending_skips_active_peer_lease() {
                     &counterparty,
                     FixedClock.now(),
                     FixedClock.now() + ChronoDuration::seconds(10),
-                )
+                )?
                 .expect("lease should be available");
                 Ok(())
             }
@@ -214,7 +214,7 @@ async fn test_replaced_lease_cannot_record_recovery_marker_publish_error() {
                         &counterparty,
                         FixedClock.now() - ChronoDuration::seconds(2),
                         FixedClock.now() - ChronoDuration::seconds(1),
-                    )
+                    )?
                     .expect("stale lease should be available"))
             }
         })
@@ -229,7 +229,7 @@ async fn test_replaced_lease_cannot_record_recovery_marker_publish_error() {
                         &counterparty,
                         FixedClock.now(),
                         FixedClock.now() + ChronoDuration::seconds(10),
-                    )
+                    )?
                     .expect("expired lease should be replaceable"))
             }
         })
@@ -289,7 +289,7 @@ async fn test_replaced_lease_cannot_clear_recovery_marker() {
                         &counterparty,
                         FixedClock.now() - ChronoDuration::seconds(2),
                         FixedClock.now() - ChronoDuration::seconds(1),
-                    )
+                    )?
                     .expect("stale lease should be available"))
             }
         })
@@ -303,7 +303,7 @@ async fn test_replaced_lease_cannot_clear_recovery_marker() {
                     &counterparty,
                     FixedClock.now(),
                     FixedClock.now() + ChronoDuration::seconds(10),
-                )
+                )?
                 .expect("expired lease should be replaceable");
                 Ok(())
             }

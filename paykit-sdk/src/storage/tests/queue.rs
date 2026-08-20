@@ -11,9 +11,9 @@ async fn test_invalid_outbound_private_message_does_not_block_later_records() {
             move |tx| {
                 let first = tx.insert_outbound_private_message(outbound_private_message(
                     counterparty.clone(),
-                ));
+                ))?;
                 let second =
-                    tx.insert_outbound_private_message(outbound_private_message(counterparty));
+                    tx.insert_outbound_private_message(outbound_private_message(counterparty))?;
                 Ok((first, second))
             }
         })
@@ -62,9 +62,9 @@ async fn test_private_payment_list_queue_sends_only_latest_state() {
             move |tx| {
                 let first = tx.insert_outbound_private_message(outbound_private_message(
                     counterparty.clone(),
-                ));
+                ))?;
                 let second =
-                    tx.insert_outbound_private_message(outbound_private_message(counterparty));
+                    tx.insert_outbound_private_message(outbound_private_message(counterparty))?;
                 Ok((first, second))
             }
         })
@@ -104,14 +104,13 @@ async fn test_private_payment_list_queue_supersedes_only_the_same_app() {
             move |tx| {
                 let bitkit_first = tx.insert_outbound_private_message(
                     outbound_private_message_for_app(counterparty.clone(), "bitkit"),
-                );
-                let server = tx.insert_outbound_private_message(outbound_private_message_for_app(
-                    counterparty.clone(),
-                    "paykit-server",
-                ));
+                )?;
+                let server = tx.insert_outbound_private_message(
+                    outbound_private_message_for_app(counterparty.clone(), "paykit-server"),
+                )?;
                 let bitkit_latest = tx.insert_outbound_private_message(
                     outbound_private_message_for_app(counterparty, "bitkit"),
-                );
+                )?;
                 Ok((bitkit_first, server, bitkit_latest))
             }
         })
@@ -162,12 +161,12 @@ async fn test_private_payment_list_queue_reclaims_stale_sending_before_newer_lis
             move |tx| {
                 let mut first = tx.insert_outbound_private_message(outbound_private_message(
                     counterparty.clone(),
-                ));
+                ))?;
                 first.status = OutboundPrivateMessageStatus::Sending;
                 first.last_attempt_at = Some(timestamp() - chrono::Duration::seconds(120));
                 tx.save_outbound_private_message(first.clone())?;
                 let second =
-                    tx.insert_outbound_private_message(outbound_private_message(counterparty));
+                    tx.insert_outbound_private_message(outbound_private_message(counterparty))?;
                 Ok((first, second))
             }
         })
@@ -216,13 +215,13 @@ async fn test_unregistered_attempted_message_blocks_later_registered_app() {
             move |tx| {
                 let mut bitkit_failed = tx.insert_outbound_private_message(
                     outbound_private_message_for_app(counterparty.clone(), "bitkit"),
-                );
+                )?;
                 bitkit_failed.status = OutboundPrivateMessageStatus::Failed;
                 bitkit_failed.last_attempt_at = Some(timestamp() - chrono::Duration::seconds(120));
                 tx.save_outbound_private_message(bitkit_failed.clone())?;
                 let server_pending = tx.insert_outbound_private_message(
                     outbound_private_message_for_app(counterparty, "paykit-server"),
-                );
+                )?;
                 Ok((bitkit_failed, server_pending))
             }
         })
@@ -277,12 +276,12 @@ async fn test_event_message_queue_preserves_fifo() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                let first = tx.insert_outbound_private_message(outbound_payment_request_message(
-                    counterparty.clone(),
-                ));
-                let second = tx.insert_outbound_private_message(outbound_payment_request_message(
-                    counterparty,
-                ));
+                let first = tx.insert_outbound_private_message(
+                    outbound_payment_request_message(counterparty.clone()),
+                )?;
+                let second = tx.insert_outbound_private_message(
+                    outbound_payment_request_message(counterparty),
+                )?;
                 Ok((first, second))
             }
         })
@@ -321,11 +320,11 @@ async fn test_restored_event_head_blocks_discovery_until_its_app_is_republished(
                 tx.insert_outbound_private_message(outbound_payment_request_message_for_app(
                     counterparty.clone(),
                     "bitkit",
-                ));
+                ))?;
                 tx.insert_outbound_private_message(outbound_payment_request_message_for_app(
                     counterparty,
                     "paykit-server",
-                ));
+                ))?;
                 tx.activate_paykit_app(&paykit_lib::PaykitAppId::new("paykit-server").unwrap());
                 Ok(())
             }
@@ -370,10 +369,10 @@ async fn test_inactive_private_payment_list_does_not_block_another_apps_event() 
                 tx.insert_outbound_private_message(outbound_private_message_for_app(
                     counterparty.clone(),
                     "bitkit",
-                ));
+                ))?;
                 let server_event = tx.insert_outbound_private_message(
                     outbound_payment_request_message_for_app(counterparty, "paykit-server"),
-                );
+                )?;
                 tx.activate_paykit_app(&paykit_lib::PaykitAppId::new("paykit-server").unwrap());
                 Ok(server_event)
             }
@@ -409,10 +408,10 @@ async fn test_retired_event_head_does_not_block_another_apps_event() {
                 tx.insert_outbound_private_message(outbound_payment_request_message_for_app(
                     counterparty.clone(),
                     "bitkit",
-                ));
+                ))?;
                 let server_event = tx.insert_outbound_private_message(
                     outbound_payment_request_message_for_app(counterparty, "paykit-server"),
-                );
+                )?;
                 tx.retire_paykit_app(paykit_lib::PaykitAppId::new("bitkit").unwrap());
                 tx.activate_paykit_app(&paykit_lib::PaykitAppId::new("paykit-server").unwrap());
                 Ok(server_event)

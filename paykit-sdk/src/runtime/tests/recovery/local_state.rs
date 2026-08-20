@@ -32,7 +32,7 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
                     &counterparty,
                     FixedClock.now(),
                     FixedClock.now() + ChronoDuration::seconds(10),
-                )
+                )?
                 .expect("lease should be available");
                 Ok(())
             }

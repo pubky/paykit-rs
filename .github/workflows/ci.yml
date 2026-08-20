@@ -76,21 +76,34 @@ jobs:
       - name: Build all platform bindings
         working-directory: paykit-ffi
         run: ./build.sh all
-      - name: Check generated binding sources
+      - name: Check generated binding artifacts
         shell: bash
         run: |
-          generated_sources=(
+          generated_artifacts=(
             paykit-ffi/bindings/ios/PaykitPublicKeys.swift
+            paykit-ffi/bindings/ios/PaykitRedaction.swift
             paykit-ffi/bindings/ios/module.modulemap
             paykit-ffi/bindings/ios/paykit.swift
             paykit-ffi/bindings/ios/paykitFFI.h
             paykit-ffi/bindings/android/lib/src/main/kotlin/com/synonym/paykit/paykit.android.kt
             paykit-ffi/bindings/android/lib/src/main/kotlin/com/synonym/paykit/paykit.common.kt
+            paykit-ffi/bindings/android/lib/src/main/jniLibs/arm64-v8a/libpaykit.so
+            paykit-ffi/bindings/android/lib/src/main/jniLibs/armeabi-v7a/libpaykit.so
+            paykit-ffi/bindings/android/lib/src/main/jniLibs/x86/libpaykit.so
+            paykit-ffi/bindings/android/lib/src/main/jniLibs/x86_64/libpaykit.so
           )
 
-          if ! git diff --quiet -- "${generated_sources[@]}"; then
-            echo "::error::Generated binding sources are stale. Run 'cd paykit-ffi && ./build.sh all' and commit the updated sources."
-            git diff --name-only -- "${generated_sources[@]}"
+          for artifact in "${generated_artifacts[@]}"; do
+            if [[ ! -f "$artifact" ]]; then
+              echo "::error::Generated binding artifact is missing: $artifact"
+              exit 1
+            fi
+          done
+
+          generated_changes=$(git status --short --untracked-files=all -- "${generated_artifacts[@]}")
+          if [[ -n "$generated_changes" ]]; then
+            echo "::error::Generated binding artifacts are stale. Run 'cd paykit-ffi && ./build.sh all' and commit the updated artifacts."
+            printf '%s\n' "$generated_changes"
             exit 1
           fi
 

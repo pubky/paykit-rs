@@ -28,6 +28,9 @@ use conversions::{
 };
 
 /// Payment adapter payload text with redacted debug output.
+///
+/// Android callback implementations should export callback-supplied payloads
+/// and close their generated native wrappers before returning.
 #[derive(uniffi::Object)]
 pub struct FfiPaymentPayload {
     text: String,
@@ -54,6 +57,9 @@ impl FfiPaymentPayload {
 }
 
 /// Reservation attribution metadata with redacted debug output.
+///
+/// Android callback implementations should export callback-supplied metadata
+/// and close its generated native wrapper before returning.
 #[derive(uniffi::Object)]
 pub struct FfiReservationAttribution {
     fields: HashMap<String, String>,
@@ -84,7 +90,7 @@ impl FfiReservationAttribution {
 }
 
 /// Payment-method-specific receiving detail for public publication.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPublicReceivingDetail {
     /// Payment Endpoint Identifier string.
     pub identifier: String,
@@ -93,7 +99,7 @@ pub struct FfiPublicReceivingDetail {
 }
 
 /// Payment-method-specific receiving detail for a Private Payment List.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPrivateReceivingDetail {
     /// Payment Endpoint Identifier string.
     pub identifier: String,
@@ -137,7 +143,7 @@ pub enum FfiPrivateReceivingDetailReservationResponseKind {
 }
 
 /// Explicit result for private receiving-detail reservation callbacks.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPrivateReceivingDetailReservationResponse {
     /// Response kind.
     pub kind: FfiPrivateReceivingDetailReservationResponseKind,
@@ -173,7 +179,7 @@ impl fmt::Debug for FfiPrivatePaymentEndpointReservationCancellation {
 }
 
 /// Optional amount context for endpoint selection.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiPaymentAmountContext {
     /// Decimal amount text.
     pub value: String,
@@ -182,7 +188,7 @@ pub struct FfiPaymentAmountContext {
 }
 
 /// Public Payment Endpoint candidate passed to the payment adapter.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPublicPaymentEndpointCandidate {
     /// Opaque candidate id for this callback request.
     pub candidate_id: String,
@@ -197,7 +203,7 @@ pub struct FfiPublicPaymentEndpointCandidate {
 }
 
 /// Private Payment Endpoint candidate passed to the payment adapter.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPrivatePaymentEndpointCandidate {
     /// Opaque candidate id for this callback request.
     pub candidate_id: String,
@@ -212,7 +218,7 @@ pub struct FfiPrivatePaymentEndpointCandidate {
 }
 
 /// Request passed to the payment adapter for public endpoint ordering.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPublicPaymentEndpointSelectionRequest {
     /// Counterparty being paid.
     pub counterparty: String,
@@ -223,7 +229,7 @@ pub struct FfiPublicPaymentEndpointSelectionRequest {
 }
 
 /// Request passed to the payment adapter for private endpoint ordering.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPrivatePaymentEndpointSelectionRequest {
     /// Counterparty being paid.
     pub counterparty: String,
@@ -234,11 +240,23 @@ pub struct FfiPrivatePaymentEndpointSelectionRequest {
 }
 
 /// Payment-method-specific execution payload produced by the adapter.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone)]
 pub struct FfiPaymentTarget {
     /// Method-specific target payload.
     pub payload: Arc<FfiPaymentPayload>,
 }
+
+impl_redacted_debug!(
+    FfiPublicReceivingDetail,
+    FfiPrivateReceivingDetail,
+    FfiPrivateReceivingDetailReservationResponse,
+    FfiPaymentAmountContext,
+    FfiPublicPaymentEndpointCandidate,
+    FfiPrivatePaymentEndpointCandidate,
+    FfiPublicPaymentEndpointSelectionRequest,
+    FfiPrivatePaymentEndpointSelectionRequest,
+    FfiPaymentTarget,
+);
 
 /// One public endpoint changed during sync.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
@@ -266,6 +284,9 @@ pub struct FfiEndpointSyncReport {
 ///
 /// Public callbacks never receive private values, and private callbacks never
 /// receive public values.
+///
+/// Callbacks must not synchronously call back into the same SDK handle while
+/// the originating SDK call is waiting for them.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkPaymentAdapter: Send + Sync {
     /// Return receiving details intended for public Payment Endpoints.
@@ -571,6 +592,72 @@ mod tests;
 #[cfg(test)]
 mod redaction_tests {
     use super::*;
+
+    fn assert_redacted<T: fmt::Debug>(value: &T, type_name: &str) {
+        assert_eq!(format!("{value:?}"), format!("{type_name}(<redacted>)"));
+    }
+
+    #[test]
+    fn test_payment_adapter_records_redact_debug() {
+        let payload = Arc::new(FfiPaymentPayload::new("payload-secret".into()));
+        let amount = FfiPaymentAmountContext {
+            value: "amount-secret".into(),
+            asset: "asset-secret".into(),
+        };
+        let public_detail = FfiPublicReceivingDetail {
+            identifier: "public-identifier-secret".into(),
+            payload: Arc::clone(&payload),
+        };
+        let private_detail = FfiPrivateReceivingDetail {
+            identifier: "private-identifier-secret".into(),
+            payload: Arc::clone(&payload),
+        };
+        let public_candidate = FfiPublicPaymentEndpointCandidate {
+            candidate_id: "public-candidate-secret".into(),
+            counterparty: "public-counterparty-secret".into(),
+            app_id: "public-app-secret".into(),
+            identifier: "public-identifier-secret".into(),
+            payload: Arc::clone(&payload),
+        };
+        let private_candidate = FfiPrivatePaymentEndpointCandidate {
+            candidate_id: "private-candidate-secret".into(),
+            counterparty: "private-counterparty-secret".into(),
+            app_id: "private-app-secret".into(),
+            identifier: "private-identifier-secret".into(),
+            payload: Arc::clone(&payload),
+        };
+        let public_request = FfiPublicPaymentEndpointSelectionRequest {
+            counterparty: "public-request-secret".into(),
+            amount: Some(amount.clone()),
+            candidates: vec![public_candidate.clone()],
+        };
+        let private_request = FfiPrivatePaymentEndpointSelectionRequest {
+            counterparty: "private-request-secret".into(),
+            amount: Some(amount.clone()),
+            candidates: vec![private_candidate.clone()],
+        };
+        let reservation_response = FfiPrivateReceivingDetailReservationResponse {
+            kind: FfiPrivateReceivingDetailReservationResponseKind::Reservations,
+            reservations: Vec::new(),
+        };
+        let target = FfiPaymentTarget { payload };
+
+        assert_redacted(&public_detail, "FfiPublicReceivingDetail");
+        assert_redacted(&private_detail, "FfiPrivateReceivingDetail");
+        assert_redacted(
+            &reservation_response,
+            "FfiPrivateReceivingDetailReservationResponse",
+        );
+        assert_redacted(&amount, "FfiPaymentAmountContext");
+        assert_redacted(&public_candidate, "FfiPublicPaymentEndpointCandidate");
+        assert_redacted(&private_candidate, "FfiPrivatePaymentEndpointCandidate");
+        assert_redacted(&public_request, "FfiPublicPaymentEndpointSelectionRequest");
+        assert_redacted(
+            &private_request,
+            "FfiPrivatePaymentEndpointSelectionRequest",
+        );
+        assert_redacted(&target, "FfiPaymentTarget");
+    }
 
     #[test]
     fn test_reservation_cancellation_debug_redacts_sensitive_fields() {

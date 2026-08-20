@@ -10,7 +10,6 @@ let package = Package(
     name: "paykit",
     platforms: [
         .iOS(.v15),
-        .macOS(.v12),
     ],
     products: [
         .library(
@@ -22,7 +21,7 @@ let package = Package(
             name: "Paykit",
             dependencies: ["PaykitFFI"],
             path: "./paykit-ffi/bindings/ios",
-            sources: ["paykit.swift", "PaykitPublicKeys.swift"]
+            sources: ["paykit.swift", "PaykitPublicKeys.swift", "PaykitRedaction.swift"]
         ),
         .binaryTarget(
             name: "PaykitFFI",

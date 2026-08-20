@@ -425,3 +425,131 @@ async fn test_process_receipt_issuance_without_session_preserves_prepared_record
         .unwrap();
     assert!(stored.last_error.is_none());
 }
+
+#[tokio::test]
+async fn test_receipt_access_enqueue_is_idempotent_for_stale_record() {
+    let storage = registered_test_storage();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local_public_key),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let prepared_view = sdk
+        .prepare_receipt_issuance(
+            counterparty.clone(),
+            receipt_draft("550e8400-e29b-41d4-a716-446655440000"),
+        )
+        .await
+        .unwrap();
+    let prepared = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let receipt_id = prepared_view.receipt_id.clone();
+            move |tx| {
+                Ok(tx
+                    .receipt_issuance_record(&counterparty, &receipt_id)
+                    .unwrap())
+            }
+        })
+        .await
+        .unwrap();
+
+    let first = crate::domain::receipts::enqueue_receipt_access_for_issuance(
+        &storage,
+        prepared.clone(),
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let second = crate::domain::receipts::enqueue_receipt_access_for_issuance(
+        &storage,
+        prepared,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(first.outbound_message_id, second.outbound_message_id);
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages.len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_receipt_issuance_failure_does_not_regress_access_queued_record() {
+    let storage = registered_test_storage();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local_public_key),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let prepared_view = sdk
+        .prepare_receipt_issuance(
+            counterparty.clone(),
+            receipt_draft("550e8400-e29b-41d4-a716-446655440000"),
+        )
+        .await
+        .unwrap();
+    let prepared = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let receipt_id = prepared_view.receipt_id.clone();
+            move |tx| {
+                Ok(tx
+                    .receipt_issuance_record(&counterparty, &receipt_id)
+                    .unwrap())
+            }
+        })
+        .await
+        .unwrap();
+    crate::domain::receipts::enqueue_receipt_access_for_issuance(
+        &storage,
+        prepared.clone(),
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+
+    sdk.save_receipt_issuance_failure(
+        &counterparty,
+        &prepared.receipt_id,
+        FixedClock.now(),
+        "stale failure".into(),
+    )
+    .await
+    .unwrap();
+
+    let stored = storage
+        .transaction(move |tx| {
+            Ok(tx
+                .receipt_issuance_record(&counterparty, &prepared.receipt_id)
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!(stored.status, ReceiptIssuanceStatus::AccessQueued);
+    assert!(stored.last_error.is_none());
+}

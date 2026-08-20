@@ -5,9 +5,11 @@ async fn cache_bitkit_private_app(storage: &InMemoryStorage, counterparty: &Pubk
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                tx.save_authorized_private_apps(
+                save_authorized_paykit_app(
+                    tx,
                     counterparty,
-                    vec![paykit_lib::PaykitAppId::new("bitkit").unwrap()],
+                    paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+                    private_app_capabilities(),
                 );
                 Ok(())
             }

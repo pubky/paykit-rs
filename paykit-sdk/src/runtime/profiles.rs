@@ -1,6 +1,8 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+const MAX_PUBLIC_PROFILE_BYTES: usize = 256 * 1024;
+
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
     S: StorageAdapter,
@@ -51,8 +53,14 @@ where
                     source: None,
                 })?;
         let path = PAYKIT_PROFILE_PATH;
-        let Some(raw_json) =
-            fetch_public_text(&public_storage, &public_key, path, "fetch profile").await?
+        let Some(raw_json) = fetch_public_text(
+            &public_storage,
+            &public_key,
+            path,
+            "fetch profile",
+            MAX_PUBLIC_PROFILE_BYTES,
+        )
+        .await?
         else {
             return Ok(None);
         };
@@ -162,7 +170,8 @@ where
     }
 
     /// Fetch a public `pubky://` file referenced by profile metadata.
-    pub async fn fetch_pubky_file(&self, uri: &str) -> Result<Option<Vec<u8>>> {
+    pub async fn fetch_pubky_file(&self, uri: &str, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        require_response_size_within_limit(None, max_bytes, "fetch Pubky file")?;
         let public_storage =
             self.pubky
                 .load_public_storage()
@@ -171,12 +180,13 @@ where
                     context: "no Pubky public storage available for Pubky file fetch".into(),
                     source: None,
                 })?;
-        fetch_public_file_uri(&public_storage, uri, "fetch Pubky file").await
+        fetch_public_file_uri(&public_storage, uri, "fetch Pubky file", max_bytes).await
     }
 
     /// Fetch a public `pubky://` text file referenced by profile metadata.
-    pub async fn fetch_pubky_text(&self, uri: &str) -> Result<Option<String>> {
-        let Some(bytes) = self.fetch_pubky_file(uri).await? else {
+    pub async fn fetch_pubky_text(&self, uri: &str, max_bytes: usize) -> Result<Option<String>> {
+        require_response_size_within_limit(None, max_bytes, "fetch Pubky text")?;
+        let Some(bytes) = self.fetch_pubky_file(uri, max_bytes).await? else {
             return Ok(None);
         };
         String::from_utf8(bytes)
@@ -205,6 +215,7 @@ where
             &public_key,
             PUBKY_PROFILE_PATH,
             "fetch Pubky profile",
+            MAX_PUBLIC_PROFILE_BYTES,
         )
         .await?
         else {
@@ -222,6 +233,7 @@ where
     pub async fn fetch_pubky_follows(
         &self,
         public_key: PubkyPublicKey,
+        max_entries: usize,
     ) -> Result<Vec<PubkyPublicKey>> {
         let public_storage =
             self.pubky
@@ -236,6 +248,7 @@ where
             &public_key,
             PUBKY_FOLLOWS_PATH_PREFIX,
             "fetch Pubky follows",
+            max_entries,
         )
         .await?;
         Ok(pubky_follow_keys_from_follow_entries(entries))

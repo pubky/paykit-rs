@@ -17,6 +17,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Explicit Paykit App removal now requires app-owned Payment Requests,
   financial events, and Receipt issuance to be complete before withdrawing the
   app's registry entry and endpoints.
+- Rust and generated-binding identity status now exposes the complete
+  `PubkyIdentityCapability` instead of a `live_session_available` boolean.
 
 ### Removed
 - Removed receiver paths, Receiver Markers, receiver-scoped Noise keys, and

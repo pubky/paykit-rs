@@ -369,7 +369,7 @@ pub fn parse_paykit_app_registry_json(raw_json: &str) -> Result<PaykitAppRegistr
         })?;
         registry.register_app(app_id, app).map_err(|err| {
             invalid_data(
-                format!("Paykit App Registry contains too many applications: {err}"),
+                format!("Paykit App Registry contains an invalid application: {err}"),
                 Some(err.into()),
             )
         })?;

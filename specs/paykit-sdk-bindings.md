@@ -110,6 +110,9 @@ when multiple runtimes or app processes can share the same blob. Bindings may
 offer helpers that encode the blob and revision into one platform record, but
 apps should still treat the contents as opaque SDK state.
 
+Storage callbacks execute while the FFI wrapper holds its per-handle storage
+lock. They must not call back into that SDK handle.
+
 Storage requirements for platform apps:
 
 - `save_state_blob_atomically` must either fully replace the previous blob or
@@ -317,6 +320,10 @@ call is waiting on that callback unless the binding explicitly supports
 reentrancy. Bindings should serialize identity-scoped operations on one handle,
 and should expose clear guidance for apps that create multiple handles sharing
 the same storage blob.
+
+Callback-supplied native objects are scoped to that callback. Android
+implementations should export needed values and close generated `AutoCloseable`
+wrappers before returning; Swift relies on ARC for the equivalent lifetime.
 
 Cancellation should be best-effort. If a platform cancels a call after the SDK
 has started a durable transaction, the SDK should still finish or fail the

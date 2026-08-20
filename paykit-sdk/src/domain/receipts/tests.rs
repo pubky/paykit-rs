@@ -283,6 +283,19 @@ fn test_receipt_access_record_error_clears_success_timestamp() {
 }
 
 #[test]
+fn test_receipt_access_record_keeps_newest_retrieval_timestamp() {
+    let receipt_id = paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+    let key = ReceiptDecryptionKey::generate();
+    let later = timestamp() + chrono::Duration::seconds(1);
+    let record = receipt_access_record(&receipt_id, &key, "invoice-2026-0001")
+        .mark_retrieved(later)
+        .mark_retrieved(timestamp());
+
+    assert_eq!(record.retrieval_attempted_at, Some(later));
+    assert_eq!(record.retrieved_at, Some(later));
+}
+
+#[test]
 fn test_receipt_access_view_hides_storage_only_fields() {
     let receipt_id = paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
     let key = ReceiptDecryptionKey::generate();

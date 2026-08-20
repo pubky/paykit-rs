@@ -278,7 +278,7 @@ where
                 kind,
                 raw_json,
                 now,
-            ));
+            ))?;
             for (draft, existing) in checked_drafts {
                 let record = draft.into_record(outbound.outbound_message_id, existing);
                 tx.save_payment_endpoint_reservation(record);

@@ -120,9 +120,16 @@ async fn test_receipt_access_records_hide_apps_without_receipt_capability() {
                     counterparty.clone(),
                     "550e8400-e29b-41d4-a716-446655440000",
                 ));
-                tx.save_authorized_receipt_apps(
+                save_authorized_paykit_app(
+                    tx,
                     counterparty,
-                    vec![paykit_lib::PaykitAppId::new("server")?],
+                    paykit_lib::PaykitAppId::new("server")?,
+                    paykit_lib::PaykitAppCapabilities {
+                        private_payments: false,
+                        payment_requests: false,
+                        receipts: true,
+                        outgoing_payments: false,
+                    },
                 );
                 Ok(())
             }
@@ -162,7 +169,7 @@ async fn test_receipt_access_records_preserve_historical_app_authorization() {
                         "550e8400-e29b-41d4-a716-446655440000",
                     ),
                 );
-                tx.save_authorized_receipt_apps(counterparty, Vec::new());
+                tx.save_authorized_paykit_apps(counterparty, HashMap::new());
                 Ok(())
             }
         })
@@ -264,9 +271,16 @@ async fn test_retrieve_receipt_ignores_access_from_unauthorized_app() {
                     counterparty.clone(),
                     receipt_id,
                 ));
-                tx.save_authorized_receipt_apps(
+                save_authorized_paykit_app(
+                    tx,
                     counterparty,
-                    vec![paykit_lib::PaykitAppId::new("server")?],
+                    paykit_lib::PaykitAppId::new("server")?,
+                    paykit_lib::PaykitAppCapabilities {
+                        private_payments: false,
+                        payment_requests: false,
+                        receipts: true,
+                        outgoing_payments: false,
+                    },
                 );
                 Ok(())
             }

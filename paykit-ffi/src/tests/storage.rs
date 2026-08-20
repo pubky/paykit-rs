@@ -126,15 +126,134 @@ fn test_state_blob_snapshot_rejects_out_of_range_outbound_id_with_redacted_error
 }
 
 #[test]
-fn test_state_blob_rejects_exhausted_id_counter() {
+fn test_state_blob_round_trips_exhausted_id_counter() {
     let state = StorageState {
         next_outbound_private_message_id: u64::MAX,
         ..StorageState::default()
     };
 
-    let error = decode_storage_state(&encode_storage_state(&state).unwrap()).unwrap_err();
+    let decoded = decode_storage_state(&encode_storage_state(&state).unwrap()).unwrap();
 
-    assert_invalid_state_blob(error);
+    assert_eq!(decoded, state);
+}
+
+#[test]
+fn test_state_revision_validates_loaded_snapshot() {
+    struct InvalidSnapshotStore;
+
+    impl FfiSdkStateBlobStore for InvalidSnapshotStore {
+        fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
+            Ok(Some(FfiSdkStateBlobSnapshot {
+                blob: Arc::new(FfiSdkStateBlob::new(
+                    encode_storage_state(&StorageState::default()).unwrap(),
+                )),
+                revision: String::new(),
+            }))
+        }
+
+        fn save_state_blob_atomically(
+            &self,
+            _blob: Arc<FfiSdkStateBlob>,
+            _expected_revision: Option<String>,
+        ) -> Result<String, PaykitFfiError> {
+            unreachable!("state revision lookup must not write")
+        }
+    }
+
+    let storage = FfiSdkStorage {
+        store: Arc::new(InvalidSnapshotStore),
+        transaction_lock: Arc::new(Mutex::new(())),
+    };
+
+    match storage.state_revision().unwrap_err() {
+        PaykitFfiError::Storage { code, context } => {
+            assert_eq!(code, "invalid_state_blob");
+            assert_eq!(context, "load SDK state blob: invalid_state_blob");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn test_state_revision_redacts_callback_error_context() {
+    struct FailingStore;
+
+    impl FfiSdkStateBlobStore for FailingStore {
+        fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
+            Err(storage_error(
+                "platform_load_failed",
+                "sensitive platform path and metadata",
+            ))
+        }
+
+        fn save_state_blob_atomically(
+            &self,
+            _blob: Arc<FfiSdkStateBlob>,
+            _expected_revision: Option<String>,
+        ) -> Result<String, PaykitFfiError> {
+            unreachable!("state revision lookup must not write")
+        }
+    }
+
+    let storage = FfiSdkStorage {
+        store: Arc::new(FailingStore),
+        transaction_lock: Arc::new(Mutex::new(())),
+    };
+
+    let error = storage.state_revision().unwrap_err();
+    match error {
+        PaykitFfiError::Storage { code, context } => {
+            assert_eq!(code, "platform_load_failed");
+            assert_eq!(context, "load SDK state blob: platform_load_failed");
+            assert!(!context.contains("sensitive"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_state_blob_transaction_rejects_exhausted_id_counter() {
+    struct ExhaustedStateStore {
+        snapshot: FfiSdkStateBlobSnapshot,
+    }
+
+    impl FfiSdkStateBlobStore for ExhaustedStateStore {
+        fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
+            Ok(Some(self.snapshot.clone()))
+        }
+
+        fn save_state_blob_atomically(
+            &self,
+            _blob: Arc<FfiSdkStateBlob>,
+            _expected_revision: Option<String>,
+        ) -> Result<String, PaykitFfiError> {
+            panic!("failed allocation must not write SDK state")
+        }
+    }
+
+    let state = StorageState {
+        next_receive_batch_id: u64::MAX,
+        ..StorageState::default()
+    };
+    let storage = FfiSdkStorage {
+        store: Arc::new(ExhaustedStateStore {
+            snapshot: FfiSdkStateBlobSnapshot {
+                blob: Arc::new(FfiSdkStateBlob::new(encode_storage_state(&state).unwrap())),
+                revision: "revision-1".into(),
+            },
+        }),
+        transaction_lock: Arc::new(Mutex::new(())),
+    };
+
+    let error = storage
+        .transaction_erased(Box::new(|tx| {
+            tx.allocate_receive_batch_id()?;
+            Ok(Box::new(()) as Box<dyn Any + Send>)
+        }))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, PaykitSdkError::Storage { .. }));
 }
 
 #[test]
@@ -252,7 +371,14 @@ async fn test_storage_rejects_decodable_invalid_loaded_state_with_redacted_error
         .await
         .unwrap_err();
 
-    assert_invalid_state_blob(PaykitFfiError::from(error));
+    match PaykitFfiError::from(error) {
+        PaykitFfiError::Storage { code, context } => {
+            assert_eq!(code, "invalid_state_blob");
+            assert_eq!(context, "load SDK state blob: invalid_state_blob");
+            assert!(!context.contains("private-outbound-secret"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -484,20 +610,20 @@ async fn test_state_blob_save_error_preserves_code() {
         }
     }
 
-    for (code, context) in [
+    for (code, provider_context) in [
         ("stale_revision", "state blob revision changed"),
         ("atomic_write_failed", "state blob write failed"),
     ] {
         let storage = FfiSdkStorage {
             store: Arc::new(SaveFailStore {
-                error: storage_error(code, context),
+                error: storage_error(code, provider_context),
             }),
             transaction_lock: Arc::new(Mutex::new(())),
         };
 
         let err = storage
             .transaction_erased(Box::new(|tx| {
-                tx.allocate_receive_batch_id();
+                tx.allocate_receive_batch_id()?;
                 Ok(Box::new(()) as Box<dyn Any + Send>)
             }))
             .await
@@ -509,7 +635,8 @@ async fn test_state_blob_save_error_preserves_code() {
                 context: actual_context,
             } => {
                 assert_eq!(actual_code, code);
-                assert_eq!(actual_context, context);
+                assert_eq!(actual_context, format!("save SDK state blob: {code}"));
+                assert!(!actual_context.contains(provider_context));
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -593,14 +720,14 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
 
     storage
         .transaction_erased(Box::new(|tx| {
-            tx.allocate_receive_batch_id();
+            tx.allocate_receive_batch_id()?;
             Ok(Box::new(()) as Box<dyn Any + Send>)
         }))
         .await
         .unwrap();
     storage
         .transaction_erased(Box::new(|tx| {
-            tx.allocate_receive_batch_id();
+            tx.allocate_receive_batch_id()?;
             Ok(Box::new(()) as Box<dyn Any + Send>)
         }))
         .await
@@ -641,7 +768,7 @@ async fn test_storage_rejects_unchanged_revision_after_write() {
 
     let result = storage
         .transaction_erased(Box::new(|tx| {
-            tx.allocate_receive_batch_id();
+            tx.allocate_receive_batch_id()?;
             Ok(Box::new(()) as Box<dyn Any + Send>)
         }))
         .await;
@@ -705,7 +832,7 @@ async fn test_concurrent_storage_adapters_reject_stale_writer() {
     let first_write = tokio::spawn(async move {
         first
             .transaction_erased(Box::new(|tx| {
-                tx.allocate_receive_batch_id();
+                tx.allocate_receive_batch_id()?;
                 Ok(Box::new(()) as Box<dyn Any + Send>)
             }))
             .await
@@ -713,7 +840,7 @@ async fn test_concurrent_storage_adapters_reject_stale_writer() {
     let second_write = tokio::spawn(async move {
         second
             .transaction_erased(Box::new(|tx| {
-                tx.allocate_receive_batch_id();
+                tx.allocate_receive_batch_id()?;
                 Ok(Box::new(()) as Box<dyn Any + Send>)
             }))
             .await
@@ -881,7 +1008,7 @@ async fn test_concurrent_storage_adapters_reject_stale_first_writer() {
         tokio::spawn(async move {
             storage
                 .transaction_erased(Box::new(|tx| {
-                    tx.allocate_receive_batch_id();
+                    tx.allocate_receive_batch_id()?;
                     Ok(Box::new(()) as Box<dyn Any + Send>)
                 }))
                 .await

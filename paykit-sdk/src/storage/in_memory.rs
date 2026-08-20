@@ -7,6 +7,13 @@ use super::queue::{
 use super::*;
 use crate::OutboundPrivateMessageStatus;
 
+fn storage_id_exhausted() -> PaykitSdkError {
+    PaykitSdkError::Storage {
+        context: "SDK storage id space is exhausted".into(),
+        source: None,
+    }
+}
+
 /// In-memory SDK storage implementation for tests and examples.
 ///
 /// This storage is not durable and must not be used for production SDK state.
@@ -143,64 +150,19 @@ impl StorageTransaction for StorageStateTransaction {
         self.state.contact_records.remove(public_key)
     }
 
-    fn authorized_private_apps(
+    fn authorized_paykit_apps(
         &self,
         counterparty: &PubkyPublicKey,
-    ) -> Option<Vec<paykit_lib::PaykitAppId>> {
-        self.state
-            .authorized_private_apps
-            .get(counterparty)
-            .cloned()
+    ) -> Option<HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>> {
+        self.state.authorized_paykit_apps.get(counterparty).cloned()
     }
 
-    fn save_authorized_private_apps(
+    fn save_authorized_paykit_apps(
         &mut self,
         counterparty: PubkyPublicKey,
-        app_ids: Vec<paykit_lib::PaykitAppId>,
+        apps: HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
     ) {
-        self.state
-            .authorized_private_apps
-            .insert(counterparty, app_ids);
-    }
-
-    fn authorized_payment_request_apps(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Option<Vec<paykit_lib::PaykitAppId>> {
-        self.state
-            .authorized_payment_request_apps
-            .get(counterparty)
-            .cloned()
-    }
-
-    fn save_authorized_payment_request_apps(
-        &mut self,
-        counterparty: PubkyPublicKey,
-        app_ids: Vec<paykit_lib::PaykitAppId>,
-    ) {
-        self.state
-            .authorized_payment_request_apps
-            .insert(counterparty, app_ids);
-    }
-
-    fn authorized_receipt_apps(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Option<Vec<paykit_lib::PaykitAppId>> {
-        self.state
-            .authorized_receipt_apps
-            .get(counterparty)
-            .cloned()
-    }
-
-    fn save_authorized_receipt_apps(
-        &mut self,
-        counterparty: PubkyPublicKey,
-        app_ids: Vec<paykit_lib::PaykitAppId>,
-    ) {
-        self.state
-            .authorized_receipt_apps
-            .insert(counterparty, app_ids);
+        self.state.authorized_paykit_apps.insert(counterparty, apps);
     }
 
     fn paykit_app_is_registered(&self, app_id: &paykit_lib::PaykitAppId) -> bool {
@@ -336,24 +298,29 @@ impl StorageTransaction for StorageStateTransaction {
         counterparty: &PubkyPublicKey,
         now: DateTime<Utc>,
         expires_at: DateTime<Utc>,
-    ) -> Option<PeerLinkOperationLease> {
+    ) -> Result<Option<PeerLinkOperationLease>> {
         if let Some(existing) = self.state.peer_link_operation_leases.get(counterparty) {
             if existing.expires_at > now {
-                return None;
+                return Ok(None);
             }
         }
 
+        let next_lease_id = self
+            .state
+            .next_peer_link_operation_lease_id
+            .checked_add(1)
+            .ok_or_else(storage_id_exhausted)?;
         let lease = PeerLinkOperationLease {
             counterparty: counterparty.clone(),
             lease_id: self.state.next_peer_link_operation_lease_id,
             claimed_at: now,
             expires_at,
         };
-        self.state.next_peer_link_operation_lease_id += 1;
+        self.state.next_peer_link_operation_lease_id = next_lease_id;
         self.state
             .peer_link_operation_leases
             .insert(counterparty.clone(), lease.clone());
-        Some(lease)
+        Ok(Some(lease))
     }
 
     fn peer_link_operation_lease(
@@ -380,12 +347,14 @@ impl StorageTransaction for StorageStateTransaction {
     fn insert_outbound_private_message(
         &mut self,
         message: NewOutboundPrivateMessage,
-    ) -> OutboundPrivateMessageRecord {
+    ) -> Result<OutboundPrivateMessageRecord> {
         let outbound_message_id = self.state.next_outbound_private_message_id;
-        self.state.next_outbound_private_message_id += 1;
+        self.state.next_outbound_private_message_id = outbound_message_id
+            .checked_add(1)
+            .ok_or_else(storage_id_exhausted)?;
         let record = OutboundPrivateMessageRecord::from_new(outbound_message_id, message);
         self.state.outbound_private_messages.push(record.clone());
-        record
+        Ok(record)
     }
 
     fn queued_outbound_private_messages(
@@ -508,19 +477,23 @@ impl StorageTransaction for StorageStateTransaction {
         }
     }
 
-    fn allocate_receive_batch_id(&mut self) -> u64 {
+    fn allocate_receive_batch_id(&mut self) -> Result<u64> {
         let receive_batch_id = self.state.next_receive_batch_id;
-        self.state.next_receive_batch_id += 1;
-        receive_batch_id
+        self.state.next_receive_batch_id = receive_batch_id
+            .checked_add(1)
+            .ok_or_else(storage_id_exhausted)?;
+        Ok(receive_batch_id)
     }
 
-    fn insert_private_stream_item(&mut self, item: NewPrivateStreamItem) -> u64 {
+    fn insert_private_stream_item(&mut self, item: NewPrivateStreamItem) -> Result<u64> {
         let stream_item_id = self.state.next_private_stream_item_id;
-        self.state.next_private_stream_item_id += 1;
+        self.state.next_private_stream_item_id = stream_item_id
+            .checked_add(1)
+            .ok_or_else(storage_id_exhausted)?;
         self.state
             .private_stream_items
             .push(PrivateStreamItemRecord::from_new(stream_item_id, item));
-        stream_item_id
+        Ok(stream_item_id)
     }
 
     fn private_stream_items(&self, counterparty: &PubkyPublicKey) -> Vec<PrivateStreamItemRecord> {

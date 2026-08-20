@@ -9,7 +9,7 @@ use paykit_sdk::{
 };
 use pubky::{Pubky, PubkyHttpClient, PubkySession};
 use tokio::sync::Mutex as AsyncMutex;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::{default_pubky_client_config, FfiPubkyClientConfig};
 use crate::errors::{ffi_error_to_sdk, identity_error, validation_error, PaykitFfiError};
@@ -60,6 +60,12 @@ pub struct FfiPubkySessionAccess {
     pub(crate) local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
     pub(crate) live_access: Option<PubkySessionAccess>,
     pub(crate) live_client_config: Option<FfiPubkyClientConfig>,
+}
+
+impl Drop for FfiPubkySessionAccess {
+    fn drop(&mut self) {
+        self.session_secret.zeroize();
+    }
 }
 
 impl fmt::Debug for FfiPubkySessionAccess {
@@ -136,8 +142,8 @@ pub struct FfiPubkyAuthDetails {
 /// validates the identifiers, creates the request-bound identity signature,
 /// encrypts the signed payload, and delivers it before normal Pubky Auth.
 ///
-/// Generated platform record descriptions may include the raw payload. Apps
-/// must not log, interpolate, or otherwise stringify this record.
+/// Generated platform record descriptions redact the record contents. Apps
+/// must still treat the payload as sensitive and avoid logging it directly.
 #[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiPubkyAuthCompanionClaim {
     /// Auth URL query parameter that announces the claim.
@@ -220,6 +226,9 @@ pub struct FfiPubkyResourceRef {
 }
 
 /// Platform-owned Pubky session provider.
+///
+/// Callbacks must not synchronously call back into the same SDK handle. Session
+/// workflows may hold that handle's session-operation gate while invoking them.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkPubkySessionProvider: Send + Sync {
     /// Load current live Pubky session access, when available.
@@ -370,6 +379,7 @@ impl FfiPubkySessionBootstrap {
         local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
         required_capabilities: String,
     ) -> Result<FfiPubkySessionBootstrapResult, PaykitFfiError> {
+        let session_secret = Zeroizing::new(session_secret);
         let secret = local_secret_key
             .map(|key| local_secret_from_bytes(key.export_bytes()))
             .transpose()?;

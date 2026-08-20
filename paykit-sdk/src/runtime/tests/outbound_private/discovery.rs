@@ -16,14 +16,15 @@ async fn test_pending_outbound_private_counterparties_dedupes_work() {
                     "paykit.private_payment_list".into(),
                     private_list_json(),
                     FixedClock.now(),
-                ));
-                let mut sent = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
-                    second,
-                    app_id(),
-                    "paykit.private_payment_list".into(),
-                    private_list_json(),
-                    FixedClock.now(),
-                ));
+                ))?;
+                let mut sent =
+                    tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                        second,
+                        app_id(),
+                        "paykit.private_payment_list".into(),
+                        private_list_json(),
+                        FixedClock.now(),
+                    ))?;
                 sent.status = OutboundPrivateMessageStatus::Sent;
                 tx.save_outbound_private_message(sent)?;
                 tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
@@ -32,7 +33,7 @@ async fn test_pending_outbound_private_counterparties_dedupes_work() {
                     "paykit.private_payment_list".into(),
                     private_list_json(),
                     FixedClock.now(),
-                ));
+                ))?;
                 Ok(())
             }
         })
@@ -65,7 +66,7 @@ async fn test_pending_outbound_private_counterparties_skips_unregistered_app() {
                     PrivateMessageKind::PrivatePaymentList.as_str().into(),
                     private_list_json(),
                     FixedClock.now(),
-                ));
+                ))?;
                 Ok(())
             }
         })
@@ -103,7 +104,7 @@ async fn test_pending_outbound_private_counterparties_does_not_skip_attempted_in
                         r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"inactive-app","payment_endpoints":{}}"#.into(),
                         FixedClock.now(),
                     ),
-                );
+                )?;
                 failed.status = OutboundPrivateMessageStatus::Failed;
                 failed.last_attempt_at = Some(FixedClock.now() - ChronoDuration::seconds(60));
                 tx.save_outbound_private_message(failed)?;
@@ -113,7 +114,7 @@ async fn test_pending_outbound_private_counterparties_does_not_skip_attempted_in
                     PrivateMessageKind::PrivatePaymentList.as_str().into(),
                     private_list_json(),
                     FixedClock.now(),
-                ));
+                ))?;
                 Ok(())
             }
         })
@@ -274,7 +275,7 @@ async fn test_pending_outbound_private_counterparties_waits_for_stale_sending() 
                         "paykit.private_payment_list".into(),
                         private_list_json(),
                         FixedClock.now(),
-                    ));
+                    ))?;
                 sending.status = OutboundPrivateMessageStatus::Sending;
                 sending.last_attempt_at = Some(FixedClock.now());
                 tx.save_outbound_private_message(sending)?;
@@ -342,7 +343,7 @@ async fn test_pending_outbound_private_counterparties_skips_recovery_required_pe
                     "paykit.private_payment_list".into(),
                     private_list_json(),
                     FixedClock.now(),
-                ));
+                ))?;
                 Ok(())
             }
         })
@@ -389,7 +390,7 @@ async fn test_pending_outbound_private_counterparties_skips_linking_peer() {
                     "paykit.private_payment_list".into(),
                     private_list_json(),
                     FixedClock.now(),
-                ));
+                ))?;
                 Ok(())
             }
         })
@@ -425,7 +426,7 @@ async fn test_pending_outbound_private_counterparties_waits_for_failed_backoff()
                         "paykit.private_payment_list".into(),
                         private_list_json(),
                         FixedClock.now(),
-                    ));
+                    ))?;
                 failed.status = OutboundPrivateMessageStatus::Failed;
                 failed.last_attempt_at = Some(FixedClock.now());
                 tx.save_outbound_private_message(failed)?;
@@ -487,7 +488,7 @@ async fn test_pending_outbound_private_counterparties_respects_queue_head() {
                         )
                         .raw_json,
                         FixedClock.now(),
-                    ));
+                    ))?;
                 failed_head.status = OutboundPrivateMessageStatus::Failed;
                 failed_head.last_attempt_at = Some(FixedClock.now());
                 tx.save_outbound_private_message(failed_head)?;
@@ -502,7 +503,7 @@ async fn test_pending_outbound_private_counterparties_respects_queue_head() {
                     )
                     .raw_json,
                     FixedClock.now(),
-                ));
+                ))?;
                 Ok(())
             }
         })

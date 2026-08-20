@@ -15,7 +15,7 @@ NATIVE_DEBUG_SYMBOLS_ZIP="$ANDROID_LIB_DIR/native-debug-symbols.zip"
 
 echo "Installing gobley-uniffi-bindgen fork..."
 GOBLEY_REV="82a0f93ad552d0c45e185f728f14c3c60b1ed707"
-cargo install --git https://github.com/ovitrif/gobley.git --rev "$GOBLEY_REV" gobley-uniffi-bindgen --force
+cargo install --git https://github.com/ovitrif/gobley.git --rev "$GOBLEY_REV" gobley-uniffi-bindgen --locked --force
 
 # Install the cargo-ndk version used by the mobile release scripts.
 CARGO_NDK_VERSION="3.5.4"
@@ -266,6 +266,10 @@ gobley-uniffi-bindgen \
 echo "Moving Kotlin files to final location..."
 find "$TMP_DIR" -name "*.kt" -exec mv {} "$BASE_DIR/" \;
 ./postprocess_bindings.sh "$BASE_DIR"/*.kt
+while IFS= read -r type; do
+    [ -n "$type" ] || continue
+    grep -Fq "override fun toString(): kotlin.String = \"$type(<redacted>)\"" "$BASE_DIR/paykit.common.kt"
+done < ./redacted_binding_records.txt
 
 echo "Normalizing generated Kotlin whitespace..."
 find "$BASE_DIR" -name "*.kt" -exec perl -0pi -e 's/[ \t]+(?=\n)//g; s/[ \t]+\z//; s/\n+\z/\n/; $_ .= "\n" unless /\n\z/' {} \;

@@ -58,6 +58,7 @@ pub fn validate_storage_state(state: &StorageState) -> Result<()> {
     validate_receipt_records(
         &state.receipt_records,
         &state.receipt_access_records,
+        &state.event_dedup_records,
         expected_receipt_recipient,
     )?;
     validate_receipt_issuance_records(&state.receipt_issuance_records, &outbound_private_messages)?;
@@ -97,9 +98,7 @@ fn validate_live_identity(state: &StorageState) -> Result<()> {
 fn has_identity_scoped_live_state(state: &StorageState) -> bool {
     !state.linked_peers.is_empty()
         || !state.contact_records.is_empty()
-        || !state.authorized_private_apps.is_empty()
-        || !state.authorized_payment_request_apps.is_empty()
-        || !state.authorized_receipt_apps.is_empty()
+        || !state.authorized_paykit_apps.is_empty()
         || !state.registered_paykit_apps.is_empty()
         || !state.registered_paykit_app_capabilities.is_empty()
         || !state.retired_paykit_apps.is_empty()
@@ -222,29 +221,10 @@ fn validate_live_app_state(state: &StorageState) -> Result<()> {
             "Paykit App capabilities belong to neither a registered nor retired app",
         ));
     }
-
-    for app_ids in state
-        .authorized_private_apps
-        .values()
-        .chain(state.authorized_payment_request_apps.values())
-        .chain(state.authorized_receipt_apps.values())
-    {
-        let unique = app_ids.iter().collect::<HashSet<_>>();
-        if unique.len() != app_ids.len() {
-            return Err(invalid_live_state(
-                "authorized Paykit App list contains duplicate App IDs",
-            ));
-        }
-    }
     Ok(())
 }
 
 fn validate_live_link_state(state: &StorageState) -> Result<()> {
-    if state.next_peer_link_operation_lease_id == u64::MAX {
-        return Err(invalid_live_state(
-            "peer link operation lease id counter is exhausted",
-        ));
-    }
     let mut lease_ids = HashSet::new();
     for lease in state.peer_link_operation_leases.values() {
         if !lease_ids.insert(lease.lease_id) {
@@ -313,9 +293,6 @@ fn validate_next_id(
     allocated_ids: impl Iterator<Item = u64>,
     context: &'static str,
 ) -> Result<()> {
-    if next_id == u64::MAX {
-        return Err(invalid_live_state("storage id counter is exhausted"));
-    }
     if allocated_ids.into_iter().any(|id| id >= next_id) {
         return Err(invalid_live_state(context));
     }

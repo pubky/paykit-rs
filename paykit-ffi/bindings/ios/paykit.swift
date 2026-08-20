@@ -645,14 +645,14 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func fetchPaykitProfile(publicKey: String) async throws  -> PaykitProfileRecord?
 
     /**
-     * Fetch public Pubky file bytes.
+     * Fetch public Pubky file bytes up to `max_bytes`.
      */
-    func fetchPubkyFile(uri: String) async throws  -> Data?
+    func fetchPubkyFile(uri: String, maxBytes: UInt64) async throws  -> Data?
 
     /**
-     * Fetch public Pubky app follows.
+     * Fetch public Pubky app follows up to `max_entries`.
      */
-    func fetchPubkyFollows(publicKey: String) async throws  -> [String]
+    func fetchPubkyFollows(publicKey: String, maxEntries: UInt64) async throws  -> [String]
 
     /**
      * Fetch a public Pubky app profile.
@@ -660,9 +660,9 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func fetchPubkyProfile(publicKey: String) async throws  -> PubkyProfileRecord?
 
     /**
-     * Fetch a public Pubky UTF-8 text file.
+     * Fetch a public Pubky UTF-8 text file up to `max_bytes`.
      */
-    func fetchPubkyText(uri: String) async throws  -> String?
+    func fetchPubkyText(uri: String, maxBytes: UInt64) async throws  -> String?
 
     /**
      * Return current identity status, when initialized.
@@ -1573,15 +1573,15 @@ open func fetchPaykitProfile(publicKey: String)async throws  -> PaykitProfileRec
 }
 
     /**
-     * Fetch public Pubky file bytes.
+     * Fetch public Pubky file bytes up to `max_bytes`.
      */
-open func fetchPubkyFile(uri: String)async throws  -> Data?  {
+open func fetchPubkyFile(uri: String, maxBytes: UInt64)async throws  -> Data?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_file(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(uri)
+                    FfiConverterString.lower(uri),FfiConverterUInt64.lower(maxBytes)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1593,15 +1593,15 @@ open func fetchPubkyFile(uri: String)async throws  -> Data?  {
 }
 
     /**
-     * Fetch public Pubky app follows.
+     * Fetch public Pubky app follows up to `max_entries`.
      */
-open func fetchPubkyFollows(publicKey: String)async throws  -> [String]  {
+open func fetchPubkyFollows(publicKey: String, maxEntries: UInt64)async throws  -> [String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_follows(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(publicKey)
+                    FfiConverterString.lower(publicKey),FfiConverterUInt64.lower(maxEntries)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -1633,15 +1633,15 @@ open func fetchPubkyProfile(publicKey: String)async throws  -> PubkyProfileRecor
 }
 
     /**
-     * Fetch a public Pubky UTF-8 text file.
+     * Fetch a public Pubky UTF-8 text file up to `max_bytes`.
      */
-open func fetchPubkyText(uri: String)async throws  -> String?  {
+open func fetchPubkyText(uri: String, maxBytes: UInt64)async throws  -> String?  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_text(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(uri)
+                    FfiConverterString.lower(uri),FfiConverterUInt64.lower(maxBytes)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -3005,6 +3005,9 @@ public func FfiConverterTypePaykitSdk_lower(_ value: PaykitSdk) -> UnsafeMutable
 
 /**
  * Payment adapter payload text with redacted debug output.
+ *
+ * Android callback implementations should export callback-supplied payloads
+ * and close their generated native wrappers before returning.
  */
 public protocol PaymentPayloadProtocol: AnyObject, Sendable {
 
@@ -3016,6 +3019,9 @@ public protocol PaymentPayloadProtocol: AnyObject, Sendable {
 }
 /**
  * Payment adapter payload text with redacted debug output.
+ *
+ * Android callback implementations should export callback-supplied payloads
+ * and close their generated native wrappers before returning.
  */
 open class PaymentPayload: PaymentPayloadProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -4440,6 +4446,9 @@ public func FfiConverterTypePubkySessionBootstrap_lower(_ value: PubkySessionBoo
 
 /**
  * Reservation attribution metadata with redacted debug output.
+ *
+ * Android callback implementations should export callback-supplied metadata
+ * and close its generated native wrapper before returning.
  */
 public protocol ReservationAttributionProtocol: AnyObject, Sendable {
 
@@ -4451,6 +4460,9 @@ public protocol ReservationAttributionProtocol: AnyObject, Sendable {
 }
 /**
  * Reservation attribution metadata with redacted debug output.
+ *
+ * Android callback implementations should export callback-supplied metadata
+ * and close its generated native wrapper before returning.
  */
 open class ReservationAttribution: ReservationAttributionProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -4733,6 +4745,9 @@ public func FfiConverterTypeSdkBackupBlob_lower(_ value: SdkBackupBlob) -> Unsaf
  *
  * Public callbacks never receive private values, and private callbacks never
  * receive public values.
+ *
+ * Callbacks must not synchronously call back into the same SDK handle while
+ * the originating SDK call is waiting for them.
  */
 public protocol SdkPaymentAdapter: AnyObject, Sendable {
 
@@ -4782,6 +4797,9 @@ public protocol SdkPaymentAdapter: AnyObject, Sendable {
  *
  * Public callbacks never receive private values, and private callbacks never
  * receive public values.
+ *
+ * Callbacks must not synchronously call back into the same SDK handle while
+ * the originating SDK call is waiting for them.
  */
 open class SdkPaymentAdapterImpl: SdkPaymentAdapter, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -5206,6 +5224,9 @@ public func FfiConverterTypeSdkPaymentAdapter_lower(_ value: SdkPaymentAdapter) 
 
 /**
  * Platform-owned Pubky session provider.
+ *
+ * Callbacks must not synchronously call back into the same SDK handle. Session
+ * workflows may hold that handle's session-operation gate while invoking them.
  */
 public protocol SdkPubkySessionProvider: AnyObject, Sendable {
 
@@ -5227,6 +5248,9 @@ public protocol SdkPubkySessionProvider: AnyObject, Sendable {
 }
 /**
  * Platform-owned Pubky session provider.
+ *
+ * Callbacks must not synchronously call back into the same SDK handle. Session
+ * workflows may hold that handle's session-operation gate while invoking them.
  */
 open class SdkPubkySessionProviderImpl: SdkPubkySessionProvider, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -5465,6 +5489,9 @@ public func FfiConverterTypeSdkPubkySessionProvider_lower(_ value: SdkPubkySessi
 
 /**
  * Identity-wide SDK state blob owned by the configured storage boundary.
+ *
+ * Android storage callbacks should export callback-supplied blob bytes and
+ * close the generated native wrapper before returning.
  */
 public protocol SdkStateBlobProtocol: AnyObject, Sendable {
 
@@ -5476,6 +5503,9 @@ public protocol SdkStateBlobProtocol: AnyObject, Sendable {
 }
 /**
  * Identity-wide SDK state blob owned by the configured storage boundary.
+ *
+ * Android storage callbacks should export callback-supplied blob bytes and
+ * close the generated native wrapper before returning.
  */
 open class SdkStateBlob: SdkStateBlobProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -5610,6 +5640,10 @@ public func FfiConverterTypeSdkStateBlob_lower(_ value: SdkStateBlob) -> UnsafeM
 
 /**
  * Platform-owned durable blob store for SDK state.
+ *
+ * The SDK invokes these callbacks while holding its per-handle storage lock.
+ * Implementations must not call back into the same SDK handle from either
+ * callback because doing so would deadlock.
  */
 public protocol SdkStateBlobStore: AnyObject, Sendable {
 
@@ -5632,6 +5666,10 @@ public protocol SdkStateBlobStore: AnyObject, Sendable {
 }
 /**
  * Platform-owned durable blob store for SDK state.
+ *
+ * The SDK invokes these callbacks while holding its per-handle storage lock.
+ * Implementations must not call back into the same SDK handle from either
+ * callback because doing so would deadlock.
  */
 open class SdkStateBlobStoreImpl: SdkStateBlobStore, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -5935,6 +5973,8 @@ public func FfiConverterTypeBillingPeriod_lower(_ value: BillingPeriod) -> RustB
 
 /**
  * Local SDK contact record.
+ *
+ * Generated platform record descriptions redact the record contents.
  */
 public struct ContactRecord {
     /**
@@ -9715,8 +9755,7 @@ public func FfiConverterTypePrivatePaymentEndpointReservationCancellation_lower(
  * Plain reservation input for one Payment Endpoint.
  *
  * Endpoint payloads and attribution can contain private payment material.
- * Generated platform descriptions may include these fields; applications
- * must not log or stringify this record.
+ * Generated platform descriptions redact the complete record.
  */
 public struct PrivatePaymentEndpointReservationInput {
     /**
@@ -10970,8 +11009,8 @@ public func FfiConverterTypeProfileResolution_lower(_ value: ProfileResolution) 
  * validates the identifiers, creates the request-bound identity signature,
  * encrypts the signed payload, and delivers it before normal Pubky Auth.
  *
- * Generated platform record descriptions may include the raw payload. Apps
- * must not log, interpolate, or otherwise stringify this record.
+ * Generated platform record descriptions redact the record contents. Apps
+ * must still treat the payload as sensitive and avoid logging it directly.
  */
 public struct PubkyAuthCompanionClaim {
     /**
@@ -17947,16 +17986,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_paykit_profile() != 57253) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file() != 313) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file() != 18040) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_follows() != 44041) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_follows() != 64326) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_profile() != 60331) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 17257) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 46340) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_identity_status() != 8559) {

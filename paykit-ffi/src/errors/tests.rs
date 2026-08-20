@@ -116,13 +116,9 @@ fn test_sdk_error_maps_to_expected_ffi_variant_and_code() {
 }
 
 #[test]
-fn test_ffi_sdk_round_trip_recovers_original_via_downcast() {
-    // Every arm of `ffi_error_to_sdk` wraps the original FFI error in the SDK
-    // error's `source`; converting back must downcast to the exact original
-    // (same variant, custom code, and reason), not a re-labelled placeholder
-    // with the variant's generic code. This pins the bindings contract that
-    // machine-readable callback error codes survive the round trip losslessly
-    // for all eight variants.
+fn test_ffi_sdk_round_trip_preserves_variant_and_code() {
+    // Callback errors keep their machine-readable identity while replacing
+    // app-provided context with the SDK operation that failed.
     let originals = [
         PaykitFfiError::Storage {
             code: "atomic_write_failed".into(),
@@ -161,11 +157,11 @@ fn test_ffi_sdk_round_trip_recovers_original_via_downcast() {
     for original in originals {
         let sdk = ffi_error_to_sdk(original.clone(), "round trip");
         let restored = PaykitFfiError::from(sdk);
-        assert_eq!(
-            parts(&restored),
-            parts(&original),
-            "round trip must preserve the original error"
-        );
+        let (variant, code, context) = parts(&restored);
+        let (expected_variant, expected_code, _) = parts(&original);
+        assert_eq!(variant, expected_variant);
+        assert_eq!(code, expected_code);
+        assert_eq!(context, format!("round trip: {expected_code}"));
     }
 }
 

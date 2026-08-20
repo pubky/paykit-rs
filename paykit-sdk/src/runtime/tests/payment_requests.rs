@@ -720,7 +720,17 @@ async fn authorize_payment_request_app(
     let app_id = paykit_lib::PaykitAppId::new(app_id).unwrap();
     storage
         .transaction(move |tx| {
-            tx.save_authorized_payment_request_apps(counterparty, vec![app_id]);
+            save_authorized_paykit_app(
+                tx,
+                counterparty,
+                app_id,
+                paykit_lib::PaykitAppCapabilities {
+                    private_payments: false,
+                    payment_requests: true,
+                    receipts: false,
+                    outgoing_payments: false,
+                },
+            );
             Ok(())
         })
         .await

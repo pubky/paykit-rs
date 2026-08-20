@@ -26,6 +26,15 @@ fn registered_storage() -> InMemoryStorage {
     InMemoryStorage::with_registered_apps([app_id()])
 }
 
+fn payment_request_capabilities() -> paykit_lib::PaykitAppCapabilities {
+    paykit_lib::PaykitAppCapabilities {
+        private_payments: false,
+        payment_requests: true,
+        receipts: false,
+        outgoing_payments: false,
+    }
+}
+
 fn private_message(raw_json: String) -> PrivateApplicationMessage {
     let value: serde_json::Value = serde_json::from_str(&raw_json).unwrap();
     PrivateApplicationMessage {
@@ -148,7 +157,10 @@ async fn persist_authorized_request(
     .await;
     storage
         .transaction(move |tx| {
-            tx.save_authorized_payment_request_apps(counterparty, vec![app_id()]);
+            tx.save_authorized_paykit_apps(
+                counterparty,
+                HashMap::from([(app_id(), payment_request_capabilities())]),
+            );
             Ok(())
         })
         .await

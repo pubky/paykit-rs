@@ -428,8 +428,14 @@ impl ReceiptAccessRecord {
 
     pub(crate) fn mark_retrieved(&self, retrieved_at: DateTime<Utc>) -> Self {
         let mut record = self.clone();
+        let retrieved_at = record
+            .retrieved_at
+            .map_or(retrieved_at, |current| current.max(retrieved_at));
+        let attempted_at = record
+            .retrieval_attempted_at
+            .map_or(retrieved_at, |current| current.max(retrieved_at));
         record.retrieval_status = ReceiptRetrievalStatus::Retrieved;
-        record.retrieval_attempted_at = Some(retrieved_at);
+        record.retrieval_attempted_at = Some(attempted_at);
         record.retrieved_at = Some(retrieved_at);
         record.last_retrieval_error = None;
         record

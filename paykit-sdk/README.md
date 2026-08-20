@@ -120,10 +120,10 @@ Common workflows:
   Paykit Profile metadata, including application-defined public fields in `extra`
 - use `publish_paykit_blob` / `delete_paykit_blob` for files under the
   identity-wide Paykit blob prefix
-- use `fetch_pubky_file` / `fetch_pubky_text` to load public `pubky://`
-  files referenced by profile metadata
-- use `fetch_pubky_profile` / `fetch_pubky_follows` for read-only Pubky app
-  profile and follows data
+- use `fetch_pubky_file` / `fetch_pubky_text` with an explicit byte limit to
+  load public `pubky://` files referenced by profile metadata
+- use bounded `fetch_pubky_profile` and call `fetch_pubky_follows` with an
+  explicit entry limit for read-only Pubky app profile and follows data
 - use `resolve_profile` when contact display should prefer Paykit
   Profile and fall back to Pubky Profile
 - use `PubkySessionBootstrap` for common Pubky signup, signin, session import,

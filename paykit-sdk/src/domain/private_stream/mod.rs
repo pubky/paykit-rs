@@ -105,7 +105,7 @@ where
 {
     storage
         .transaction(move |tx| {
-            let receive_batch_id = tx.allocate_receive_batch_id();
+            let receive_batch_id = tx.allocate_receive_batch_id()?;
             let mut report = PrivateStreamIntakeReport {
                 receive_batch_id,
                 stream_item_ids: Vec::with_capacity(messages.len()),
@@ -135,7 +135,7 @@ where
                         parse_error,
                         received_at,
                     },
-                ));
+                ))?;
 
                 let dedupe_outcome = event.map(|event| {
                     update_event_dedupe(
@@ -214,8 +214,12 @@ pub(crate) fn classify_private_application_message(
     message: &PrivateApplicationMessage,
 ) -> PrivateStreamMessageClassification {
     let Some(kind) = message.known_kind() else {
+        let app_id = message
+            .app_id
+            .as_deref()
+            .and_then(|app_id| PaykitAppId::new(app_id).ok());
         return PrivateStreamMessageClassification {
-            status: if message.version.is_some() && message.kind.is_some() {
+            status: if message.version.is_some() && message.kind.is_some() && app_id.is_some() {
                 PrivateStreamParseStatus::UnknownKind
             } else {
                 PrivateStreamParseStatus::InvalidJson
@@ -223,7 +227,7 @@ pub(crate) fn classify_private_application_message(
             parse_error: message.invalid_utf8_error().map(str::to_owned),
             event: None,
             receipt_access: None,
-            app_id: None,
+            app_id,
         };
     };
 

@@ -159,9 +159,10 @@ async fn test_select_public_payment_endpoint_ids_rejects_unknown_ids() {
         .await
         .unwrap_err();
 
+    let ffi_error = PaykitFfiError::from(err);
     assert!(matches!(
-        err,
-        paykit_sdk::PaykitSdkError::PaymentAdapter { .. }
+        ffi_error,
+        PaykitFfiError::PaymentAdapter { ref code, .. } if code == "invalid_candidate_id"
     ));
 }
 

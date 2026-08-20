@@ -74,7 +74,14 @@ where
                 Ok(app_ids) => app_ids,
                 Err(_) => {
                     self.storage
-                        .transaction(|tx| Ok(tx.authorized_receipt_apps(&counterparty)))
+                        .transaction(|tx| {
+                            Ok(tx.authorized_paykit_apps(&counterparty).map(|apps| {
+                                apps.into_iter()
+                                    .filter(|(_, capabilities)| capabilities.receipts)
+                                    .map(|(app_id, _)| app_id)
+                                    .collect()
+                            }))
+                        })
                         .await?
                 }
             };

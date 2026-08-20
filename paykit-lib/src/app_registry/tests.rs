@@ -90,6 +90,30 @@ fn test_registry_requires_noise_key_for_private_capabilities() {
 }
 
 #[test]
+fn test_remote_registry_reports_invalid_app_without_noise_key() {
+    let raw = json!({
+        "version": APP_REGISTRY_VERSION,
+        "kind": APP_REGISTRY_KIND,
+        "noise_public_key": null,
+        "apps": {
+            "bitkit": {
+                "display_name": "Bitkit",
+                "capabilities": capabilities(),
+            }
+        },
+        "default_app_id": null,
+        "default_apps_by_endpoint": {},
+    })
+    .to_string();
+
+    let error = parse_paykit_app_registry_json(&raw).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("invalid application"));
+    assert!(!message.contains("too many applications"));
+}
+
+#[test]
 fn test_app_registry_json_uses_stable_key_order() {
     let mut registry = registry();
     registry

@@ -3,7 +3,8 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     domain::outbound_private::OutboundPrivateMessageStatus,
-    domain::private_stream::PrivateStreamParseStatus, storage::InMemoryStorage,
+    domain::private_stream::PrivateStreamParseStatus,
+    storage::{InMemoryStorage, NewOutboundPrivateMessage},
 };
 
 fn timestamp() -> chrono::DateTime<Utc> {

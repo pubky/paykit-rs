@@ -250,7 +250,7 @@ async fn test_enqueue_private_payment_list_with_link_lease_rejects_stale_lease()
                         &counterparty,
                         timestamp(),
                         timestamp() + ChronoDuration::seconds(10),
-                    )
+                    )?
                     .unwrap())
             }
         })
@@ -264,7 +264,7 @@ async fn test_enqueue_private_payment_list_with_link_lease_rejects_stale_lease()
                     &counterparty,
                     timestamp() + ChronoDuration::seconds(11),
                     timestamp() + ChronoDuration::seconds(71),
-                );
+                )?;
                 Ok(())
             }
         })

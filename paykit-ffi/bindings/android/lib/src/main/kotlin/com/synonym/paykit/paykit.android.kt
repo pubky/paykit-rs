@@ -1646,16 +1646,16 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_paykit_profile() != 57253.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file() != 313.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file() != 18040.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_follows() != 44041.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_follows() != 64326.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_profile() != 60331.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 17257.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 46340.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_identity_status() != 8559.toShort()) {
@@ -2653,11 +2653,13 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_file(
         `ptr`: Pointer?,
         `uri`: RustBufferByValue,
+        `maxBytes`: Long,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_follows(
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
+        `maxEntries`: Long,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_profile(
@@ -2668,6 +2670,7 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_text(
         `ptr`: Pointer?,
         `uri`: RustBufferByValue,
+        `maxBytes`: Long,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_identity_status(
@@ -4606,15 +4609,16 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
-     * Fetch public Pubky file bytes.
+     * Fetch public Pubky file bytes up to `max_bytes`.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `fetchPubkyFile`(`uri`: kotlin.String): kotlin.ByteArray? {
+    public override suspend fun `fetchPubkyFile`(`uri`: kotlin.String, `maxBytes`: kotlin.ULong): kotlin.ByteArray? {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_file(
                     thisPtr,
                     FfiConverterString.lower(`uri`),
+                    FfiConverterULong.lower(`maxBytes`),
                 )
             },
             { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -4629,15 +4633,16 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
-     * Fetch public Pubky app follows.
+     * Fetch public Pubky app follows up to `max_entries`.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `fetchPubkyFollows`(`publicKey`: kotlin.String): List<kotlin.String> {
+    public override suspend fun `fetchPubkyFollows`(`publicKey`: kotlin.String, `maxEntries`: kotlin.ULong): List<kotlin.String> {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_follows(
                     thisPtr,
                     FfiConverterString.lower(`publicKey`),
+                    FfiConverterULong.lower(`maxEntries`),
                 )
             },
             { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -4675,15 +4680,16 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
-     * Fetch a public Pubky UTF-8 text file.
+     * Fetch a public Pubky UTF-8 text file up to `max_bytes`.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `fetchPubkyText`(`uri`: kotlin.String): kotlin.String? {
+    public override suspend fun `fetchPubkyText`(`uri`: kotlin.String, `maxBytes`: kotlin.ULong): kotlin.String? {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_text(
                     thisPtr,
                     FfiConverterString.lower(`uri`),
+                    FfiConverterULong.lower(`maxBytes`),
                 )
             },
             { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -6292,6 +6298,9 @@ public object FfiConverterTypePaykitSdk: FfiConverter<PaykitSdk, Pointer> {
 
 /**
  * Payment adapter payload text with redacted debug output.
+ *
+ * Android callback implementations should export callback-supplied payloads
+ * and close their generated native wrappers before returning.
  */
 public open class PaymentPayload: Disposable, PaymentPayloadInterface {
 
@@ -7834,6 +7843,9 @@ public object FfiConverterTypePubkySessionBootstrap: FfiConverter<PubkySessionBo
 
 /**
  * Reservation attribution metadata with redacted debug output.
+ *
+ * Android callback implementations should export callback-supplied metadata
+ * and close its generated native wrapper before returning.
  */
 public open class ReservationAttribution: Disposable, ReservationAttributionInterface {
 
@@ -8155,6 +8167,9 @@ public object FfiConverterTypeSdkBackupBlob: FfiConverter<SdkBackupBlob, Pointer
  *
  * Public callbacks never receive private values, and private callbacks never
  * receive public values.
+ *
+ * Callbacks must not synchronously call back into the same SDK handle while
+ * the originating SDK call is waiting for them.
  */
 public open class SdkPaymentAdapterImpl: Disposable, SdkPaymentAdapter {
 
@@ -8627,6 +8642,9 @@ internal object uniffiCallbackInterfaceFfiSdkPaymentAdapter {
 
 /**
  * Platform-owned Pubky session provider.
+ *
+ * Callbacks must not synchronously call back into the same SDK handle. Session
+ * workflows may hold that handle's session-operation gate while invoking them.
  */
 public open class SdkPubkySessionProviderImpl: Disposable, SdkPubkySessionProvider {
 
@@ -8893,6 +8911,9 @@ internal object uniffiCallbackInterfaceFfiSdkPubkySessionProvider {
 
 /**
  * Identity-wide SDK state blob owned by the configured storage boundary.
+ *
+ * Android storage callbacks should export callback-supplied blob bytes and
+ * close the generated native wrapper before returning.
  */
 public open class SdkStateBlob: Disposable, SdkStateBlobInterface {
 
@@ -9052,6 +9073,10 @@ public object FfiConverterTypeSdkStateBlob: FfiConverter<SdkStateBlob, Pointer> 
 
 /**
  * Platform-owned durable blob store for SDK state.
+ *
+ * The SDK invokes these callbacks while holding its per-handle storage lock.
+ * Implementations must not call back into the same SDK handle from either
+ * callback because doing so would deadlock.
  */
 public open class SdkStateBlobStoreImpl: Disposable, SdkStateBlobStore {
 

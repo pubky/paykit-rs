@@ -310,7 +310,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
                         &counterparty,
                         FixedClock.now(),
                         FixedClock.now() + ChronoDuration::seconds(10),
-                    )
+                    )?
                     .unwrap())
             }
         })
@@ -324,7 +324,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
                     &counterparty,
                     FixedClock.now() + ChronoDuration::seconds(11),
                     FixedClock.now() + ChronoDuration::seconds(71),
-                );
+                )?;
                 Ok(())
             }
         })
@@ -433,6 +433,38 @@ async fn test_reservation_cleanup_failure_keeps_cancellation_claim() {
 }
 
 #[tokio::test]
+async fn test_queue_error_cleanup_preserves_adapter_error_without_reservation_id() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        FailingCancellationPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    let cancellation = PrivatePaymentEndpointReservationCancellation {
+        reservation_id: "reservation-id-secret".into(),
+        counterparty: counterparty.clone(),
+        identifier: "btc-lightning-bolt11".into(),
+        payload_hash: reservation_payload_hash("one"),
+        attribution: HashMap::new(),
+    };
+
+    let error = sdk
+        .cancel_reservations_after_queue_error(&[cancellation], &counterparty)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        PaykitSdkError::PaymentAdapter { ref context, .. }
+            if context == "cancellation failed"
+    ));
+    assert!(!error.to_string().contains("reservation-id-secret"));
+}
+
+#[tokio::test]
 async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -459,7 +491,7 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
                         &counterparty,
                         FixedClock.now(),
                         FixedClock.now() + ChronoDuration::seconds(10),
-                    )
+                    )?
                     .unwrap())
             }
         })

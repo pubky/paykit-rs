@@ -138,17 +138,25 @@ paykit-sdk/
       recovery.rs
     runtime/
       mod.rs
+      app_registry.rs
+      app_removal.rs
       backup.rs
       contacts.rs
       encrypted_links.rs
       outbound_private.rs
       payment_requests.rs
       payment_resolution.rs
+      payment_resolution/
       private_lists.rs
       private_stream.rs
+      profiles.rs
       public_endpoints.rs
-      receipts.rs
+      receipts/
+        mod.rs
+        issuance.rs
+        retrieval.rs
       recovery.rs
+      reservation_cleanup.rs
     storage/
       mod.rs
       in_memory.rs
@@ -156,7 +164,7 @@ paykit-sdk/
       records.rs
     backup/
       mod.rs
-      validation.rs
+      validation/
 ```
 
 Module responsibilities:

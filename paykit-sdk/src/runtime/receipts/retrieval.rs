@@ -7,255 +7,6 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
-    /// Prepare a receipt issuance and persist it before network side effects.
-    ///
-    /// This does not store the Encrypted Receipt or queue Receipt Access. Use
-    /// [`Self::process_receipt_issuance`] to continue the network steps, or
-    /// [`Self::issue_receipt`] when the draft already has a Receipt ID.
-    pub async fn prepare_receipt_issuance(
-        &self,
-        counterparty: PubkyPublicKey,
-        draft: ReceiptDraft,
-    ) -> Result<ReceiptIssuanceView> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
-            return Err(PaykitSdkError::Identity {
-                context: "no local Pubky identity available for receipt issuance".into(),
-                source: None,
-            });
-        }
-        self.ensure_peer_not_blocked(&counterparty).await?;
-
-        if let Some(receipt_id) = draft.receipt_id.as_ref() {
-            if let Some(existing) =
-                load_receipt_issuance_record_by_receipt_id(&self.storage, receipt_id.as_str())
-                    .await?
-            {
-                if existing.app_id != self.config.app_id {
-                    return Err(PaykitSdkError::Protocol {
-                        context: format!(
-                            "Receipt issuance {} already exists for another Paykit App",
-                            existing.receipt_id
-                        ),
-                        source: None,
-                    });
-                }
-                if existing.counterparty != counterparty {
-                    return Err(PaykitSdkError::Protocol {
-                        context: format!(
-                            "Receipt issuance {} already exists for a different counterparty",
-                            existing.receipt_id
-                        ),
-                        source: None,
-                    });
-                }
-                if !receipt_issuance_record_matches_draft(&existing, &draft)? {
-                    return Err(PaykitSdkError::Protocol {
-                        context: format!(
-                            "Receipt issuance {} for counterparty {} already exists with different fields",
-                            existing.receipt_id, counterparty
-                        ),
-                        source: None,
-                    });
-                }
-                return Ok(ReceiptIssuanceView::from(&existing));
-            }
-        }
-
-        let now = self.clock.now();
-        let recipient = counterparty.to_public_key()?;
-        let prepared = paykit_lib::prepare_receipt_for_recipient(recipient, draft)?;
-        let record = ReceiptIssuanceRecord::from_prepared(
-            counterparty,
-            self.config.app_id.clone(),
-            prepared,
-            now,
-        )?;
-        self.storage
-            .transaction({
-                let app_id = self.config.app_id.clone();
-                let record = record.clone();
-                move |tx| {
-                    crate::storage::require_paykit_app_capability(
-                        tx,
-                        &app_id,
-                        PrivateMessageKind::ReceiptAccess,
-                    )?;
-                    if tx
-                        .receipt_issuance_record_by_receipt_id(&record.receipt_id)
-                        .is_some()
-                    {
-                        return Err(PaykitSdkError::Protocol {
-                            context: format!(
-                                "Receipt issuance {} already exists",
-                                record.receipt_id
-                            ),
-                            source: None,
-                        });
-                    }
-                    tx.save_receipt_issuance_record(record);
-                    Ok(())
-                }
-            })
-            .await?;
-        Ok(ReceiptIssuanceView::from(&record))
-    }
-
-    /// Prepare, store, and queue Receipt Access for private delivery.
-    ///
-    /// The draft must include a Receipt ID so repeated calls are retry-safe.
-    /// The returned record reflects local issuance progress. Receipt Access
-    /// delivery still depends on processing the outbound private queue.
-    pub async fn issue_receipt(
-        &self,
-        counterparty: PubkyPublicKey,
-        draft: ReceiptDraft,
-    ) -> Result<ReceiptIssuanceView> {
-        if draft.receipt_id.is_none() {
-            return Err(PaykitSdkError::Protocol {
-                context: "issue_receipt requires a caller-provided Receipt ID for retry-safe issuance; use prepare_receipt_issuance first when the SDK should generate one".into(),
-                source: None,
-            });
-        }
-        let record = self
-            .prepare_receipt_issuance(counterparty.clone(), draft)
-            .await?;
-        self.process_receipt_issuance(counterparty, &record.receipt_id)
-            .await
-    }
-
-    /// Continue storage and Receipt Access queueing for a prepared issuance.
-    pub async fn process_receipt_issuance(
-        &self,
-        counterparty: PubkyPublicKey,
-        receipt_id: &str,
-    ) -> Result<ReceiptIssuanceView> {
-        let record = load_receipt_issuance_record(&self.storage, &counterparty, receipt_id)
-            .await?
-            .ok_or_else(|| PaykitSdkError::NotFound {
-                context: format!(
-                    "Receipt issuance {receipt_id} for counterparty {counterparty} was not found"
-                ),
-                source: None,
-            })?;
-        if record.app_id != self.config.app_id {
-            return Err(PaykitSdkError::Policy {
-                context: format!("Receipt issuance {receipt_id} belongs to another Paykit App"),
-                source: None,
-            });
-        }
-        if record.status == ReceiptIssuanceStatus::AccessQueued {
-            return Ok(ReceiptIssuanceView::from(&record));
-        }
-        self.ensure_private_outbound_ready(&counterparty).await?;
-        let (session_access, _) = self.private_link_session_access().await?;
-
-        let record = if record.stored_at.is_some() {
-            record
-        } else {
-            match store_encrypted_receipt_json(&session_access.session, &record).await {
-                Ok(()) => {
-                    let stored = record.mark_stored(self.clock.now());
-                    self.storage
-                        .transaction({
-                            let stored = stored.clone();
-                            move |tx| {
-                                tx.save_receipt_issuance_record(stored);
-                                Ok(())
-                            }
-                        })
-                        .await?;
-                    stored
-                }
-                Err(err) => {
-                    let failed = record.mark_failed(self.clock.now(), err.to_string());
-                    self.storage
-                        .transaction({
-                            let failed = failed.clone();
-                            move |tx| {
-                                tx.save_receipt_issuance_record(failed);
-                                Ok(())
-                            }
-                        })
-                        .await?;
-                    return Err(err);
-                }
-            }
-        };
-
-        match enqueue_receipt_access_for_issuance(&self.storage, record.clone(), self.clock.now())
-            .await
-        {
-            Ok(queued) => Ok(ReceiptIssuanceView::from(&queued)),
-            Err(err) => {
-                let failed = record.mark_failed(self.clock.now(), err.to_string());
-                self.storage
-                    .transaction({
-                        let failed = failed.clone();
-                        move |tx| {
-                            tx.save_receipt_issuance_record(failed);
-                            Ok(())
-                        }
-                    })
-                    .await?;
-                Err(err)
-            }
-        }
-    }
-
-    /// List local receipt issuance records for one counterparty.
-    pub async fn receipt_issuance_records(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Result<Vec<ReceiptIssuanceView>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
-            return Ok(Vec::new());
-        }
-        self.ensure_peer_not_blocked(counterparty).await?;
-        let mut records = load_receipt_issuance_records(&self.storage, counterparty)
-            .await?
-            .iter()
-            .map(ReceiptIssuanceView::from)
-            .collect::<Vec<_>>();
-        records.sort_by_key(|record| Reverse(record.created_at));
-        Ok(records)
-    }
-
-    /// List issued receipts for one counterparty, newest first.
-    pub async fn issued_receipts_to(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Result<Vec<ReceiptIssuanceView>> {
-        self.receipt_issuance_records(counterparty).await
-    }
-
-    /// List issued receipts across non-blocked counterparties, newest first.
-    pub async fn issued_receipts(&self) -> Result<Vec<ReceiptIssuanceView>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
-            return Ok(Vec::new());
-        }
-        self.storage
-            .transaction(|tx| {
-                let snapshot = tx.export_storage_state();
-                let mut records = snapshot
-                    .receipt_issuance_records
-                    .into_values()
-                    .filter(|record| {
-                        !snapshot
-                            .linked_peers
-                            .get(&record.counterparty)
-                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
-                    })
-                    .map(|record| ReceiptIssuanceView::from(&record))
-                    .collect::<Vec<_>>();
-                records.sort_by_key(|record| Reverse(record.created_at));
-                Ok(records)
-            })
-            .await
-    }
-
     /// Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
     ///
     /// The decrypted Receipt is private SDK state. This returns an already
@@ -275,19 +26,10 @@ where
                 source: None,
             })?;
         self.ensure_peer_not_blocked(&counterparty).await?;
-        let (
-            stored_receipt,
-            mut access_records,
-            conflicted_access_records,
-            stored_receipt_conflicted,
-        ) = self
+        let (stored_receipt, mut access_records, conflicted_access_records) = self
             .storage
             .transaction(|tx| {
                 let stored_receipt = tx.receipt_record(&counterparty, receipt_id);
-                let stored_receipt_conflicted = stored_receipt.as_ref().is_some_and(|record| {
-                    tx.event_dedup_record(&counterparty, &record.receipt_access_event_id)
-                        .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
-                });
                 let mut access_records = Vec::new();
                 let mut conflicted_access_records = Vec::new();
                 for record in tx
@@ -302,42 +44,22 @@ where
                     }
                 }
                 access_records.sort_by_key(|record| Reverse(record.stream_item_id));
-                Ok((
-                    stored_receipt,
-                    access_records,
-                    conflicted_access_records,
-                    stored_receipt_conflicted,
-                ))
+                Ok((stored_receipt, access_records, conflicted_access_records))
             })
             .await?;
         if let Some(record) = stored_receipt {
-            access_records.retain(|access| access.app_authorized);
-            let conflicted_access_count = conflicted_access_records
-                .iter()
-                .filter(|access| access.app_authorized)
-                .count();
             if record.recipient_public_key != local_public_key {
                 return Err(PaykitSdkError::Protocol {
                     context: "stored Receipt recipient does not match local identity".into(),
                     source: None,
                 });
             }
-            if stored_receipt_conflicted {
+            access_records.retain(|access| access.app_authorized);
+            if conflicted_access_records
+                .iter()
+                .any(|access| access.app_authorized)
+            {
                 return Err(Self::conflicted_receipt_access_error(receipt_id));
-            }
-            if access_records.is_empty() && conflicted_access_count > 0 {
-                return Err(Self::conflicted_receipt_access_error(receipt_id));
-            }
-            if !access_records.iter().any(|access| {
-                access.retrieval_status == ReceiptRetrievalStatus::Retrieved
-                    && receipt_record_matches_access(&record, access)
-            }) {
-                return Err(PaykitSdkError::Protocol {
-                    context: format!(
-                        "stored Receipt {receipt_id} has no authorized retrieved Receipt Access"
-                    ),
-                    source: None,
-                });
             }
             self.reconcile_cached_receipt_access_records(
                 &record,
@@ -345,6 +67,12 @@ where
                 self.clock.now(),
             )
             .await?;
+            self.storage
+                .transaction({
+                    let record = record.clone();
+                    move |tx| Self::validate_receipt_record_accesses(tx, &record, None)
+                })
+                .await?;
             return Ok(record);
         }
         let authorized_app_ids = self.authorized_receipt_apps_for_peer(&counterparty).await?;
@@ -445,19 +173,45 @@ where
                 &local_public_key,
             ) {
                 Ok(record) => {
-                    self.storage
+                    let record = self
+                        .storage
                         .transaction({
-                            let access = access.mark_retrieved(now);
+                            let access_event_id = access.event_id.clone();
                             let record = record.clone();
                             move |tx| {
-                                tx.save_receipt_access_record(access);
-                                tx.save_receipt_record(record);
-                                Ok(())
+                                let mut persisted_record = tx
+                                    .receipt_record(&record.issuer, &record.receipt_id)
+                                    .unwrap_or(record);
+                                persisted_record.retrieved_at =
+                                    persisted_record.retrieved_at.max(now);
+                                Self::validate_receipt_record_accesses(
+                                    tx,
+                                    &persisted_record,
+                                    Some(&access_event_id),
+                                )?;
+                                let current = tx
+                                    .receipt_access_records(&persisted_record.issuer)
+                                    .into_iter()
+                                    .find(|candidate| candidate.event_id == access_event_id)
+                                    .ok_or_else(|| PaykitSdkError::RecoveryRequired {
+                                        context: format!(
+                                            "Receipt Access event for receipt {} is no longer available",
+                                            persisted_record.receipt_id
+                                        ),
+                                        source: None,
+                                    })?;
+                                tx.save_receipt_access_record(current.mark_retrieved(now));
+                                tx.save_receipt_record(persisted_record.clone());
+                                Ok(persisted_record)
                             }
                         })
                         .await?;
-                    self.reconcile_cached_receipt_access_records(&record, &all_access_records, now)
-                        .await?;
+                    self.reconcile_cached_receipt_access_records(
+                        &record,
+                        &all_access_records,
+                        record.retrieved_at,
+                    )
+                    .await?;
                     return Ok(record);
                 }
                 Err(err) => {
@@ -667,9 +421,20 @@ where
                 let access_records = access_records.to_vec();
                 move |tx| {
                     let mut has_mismatched_access = false;
-                    for access in access_records {
+                    for expected_access in access_records {
+                        let Some(access) = tx
+                            .receipt_access_records(&record.issuer)
+                            .into_iter()
+                            .find(|candidate| candidate.event_id == expected_access.event_id)
+                        else {
+                            continue;
+                        };
                         if receipt_record_matches_access(&record, &access) {
-                            if access.retrieval_status != ReceiptRetrievalStatus::Retrieved {
+                            if access.retrieval_status != ReceiptRetrievalStatus::Retrieved
+                                || access
+                                    .retrieved_at
+                                    .is_none_or(|retrieved_at| retrieved_at < now)
+                            {
                                 tx.save_receipt_access_record(access.mark_retrieved(now));
                             }
                         } else {
@@ -713,14 +478,46 @@ where
         tx: &dyn crate::storage::StorageTransaction,
         record: &ReceiptRecord,
     ) -> bool {
-        tx.receipt_access_records(&record.issuer)
+        Self::validate_receipt_record_accesses(tx, record, None).is_ok()
+    }
+
+    fn validate_receipt_record_accesses(
+        tx: &dyn crate::storage::StorageTransaction,
+        record: &ReceiptRecord,
+        pending_event_id: Option<&str>,
+    ) -> Result<()> {
+        let access_records = tx
+            .receipt_access_records(&record.issuer)
             .into_iter()
-            .find(|access| access.event_id == record.receipt_access_event_id)
-            .is_some_and(|access| {
-                access.app_authorized
-                    && access.retrieval_status == ReceiptRetrievalStatus::Retrieved
-                    && receipt_record_matches_access(record, &access)
-            })
+            .filter(|access| access.app_authorized && access.receipt_id == record.receipt_id)
+            .collect::<Vec<_>>();
+        if access_records
+            .iter()
+            .any(|access| Self::receipt_access_event_is_conflicted(tx, access))
+        {
+            return Err(Self::conflicted_receipt_access_error(&record.receipt_id));
+        }
+        if access_records
+            .iter()
+            .any(|access| !receipt_record_matches_access(record, access))
+        {
+            return Err(Self::mismatched_receipt_access_error(&record.receipt_id));
+        }
+        let has_provenance = access_records.iter().any(|access| {
+            access.event_id == record.receipt_access_event_id
+                && (access.retrieval_status == ReceiptRetrievalStatus::Retrieved
+                    || pending_event_id == Some(access.event_id.as_str()))
+        });
+        if !has_provenance {
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "stored Receipt {} has no authorized retrieved Receipt Access",
+                    record.receipt_id
+                ),
+                source: None,
+            });
+        }
+        Ok(())
     }
 
     fn conflicted_receipt_access_error(receipt_id: &str) -> PaykitSdkError {
@@ -741,7 +538,7 @@ where
         }
     }
 
-    async fn save_receipt_retrieval_error(
+    pub(in crate::runtime) async fn save_receipt_retrieval_error(
         &self,
         access: &ReceiptAccessRecord,
         status: ReceiptRetrievalStatus,
@@ -750,9 +547,23 @@ where
     ) -> Result<()> {
         self.storage
             .transaction({
-                let access = access.mark_retrieval_error(status, attempted_at, error);
+                let counterparty = access.counterparty.clone();
+                let event_id = access.event_id.clone();
                 move |tx| {
-                    tx.save_receipt_access_record(access);
+                    let Some(current) = tx
+                        .receipt_access_records(&counterparty)
+                        .into_iter()
+                        .find(|candidate| candidate.event_id == event_id)
+                    else {
+                        return Ok(());
+                    };
+                    if current.retrieval_status != ReceiptRetrievalStatus::Retrieved {
+                        tx.save_receipt_access_record(current.mark_retrieval_error(
+                            status,
+                            attempted_at,
+                            error,
+                        ));
+                    }
                     Ok(())
                 }
             })

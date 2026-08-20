@@ -9,11 +9,11 @@ async fn test_peer_link_operation_lease_blocks_until_released() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(60),
-                ))
+                )
             }
         })
         .await
@@ -23,11 +23,11 @@ async fn test_peer_link_operation_lease_blocks_until_released() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(60),
-                ))
+                )
             }
         })
         .await
@@ -48,11 +48,11 @@ async fn test_peer_link_operation_lease_blocks_until_released() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(60),
-                ))
+                )
             }
         })
         .await
@@ -70,11 +70,11 @@ async fn test_peer_link_operation_lease_can_be_reclaimed_after_expiry() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
-                ))
+                )
             }
         })
         .await
@@ -84,11 +84,11 @@ async fn test_peer_link_operation_lease_can_be_reclaimed_after_expiry() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
-                ))
+                )
             }
         })
         .await
@@ -117,11 +117,11 @@ async fn test_peer_link_operation_stale_release_keeps_newer_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
-                ))
+                )
             }
         })
         .await
@@ -131,11 +131,11 @@ async fn test_peer_link_operation_stale_release_keeps_newer_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
-                ))
+                )
             }
         })
         .await
@@ -176,13 +176,13 @@ async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
             move |tx| {
                 let record = tx.insert_outbound_private_message(outbound_private_message(
                     counterparty.clone(),
-                ));
+                ))?;
                 let lease = tx
                     .claim_peer_link_operation(
                         &counterparty,
                         timestamp(),
                         timestamp() + chrono::Duration::seconds(10),
-                    )
+                    )?
                     .unwrap();
                 Ok((record, lease))
             }
@@ -198,7 +198,7 @@ async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
                         &counterparty,
                         timestamp() + chrono::Duration::seconds(11),
                         timestamp() + chrono::Duration::seconds(71),
-                    )
+                    )?
                     .unwrap())
             }
         })

@@ -1,4 +1,5 @@
 use super::*;
+use crate::PubkyPublicKey;
 fn public_key() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }

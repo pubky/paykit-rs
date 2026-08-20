@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -7,7 +7,6 @@ mod in_memory;
 mod queue;
 mod records;
 
-pub use crate::backup::validation::validate_storage_state;
 pub use in_memory::{run_storage_state_transaction, InMemoryStorage};
 pub use records::{
     EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, NewOutboundPrivateMessage,
@@ -19,12 +18,30 @@ pub(crate) use queue::outbound_private_queue_head_is_claimable;
 pub(crate) use records::NewPrivateStreamItemDetails;
 
 use crate::{
-    backup::ValidatedStorageState,
     domain::contacts::ContactRecord,
     domain::receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
     identity::{IdentityState, PubkyPublicKey},
     PaykitSdkError, Result,
 };
+
+/// Validated full-state replacement payload.
+///
+/// Callers can receive and apply this opaque value, but only the SDK can
+/// construct one after validating backup state.
+pub struct ValidatedStorageState {
+    state: StorageState,
+}
+
+impl ValidatedStorageState {
+    pub(crate) fn new(state: StorageState) -> Self {
+        Self { state }
+    }
+
+    /// Consume the validated wrapper and return the storage state.
+    pub fn into_storage_state(self) -> StorageState {
+        self.state
+    }
+}
 
 /// Erased storage transaction callback for boxed storage adapters.
 pub type StorageTransactionCallback<'a> =
@@ -151,43 +168,17 @@ pub trait StorageTransaction {
     /// Remove one Contact Record.
     fn remove_contact_record(&mut self, public_key: &PubkyPublicKey) -> Option<ContactRecord>;
 
-    /// Load the last registry-validated private application ids for a counterparty.
-    fn authorized_private_apps(
+    /// Load the last registry-validated application capabilities for a counterparty.
+    fn authorized_paykit_apps(
         &self,
         counterparty: &PubkyPublicKey,
-    ) -> Option<Vec<paykit_lib::PaykitAppId>>;
+    ) -> Option<HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>>;
 
-    /// Save registry-validated private application ids for a counterparty.
-    fn save_authorized_private_apps(
+    /// Save registry-validated application capabilities for a counterparty.
+    fn save_authorized_paykit_apps(
         &mut self,
         counterparty: PubkyPublicKey,
-        app_ids: Vec<paykit_lib::PaykitAppId>,
-    );
-
-    /// Load the last registry-validated Payment Request application ids for a counterparty.
-    fn authorized_payment_request_apps(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Option<Vec<paykit_lib::PaykitAppId>>;
-
-    /// Save registry-validated Payment Request application ids for a counterparty.
-    fn save_authorized_payment_request_apps(
-        &mut self,
-        counterparty: PubkyPublicKey,
-        app_ids: Vec<paykit_lib::PaykitAppId>,
-    );
-
-    /// Load the last registry-validated Receipt application ids for a counterparty.
-    fn authorized_receipt_apps(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Option<Vec<paykit_lib::PaykitAppId>>;
-
-    /// Save registry-validated Receipt application ids for a counterparty.
-    fn save_authorized_receipt_apps(
-        &mut self,
-        counterparty: PubkyPublicKey,
-        app_ids: Vec<paykit_lib::PaykitAppId>,
+        apps: HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
     );
 
     /// Return whether an app was explicitly published from this state backing.
@@ -261,7 +252,7 @@ pub trait StorageTransaction {
         counterparty: &PubkyPublicKey,
         now: DateTime<Utc>,
         expires_at: DateTime<Utc>,
-    ) -> Option<PeerLinkOperationLease>;
+    ) -> Result<Option<PeerLinkOperationLease>>;
 
     /// Load the active peer link operation lease.
     fn peer_link_operation_lease(
@@ -276,7 +267,7 @@ pub trait StorageTransaction {
     fn insert_outbound_private_message(
         &mut self,
         message: NewOutboundPrivateMessage,
-    ) -> OutboundPrivateMessageRecord;
+    ) -> Result<OutboundPrivateMessageRecord>;
 
     /// List outbound private messages that should be attempted.
     fn queued_outbound_private_messages(
@@ -311,10 +302,10 @@ pub trait StorageTransaction {
         -> Result<()>;
 
     /// Allocate a receive batch id.
-    fn allocate_receive_batch_id(&mut self) -> u64;
+    fn allocate_receive_batch_id(&mut self) -> Result<u64>;
 
     /// Insert one private stream item and return its assigned id.
-    fn insert_private_stream_item(&mut self, item: NewPrivateStreamItem) -> u64;
+    fn insert_private_stream_item(&mut self, item: NewPrivateStreamItem) -> Result<u64>;
 
     /// List private stream items for a counterparty.
     fn private_stream_items(&self, counterparty: &PubkyPublicKey) -> Vec<PrivateStreamItemRecord>;
