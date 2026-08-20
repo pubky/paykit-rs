@@ -51,6 +51,8 @@ Either party may end an accepted Allowance: the Allower revokes the authority, w
 
 Shared terms define the maximum authority communicated to the Allowee. The Allower's wallet may privately enforce stricter safeguards and may decline any instruction. Those safeguards are not Allowances, need not be shared, and cannot expand the shared authority.
 
+Shared means the Allower and Allowee both know and accept the maximum terms. Enforcement remains with the Allower's wallet and does not rely on the Allowee or Payee to report usage or errors.
+
 ## Policy rules
 
 Every configured Allowance rule must pass. V1 excludes OR groups, ordered allow or deny rules, FX, and cross-asset evaluation.
@@ -71,17 +73,21 @@ Period limits may use anchored periods or rolling windows. Months and years are 
 
 Only the instruction's Payment Amount consumes capacity. Fees do not count, and refunds do not restore capacity. An Allowance without an expiry remains active until ended.
 
+An instruction is approved or declined for its exact Payment Amount. The wallet must not automatically substitute another amount.
+
 ## Evaluation and execution
 
 The intended flow is:
 
 1. The Allowee submits a payment instruction that references the Allowance ID and identifies the exact Payment Amount, Payee, payment destination, and a unique instruction ID.
 2. Paykit Library parses and structurally validates the message. Paykit SDK checks that it came from the bound Allowee and that recorded lifecycle events show the Allowance was accepted and not ended. It then persists, correlates, and deduplicates the instruction.
-3. Using trusted time and durable history, the wallet evaluates activation and expiry, the remaining shared terms, private safeguards, current usage, replay protection, and payment capability.
+3. Before execution, using trusted time and durable history, the wallet evaluates activation and expiry, the remaining shared terms, private safeguards, current usage, replay protection, destination authenticity, freshness, revocation status, and payment capability.
 4. If approved, the wallet pays the Payee directly using the selected payment method.
 5. Paykit SDK may communicate the result and any supported proof information to the Allowee.
 
-The future protocol specification must define how Payees and payment destinations are represented, how instructions and results are correlated, and which lifecycle messages are required. The existing Payment Proof is tied to a Payment Request, so its direct reuse is not assumed here.
+The future protocol specification must define how Payees and payment destinations are represented and authenticated, how destination expiry, replacement, or revocation is communicated, how instructions and results are correlated, and which lifecycle messages are required. A wallet must decline automatic execution when it cannot establish that a destination is current and usable. The existing Payment Proof is tied to a Payment Request, so its direct reuse is not assumed here.
+
+Where the Payee publishes or shares a payment destination through Paykit, it must be able to communicate an authenticated withdrawal or replacement if that destination is compromised. Once the wallet observes that change, it must not start a new payment to the withdrawn destination, even when the instruction otherwise satisfies the Allowance.
 
 ## Component responsibilities
 
@@ -103,7 +109,7 @@ This is the audit trail for the product discussion, not required reading for the
 
 ### Earlier decisions (historical, 1-37)
 
-These entries are retained as history, not as current requirements. Decisions 38 through 47 state the current direction and identify which earlier decisions they supersede.
+These entries are retained as history, not as current requirements. Decisions 38 through 50 state the current direction and identify which earlier decisions they supersede.
 
 1. **How do Payment Requests, Allowances, and Subscriptions relate?** Initial answer: automatic charges use one-time Payment Requests, and a scheduled Allowance is a Subscription. Decisions 29 and 30 later kept Recurring Payment Requests for scheduled payments.
 2. **Who may propose a shared Allowance?** Either payer or payee.
@@ -143,7 +149,7 @@ These entries are retained as history, not as current requirements. Decisions 38
 36. **What does a shared Allowance promise?** Eligibility for automatic handling, not guaranteed payment.
 37. **How is a scheduled occurrence identified?** By the existing Billing Period on its Payment Proof.
 
-### Current direction (38-47)
+### Current direction (38-50)
 
 38. **What is an Allowance?** Scoped permission granted by an Allower to an Allowee to request qualifying payments from the Allower's wallet without fresh approval each time. This supersedes the Subscription-oriented model in 1 and 30.
 39. **Who are the parties?** The Allower controls the funds, the Allowee may use the Allowance, and the Payee receives each payment.
@@ -155,3 +161,6 @@ These entries are retained as history, not as current requirements. Decisions 38
 45. **Who evaluates an instruction?** The Allower's wallet evaluates shared terms, private safeguards, usage, replay protection, and payment capability. Paykit owns structural validation, correlation, and durable coordination. Earlier implementation details in 13 through 18, 34, and 35 are not current requirements where they assign policy or execution decisions to Paykit Library or Paykit SDK.
 46. **What does an accepted Allowance promise?** Prior authority to submit qualifying instructions, not guaranteed acceptance, funds, execution, or settlement. This supersedes 36.
 47. **Does this document define atomicity?** No. Atomicity is out of scope.
+48. **Who enforces shared terms?** The Allower's wallet. Shared terms give both parties the same maximum scope, but the wallet does not trust the Allowee or Payee to report usage or errors.
+49. **May the wallet adjust an instruction's amount automatically?** No. It approves or declines the instruction for its exact Payment Amount.
+50. **How are compromised payment destinations handled?** Where the Payee publishes or shares a destination through Paykit, it can communicate an authenticated withdrawal or replacement. Once observed, the wallet must not start a new payment to that destination, even when the instruction otherwise qualifies.
