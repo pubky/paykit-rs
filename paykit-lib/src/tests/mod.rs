@@ -12,6 +12,7 @@ mod payment_request;
 mod payment_request_properties;
 mod private_payment_list;
 mod receipt_access;
+mod routing_tracing;
 
 static SHARED_POSTGRES: OnceCell<EmbeddedPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
@@ -48,10 +49,6 @@ struct TestSetup {
     public_storage: pubky::PublicStorage,
     raw_session: PubkySession,
     public_key: PublicKey,
-}
-
-fn receiver_path() -> PaykitReceiverPath {
-    PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
 impl TestSetup {
@@ -111,27 +108,29 @@ impl InProgressHandshakeSetup {
 
         let initiator_public_key = initiator_session.info().public_key();
         let responder_public_key = responder_session.info().public_key();
-        let initiator_noise_keypair = Keypair::random();
-        let responder_noise_keypair = Keypair::random();
+        let initiator_noise_secret_key =
+            derive_paykit_noise_secret_key(&initiator_keypair.secret_key());
+        let responder_noise_secret_key =
+            derive_paykit_noise_secret_key(&responder_keypair.secret_key());
+        let initiator_noise_public_key =
+            Keypair::from_secret(&initiator_noise_secret_key).public_key();
+        let responder_noise_public_key =
+            Keypair::from_secret(&responder_noise_secret_key).public_key();
 
         let initiator_handshake = initiate_encrypted_link(
             initiator_session.clone(),
-            initiator_noise_keypair.secret_key(),
+            initiator_noise_secret_key,
             responder_public_key,
-            &responder_noise_keypair.public_key(),
-            &receiver_path(),
-            &receiver_path(),
+            &responder_noise_public_key,
             initiator_sdk,
         )
         .unwrap();
 
         let responder_handshake = accept_encrypted_link(
             responder_session.clone(),
-            responder_noise_keypair.secret_key(),
+            responder_noise_secret_key,
             initiator_public_key,
-            &initiator_noise_keypair.public_key(),
-            &receiver_path(),
-            &receiver_path(),
+            &initiator_noise_public_key,
             responder_sdk,
         )
         .unwrap();
@@ -214,17 +213,19 @@ impl PrivateTestSetup {
 
         let sender_public_key = sender_session.info().public_key();
         let receiver_public_key = receiver_session.info().public_key();
-        let sender_noise_keypair = Keypair::random();
-        let receiver_noise_keypair = Keypair::random();
+        let sender_noise_secret_key = derive_paykit_noise_secret_key(&sender_keypair.secret_key());
+        let receiver_noise_secret_key =
+            derive_paykit_noise_secret_key(&receiver_keypair.secret_key());
+        let sender_noise_public_key = Keypair::from_secret(&sender_noise_secret_key).public_key();
+        let receiver_noise_public_key =
+            Keypair::from_secret(&receiver_noise_secret_key).public_key();
 
         // Initiate handshake from sender side.
         let sender_handshake = initiate_encrypted_link(
             sender_session.clone(),
-            sender_noise_keypair.secret_key(),
+            sender_noise_secret_key,
             receiver_public_key,
-            &receiver_noise_keypair.public_key(),
-            &receiver_path(),
-            &receiver_path(),
+            &receiver_noise_public_key,
             sender_sdk,
         )
         .unwrap();
@@ -232,11 +233,9 @@ impl PrivateTestSetup {
         // Accept handshake from receiver side.
         let receiver_handshake = accept_encrypted_link(
             receiver_session.clone(),
-            receiver_noise_keypair.secret_key(),
+            receiver_noise_secret_key,
             sender_public_key,
-            &sender_noise_keypair.public_key(),
-            &receiver_path(),
-            &receiver_path(),
+            &sender_noise_public_key,
             receiver_sdk,
         )
         .unwrap();
@@ -259,10 +258,14 @@ impl PrivateTestSetup {
 
 // Shared helpers for integration-style tests under this module.
 
+fn test_app_id() -> PaykitAppId {
+    PaykitAppId::new("test-app").unwrap()
+}
+
 fn private_payment_list(
     payment_endpoints: &HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
 ) -> PrivatePaymentList {
-    PrivatePaymentList::new(payment_endpoints.clone())
+    PrivatePaymentList::new(test_app_id(), payment_endpoints.clone())
 }
 
 async fn send_raw_private_application_message(link: &mut EncryptedLink, json: &str) {

@@ -76,10 +76,10 @@ replay dedupe.
 
 Private Paykit message shapes build on each other:
 
-- Private Application Message: `version` + `kind`.
+- Private Application Message: `version` + `kind` + source `app_id`.
 - Latest-State Message: Private Application Message where the newest valid
-  message supersedes older messages of the same kind. Malformed newer messages
-  do not supersede the latest valid state.
+  message supersedes older messages of the same kind and source App ID.
+  Malformed newer messages do not supersede the latest valid state.
 - Event Message: Private Application Message + `event_id`, where every valid message matters.
 - Payment Request Event Message: Event Message + `payment_request_id`.
 
@@ -91,6 +91,7 @@ Every Payment Request protocol message uses common versioned JSON fields:
 {
   "version": 1,
   "kind": "paykit.payment_request",
+  "app_id": "paykit-server",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
   "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33"
 }
@@ -100,6 +101,7 @@ Rules:
 
 - `version` MUST be `1`.
 - `kind` MUST identify the message kind.
+- `app_id` MUST be a valid Paykit App ID identifying the source app.
 - `event_id` MUST be a UUID-v4.
 - `payment_request_id` MUST be a UUID-v4.
 - A retried resend of the same event MUST reuse the same `event_id` and same payload.
@@ -167,6 +169,7 @@ The `payment_request_id` is carried by the top-level message and is not repeated
   "proposal_expires_at": "2026-06-01T00:00:00Z",
   "recurrence": null,
   "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
+  "required_app_id": "bitkit",
   "metadata": {}
 }
 ```
@@ -195,6 +198,9 @@ Rules:
 - `recurrence` MUST be `null` for one-time requests.
 - `recurrence` MUST be an object for recurring requests.
 - `accepted_payment_endpoint_identifiers` MUST be a non-empty array of valid Payment Endpoint Identifiers.
+- `required_app_id` is required and MUST be either `null` or a valid Paykit App
+  ID. When present, it constrains payment execution to an endpoint owned by
+  that app.
 - `metadata` is optional. If present, it MUST be a JSON object.
 - Request terms are immutable after the initial `paykit.payment_request` event.
 
@@ -238,6 +244,7 @@ Sent by the payee to the payer.
 {
   "version": 1,
   "kind": "paykit.payment_request",
+  "app_id": "paykit-server",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
   "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
   "request": {
@@ -249,6 +256,7 @@ Sent by the payee to the payer.
     "proposal_expires_at": "2026-06-01T00:00:00Z",
     "recurrence": null,
     "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
+    "required_app_id": "bitkit",
     "metadata": {}
   }
 }
@@ -259,6 +267,8 @@ Validation rules:
 - Sender MUST be the payee.
 - Receiver MUST be the payer.
 - `request` MUST be present and valid.
+- `required_app_id` MUST be present and may be `null`. When non-null, the payer
+  MUST use a Payment Endpoint owned by that app.
 - The first valid `paykit.payment_request` for a `payment_request_id` defines immutable terms.
 - A later `paykit.payment_request` with the same `payment_request_id` and a
   different `event_id` is invalid, even if the terms are byte-identical.
@@ -277,6 +287,7 @@ Sent by the payer to the payee.
 {
   "version": 1,
   "kind": "paykit.payment_request_acceptance",
+  "app_id": "bitkit",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
   "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33"
 }
@@ -303,6 +314,7 @@ Sent by the payer to the payee.
 {
   "version": 1,
   "kind": "paykit.payment_request_rejection",
+  "app_id": "bitkit",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
   "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
   "reason": "user_rejected"
@@ -327,6 +339,7 @@ Sent by either payer or payee.
 {
   "version": 1,
   "kind": "paykit.payment_request_cancellation",
+  "app_id": "bitkit",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
   "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
   "reason": "user_requested"
@@ -358,10 +371,12 @@ may be included inside `proof` when needed.
 {
   "version": 1,
   "kind": "paykit.payment_proof",
+  "app_id": "bitkit",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d105",
   "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
   "payment_reference": "invoice-2026-0001",
   "billing_period": null,
+  "payment_app_id": "bitkit",
   "payment_endpoint_identifier": "btc-lightning-bolt11",
   "proof": {
     "type": "bitcoin-bolt11-preimage",
@@ -378,6 +393,8 @@ Validation rules:
 - `payment_reference` MUST equal the accepted request's `payment_reference`.
 - `billing_period` MUST be `null` for one-time requests.
 - `billing_period` MUST be present for recurring requests.
+- `payment_app_id` MUST identify the app whose Payment Endpoint was paid.
+- When the request specifies `required_app_id`, `payment_app_id` MUST match it.
 - For recurring requests, `billing_period` identifies the claimed interval being
   paid. Paykit v0.2 validates its shape but does not define canonical recurrence
   math for proving it was derived from the accepted recurrence. Integrating
@@ -500,6 +517,7 @@ Receipt on the issuer's homeserver and decrypt it locally.
 
 Receipt Access carries:
 
+- `app_id`: the Paykit App that issued Receipt Access
 - `event_id`: an Event ID for idempotent processing
 - `receipt_id`: the Receipt ID of the Encrypted Receipt
 - `payment_reference`: the Payment Reference for the receipted payment

@@ -3189,6 +3189,7 @@ version = "0.1.0-rc46"
 dependencies = [
  "anyhow",
  "base64",
+ "blake3",
  "chacha20poly1305",
  "chrono",
  "proptest",
@@ -3200,6 +3201,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "zeroize",
 ]

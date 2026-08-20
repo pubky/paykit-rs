@@ -7,11 +7,12 @@ use chacha20poly1305::{
 use zeroize::Zeroize;
 
 use crate::validation::invalid_plaintext_json;
-use crate::{PaykitError, PaykitReceiverPath, Result};
+use crate::{PaykitError, Result};
 
 use super::{
     wire::{EncryptedReceiptWire, ReceiptWire},
-    Receipt, ReceiptAccess, ReceiptDecryptionKey, RECEIPT_ENCRYPTION_ALGORITHM,
+    Receipt, ReceiptAccess, ReceiptDecryptionKey, ENCRYPTED_RECEIPT_MAX_BYTES,
+    RECEIPT_ENCRYPTION_ALGORITHM,
 };
 
 impl Receipt {
@@ -22,15 +23,11 @@ impl Receipt {
     /// Encrypt this receipt for storage at its canonical Receipt Location path
     /// using `key`.
     ///
-    /// The location path is derived from the issuer receiver path and Receipt ID
-    /// and authenticated as AEAD associated data; callers must use that same
-    /// canonical path when decrypting.
-    pub fn encrypt(
-        &self,
-        receiver_path: &PaykitReceiverPath,
-        key: &ReceiptDecryptionKey,
-    ) -> Result<String> {
-        let location = ReceiptAccess::location(receiver_path, &self.receipt_id);
+    /// The location path is derived from the Receipt ID and authenticated as
+    /// AEAD associated data; callers must use that same canonical path when
+    /// decrypting.
+    pub fn encrypt(&self, key: &ReceiptDecryptionKey) -> Result<String> {
+        let location = ReceiptAccess::location_for(&self.receipt_id);
         self.encrypt_for_location(key, &location)
     }
 
@@ -43,7 +40,7 @@ impl Receipt {
         if let Some(amount) = &self.amount {
             amount.validate_with_label("Receipt amount")?;
         }
-        if !ReceiptAccess::location_matches_receipt_id(location, &self.receipt_id) {
+        if ReceiptAccess::location_for(&self.receipt_id) != location {
             return Err(PaykitError::Validation(
                 "Receipt Location does not match Receipt ID".into(),
             ));
@@ -78,10 +75,17 @@ impl Receipt {
             nonce: URL_SAFE_NO_PAD.encode(nonce),
             ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
         };
-        serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to serialize encrypted receipt JSON: {err}"),
-            source: Some(err.into()),
-        })
+        let encrypted_json =
+            serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
+                context: format!("failed to serialize encrypted receipt JSON: {err}"),
+                source: Some(err.into()),
+            })?;
+        if encrypted_json.len() > ENCRYPTED_RECEIPT_MAX_BYTES {
+            return Err(PaykitError::Validation(format!(
+                "Encrypted Receipt must not exceed {ENCRYPTED_RECEIPT_MAX_BYTES} bytes"
+            )));
+        }
+        Ok(encrypted_json)
     }
 
     /// Decrypt an Encrypted Receipt fetched from a homeserver.
@@ -94,6 +98,12 @@ impl Receipt {
         key: &ReceiptDecryptionKey,
         location: &str,
     ) -> Result<Self> {
+        if encrypted_json.len() > ENCRYPTED_RECEIPT_MAX_BYTES {
+            return Err(PaykitError::InvalidData {
+                context: format!("Encrypted Receipt exceeds {ENCRYPTED_RECEIPT_MAX_BYTES} bytes"),
+                source: None,
+            });
+        }
         // The serde error can embed fragments of the fetched document; keep the
         // context static and leave the detail in `source`, which stays local.
         let wire: EncryptedReceiptWire =
@@ -158,7 +168,7 @@ impl Receipt {
         let receipt_wire: ReceiptWire = serde_json::from_slice(&plaintext)
             .map_err(|_| invalid_plaintext_json("failed to parse receipt plaintext JSON"))?;
         let receipt = Self::try_from(receipt_wire)?;
-        if !ReceiptAccess::location_matches_receipt_id(location, &receipt.receipt_id) {
+        if ReceiptAccess::location_for(&receipt.receipt_id) != location {
             return Err(PaykitError::InvalidData {
                 context: "Receipt ID does not match Receipt Location".into(),
                 source: None,

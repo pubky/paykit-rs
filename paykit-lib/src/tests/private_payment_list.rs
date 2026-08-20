@@ -29,7 +29,7 @@ async fn private_payment_list_round_trip() {
 
     set_private_payment_list(
         &mut setup.sender_link,
-        &PrivatePaymentList::new(payment_endpoints),
+        &PrivatePaymentList::new(test_app_id(), payment_endpoints),
     )
     .await
     .unwrap();
@@ -38,6 +38,7 @@ async fn private_payment_list_round_trip() {
         .await
         .unwrap();
     assert_eq!(received.payment_endpoints.len(), 1);
+    assert_eq!(received.app_id(), &test_app_id());
     assert_eq!(
         received.payment_endpoints.get(&endpoint_identifier),
         Some(&payload)
@@ -220,22 +221,18 @@ async fn test_parallel_writer_reader_happy_path() {
         .await
         .unwrap();
     let reader_pubkey = reader_session.info().public_key().clone();
-    let writer_noise_keypair = Keypair::random();
-    let reader_noise_keypair = Keypair::random();
-    let writer_noise_pubkey = writer_noise_keypair.public_key();
 
     let w_session = writer_session.clone();
     let w_reader_pubkey = reader_pubkey;
-    let w_reader_noise_pubkey = reader_noise_keypair.public_key();
+    let writer_noise_secret_key = derive_paykit_noise_secret_key(&writer_keypair.secret_key());
+    let reader_noise_public_key = derive_paykit_noise_public_key(&reader_keypair.secret_key());
 
     let writer_handle = tokio::spawn(async move {
         let handshake = initiate_encrypted_link(
             w_session.clone(),
-            writer_noise_keypair.secret_key(),
+            writer_noise_secret_key,
             &w_reader_pubkey,
-            &w_reader_noise_pubkey,
-            &receiver_path(),
-            &receiver_path(),
+            &reader_noise_public_key,
             writer_sdk,
         )
         .unwrap();
@@ -261,16 +258,15 @@ async fn test_parallel_writer_reader_happy_path() {
 
     let r_session = reader_session.clone();
     let r_writer_pubkey = writer_pubkey;
-    let r_writer_noise_pubkey = writer_noise_pubkey;
+    let reader_noise_secret_key = derive_paykit_noise_secret_key(&reader_keypair.secret_key());
+    let writer_noise_public_key = derive_paykit_noise_public_key(&writer_keypair.secret_key());
 
     let reader_handle = tokio::spawn(async move {
         let handshake = accept_encrypted_link(
             r_session.clone(),
-            reader_noise_keypair.secret_key(),
+            reader_noise_secret_key,
             &r_writer_pubkey,
-            &r_writer_noise_pubkey,
-            &receiver_path(),
-            &receiver_path(),
+            &writer_noise_public_key,
             reader_sdk,
         )
         .unwrap();

@@ -15,5 +15,6 @@ pub use link::{
 };
 pub use private_application_message::{
     clear_encrypted_link_outbox, PrivateApplicationMessage, PrivateMessageKind,
+    PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT,
 };
 pub use snapshot::{EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot};

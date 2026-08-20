@@ -19,8 +19,9 @@ Request messages, receipts, and language bindings needed for that exchange.
 
 Wallets, payment processors, and apps keep control of payment execution,
 business rules, payment selection, local storage, key rotation, recurring
-Payment Request scheduling, Payment Request lifecycle state, and timeouts.
-Paykit is the discovery and exchange layer those systems can integrate.
+Payment Request scheduling, and timeouts. The SDK derives Paykit Payment
+Request lifecycle state from the shared private event stream and outbound
+queue. Paykit is the discovery and exchange layer those systems can integrate.
 
 For canonical protocol vocabulary, see [THESAURUS.md](THESAURUS.md).
 
@@ -35,24 +36,26 @@ Paykit uses Pubky as its only network and storage backend. Public data is stored
 on Pubky homeservers under paths owned by a Pubky public key, and private Paykit
 messages are exchanged through `pubky-noise`.
 
-Public Payment Endpoint Payloads are stored as separate files under:
+The identity-wide Paykit App Registry is stored at:
 
 ```text
-/pub/paykit/v0/{receiver_path}/endpoints/{payment_endpoint_identifier}
+/pub/paykit/v0/app-registry.json
+```
+
+Public Payment Endpoint Payloads are owned by a registered Paykit App and
+stored as separate files under:
+
+```text
+/pub/paykit/v0/apps/{app_id}/endpoints/{payment_endpoint_identifier}
 ```
 
 Public reads use `pubky::PublicStorage`; authenticated writes use
 `pubky::PubkySession`. Missing files or directories are treated as absent data
 rather than protocol errors.
 
-Private Application Messages use `pubky-noise`. Paykit derives
-per-counterparty-receiver private folders during the Encrypted Link Handshake,
-while `pubky-noise` owns encryption, file naming, counters, and storage slots.
-Each receiver publishes its receiver-scoped Noise public key in
-`receiver.json`. The corresponding secret stays in that receiver's secure
-storage and is independent of the Pubky identity secret; the Pubky identity
-key locates and authenticates homeserver state and separates receiver-pair
-path domains.
+Private Application Messages use `pubky-noise`. Paykit derives per-counterparty
+private folders during the Encrypted Link Handshake, while `pubky-noise` owns
+encryption, file naming, counters, and storage slots.
 
 ### Core Vocabulary
 
@@ -90,18 +93,21 @@ enforces structural path-safety validation.
 ### Public Payment Lists
 
 Public Payment Lists are discoverable by anyone who knows the payee's Pubky
-public key and Paykit receiver path.
+public key.
 
 1. The payee creates one or more Payment Endpoints.
-2. The payee writes each Payment Endpoint Payload under its Payment Endpoint
-   Identifier.
-3. The payee shares their Pubky public key and receiver path.
-4. A payer calls `get_payment_list` or `get_payment_endpoint` through the
-   Paykit Library or a Language Binding.
+2. The payee registers the publishing Paykit App in the identity-wide App
+   Registry.
+3. The payee writes each Payment Endpoint Payload under that App ID and its
+   Payment Endpoint Identifier.
+4. The payee shares their Pubky public key.
+5. A payer reads the App Registry, then calls `get_payment_list` or
+   `get_payment_endpoint` for the relevant App ID through the Paykit Library or
+   a Language Binding.
 
-Public Payment Lists are observable by anyone with the payee public key and
-receiver path. Apps should avoid publishing reusable or correlation-sensitive
-Payment Endpoint Payloads unless that matches the payee's privacy model.
+Public Payment Lists are observable by anyone with the payee public key. Apps
+should avoid publishing reusable or correlation-sensitive Payment Endpoint
+Payloads unless that matches the payee's privacy model.
 
 ### Private Payment Lists
 
@@ -117,12 +123,12 @@ established Encrypted Link.
    `EncryptedLink::receive_private_application_messages` and parses
    Private Payment List messages with `parse_private_payment_list_json`.
 
-Private Payment Lists use Latest-State Message semantics: newer list messages
-supersede older queued list messages of the same kind. Only valid list messages
-participate in latest-state selection; malformed newer messages do not supersede
-the latest valid state. The caller is responsible for maintaining the complete
-`payment_endpoints` map and sending the full desired Payment List on each
-update.
+Private Payment Lists use Latest-State Message semantics per Paykit App: a
+newer list supersedes older queued lists from the same app without replacing
+lists from other apps. Only valid list messages participate in latest-state
+selection; malformed newer messages do not supersede the latest valid state.
+The caller is responsible for maintaining the complete `payment_endpoints` map
+and sending the full desired Payment List for its app on each update.
 
 ## Payment Selection
 
@@ -160,8 +166,8 @@ handle.
 
 Paykit receipts are encrypted before storage. The plaintext Receipt is created
 and read locally; the payee stores only the Encrypted Receipt at the canonical
-homeserver path derived from the issuer receiver path and Receipt ID, then sends
-Receipt Access to the counterparty over the Encrypted Link.
+homeserver path derived from the Receipt ID, then sends Receipt Access to the
+counterparty over the Encrypted Link.
 
 Receipt Access uses Event Message semantics: every valid Receipt Access message
 matters. Apps that process multiple Private Message Kinds should consume the
@@ -210,7 +216,7 @@ before executing a payment through their existing infrastructure.
 `paykit-sdk` is the Rust runtime layer for SDK-managed local
 state such as endpoint sync, Encrypted Link snapshots, private stream intake,
 Private Payment Lists, Paykit Profiles, Paykit Blob helpers, read-only Pubky
-app profile/follows helpers, local Contact Records, and contact payment resolution. Payment
+app profile/follows helpers, Contact Records, and contact payment resolution. Payment
 execution, settlement detection, product UI, and platform session storage
 remain with the integrating application and its adapters.
 
@@ -226,27 +232,21 @@ remain with the integrating application and its adapters.
 
 ### Public Payment Data
 
-#### Discover Paykit Receivers
-
-`list_paykit_receiver_paths` lists receiver/runtime folders published by a Pubky
-identity so callers can choose the receiver path for scoped Payment List reads.
-
 #### Retrieve a public Payment List
 
-`get_payment_list` fetches all public Payment Endpoints published by a payee
-receiver path. The result is empty when that receiver has not published any
-endpoints.
+`get_payment_list` fetches all public Payment Endpoints published by one Paykit
+App under a payee identity. The result is empty when that app has not published
+any endpoints.
 
 #### Retrieve one public Payment Endpoint Payload
 
-`get_payment_endpoint` fetches one Payment Endpoint Payload for a payee,
-receiver path, and Payment Endpoint Identifier. Missing files are returned as
-`None`.
+`get_payment_endpoint` fetches one Payment Endpoint Payload for a payee, Paykit
+App ID, and Payment Endpoint Identifier. Missing files are returned as `None`.
 
 #### Store a public Payment Endpoint
 
 `set_payment_endpoint` publishes or updates one Payment Endpoint Payload under
-the caller's authenticated Pubky session.
+the caller's Paykit App ID and authenticated Pubky session.
 
 #### Remove a public Payment Endpoint
 
@@ -304,8 +304,8 @@ already have a known Receipt Access JSON payload. `decrypt_receipt` decrypts an
 Encrypted Receipt fetched by the app from its Receipt Location into the local
 plaintext Receipt.
 Receipt Location is a path on the issuer's homeserver; SDK/runtime code pairs
-it with the issuer public key and issuer receiver path when retrieving the
-Encrypted Receipt.
+it with the Receipt Access sender/issuer context when retrieving the Encrypted
+Receipt.
 
 Private Application Messages share one ordered encrypted stream. The raw stream
 API returns every received Private Application Message plaintext payload in
@@ -326,16 +326,14 @@ Metadata.
 
 ### Public Payment Endpoints
 
-- `list_paykit_receiver_paths(storage, payee)`: list the payee's Paykit
-  receiver paths.
-- `set_payment_endpoint(session, receiver_path, identifier, payload)`: publish or
-  update one public Payment Endpoint.
-- `remove_payment_endpoint(session, receiver_path, identifier)`: remove one public
-  Payment Endpoint.
-- `get_payment_list(storage, payee, receiver_path)`: fetch the payee receiver's
-  public Payment List.
-- `get_payment_endpoint(storage, payee, receiver_path, identifier)`: fetch one
-  public Payment Endpoint Payload.
+- `set_payment_endpoint(session, app_id, identifier, payload)`: publish or
+  update one app-owned public Payment Endpoint.
+- `remove_payment_endpoint(session, app_id, identifier)`: remove one app-owned
+  public Payment Endpoint.
+- `get_payment_list(storage, payee, app_id)`: fetch one app's public Payment
+  List under the payee identity.
+- `get_payment_endpoint(storage, payee, app_id, identifier)`: fetch one
+  app-owned public Payment Endpoint Payload.
 
 ### Encrypted Links
 
@@ -361,32 +359,34 @@ Metadata.
 
 ### Payment Requests
 
-- `send_payment_request(link, request)`: send a payee-initiated Payment Request.
-- `send_payment_request_acceptance(link, acceptance)`: send payer acceptance
-  for a Payment Request.
-- `send_payment_request_rejection(link, rejection)`: send payer rejection for
-  a Payment Request.
-- `send_payment_request_cancellation(link, cancellation)`: send payer or payee
-  cancellation for a Payment Request.
-- `send_payment_proof(link, proof)`: send payer-submitted Payment Proof after
-  payment.
+- `send_payment_request(link, app_id, request)`: send a payee-initiated Payment
+  Request.
+- `send_payment_request_acceptance(link, app_id, acceptance)`: send payer
+  acceptance for a Payment Request.
+- `send_payment_request_rejection(link, app_id, rejection)`: send payer
+  rejection for a Payment Request.
+- `send_payment_request_cancellation(link, app_id, cancellation)`: send payer
+  or payee cancellation for a Payment Request.
+- `send_payment_proof(link, app_id, proof)`: send payer-submitted Payment Proof
+  after payment.
 - `parse_payment_request_event_message(message)`: parse a raw Private
   Application Message as a Payment Request event when applicable.
-- `serialize_payment_request_event(event)`: serialize a Payment Request event
-  so SDK/runtime code can persist the outbound payload before sending.
+- `serialize_payment_request_event(app_id, event)`: serialize an app-attributed
+  Payment Request event so SDK/runtime code can persist the outbound payload
+  before sending.
 - `PaymentProof::validate_for_request(request)`: validate stateless proof and
   request correlation fields.
 
 ### Receipts
 
-- `prepare_receipt(link, receiver_path, draft)`: build the plaintext Receipt,
-  Encrypted Receipt, and Receipt Access descriptor without storing or sending.
-  Receipt drafts may include optional `payment_request_id` and `billing_period`
-  fields for Payment Request correlation.
+- `prepare_receipt(link, draft)`: build the plaintext Receipt, Encrypted Receipt, and Receipt
+  Access descriptor without storing or sending. Receipt drafts may include
+  optional `payment_request_id` and `billing_period` fields for Payment Request
+  correlation.
 - `store_prepared_receipt(session, prepared)`: store a prepared Encrypted
   Receipt at its Receipt Location.
-- `send_receipt_access(link, access)`: send a prepared Receipt Access descriptor
-  over the Encrypted Link.
+- `send_receipt_access(link, app_id, access)`: send an app-attributed Receipt
+  Access descriptor over the Encrypted Link.
 - `parse_receipt_access_event_message(message)`: parse a raw Private
   Application Message as a Receipt Access event when applicable.
 - `parse_receipt_access_json(json)`: parse Receipt Access from a raw private

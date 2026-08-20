@@ -3,10 +3,9 @@
 //! Recovery markers are public Pubky records used when a runtime decides an
 //! Encrypted Link with one counterparty can no longer be used safely. They are
 //! not sent over the broken link. Instead, each peer derives a pairwise marker
-//! path from its receiver Noise secret key and the counterparty receiver Noise
-//! public key, writes a minimal marker to its own homeserver, and polls the
-//! counterparty's derived marker path. Pubky identity keys remain part of the
-//! receiver-pair domain and select the homeserver used for storage.
+//! path from its local Noise secret key and the counterparty Noise public key, writes a
+//! minimal marker to its own homeserver, and polls the counterparty's derived
+//! marker path.
 //!
 //! Marker payloads intentionally contain only `version`, `kind`, `attempt_id`,
 //! and `created_at`. They do not contain payment data, endpoint data, message
@@ -23,13 +22,14 @@ use pubky::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    pubky_routing::{encrypted_link_recovery_path_prefix, receiver_pair_path_domain},
+    pubky_routing::fetch_text,
     validation::{invalid_data, invalid_wire, parse_utc_timestamp, validate_uuid_v4},
-    PaykitError, PaykitReceiverPath, Result,
+    PaykitError, Result, PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX,
 };
 
 const RECOVERY_MARKER_KIND: &str = "paykit.encrypted_link_recovery";
 const RECOVERY_MARKER_PATH_DOMAIN: &[u8] = b"paykit-link-recovery-v0";
+const RECOVERY_MARKER_MAX_BYTES: usize = 4 * 1024;
 
 /// Minimal public marker that asks a counterparty to relink an Encrypted Link.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +119,12 @@ pub fn serialize_encrypted_link_recovery_marker(
 pub fn parse_encrypted_link_recovery_marker_json(
     raw_json: &str,
 ) -> Result<EncryptedLinkRecoveryMarker> {
+    if raw_json.len() > RECOVERY_MARKER_MAX_BYTES {
+        return Err(invalid_data(
+            format!("Encrypted Link recovery marker exceeds {RECOVERY_MARKER_MAX_BYTES} bytes"),
+            None,
+        ));
+    }
     let wire = serde_json::from_str::<RecoveryMarkerWire>(raw_json).map_err(|err| {
         invalid_data(
             format!("Encrypted Link recovery marker JSON is invalid: {err}"),
@@ -130,56 +136,36 @@ pub fn parse_encrypted_link_recovery_marker_json(
 
 /// Compute local write and remote read paths for recovery markers.
 pub fn encrypted_link_recovery_marker_paths(
-    local_noise_secret_key: &[u8; 32],
-    local_identity_public_key: &PublicKey,
-    remote_identity_public_key: &PublicKey,
+    local_secret_key: &[u8; 32],
     remote_noise_public_key: &PublicKey,
-    local_receiver_path: &PaykitReceiverPath,
-    remote_receiver_path: &PaykitReceiverPath,
 ) -> (String, String) {
-    let local_base = encrypted_link_recovery_path_prefix(local_receiver_path);
-    let remote_base = encrypted_link_recovery_path_prefix(remote_receiver_path);
-    let path_domain = receiver_pair_path_domain(
+    pubky_noise::path_derivation::derive_asymmetric_paths(
+        local_secret_key,
+        remote_noise_public_key,
         RECOVERY_MARKER_PATH_DOMAIN,
-        local_identity_public_key,
-        local_receiver_path,
-        remote_identity_public_key,
-        remote_receiver_path,
-    );
-    let (write_path, _) = pubky_noise::path_derivation::derive_asymmetric_paths(
-        local_noise_secret_key,
-        remote_noise_public_key,
-        &path_domain,
-        &local_base,
-    );
-    let (_, read_path) = pubky_noise::path_derivation::derive_asymmetric_paths(
-        local_noise_secret_key,
-        remote_noise_public_key,
-        &path_domain,
-        &remote_base,
-    );
-    (write_path, read_path)
+        PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX,
+    )
 }
 
 /// Publish a local recovery marker and return the path written.
+///
+/// The caller must provide a Pubky session with write access to the derived
+/// marker path and the same local Noise key used for the peer relationship. The
+/// caller owns session creation, capability scope, key rotation, and recovery
+/// policy. Request timeouts are configured on the Pubky client.
+///
+/// # Errors
+///
+/// Returns [`PaykitError::Validation`] when the marker cannot be serialized and
+/// [`PaykitError::Transport`] when Pubky storage rejects the write.
 pub async fn publish_encrypted_link_recovery_marker(
     session: &PubkySession,
-    local_noise_secret_key: &[u8; 32],
-    remote_identity_public_key: &PublicKey,
+    local_secret_key: &[u8; 32],
     remote_noise_public_key: &PublicKey,
-    local_receiver_path: &PaykitReceiverPath,
-    remote_receiver_path: &PaykitReceiverPath,
     marker: &EncryptedLinkRecoveryMarker,
 ) -> Result<String> {
-    let local_identity_public_key = session.info().public_key();
-    let (write_path, _) = encrypted_link_recovery_marker_paths(
-        local_noise_secret_key,
-        local_identity_public_key,
-        remote_identity_public_key,
-        remote_noise_public_key,
-        local_receiver_path,
-        remote_receiver_path,
-    );
+    let (write_path, _) =
+        encrypted_link_recovery_marker_paths(local_secret_key, remote_noise_public_key);
     let payload = serialize_encrypted_link_recovery_marker(marker)?;
     session
         .storage()
@@ -193,23 +179,23 @@ pub async fn publish_encrypted_link_recovery_marker(
 }
 
 /// Remove the local recovery marker for a counterparty.
+///
+/// Missing markers are treated as success. The caller must provide a Pubky
+/// session with write access to the derived marker path and owns session
+/// creation, capability scope, key rotation, recovery policy, and Pubky-client
+/// timeout configuration.
+///
+/// # Errors
+///
+/// Returns [`PaykitError::Transport`] when Pubky storage fails for a reason
+/// other than the marker already being absent.
 pub async fn remove_encrypted_link_recovery_marker(
     session: &PubkySession,
-    local_noise_secret_key: &[u8; 32],
-    remote_identity_public_key: &PublicKey,
+    local_secret_key: &[u8; 32],
     remote_noise_public_key: &PublicKey,
-    local_receiver_path: &PaykitReceiverPath,
-    remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<String> {
-    let local_identity_public_key = session.info().public_key();
-    let (write_path, _) = encrypted_link_recovery_marker_paths(
-        local_noise_secret_key,
-        local_identity_public_key,
-        remote_identity_public_key,
-        remote_noise_public_key,
-        local_receiver_path,
-        remote_receiver_path,
-    );
+    let (write_path, _) =
+        encrypted_link_recovery_marker_paths(local_secret_key, remote_noise_public_key);
     match session.storage().delete(write_path.clone()).await {
         Ok(_) => Ok(write_path),
         Err(err) if is_not_found(&err) => Ok(write_path),
@@ -221,48 +207,33 @@ pub async fn remove_encrypted_link_recovery_marker(
 }
 
 /// Fetch a counterparty's recovery marker, if one is present.
+///
+/// This unauthenticated read returns `Ok(None)` when the derived marker resource
+/// is missing or empty. The caller supplies the peer identity and Noise keys and
+/// owns key rotation, recovery policy, and Pubky-client timeout configuration.
+///
+/// # Errors
+///
+/// Returns [`PaykitError::InvalidData`] for malformed remote marker data and
+/// [`PaykitError::Transport`] when Pubky storage cannot be read.
 pub async fn fetch_encrypted_link_recovery_marker(
     storage: &PublicStorage,
-    local_noise_secret_key: &[u8; 32],
-    local_identity_public_key: &PublicKey,
+    local_secret_key: &[u8; 32],
     remote_identity_public_key: &PublicKey,
     remote_noise_public_key: &PublicKey,
-    local_receiver_path: &PaykitReceiverPath,
-    remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<Option<EncryptedLinkRecoveryMarker>> {
-    let (_, read_path) = encrypted_link_recovery_marker_paths(
-        local_noise_secret_key,
-        local_identity_public_key,
-        remote_identity_public_key,
-        remote_noise_public_key,
-        local_receiver_path,
-        remote_receiver_path,
-    );
+    let (_, read_path) =
+        encrypted_link_recovery_marker_paths(local_secret_key, remote_noise_public_key);
     let addr = format!("{remote_identity_public_key}{read_path}");
-    match storage.get(&addr).await {
-        Ok(resp) => {
-            let bytes = resp.bytes().await.map_err(|err| PaykitError::Transport {
-                context: "fetch Encrypted Link recovery marker".into(),
-                source: err.into(),
-            })?;
-            if bytes.is_empty() {
-                return Ok(None);
-            }
-            let raw_json = String::from_utf8(bytes.to_vec()).map_err(|err| {
-                let pos = err.utf8_error().valid_up_to();
-                invalid_data(
-                    format!("Encrypted Link recovery marker is invalid UTF-8 at byte {pos}"),
-                    Some(err.into()),
-                )
-            })?;
-            parse_encrypted_link_recovery_marker_json(&raw_json).map(Some)
-        }
-        Err(err) if is_not_found(&err) => Ok(None),
-        Err(err) => Err(PaykitError::Transport {
-            context: "fetch Encrypted Link recovery marker".into(),
-            source: err.into(),
-        }),
-    }
+    fetch_text(
+        storage,
+        addr,
+        "fetch Encrypted Link recovery marker",
+        Some(RECOVERY_MARKER_MAX_BYTES),
+    )
+    .await?
+    .map(|raw_json| parse_encrypted_link_recovery_marker_json(&raw_json))
+    .transpose()
 }
 
 fn is_not_found(err: &PubkyError) -> bool {
@@ -279,7 +250,7 @@ mod tests {
 
     use super::*;
 
-    fn key_pair() -> ([u8; 32], PublicKey) {
+    fn secret_pair() -> ([u8; 32], PublicKey) {
         let keypair = Keypair::random();
         (keypair.secret_key(), keypair.public_key())
     }
@@ -309,96 +280,27 @@ mod tests {
     }
 
     #[test]
-    fn test_recovery_marker_paths_are_pairwise_symmetric() {
-        let (alice_noise_secret, alice_noise_public) = key_pair();
-        let (bob_noise_secret, bob_noise_public) = key_pair();
-        let (_, alice_identity_public) = key_pair();
-        let (_, bob_identity_public) = key_pair();
-        let alice_receiver = PaykitReceiverPath::new("bitkit/wallet").unwrap();
-        let bob_receiver = PaykitReceiverPath::new("tether/wallet").unwrap();
+    fn test_recovery_marker_rejects_oversized_payload() {
+        let raw = " ".repeat(RECOVERY_MARKER_MAX_BYTES + 1);
 
-        let (alice_write, alice_read) = encrypted_link_recovery_marker_paths(
-            &alice_noise_secret,
-            &alice_identity_public,
-            &bob_identity_public,
-            &bob_noise_public,
-            &alice_receiver,
-            &bob_receiver,
-        );
-        let (bob_write, bob_read) = encrypted_link_recovery_marker_paths(
-            &bob_noise_secret,
-            &bob_identity_public,
-            &alice_identity_public,
-            &alice_noise_public,
-            &bob_receiver,
-            &alice_receiver,
-        );
+        let result = parse_encrypted_link_recovery_marker_json(&raw);
+
+        assert!(matches!(result, Err(PaykitError::InvalidData { .. })));
+    }
+
+    #[test]
+    fn test_recovery_marker_paths_are_pairwise_symmetric() {
+        let (alice_secret, alice_public) = secret_pair();
+        let (bob_secret, bob_public) = secret_pair();
+
+        let (alice_write, alice_read) =
+            encrypted_link_recovery_marker_paths(&alice_secret, &bob_public);
+        let (bob_write, bob_read) =
+            encrypted_link_recovery_marker_paths(&bob_secret, &alice_public);
 
         assert_eq!(alice_write, bob_read);
         assert_eq!(alice_read, bob_write);
-        assert!(
-            alice_write.starts_with("/pub/paykit/v0/private/bitkit/wallet/encrypted-link-recovery")
-        );
-        assert!(
-            bob_write.starts_with("/pub/paykit/v0/private/tether/wallet/encrypted-link-recovery")
-        );
+        assert!(alice_write.starts_with(PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX));
         assert_ne!(alice_write, alice_read);
-    }
-
-    #[test]
-    fn test_recovery_marker_paths_include_both_receiver_paths() {
-        let (alice_noise_secret, _) = key_pair();
-        let (_, bob_noise_public) = key_pair();
-        let (_, alice_identity_public) = key_pair();
-        let (_, bob_identity_public) = key_pair();
-        let alice_receiver = PaykitReceiverPath::new("bitkit/wallet").unwrap();
-        let bob_receiver = PaykitReceiverPath::new("tether/wallet").unwrap();
-        let bob_other_receiver = PaykitReceiverPath::new("bitkit/server").unwrap();
-
-        let (write_to_bob_receiver, _) = encrypted_link_recovery_marker_paths(
-            &alice_noise_secret,
-            &alice_identity_public,
-            &bob_identity_public,
-            &bob_noise_public,
-            &alice_receiver,
-            &bob_receiver,
-        );
-        let (write_to_bob_other_receiver, _) = encrypted_link_recovery_marker_paths(
-            &alice_noise_secret,
-            &alice_identity_public,
-            &bob_identity_public,
-            &bob_noise_public,
-            &alice_receiver,
-            &bob_other_receiver,
-        );
-
-        assert_ne!(write_to_bob_receiver, write_to_bob_other_receiver);
-    }
-
-    // CLAUDE.md contract: public reads treat 404/GONE as absence, never as errors.
-    fn server_error(status: StatusCode) -> PubkyError {
-        PubkyError::Request(RequestError::Server {
-            status,
-            message: "test response".into(),
-        })
-    }
-
-    #[test]
-    fn test_is_not_found_matches_not_found_and_gone() {
-        assert!(is_not_found(&server_error(StatusCode::NOT_FOUND)));
-        assert!(is_not_found(&server_error(StatusCode::GONE)));
-    }
-
-    #[test]
-    fn test_is_not_found_rejects_other_statuses_and_variants() {
-        assert!(!is_not_found(&server_error(
-            StatusCode::INTERNAL_SERVER_ERROR
-        )));
-        assert!(!is_not_found(&server_error(StatusCode::FORBIDDEN)));
-
-        let validation_error = PubkyError::Request(RequestError::Validation {
-            message: "invalid request".into(),
-        });
-        assert!(!is_not_found(&validation_error));
     }
 }

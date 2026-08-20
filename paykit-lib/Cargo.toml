@@ -16,6 +16,7 @@ categories = ["network-programming", "finance"]
 [dependencies]
 anyhow = "1.0.102"
 base64 = "0.22"
+blake3 = "1"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 pubky = "0.8.0"
@@ -31,3 +32,4 @@ zeroize = "1"
 proptest = "1"
 pubky-testnet = { version = "0.8.0", features = ["embedded-postgres"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3"

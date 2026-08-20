@@ -30,18 +30,6 @@
 - **Synonyms to AVOID**: Paykit core, Paykit runtime core, Pubky SDK
 - **Related terms**: Paykit, Paykit Library, Language Bindings
 
-### Paykit Receiver Path
-- **Definition**: The folder-safe app/runtime path for one Paykit runtime under a Pubky identity, currently shaped as `{app}/{wallet|server}` such as `bitkit/wallet` or `bitkit/server`. It scopes public Payment Endpoints, private Paykit paths, receipts, profiles, and SDK state.
-- **NOT**: A payment-role receiver, payee, wallet address, or Pubky public key.
-- **Synonyms to AVOID**: receiver id, receiver when it could mean the party receiving value
-- **Related terms**: Payee, Pubky Routing, Payment Endpoint
-
-### Paykit Receiver Reference
-- **Definition**: The combination of a Pubky public key and Paykit Receiver Path that identifies one concrete Paykit app/runtime folder.
-- **NOT**: Only the Pubky public key, a human contact, or a Payment Endpoint.
-- **Synonyms to AVOID**: receiver id, receiver when the identity plus path distinction matters
-- **Related terms**: Paykit Receiver Path, Pubky Routing, Payment Endpoint
-
 ### Language Bindings
 - **Definition**: Distribution/integration surfaces for Paykit Library or Paykit SDK in languages or platforms such as Swift and Kotlin.
 - **NOT**: First-class Paykit architecture components.
@@ -50,14 +38,30 @@
 
 ## SDK Terms
 
+### Paykit App
+- **Definition**: One application or payment processor participating in a shared Paykit identity. A Paykit App has a stable Paykit App ID, owns its public Payment Endpoints, and is identified as the source of private Paykit messages. It does not own a separate Encrypted Link or private stream.
+- **NOT**: A Pubky identity or a Payment Endpoint.
+- **Related terms**: Paykit App ID, Paykit App Registry, Paykit SDK, Private Application Message
+
+### Paykit App ID
+- **Definition**: The stable, path-safe identifier for a Paykit App within one Paykit identity, such as `bitkit` or `paykit-server`. It attributes private messages and scopes public Payment Endpoint ownership.
+- **NOT**: A Pubky public key, Payment Endpoint Identifier, or user-readable app name.
+- **Related terms**: Paykit App, Paykit App Registry, Payment Endpoint
+
+### Paykit App Registry
+- **Definition**: The identity-wide public record that lists the Paykit Apps participating in one Paykit identity, their display names and capabilities, the identity-wide Noise public key, and optional default-app preferences.
+- **NOT**: Shared private SDK state, a contact list, a Payment List, or one registry file per app.
+- **Synonyms to AVOID**: receiver registry, receiver index
+- **Related terms**: Paykit App, Paykit App ID, Pubky Routing
+
 ### Paykit Profile
-- **Definition**: Public Paykit-facing display metadata published by a Pubky identity under the SDK configured profile path, with a small shared display core and optional app-owned `extra` JSON object.
+- **Definition**: Public Paykit-facing display metadata published by a Pubky identity at `/pub/paykit/profile.json`, with a small shared display core and optional application-defined `extra` JSON object.
 - **NOT**: A product-specific profile page, app account record, Pubky app profile, or Payment Endpoint.
 - **Synonyms to AVOID**: Payment Profile when referring to SDK display metadata
 - **Related terms**: Paykit SDK, Paykit Blob, Pubky Profile, Pubky Routing, Contact Record
 
 ### Paykit Blob
-- **Definition**: Public file bytes published by the Paykit SDK under the SDK configured blob prefix, usually referenced by Paykit Profile fields.
+- **Definition**: Public file bytes published by the Paykit SDK under `/pub/paykit/blobs/`, usually referenced by Paykit Profile fields.
 - **NOT**: Arbitrary Pubky file hosting, image rendering/cache state, or private SDK backup data.
 - **Synonyms to AVOID**: Pubky Blob when referring to SDK-scoped blob paths
 - **Related terms**: Paykit SDK, Paykit Profile, Pubky Routing
@@ -69,22 +73,16 @@
 - **Related terms**: Paykit SDK, Paykit Profile, Contact Record
 
 ### Contact Record
-- **Definition**: A local SDK record for a saved Pubky public key, optional local label, cached Paykit Profile, and contact-related SDK state.
+- **Definition**: A private SDK record for a saved Pubky public key, optional user label, cached Paykit Profile, and contact-related SDK state shared by apps using the identity.
 - **NOT**: A public social graph requirement, Pubky Profile import result, or a Payment List.
 - **Synonyms to AVOID**: contact payment option
 - **Related terms**: Paykit SDK, Paykit Profile, Pubky Profile, Public Contact Marker
 
 ### Public Contact Marker
-- **Definition**: An optional public Pubky marker published by explicit SDK policy to indicate a saved contact in the SDK configured profile/contact namespace.
+- **Definition**: An optional public Pubky marker published under `/pub/paykit/contacts/` by explicit SDK policy to indicate a saved contact.
 - **NOT**: The default Contact Record storage model or proof of an active Encrypted Link.
 - **Synonyms to AVOID**: public contact record when referring to the marker only
 - **Related terms**: Contact Record, Paykit Profile, Paykit SDK
-
-### Receiver Marker
-- **Definition**: An optional public Pubky marker at `/pub/paykit/v0/{receiver_path}/receiver.json` that makes one Paykit Receiver Path discoverable even when it has no public Payment Endpoints. The payload carries version, kind, receiver path, coarse receiver capabilities, and the receiver-scoped Noise public key used to establish Encrypted Links.
-- **NOT**: A Payment Endpoint, Payment List, public profile, or proof of an active Encrypted Link.
-- **Synonyms to AVOID**: receiver record, receiver index entry when referring to the marker payload
-- **Related terms**: Paykit Receiver Path, Payment Endpoint, Pubky Routing, Paykit SDK
 
 ## Core Protocol Terms
 
@@ -108,7 +106,7 @@
 
 ### Payment Endpoint Identifier
 - **Definition**: The canonical machine-readable identifier for a payment endpoint type, such as `btc-lightning-bolt12` or `eur-sepa-iban`.
-- **NOT**: The full Payment Endpoint, the payload/credential itself, or reserved Paykit storage path segments such as `private` or `encrypted-link-recovery`.
+- **NOT**: The full Payment Endpoint, the payload/credential itself, or the reserved Paykit storage path segment `private`.
 - **Synonyms to AVOID**: method id, payment method id
 - **Related terms**: Payment Endpoint, Payment Method, Asset, Rail, Endpoint Format
 
@@ -151,7 +149,7 @@
 ## Private Payments and Receipts
 
 ### Private Application Message
-- **Definition**: A versioned JSON message sent over an Encrypted Link and identified by a Private Message Kind. This is the base private message shape: `version` plus `kind`.
+- **Definition**: A versioned JSON message sent over an identity-wide Encrypted Link and identified by a Private Message Kind and source Paykit App ID. This is the base private message shape: `version`, `kind`, and `app_id`.
 - **NOT**: Public Paykit data published through Pubky public storage or the Encrypted Link itself.
 - **Synonyms to AVOID**: private payload when naming the protocol concept
 - **Related terms**: Encrypted Link, Private Message Kind, Private Payment List, Receipt Access
@@ -163,7 +161,7 @@
 - **Related terms**: Private Application Message, Private Payment List, Receipt Access
 
 ### Latest-State Message
-- **Definition**: A private message semantic where only the newest valid message of that kind matters. Malformed newer messages do not supersede the latest valid state.
+- **Definition**: A private message semantic where only the newest valid message of that kind and source Paykit App matters. Malformed newer messages do not supersede the latest valid state.
 - **NOT**: An Event Message where every valid message must be preserved and processed in send order.
 - **Synonyms to AVOID**: latest-wins message when naming the protocol concept
 - **Related terms**: Private Application Message, Private Message Kind, Event Message, Private Payment List
@@ -187,7 +185,7 @@
 - **Related terms**: Encrypted Link, Linked Peer, Paykit SDK
 
 ### Private Payment List
-- **Definition**: A versioned encrypted Paykit message carrying a complete Payment List shared with a Linked Peer. Latest-State Message semantics apply; a newer Private Payment List supersedes older queued Private Payment List messages.
+- **Definition**: A versioned encrypted Paykit message carrying one Paykit App's complete Payment List shared with a Linked Peer. Latest-State Message semantics apply per Paykit App; a newer Private Payment List supersedes older queued Private Payment List messages from that app without replacing lists from other apps.
 - **NOT**: A Payment Request, Payment Proof, or the source of a Payment Request's Payment Reference.
 - **Synonyms to AVOID**: Private Payment Method List, Private Payment Envelope, private payments payload
 - **Related terms**: Linked Peer, Private Application Message, Latest-State Message, Payment List, Payment Endpoint
@@ -357,6 +355,7 @@ Current/core:
 - Paykit Protocol
 - Paykit Library
 - Paykit SDK
+- Language Bindings
 - Pubky Routing
 
 Protocol concepts:
@@ -389,14 +388,3 @@ Protocol concepts:
 - Receipt Access
 - Encrypted Link
 - Encrypted Link Handshake
-
-Future/planned:
-- Paykit SDK platform bindings
-
-Implementation details:
-- Paykit FFI
-- Paykit PDK
-- MethodId
-- EndpointData
-- SupportedPayments
-- PrivatePaymentsPayload
