@@ -78,7 +78,7 @@ The intended flow is:
 1. The Allowee submits a payment instruction that references the Allowance ID and identifies the exact Payment Amount, Payee, payment destination, and a unique instruction ID.
 2. Paykit Library parses and structurally validates the message. Paykit SDK checks that it came from the bound Allowee and that recorded lifecycle events show the Allowance was accepted and not ended. It then persists, correlates, and deduplicates the instruction.
 3. Using trusted time and durable history, the wallet evaluates activation and expiry, the remaining shared terms, private safeguards, current usage, replay protection, and payment capability.
-4. If approved, the wallet uses its payment integration to pay the Payee directly.
+4. If approved, the wallet pays the Payee directly using the selected payment method.
 5. Paykit SDK may communicate the result and any supported proof information to the Allowee.
 
 The future protocol specification must define how Payees and payment destinations are represented, how instructions and results are correlated, and which lifecycle messages are required. The existing Payment Proof is tied to a Payment Request, so its direct reuse is not assumed here.
@@ -91,10 +91,9 @@ This is the intended responsibility split for a future Allowance protocol:
 | --- | --- |
 | Paykit Protocol and Paykit Library | Shared Allowance terms, IDs, lifecycle and payment-instruction shapes, parsing, serialization, structural validation, and stateless correlation. |
 | Paykit SDK | Durable lifecycle state, ordered event handling, message queues, sender and lifecycle checks, message deduplication, recovery, and app-facing records. |
-| Wallet | Consent, supported terms, private safeguards, trusted time, policy evaluation, usage accounting, capacity, concurrency, execution replay protection, authentication, and the decision to execute. |
-| Payment integration | Payment Endpoint and funding selection, fees, balances, routing, credentials, signing, broadcasting, monitoring, settlement, and method-specific proof validation. |
+| Wallet | Consent, supported terms, private safeguards, trusted time, policy evaluation, usage accounting, capacity, concurrency, replay protection, authentication, and the decision to pay. It also handles payment-specific work such as selecting a Payment Endpoint and funds, checking fees and balances, signing, broadcasting, monitoring settlement, and validating proof. |
 
-Paykit Library remains stateless and payment-method-neutral: it does not evaluate wallet policy, reserve capacity, or move funds. Paykit SDK coordinates the workflow but does not decide to pay. The wallet applies the rules and controls execution.
+Paykit Library remains stateless and payment-method-neutral: it does not evaluate wallet policy, reserve capacity, or move funds. Paykit SDK coordinates the workflow but does not decide to pay. The self-custody wallet applies the rules, controls the credentials, and executes the payment.
 
 An Allowance ID is a correlation identifier, not a bearer credential.
 
