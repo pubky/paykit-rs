@@ -431,6 +431,15 @@ fn save_authorized_receipt_access(
     tx.save_receipt_access_record(record);
 }
 
+fn save_retrieved_authorized_receipt_access(
+    tx: &mut dyn StorageTransaction,
+    mut record: ReceiptAccessRecord,
+) {
+    tx.save_authorized_receipt_apps(record.counterparty.clone(), vec![record.app_id.clone()]);
+    record.app_authorized = true;
+    tx.save_receipt_access_record(record.mark_retrieved(FixedClock.now()));
+}
+
 fn receipt_record(
     issuer: PubkyPublicKey,
     receipt_id: &str,
@@ -440,7 +449,9 @@ fn receipt_record(
         issuer,
         app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
         receipt_access_event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
-        receipt_access_key_hash: "receipt-access-key-hash".into(),
+        receipt_access_key_hash: crate::domain::receipts::receipt_access_key_hash(
+            "receipt-secret-key",
+        ),
         receipt_id: receipt_id.into(),
         payment_reference: "invoice-2026-0001".into(),
         payment_request_id: None,

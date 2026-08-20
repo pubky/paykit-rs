@@ -135,7 +135,7 @@ where
         counterparty: PubkyPublicKey,
         mut report: OutboundPrivateSendReport,
         lease: PeerLinkOperationLease,
-        session_access: PubkySessionAccess,
+        session_access: GuardedSessionAccess,
     ) -> Result<OutboundPrivateSendReport> {
         let (mut link, mut link_state) = self
             .restore_link_for_outbound_send(&counterparty, &lease, &session_access)

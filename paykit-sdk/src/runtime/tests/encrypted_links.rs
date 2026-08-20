@@ -1,5 +1,14 @@
 use super::*;
 
+#[test]
+fn test_link_identity_must_differ_from_local_identity() {
+    let local = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+
+    let result = crate::runtime::encrypted_links::require_distinct_link_identity(&local, &local);
+
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+}
+
 #[tokio::test]
 async fn test_initiate_link_with_peer_requires_pubky_session() {
     let storage = InMemoryStorage::new();

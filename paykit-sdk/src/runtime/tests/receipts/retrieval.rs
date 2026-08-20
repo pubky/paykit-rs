@@ -15,6 +15,10 @@ async fn test_retrieve_receipt_returns_cached_record_for_public_only_identity() 
                     public_key: Some(local_public_key.clone()),
                     initialized_at: FixedClock.now(),
                 });
+                save_retrieved_authorized_receipt_access(
+                    tx,
+                    receipt_access_record(counterparty.clone(), receipt_id),
+                );
                 tx.save_receipt_record(receipt_record(counterparty, receipt_id, local_public_key));
                 Ok(())
             }
@@ -38,6 +42,47 @@ async fn test_retrieve_receipt_returns_cached_record_for_public_only_identity() 
 }
 
 #[tokio::test]
+async fn test_cached_receipt_requires_authorized_retrieved_access() {
+    let storage = registered_test_storage();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let local_public_key = local_public_key.clone();
+            move |tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_public_key.clone()),
+                    initialized_at: FixedClock.now(),
+                });
+                tx.save_receipt_access_record(receipt_access_record(
+                    counterparty.clone(),
+                    "receipt-1",
+                ));
+                tx.save_receipt_record(receipt_record(counterparty, "receipt-1", local_public_key));
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let retrieval = sdk
+        .retrieve_receipt(counterparty.clone(), "receipt-1")
+        .await;
+    let listed = sdk.receipt_records(&counterparty).await.unwrap();
+
+    assert!(matches!(retrieval, Err(PaykitSdkError::Protocol { .. })));
+    assert!(listed.is_empty());
+}
+
+#[tokio::test]
 async fn test_retrieve_receipt_rejects_clean_mismatched_access_for_cached_receipt() {
     let storage = registered_test_storage();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -57,6 +102,10 @@ async fn test_retrieve_receipt_rejects_clean_mismatched_access_for_cached_receip
                 access.stream_item_id = 2;
                 access.payment_reference = "other-invoice".into();
                 save_authorized_receipt_access(tx, access);
+                save_retrieved_authorized_receipt_access(
+                    tx,
+                    receipt_access_record(counterparty.clone(), receipt_id),
+                );
                 tx.save_receipt_record(receipt_record(counterparty, receipt_id, local_public_key));
                 Ok(())
             }
@@ -79,7 +128,7 @@ async fn test_retrieve_receipt_rejects_clean_mismatched_access_for_cached_receip
             Ok(tx
                 .receipt_access_records(&counterparty)
                 .into_iter()
-                .find(|record| record.receipt_id == receipt_id)
+                .find(|record| record.event_id == "750e8400-e29b-41d4-a716-446655440000")
                 .unwrap())
         })
         .await
@@ -186,6 +235,10 @@ async fn test_retrieve_receipt_ignores_unauthorized_conflicting_access_for_cache
                 unauthorized.payment_reference = "other-invoice".into();
                 tx.save_event_dedup_record(conflicted_event_dedup_record(&unauthorized));
                 tx.save_receipt_access_record(unauthorized);
+                save_retrieved_authorized_receipt_access(
+                    tx,
+                    receipt_access_record(counterparty.clone(), receipt_id),
+                );
                 tx.save_receipt_record(receipt_record(counterparty, receipt_id, local_public_key));
                 Ok(())
             }
@@ -224,12 +277,23 @@ async fn test_receipt_records_filter_recipient_identity() {
                     public_key: Some(local_public_key.clone()),
                     initialized_at: FixedClock.now(),
                 });
+                save_retrieved_authorized_receipt_access(
+                    tx,
+                    receipt_access_record(issuer.clone(), "receipt-1"),
+                );
                 tx.save_receipt_record(receipt_record(
                     issuer.clone(),
                     "receipt-1",
                     local_public_key,
                 ));
-                tx.save_receipt_record(receipt_record(issuer, "receipt-2", wrong_recipient));
+                let mut second_access = receipt_access_record(issuer.clone(), "receipt-2");
+                second_access.event_id = "750e8400-e29b-41d4-a716-446655440000".into();
+                second_access.stream_item_id = 2;
+                save_retrieved_authorized_receipt_access(tx, second_access);
+                let mut second_record = receipt_record(issuer, "receipt-2", wrong_recipient);
+                second_record.receipt_access_event_id =
+                    "750e8400-e29b-41d4-a716-446655440000".into();
+                tx.save_receipt_record(second_record);
                 Ok(())
             }
         })

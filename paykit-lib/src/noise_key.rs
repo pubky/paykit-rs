@@ -28,6 +28,13 @@ mod tests {
         let second = derive_paykit_noise_secret_key(&pubky_secret_key);
 
         assert_eq!(first, second);
+        assert_eq!(
+            first,
+            [
+                139, 233, 237, 224, 3, 115, 2, 131, 96, 220, 144, 73, 253, 178, 176, 121, 197, 120,
+                203, 97, 209, 193, 110, 208, 137, 44, 197, 5, 171, 202, 52, 164,
+            ]
+        );
         assert_ne!(first, pubky_secret_key);
         assert_eq!(
             derive_paykit_noise_public_key(&pubky_secret_key),

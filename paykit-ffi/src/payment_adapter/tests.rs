@@ -262,6 +262,26 @@ fn test_payment_endpoint_reservation_parses_expiry() {
 }
 
 #[test]
+fn test_payment_endpoint_reservation_classifies_invalid_expiry_as_adapter_error() {
+    let reservation = FfiPrivatePaymentEndpointReservation {
+        reservation_id: "reservation-1".into(),
+        receiving_detail: FfiPrivateReceivingDetail {
+            identifier: "btc-mainnet-address".into(),
+            payload: Arc::new(FfiPaymentPayload::new("bc1qexample".into())),
+        },
+        expires_at: Some("not-a-time".into()),
+        attribution: Arc::new(FfiReservationAttribution::new(HashMap::new())),
+    };
+
+    let error = PrivatePaymentEndpointReservation::try_from(reservation).unwrap_err();
+
+    assert!(matches!(
+        error,
+        paykit_sdk::PaykitSdkError::PaymentAdapter { .. }
+    ));
+}
+
+#[test]
 fn test_noop_adapter_reports_unavailable_for_receiving_details() {
     let err = FfiNoopSdkPaymentAdapter
         .current_public_receiving_details()

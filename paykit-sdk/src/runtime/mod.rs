@@ -1,6 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
+    ops::Deref,
     sync::{Arc, Mutex},
 };
 
@@ -13,9 +14,10 @@ use paykit_lib::{
 };
 use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
 #[cfg(test)]
-use crate::domain::payment_requests::enqueue_payment_request_response as enqueue_payment_request_response_message;
+use crate::domain::payment_requests::enqueue_payment_request_event as enqueue_payment_request_response_message;
 
 use crate::{
     backup::{
@@ -161,6 +163,9 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     config: PaykitSdkConfig,
     clock: C,
     identity_operation_in_progress: Arc<Mutex<bool>>,
+    // Session-backed workflows hold a read guard; sign-out waits for all of
+    // them before clearing access under the write guard.
+    session_operation_gate: Arc<RwLock<()>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +176,19 @@ enum PrivateQueueReadiness {
 
 struct RuntimeOperationGuard {
     in_progress: Arc<Mutex<bool>>,
+}
+
+struct GuardedSessionAccess {
+    access: PubkySessionAccess,
+    _guard: OwnedRwLockReadGuard<()>,
+}
+
+impl Deref for GuardedSessionAccess {
+    type Target = PubkySessionAccess;
+
+    fn deref(&self) -> &Self::Target {
+        &self.access
+    }
 }
 
 impl Drop for RuntimeOperationGuard {
@@ -209,6 +227,7 @@ where
             config,
             clock,
             identity_operation_in_progress: Arc::new(Mutex::new(false)),
+            session_operation_gate: Arc::new(RwLock::new(())),
         }
     }
 
@@ -259,6 +278,7 @@ where
     /// later and other applications are not affected.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
+        let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
         self.pubky.clear_session_access().await?;
 
         let now = self.clock.now();
@@ -282,11 +302,12 @@ where
 
     async fn load_session_access_and_refresh_identity(
         &self,
-    ) -> Result<(Option<PubkySessionAccess>, IdentityState)> {
+    ) -> Result<(Option<GuardedSessionAccess>, IdentityState)> {
+        let session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
         let session = self.pubky.load_session_access().await?;
         let now = self.clock.now();
 
-        let Some(session_access) = session.as_ref() else {
+        let Some(session_access) = session else {
             let state = self
                 .storage
                 .transaction(move |tx| {
@@ -303,7 +324,7 @@ where
                 })
                 .await?;
 
-            return Ok((session, state));
+            return Ok((None, state));
         };
 
         let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
@@ -314,7 +335,13 @@ where
             .transaction(move |tx| bind_storage_to_identity(tx, public_key, now))
             .await?;
 
-        Ok((session, state))
+        Ok((
+            Some(GuardedSessionAccess {
+                access: session_access,
+                _guard: session_guard,
+            }),
+            state,
+        ))
     }
 
     async fn require_initialized_identity(&self, context: &str) -> Result<PubkyPublicKey> {
@@ -333,7 +360,8 @@ where
     async fn load_session_access_for_initialized_identity(
         &self,
         context: &str,
-    ) -> Result<PubkySessionAccess> {
+    ) -> Result<GuardedSessionAccess> {
+        let session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
         let expected_public_key = self.require_initialized_identity(context).await?;
         let session_access =
             self.pubky
@@ -353,7 +381,10 @@ where
             });
         }
         session_access.validate_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
-        Ok(session_access)
+        Ok(GuardedSessionAccess {
+            access: session_access,
+            _guard: session_guard,
+        })
     }
 
     /// Return the last persisted identity status, if initialized.

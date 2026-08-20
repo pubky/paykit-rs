@@ -58,7 +58,7 @@ where
         &self,
         counterparty: PubkyPublicKey,
         lease: PeerLinkOperationLease,
-        session_access: PubkySessionAccess,
+        session_access: GuardedSessionAccess,
     ) -> Result<PrivateStreamIntakeReport> {
         let secret_key = session_access
             .local_secret_key

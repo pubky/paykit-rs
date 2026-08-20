@@ -129,6 +129,32 @@ async fn persist_messages(
     persist_messages_at(storage, counterparty, messages, timestamp()).await
 }
 
+async fn persist_authorized_request(
+    storage: &InMemoryStorage,
+    counterparty: PubkyPublicKey,
+    request_id: &str,
+) {
+    persist_messages(
+        storage,
+        counterparty.clone(),
+        vec![request_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            request_id,
+            "invoice-2026-0001",
+            None,
+            None,
+        )],
+    )
+    .await;
+    storage
+        .transaction(move |tx| {
+            tx.save_authorized_payment_request_apps(counterparty, vec![app_id()]);
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 async fn persist_messages_at(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,

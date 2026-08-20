@@ -258,7 +258,8 @@ where
     ) -> Result<LinkedPeerHandshakeReport> {
         self.ensure_peer_not_recovery_required_or_blocked(&counterparty)
             .await?;
-        let _ = self.private_link_session_access().await?;
+        let (session_access, _) = self.private_link_session_access().await?;
+        drop(session_access);
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = self
             .advance_link_handshake_with_claim(counterparty, lease.clone())
@@ -278,15 +279,12 @@ where
         counterparty: PubkyPublicKey,
         max_advance_steps: u32,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let (session_access, _) = self.private_link_session_access().await?;
-        let local_public_key = session_access.public_key()?;
-        if local_public_key == counterparty {
-            return Err(PaykitSdkError::Policy {
-                context: "cannot establish an Encrypted Link with the local identity".into(),
-                source: None,
-            });
-        }
-        let role = deterministic_handshake_role(&local_public_key, &counterparty);
+        let role = {
+            let (session_access, _) = self.private_link_session_access().await?;
+            let local_public_key = session_access.public_key()?;
+            require_distinct_link_identity(&local_public_key, &counterparty)?;
+            deterministic_handshake_role(&local_public_key, &counterparty)
+        };
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = self
             .ensure_link_with_peer_with_claim(counterparty, role, max_advance_steps, lease.clone())
@@ -511,10 +509,10 @@ where
         let remote_public_key = counterparty.to_public_key()?;
         let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot_bytes)?;
         paykit_lib::restore_encrypted_link_handshake(
-            session_access.session,
+            session_access.session.clone(),
             secret_key,
             &remote_public_key,
-            session_access.outbox_client,
+            session_access.outbox_client.clone(),
             snapshot,
         )
         .await
@@ -586,7 +584,10 @@ where
         counterparty: PubkyPublicKey,
         role: EncryptedLinkHandshakeRole,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let _ = self.private_link_session_access().await?;
+        {
+            let (session_access, _) = self.private_link_session_access().await?;
+            require_distinct_link_identity(&session_access.public_key()?, &counterparty)?;
+        }
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = self
             .start_link_handshake_with_claim(counterparty, role, lease.clone())
@@ -686,18 +687,18 @@ where
         }
         let handshake = match role {
             EncryptedLinkHandshakeRole::Initiator => paykit_lib::initiate_encrypted_link(
-                session_access.session,
+                session_access.session.clone(),
                 secret_key,
                 &remote_public_key,
                 &remote_noise_public_key,
-                session_access.outbox_client,
+                session_access.outbox_client.clone(),
             )?,
             EncryptedLinkHandshakeRole::Responder => paykit_lib::accept_encrypted_link(
-                session_access.session,
+                session_access.session.clone(),
                 secret_key,
                 &remote_public_key,
                 &remote_noise_public_key,
-                session_access.outbox_client,
+                session_access.outbox_client.clone(),
             )?,
         };
 
@@ -758,7 +759,7 @@ where
 
     pub(super) async fn private_link_session_access(
         &self,
-    ) -> Result<(PubkySessionAccess, [u8; 32])> {
+    ) -> Result<(GuardedSessionAccess, [u8; 32])> {
         let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
@@ -796,7 +797,15 @@ where
                     context: format!("counterparty {counterparty} has no Paykit App Registry"),
                     source: None,
                 })?;
-        Ok(registry.noise_public_key().clone())
+        registry
+            .noise_public_key()
+            .cloned()
+            .ok_or_else(|| PaykitSdkError::NotFound {
+                context: format!(
+                    "counterparty {counterparty} has not initialized its Paykit Noise key"
+                ),
+                source: None,
+            })
     }
 }
 
@@ -826,4 +835,17 @@ fn deterministic_handshake_role(
     } else {
         EncryptedLinkHandshakeRole::Responder
     }
+}
+
+pub(super) fn require_distinct_link_identity(
+    local_public_key: &PubkyPublicKey,
+    counterparty: &PubkyPublicKey,
+) -> Result<()> {
+    if local_public_key == counterparty {
+        return Err(PaykitSdkError::Policy {
+            context: "cannot establish an Encrypted Link with the local identity".into(),
+            source: None,
+        });
+    }
+    Ok(())
 }

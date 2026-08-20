@@ -9725,7 +9725,7 @@ public object FfiConverterTypePaykitAppCapabilities: FfiConverterRustBuffer<Payk
 public object FfiConverterTypePaykitAppRegistry: FfiConverterRustBuffer<PaykitAppRegistry> {
     override fun read(buf: ByteBuffer): PaykitAppRegistry {
         return PaykitAppRegistry(
-            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterSequenceTypePaykitApp.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterMapStringString.read(buf),
@@ -9733,14 +9733,14 @@ public object FfiConverterTypePaykitAppRegistry: FfiConverterRustBuffer<PaykitAp
     }
 
     override fun allocationSize(value: PaykitAppRegistry): ULong = (
-            FfiConverterString.allocationSize(value.`noisePublicKey`) +
+            FfiConverterOptionalString.allocationSize(value.`noisePublicKey`) +
             FfiConverterSequenceTypePaykitApp.allocationSize(value.`apps`) +
             FfiConverterOptionalString.allocationSize(value.`defaultAppId`) +
             FfiConverterMapStringString.allocationSize(value.`defaultAppsByEndpoint`)
     )
 
     override fun write(value: PaykitAppRegistry, buf: ByteBuffer) {
-        FfiConverterString.write(value.`noisePublicKey`, buf)
+        FfiConverterOptionalString.write(value.`noisePublicKey`, buf)
         FfiConverterSequenceTypePaykitApp.write(value.`apps`, buf)
         FfiConverterOptionalString.write(value.`defaultAppId`, buf)
         FfiConverterMapStringString.write(value.`defaultAppsByEndpoint`, buf)

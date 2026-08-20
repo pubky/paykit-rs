@@ -58,3 +58,15 @@ async fn test_restore_backup_state_advances_counters() {
     assert_eq!(restored.next_receive_batch_id, 4);
     assert_eq!(restored.next_private_stream_item_id, 10);
 }
+
+#[tokio::test]
+async fn test_restore_backup_state_rejects_exhausted_counter() {
+    let storage = InMemoryStorage::new();
+    let identity = identity(public_key());
+    let mut backup = empty_backup(identity);
+    backup.next_outbound_private_message_id = u64::MAX;
+
+    let error = restore_backup_state(&storage, backup).await.unwrap_err();
+
+    assert!(matches!(error, PaykitSdkError::Storage { .. }));
+}

@@ -199,6 +199,9 @@ pub(crate) fn decode_backup_state(bytes: &[u8]) -> Result<SdkBackupState, Paykit
 pub fn encode_sdk_state_blob_snapshot(
     snapshot: FfiSdkStateBlobSnapshot,
 ) -> Result<Vec<u8>, PaykitFfiError> {
+    if snapshot.revision.is_empty() {
+        return Err(invalid_state_blob_error());
+    }
     postcard::to_allocvec(&StateBlobSnapshotEnvelope {
         version: SDK_STATE_BLOB_VERSION,
         revision: snapshot.revision,

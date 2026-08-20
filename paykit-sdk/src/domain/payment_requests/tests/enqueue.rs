@@ -57,6 +57,7 @@ async fn test_enqueue_payment_request_response_allows_only_first_app() {
     let storage = registered_storage();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    persist_authorized_request(&storage, counterparty.clone(), request_id).await;
     let acceptance = parsed_event(acceptance_raw(
         "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
         request_id,
@@ -66,7 +67,7 @@ async fn test_enqueue_payment_request_response_allows_only_first_app() {
         request_id,
     ));
 
-    let first = enqueue_payment_request_response(
+    let first = enqueue_checked_payment_request_action(
         &storage,
         counterparty.clone(),
         &app_id(),
@@ -75,7 +76,7 @@ async fn test_enqueue_payment_request_response_allows_only_first_app() {
     )
     .await
     .unwrap();
-    let err = enqueue_payment_request_response(
+    let err = enqueue_checked_payment_request_action(
         &storage,
         counterparty.clone(),
         &paykit_lib::PaykitAppId::new("server").unwrap(),
@@ -113,6 +114,7 @@ async fn test_concurrent_payment_request_responses_claim_only_one_app() {
         .await
         .unwrap();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    persist_authorized_request(&storage, counterparty.clone(), request_id).await;
     let acceptance = parsed_event(acceptance_raw(
         "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
         request_id,
@@ -122,14 +124,14 @@ async fn test_concurrent_payment_request_responses_claim_only_one_app() {
         request_id,
     ));
 
-    let accept = enqueue_payment_request_response(
+    let accept = enqueue_checked_payment_request_action(
         &storage,
         counterparty.clone(),
         &bitkit,
         &acceptance,
         timestamp(),
     );
-    let reject = enqueue_payment_request_response(
+    let reject = enqueue_checked_payment_request_action(
         &storage,
         counterparty.clone(),
         &server,
@@ -152,6 +154,7 @@ async fn test_enqueue_payment_request_allows_same_app_cancellation_after_accepta
     let storage = registered_storage();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    persist_authorized_request(&storage, counterparty.clone(), request_id).await;
     let acceptance = parsed_event(acceptance_raw(
         "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
         request_id,
@@ -163,7 +166,7 @@ async fn test_enqueue_payment_request_allows_same_app_cancellation_after_accepta
         panic!("expected cancellation event");
     };
 
-    enqueue_payment_request_response(
+    enqueue_checked_payment_request_action(
         &storage,
         counterparty.clone(),
         &app_id(),
@@ -172,11 +175,11 @@ async fn test_enqueue_payment_request_allows_same_app_cancellation_after_accepta
     )
     .await
     .unwrap();
-    let cancellation = enqueue_payment_request_cancellation(
+    let cancellation = enqueue_checked_payment_request_action(
         &storage,
         counterparty.clone(),
         &app_id(),
-        &cancellation,
+        &PaymentRequestEvent::Cancellation(cancellation),
         timestamp(),
     )
     .await
@@ -197,6 +200,7 @@ async fn test_enqueue_payment_request_rejects_other_app_cancellation_after_accep
     let storage = registered_storage();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    persist_authorized_request(&storage, counterparty.clone(), request_id).await;
     let acceptance = parsed_event(acceptance_raw(
         "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
         request_id,
@@ -208,7 +212,7 @@ async fn test_enqueue_payment_request_rejects_other_app_cancellation_after_accep
         panic!("expected cancellation event");
     };
 
-    enqueue_payment_request_response(
+    enqueue_checked_payment_request_action(
         &storage,
         counterparty.clone(),
         &app_id(),
@@ -217,11 +221,11 @@ async fn test_enqueue_payment_request_rejects_other_app_cancellation_after_accep
     )
     .await
     .unwrap();
-    let error = enqueue_payment_request_cancellation(
+    let error = enqueue_checked_payment_request_action(
         &storage,
         counterparty,
         &paykit_lib::PaykitAppId::new("server").unwrap(),
-        &cancellation,
+        &PaymentRequestEvent::Cancellation(cancellation),
         timestamp(),
     )
     .await

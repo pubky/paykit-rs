@@ -75,7 +75,7 @@ impl PaykitApp {
 /// Public registry shared by every application using one Paykit identity.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PaykitAppRegistry {
-    noise_public_key: PublicKey,
+    noise_public_key: Option<PublicKey>,
     apps: HashMap<PaykitAppId, PaykitApp>,
     default_app_id: Option<PaykitAppId>,
     default_apps_by_endpoint: HashMap<PaymentEndpointIdentifier, PaykitAppId>,
@@ -93,8 +93,11 @@ impl fmt::Debug for PaykitAppRegistry {
 }
 
 impl PaykitAppRegistry {
-    /// Create an empty registry for an identity-wide Noise public key.
-    pub fn new(noise_public_key: PublicKey) -> Self {
+    /// Create an empty registry with an optional identity-wide Noise public key.
+    ///
+    /// Public-only identities can publish applications and Payment Endpoints
+    /// before a private-capable application initializes the Noise key.
+    pub fn new(noise_public_key: Option<PublicKey>) -> Self {
         Self {
             noise_public_key,
             apps: HashMap::new(),
@@ -103,9 +106,25 @@ impl PaykitAppRegistry {
         }
     }
 
-    /// Return the identity-wide Noise public key.
-    pub fn noise_public_key(&self) -> &PublicKey {
-        &self.noise_public_key
+    /// Return the identity-wide Noise public key, when initialized.
+    pub fn noise_public_key(&self) -> Option<&PublicKey> {
+        self.noise_public_key.as_ref()
+    }
+
+    /// Initialize or verify the identity-wide Noise public key.
+    pub fn set_noise_public_key(&mut self, noise_public_key: PublicKey) -> Result<()> {
+        if self
+            .noise_public_key
+            .as_ref()
+            .is_some_and(|existing| existing != &noise_public_key)
+        {
+            return Err(PaykitError::Validation(
+                "Paykit App Registry Noise public key is already initialized to a different key"
+                    .into(),
+            ));
+        }
+        self.noise_public_key = Some(noise_public_key);
+        Ok(())
     }
 
     /// Return all registered applications keyed by App ID.
@@ -138,6 +157,12 @@ impl PaykitAppRegistry {
 
     /// Add or replace one application registration.
     pub fn register_app(&mut self, app_id: PaykitAppId, app: PaykitApp) -> Result<()> {
+        if self.noise_public_key.is_none() && app_uses_private_protocol(app.capabilities()) {
+            return Err(PaykitError::Validation(
+                "Paykit App Registry must initialize its Noise public key before registering private capabilities"
+                    .into(),
+            ));
+        }
         if !self.apps.contains_key(&app_id) && self.apps.len() >= PAYKIT_APP_REGISTRY_MAX_APPS {
             return Err(PaykitError::Validation(format!(
                 "Paykit App Registry must not contain more than {PAYKIT_APP_REGISTRY_MAX_APPS} applications"
@@ -232,7 +257,7 @@ impl From<PaykitApp> for PaykitAppWire {
 struct AppRegistryWire {
     version: u8,
     kind: String,
-    noise_public_key: String,
+    noise_public_key: Option<String>,
     #[serde(deserialize_with = "deserialize_unique_map")]
     apps: HashMap<String, PaykitAppWire>,
     default_app_id: Option<String>,
@@ -244,7 +269,7 @@ struct AppRegistryWire {
 struct AppRegistryWireRef<'a> {
     version: u8,
     kind: &'static str,
-    noise_public_key: String,
+    noise_public_key: Option<String>,
     apps: BTreeMap<&'a str, &'a PaykitApp>,
     default_app_id: Option<&'a str>,
     default_apps_by_endpoint: BTreeMap<&'a str, &'a str>,
@@ -266,7 +291,7 @@ pub fn serialize_paykit_app_registry(registry: &PaykitAppRegistry) -> Result<Str
     let raw_json = serde_json::to_string(&AppRegistryWireRef {
         version: APP_REGISTRY_VERSION,
         kind: APP_REGISTRY_KIND,
-        noise_public_key: registry.noise_public_key.z32(),
+        noise_public_key: registry.noise_public_key.as_ref().map(PublicKey::z32),
         apps,
         default_app_id: registry.default_app_id.as_ref().map(PaykitAppId::as_str),
         default_apps_by_endpoint,
@@ -322,12 +347,17 @@ pub fn parse_paykit_app_registry_json(raw_json: &str) -> Result<PaykitAppRegistr
         ));
     }
 
-    let noise_public_key = PublicKey::try_from_z32(&wire.noise_public_key).map_err(|err| {
-        invalid_data(
-            format!("Paykit App Registry Noise public key is invalid: {err}"),
-            Some(err.into()),
-        )
-    })?;
+    let noise_public_key = wire
+        .noise_public_key
+        .map(|value| {
+            PublicKey::try_from_z32(&value).map_err(|err| {
+                invalid_data(
+                    format!("Paykit App Registry Noise public key is invalid: {err}"),
+                    Some(err.into()),
+                )
+            })
+        })
+        .transpose()?;
     let mut registry = PaykitAppRegistry::new(noise_public_key);
     for (raw_app_id, raw_app) in wire.apps {
         let app_id = parse_remote_app_id(raw_app_id)?;
@@ -436,7 +466,22 @@ fn validate_registry_limits(registry: &PaykitAppRegistry) -> std::result::Result
             "Paykit App Registry must not contain more than {PAYKIT_APP_REGISTRY_MAX_ENDPOINT_DEFAULTS} endpoint defaults"
         ));
     }
+    if registry.noise_public_key.is_none()
+        && registry
+            .apps
+            .values()
+            .any(|app| app_uses_private_protocol(app.capabilities()))
+    {
+        return Err(
+            "Paykit App Registry must initialize its Noise public key before advertising private capabilities"
+                .into(),
+        );
+    }
     Ok(())
+}
+
+fn app_uses_private_protocol(capabilities: PaykitAppCapabilities) -> bool {
+    capabilities.private_payments || capabilities.payment_requests || capabilities.receipts
 }
 
 fn validate_registered_default(

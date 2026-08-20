@@ -131,7 +131,7 @@ where
     async fn publish_encrypted_link_recovery_marker_with_claim(
         &self,
         counterparty: PubkyPublicKey,
-        session_access: PubkySessionAccess,
+        session_access: GuardedSessionAccess,
         lease: PeerLinkOperationLease,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
         let new_episode = self
@@ -377,7 +377,11 @@ where
                     context: format!("counterparty {counterparty} has no Paykit App Registry"),
                     source: None,
                 })?;
-        let remote_noise_public_key = remote_registry.noise_public_key();
+        let Some(remote_noise_public_key) = remote_registry.noise_public_key() else {
+            return self
+                .recovery_marker_report_or_default(counterparty, false)
+                .await;
+        };
         let Some(marker) = paykit_lib::fetch_encrypted_link_recovery_marker(
             &public_storage,
             &secret_key,

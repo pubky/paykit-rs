@@ -126,6 +126,18 @@ fn test_state_blob_snapshot_rejects_out_of_range_outbound_id_with_redacted_error
 }
 
 #[test]
+fn test_state_blob_rejects_exhausted_id_counter() {
+    let state = StorageState {
+        next_outbound_private_message_id: u64::MAX,
+        ..StorageState::default()
+    };
+
+    let error = decode_storage_state(&encode_storage_state(&state).unwrap()).unwrap_err();
+
+    assert_invalid_state_blob(error);
+}
+
+#[test]
 fn test_state_blob_rejects_duplicate_active_lease_ids() {
     let now = Utc.with_ymd_and_hms(2026, 6, 22, 12, 0, 0).unwrap();
     let first_counterparty =
@@ -518,6 +530,20 @@ fn test_state_blob_snapshot_encoding_round_trips() {
 
     assert_eq!(decoded.revision, snapshot.revision);
     assert_eq!(decoded.blob.export_bytes(), snapshot.blob.export_bytes());
+}
+
+#[test]
+fn test_state_blob_snapshot_encoding_rejects_empty_revision() {
+    let snapshot = FfiSdkStateBlobSnapshot {
+        blob: Arc::new(FfiSdkStateBlob::new(
+            encode_storage_state(&StorageState::default()).unwrap(),
+        )),
+        revision: String::new(),
+    };
+
+    let error = encode_sdk_state_blob_snapshot(snapshot).unwrap_err();
+
+    assert_invalid_state_blob(error);
 }
 
 #[tokio::test]

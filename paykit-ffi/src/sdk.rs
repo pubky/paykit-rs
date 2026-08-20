@@ -137,6 +137,7 @@ impl FfiPaykitSdk {
         let session_provider = FfiSdkPubkySessionProviderAdapter {
             provider: session_provider,
             pubky,
+            pubky_client,
         };
         let payment_adapter = FfiSdkPaymentAdapterAdapter {
             adapter: payment_adapter,

@@ -164,7 +164,9 @@ pub(in crate::backup) fn validate_receipt_records(
                 source: None,
             });
         };
-        if access.receipt_id != record.receipt_id
+        if !access.app_authorized
+            || access.retrieval_status != ReceiptRetrievalStatus::Retrieved
+            || access.receipt_id != record.receipt_id
             || access.app_id != record.app_id
             || access.payment_reference != record.payment_reference
             || access.payment_request_id != record.payment_request_id

@@ -328,6 +328,17 @@ where
             if access_records.is_empty() && conflicted_access_count > 0 {
                 return Err(Self::conflicted_receipt_access_error(receipt_id));
             }
+            if !access_records.iter().any(|access| {
+                access.retrieval_status == ReceiptRetrievalStatus::Retrieved
+                    && receipt_record_matches_access(&record, access)
+            }) {
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "stored Receipt {receipt_id} has no authorized retrieved Receipt Access"
+                    ),
+                    source: None,
+                });
+            }
             self.reconcile_cached_receipt_access_records(
                 &record,
                 &access_records,
@@ -581,6 +592,7 @@ where
                     .into_values()
                     .filter(|record| &record.issuer == issuer)
                     .filter(|record| record.recipient_public_key == local_public_key)
+                    .filter(|record| Self::receipt_record_access_is_usable(tx, record))
                     .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.retrieved_at));
@@ -607,6 +619,7 @@ where
                     .receipt_records
                     .into_values()
                     .filter(|record| record.recipient_public_key == local_public_key)
+                    .filter(|record| Self::receipt_record_access_is_usable(tx, record))
                     .filter(|record| {
                         !snapshot
                             .linked_peers
@@ -694,6 +707,20 @@ where
     ) -> bool {
         tx.event_dedup_record(&record.issuer, &record.receipt_access_event_id)
             .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
+    }
+
+    fn receipt_record_access_is_usable(
+        tx: &dyn crate::storage::StorageTransaction,
+        record: &ReceiptRecord,
+    ) -> bool {
+        tx.receipt_access_records(&record.issuer)
+            .into_iter()
+            .find(|access| access.event_id == record.receipt_access_event_id)
+            .is_some_and(|access| {
+                access.app_authorized
+                    && access.retrieval_status == ReceiptRetrievalStatus::Retrieved
+                    && receipt_record_matches_access(record, &access)
+            })
     }
 
     fn conflicted_receipt_access_error(receipt_id: &str) -> PaykitSdkError {

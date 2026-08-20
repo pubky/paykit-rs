@@ -264,7 +264,6 @@ async fn test_sign_out_preserves_identity_scoped_state() {
     let status = sdk.sign_out().await.unwrap();
 
     assert_eq!(status.capability, PubkyIdentityCapability::SignedOut);
-    assert_eq!(status.capability, PubkyIdentityCapability::SignedOut);
     let snapshot = storage.snapshot().unwrap();
     let identity = snapshot.identity_state.unwrap();
     assert_eq!(identity.public_key.as_ref(), Some(&counterparty));
@@ -272,6 +271,60 @@ async fn test_sign_out_preserves_identity_scoped_state() {
     assert_eq!(snapshot.contact_records.len(), 1);
     assert_eq!(snapshot.public_endpoint_records.len(), 1);
     assert_eq!(snapshot.outbound_private_messages.len(), 1);
+}
+
+#[tokio::test]
+async fn test_sign_out_waits_for_live_session_operations() {
+    use std::{
+        future::Future,
+        sync::atomic::{AtomicBool, Ordering},
+        task::{Context, Poll, Waker},
+    };
+
+    #[derive(Clone)]
+    struct RecordingClearSessionProvider {
+        cleared: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl PubkySessionProvider for RecordingClearSessionProvider {
+        async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
+            Ok(None)
+        }
+
+        async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+            Ok(None)
+        }
+
+        async fn clear_session_access(&self) -> Result<()> {
+            self.cleared.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let cleared = Arc::new(AtomicBool::new(false));
+    let sdk = PaykitSdk::with_clock(
+        InMemoryStorage::new(),
+        RecordingClearSessionProvider {
+            cleared: Arc::clone(&cleared),
+        },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let session_operation = Arc::clone(&sdk.session_operation_gate).read_owned().await;
+    let mut sign_out = Box::pin(sdk.sign_out());
+    let mut context = Context::from_waker(Waker::noop());
+
+    assert!(matches!(
+        sign_out.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(!cleared.load(Ordering::SeqCst));
+
+    drop(session_operation);
+    sign_out.await.unwrap();
+    assert!(cleared.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

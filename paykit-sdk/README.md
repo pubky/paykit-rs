@@ -32,6 +32,10 @@ default-app preferences. Public Payment Endpoints remain app-scoped under the
 identity. Private Payment Lists use latest-state semantics per app and are
 aggregated across apps when resolving a private payment.
 
+Public-only apps may publish registry entries and public Payment Endpoints
+before the identity-wide Noise key is initialized. Private capabilities require
+a local identity secret and initialize the registry's immutable Noise key.
+
 Multiple app processes using the same identity must also use the same durable
 SDK state and serialize updates to the shared Encrypted Link checkpoint. The
 storage contract can represent that shared logical state. Concurrent

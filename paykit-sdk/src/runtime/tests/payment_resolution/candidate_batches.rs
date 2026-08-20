@@ -61,7 +61,8 @@ fn test_app_preference_rank_uses_endpoint_then_identity_defaults() {
         receipts: true,
         outgoing_payments: true,
     };
-    let mut registry = paykit_lib::PaykitAppRegistry::new(pubky::Keypair::random().public_key());
+    let mut registry =
+        paykit_lib::PaykitAppRegistry::new(Some(pubky::Keypair::random().public_key()));
     for (app_id, name) in [
         (bitkit.clone(), "Bitkit"),
         (server.clone(), "Server"),
@@ -96,7 +97,8 @@ fn test_public_app_load_order_prioritizes_configured_defaults() {
         receipts: true,
         outgoing_payments: true,
     };
-    let mut registry = paykit_lib::PaykitAppRegistry::new(pubky::Keypair::random().public_key());
+    let mut registry =
+        paykit_lib::PaykitAppRegistry::new(Some(pubky::Keypair::random().public_key()));
     for (app_id, name) in [
         (alpha.clone(), "Alpha"),
         (default.clone(), "Default"),

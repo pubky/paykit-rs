@@ -177,8 +177,9 @@ pub struct ValidatedStorageState {
 }
 
 impl ValidatedStorageState {
-    pub(crate) fn new(state: StorageState) -> Self {
-        Self { state }
+    pub(crate) fn new(state: StorageState) -> Result<Self> {
+        validation::validate_storage_state(&state)?;
+        Ok(Self { state })
     }
 
     /// Consume the validated wrapper and return the storage state.
@@ -556,7 +557,7 @@ impl SdkBackupState {
             receipt_issuance_records,
         };
 
-        Ok((ValidatedStorageState::new(state), report))
+        Ok((ValidatedStorageState::new(state)?, report))
     }
 
     fn validate(&self, current_identity: Option<&IdentityState>) -> Result<()> {

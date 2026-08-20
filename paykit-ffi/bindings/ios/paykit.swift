@@ -7460,12 +7460,12 @@ public func FfiConverterTypePaykitAppCapabilities_lower(_ value: PaykitAppCapabi
  */
 public struct PaykitAppRegistry {
     /**
-     * Identity-wide Noise public key as raw z32 text.
+     * Identity-wide Noise public key as raw z32 text, when initialized.
      *
-     * This is not a Pubky identity key and must not be passed through Pubky
-     * public-key normalization helpers.
+     * Public-only registries may omit this value. This is not a Pubky identity
+     * key and must not be passed through Pubky public-key normalization helpers.
      */
-    public var noisePublicKey: String
+    public var noisePublicKey: String?
     /**
      * Registered applications in App ID order.
      */
@@ -7483,11 +7483,11 @@ public struct PaykitAppRegistry {
     // declare one manually.
     public init(
         /**
-         * Identity-wide Noise public key as raw z32 text.
+         * Identity-wide Noise public key as raw z32 text, when initialized.
          *
-         * This is not a Pubky identity key and must not be passed through Pubky
-         * public-key normalization helpers.
-         */noisePublicKey: String,
+         * Public-only registries may omit this value. This is not a Pubky identity
+         * key and must not be passed through Pubky public-key normalization helpers.
+         */noisePublicKey: String?,
         /**
          * Registered applications in App ID order.
          */apps: [PaykitApp],
@@ -7545,7 +7545,7 @@ public struct FfiConverterTypePaykitAppRegistry: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaykitAppRegistry {
         return
             try PaykitAppRegistry(
-                noisePublicKey: FfiConverterString.read(from: &buf),
+                noisePublicKey: FfiConverterOptionString.read(from: &buf),
                 apps: FfiConverterSequenceTypePaykitApp.read(from: &buf),
                 defaultAppId: FfiConverterOptionString.read(from: &buf),
                 defaultAppsByEndpoint: FfiConverterDictionaryStringString.read(from: &buf)
@@ -7553,7 +7553,7 @@ public struct FfiConverterTypePaykitAppRegistry: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: PaykitAppRegistry, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.noisePublicKey, into: &buf)
+        FfiConverterOptionString.write(value.noisePublicKey, into: &buf)
         FfiConverterSequenceTypePaykitApp.write(value.apps, into: &buf)
         FfiConverterOptionString.write(value.defaultAppId, into: &buf)
         FfiConverterDictionaryStringString.write(value.defaultAppsByEndpoint, into: &buf)

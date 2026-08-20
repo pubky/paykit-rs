@@ -55,6 +55,10 @@ impl TryFrom<FfiPrivatePaymentEndpointReservation> for PrivatePaymentEndpointRes
             value.expires_at,
             value.attribution.export_fields(),
         )
+        .map_err(|err| paykit_sdk::PaykitSdkError::PaymentAdapter {
+            context: "payment adapter returned an invalid private endpoint reservation".into(),
+            source: Some(anyhow::Error::new(err)),
+        })
     }
 }
 

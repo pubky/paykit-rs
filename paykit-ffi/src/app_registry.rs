@@ -38,11 +38,11 @@ pub struct FfiPaykitApp {
 /// Public application registry for one Paykit identity.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiPaykitAppRegistry {
-    /// Identity-wide Noise public key as raw z32 text.
+    /// Identity-wide Noise public key as raw z32 text, when initialized.
     ///
-    /// This is not a Pubky identity key and must not be passed through Pubky
-    /// public-key normalization helpers.
-    pub noise_public_key: String,
+    /// Public-only registries may omit this value. This is not a Pubky identity
+    /// key and must not be passed through Pubky public-key normalization helpers.
+    pub noise_public_key: Option<String>,
     /// Registered applications in App ID order.
     pub apps: Vec<FfiPaykitApp>,
     /// Default application for generic payment routing.
@@ -200,7 +200,7 @@ impl From<PaykitAppRegistry> for FfiPaykitAppRegistry {
             .collect::<Vec<_>>();
         apps.sort_by(|left, right| left.app_id.cmp(&right.app_id));
         Self {
-            noise_public_key: value.noise_public_key().z32(),
+            noise_public_key: value.noise_public_key().map(pubky::PublicKey::z32),
             apps,
             default_app_id: value.default_app_id().map(ToString::to_string),
             default_apps_by_endpoint: value
@@ -237,7 +237,7 @@ mod tests {
             receipts: true,
             outgoing_payments: true,
         };
-        let mut registry = PaykitAppRegistry::new(pubky::Keypair::random().public_key());
+        let mut registry = PaykitAppRegistry::new(Some(pubky::Keypair::random().public_key()));
         registry
             .register_app(
                 bitkit_id.clone(),
@@ -251,6 +251,7 @@ mod tests {
 
         let ffi = FfiPaykitAppRegistry::from(registry);
 
+        assert!(ffi.noise_public_key.is_some());
         assert_eq!(ffi.apps.len(), 1);
         assert_eq!(ffi.apps[0].app_id, "bitkit");
         assert_eq!(ffi.apps[0].display_name, "Bitkit");
@@ -262,5 +263,12 @@ mod tests {
                 .map(String::as_str),
             Some("bitkit")
         );
+    }
+
+    #[test]
+    fn test_app_registry_conversion_preserves_uninitialized_noise_key() {
+        let ffi = FfiPaykitAppRegistry::from(PaykitAppRegistry::new(None));
+
+        assert!(ffi.noise_public_key.is_none());
     }
 }

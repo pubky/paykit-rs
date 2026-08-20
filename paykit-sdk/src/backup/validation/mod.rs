@@ -240,6 +240,11 @@ fn validate_live_app_state(state: &StorageState) -> Result<()> {
 }
 
 fn validate_live_link_state(state: &StorageState) -> Result<()> {
+    if state.next_peer_link_operation_lease_id == u64::MAX {
+        return Err(invalid_live_state(
+            "peer link operation lease id counter is exhausted",
+        ));
+    }
     let mut lease_ids = HashSet::new();
     for lease in state.peer_link_operation_leases.values() {
         if !lease_ids.insert(lease.lease_id) {
@@ -308,6 +313,9 @@ fn validate_next_id(
     allocated_ids: impl Iterator<Item = u64>,
     context: &'static str,
 ) -> Result<()> {
+    if next_id == u64::MAX {
+        return Err(invalid_live_state("storage id counter is exhausted"));
+    }
     if allocated_ids.into_iter().any(|id| id >= next_id) {
         return Err(invalid_live_state(context));
     }

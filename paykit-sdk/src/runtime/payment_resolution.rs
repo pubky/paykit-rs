@@ -255,7 +255,7 @@ where
             match self
                 .observe_remote_recovery_marker_for_cached_private_state(
                     &counterparty,
-                    session_access.as_ref(),
+                    session_access.as_deref(),
                 )
                 .await
             {
@@ -273,6 +273,8 @@ where
                 .private_resolution_allowed_for_peer(&counterparty, &mut state)
                 .await?;
         }
+
+        drop(session_access);
 
         let (app_registry, authorized_private_apps) = self
             .private_app_authorization_context(&counterparty)

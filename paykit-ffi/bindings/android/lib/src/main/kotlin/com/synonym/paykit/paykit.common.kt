@@ -1531,12 +1531,12 @@ public data class PaykitAppCapabilities (
 @kotlinx.serialization.Serializable
 public data class PaykitAppRegistry (
     /**
-     * Identity-wide Noise public key as raw z32 text.
+     * Identity-wide Noise public key as raw z32 text, when initialized.
      *
-     * This is not a Pubky identity key and must not be passed through Pubky
-     * public-key normalization helpers.
+     * Public-only registries may omit this value. This is not a Pubky identity
+     * key and must not be passed through Pubky public-key normalization helpers.
      */
-    val `noisePublicKey`: kotlin.String,
+    val `noisePublicKey`: kotlin.String?,
     /**
      * Registered applications in App ID order.
      */

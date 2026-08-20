@@ -481,118 +481,6 @@ where
     enqueue_payment_request_event(storage, counterparty, app_id, &event, now).await
 }
 
-/// Atomically queue the first local acceptance or rejection for a request.
-#[cfg(test)]
-pub(crate) async fn enqueue_payment_request_response<S>(
-    storage: &S,
-    counterparty: PubkyPublicKey,
-    app_id: &paykit_lib::PaykitAppId,
-    event: &PaymentRequestEvent,
-    now: DateTime<Utc>,
-) -> Result<OutboundPrivateMessageRecord>
-where
-    S: StorageAdapter,
-{
-    if !matches!(
-        event,
-        PaymentRequestEvent::Acceptance(_) | PaymentRequestEvent::Rejection(_)
-    ) {
-        return Err(PaykitSdkError::Protocol {
-            context: "Payment Request response must be an acceptance or rejection".into(),
-            source: None,
-        });
-    }
-    enqueue_first_local_payment_request_transition(storage, counterparty, app_id, event, now).await
-}
-
-#[cfg(test)]
-async fn enqueue_first_local_payment_request_transition<S>(
-    storage: &S,
-    counterparty: PubkyPublicKey,
-    app_id: &paykit_lib::PaykitAppId,
-    event: &PaymentRequestEvent,
-    now: DateTime<Utc>,
-) -> Result<OutboundPrivateMessageRecord>
-where
-    S: StorageAdapter,
-{
-    let payment_request_id = event.payment_request_id().clone();
-    let raw_json = serialize_payment_request_event(app_id, event)?;
-    let kind = match event {
-        PaymentRequestEvent::Acceptance(_) => "paykit.payment_request_acceptance",
-        PaymentRequestEvent::Rejection(_) => "paykit.payment_request_rejection",
-        PaymentRequestEvent::Cancellation(_) => "paykit.payment_request_cancellation",
-        _ => {
-            return Err(PaykitSdkError::Protocol {
-                context: "local Payment Request transition must be an acceptance, rejection, or cancellation"
-                    .into(),
-                source: None,
-            });
-        }
-    }
-    .to_owned();
-    let is_cancellation = matches!(event, PaymentRequestEvent::Cancellation(_));
-    let app_id = app_id.clone();
-
-    storage
-        .transaction(move |tx| {
-            require_paykit_app_capability(tx, &app_id, PrivateMessageKind::PaymentRequest)?;
-            let conflicting_transition = tx
-                .outbound_private_messages(&counterparty)
-                .into_iter()
-                .filter(|message| {
-                    !matches!(
-                        message.status,
-                        OutboundPrivateMessageStatus::Invalid
-                            | OutboundPrivateMessageStatus::Superseded
-                    )
-                })
-                .any(|message| {
-                    let stored_app_id = message.app_id.clone();
-                    let parsed = parse_payment_request_event_message(&PrivateApplicationMessage {
-                        version: Some(1),
-                        kind: Some(message.kind),
-                        app_id: Some(message.app_id.to_string()),
-                        raw_json: message.raw_json,
-                    });
-                    parsed.is_some_and(|parsed| {
-                        parsed.parsed_event().is_some_and(|stored| {
-                            if stored.payment_request_id() != &payment_request_id {
-                                return false;
-                            }
-                            match stored {
-                                PaymentRequestEvent::Acceptance(_) if is_cancellation => {
-                                    stored_app_id != app_id
-                                }
-                                PaymentRequestEvent::Acceptance(_)
-                                | PaymentRequestEvent::Rejection(_)
-                                | PaymentRequestEvent::Cancellation(_) => true,
-                                _ => false,
-                            }
-                        })
-                    })
-                });
-            if conflicting_transition {
-                return Err(PaykitSdkError::Policy {
-                    context: format!(
-                        "Payment Request {payment_request_id} already has a local transition"
-                    ),
-                    source: None,
-                });
-            }
-            Ok(
-                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
-                    counterparty,
-                    app_id,
-                    kind,
-                    raw_json,
-                    now,
-                )),
-            )
-        })
-        .await
-}
-
 /// Atomically validate current request state and queue one local action.
 pub(crate) async fn enqueue_checked_payment_request_action<S>(
     storage: &S,
@@ -825,7 +713,7 @@ where
     S: StorageAdapter,
 {
     let event = PaymentRequestEvent::Cancellation(event.clone());
-    enqueue_first_local_payment_request_transition(storage, counterparty, app_id, &event, now).await
+    enqueue_payment_request_event(storage, counterparty, app_id, &event, now).await
 }
 
 /// Queue a raw Payment Proof for outbound delivery.

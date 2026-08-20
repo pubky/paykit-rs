@@ -266,9 +266,11 @@ pub trait PubkySessionProvider {
 `PubkySessionAccess` provides the live authenticated `PubkySession`, Pubky
 client for counterparty homeserver access, and an optional
 `PubkyLocalSecretKey`. The SDK derives the identity-wide Paykit Noise key from
-the local Pubky secret. Public-only session access can use public workflows but
-cannot establish or advance Encrypted Links. The SDK derives and persists
-public `IdentityState` from that access during initialization.
+the local Pubky secret using BLAKE3 `derive_key` with context `paykit/noise`
+and the 32 Pubky secret-key bytes as key material. Public-only session access
+can use public workflows but cannot establish or advance Encrypted Links. The
+SDK derives and persists public `IdentityState` from that access during
+initialization.
 
 If `load_session_access` returns `None`, no live session access is currently
 available. Ordinary refreshes must preserve the shared Paykit state and block
@@ -376,6 +378,11 @@ apps. Registries are limited to 64 KiB, 64 applications, and 256
 endpoint-specific defaults. Registry updates replace the complete document;
 concurrent writers need homeserver conditional writes so one app cannot
 overwrite another app's newer registration.
+
+`noise_public_key` may be omitted while only public-capable apps are
+registered. The first private-capable app initializes it from the normative
+Noise-key derivation above. After initialization it is immutable, and private
+capabilities cannot be registered without it.
 
 An app must successfully publish its registry entry before creating
 app-attributed private work. Removal preflight reports outstanding requests,

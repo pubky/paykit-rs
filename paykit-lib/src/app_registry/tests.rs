@@ -11,8 +11,18 @@ fn capabilities() -> PaykitAppCapabilities {
     }
 }
 
+fn public_only_capabilities() -> PaykitAppCapabilities {
+    PaykitAppCapabilities {
+        private_payments: false,
+        payment_requests: false,
+        receipts: false,
+        outgoing_payments: true,
+    }
+}
+
 fn registry() -> PaykitAppRegistry {
-    let mut registry = PaykitAppRegistry::new(pubky::Keypair::from_secret(&[7; 32]).public_key());
+    let mut registry =
+        PaykitAppRegistry::new(Some(pubky::Keypair::from_secret(&[7; 32]).public_key()));
     registry
         .register_app(
             PaykitAppId::new("bitkit").unwrap(),
@@ -46,6 +56,37 @@ fn test_app_registry_json_round_trips() {
         value["default_apps_by_endpoint"]["btc-lightning-bolt11"],
         "bitkit"
     );
+}
+
+#[test]
+fn test_public_only_registry_round_trips_without_noise_key() {
+    let mut registry = PaykitAppRegistry::new(None);
+    registry
+        .register_app(
+            PaykitAppId::new("public-wallet").unwrap(),
+            PaykitApp::new("Public Wallet", public_only_capabilities()).unwrap(),
+        )
+        .unwrap();
+
+    let json = serialize_paykit_app_registry(&registry).unwrap();
+    let parsed = parse_paykit_app_registry_json(&json).unwrap();
+
+    assert!(parsed.noise_public_key().is_none());
+    assert_eq!(parsed, registry);
+}
+
+#[test]
+fn test_registry_requires_noise_key_for_private_capabilities() {
+    let mut registry = PaykitAppRegistry::new(None);
+
+    let error = registry
+        .register_app(
+            PaykitAppId::new("bitkit").unwrap(),
+            PaykitApp::new("Bitkit", capabilities()).unwrap(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, PaykitError::Validation(_)));
 }
 
 #[test]
@@ -137,7 +178,8 @@ fn test_remove_app_clears_defaults() {
 
 #[test]
 fn test_app_registry_rejects_too_many_local_apps() {
-    let mut registry = PaykitAppRegistry::new(pubky::Keypair::from_secret(&[7; 32]).public_key());
+    let mut registry =
+        PaykitAppRegistry::new(Some(pubky::Keypair::from_secret(&[7; 32]).public_key()));
     for index in 0..PAYKIT_APP_REGISTRY_MAX_APPS {
         registry
             .register_app(

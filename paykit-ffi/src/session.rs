@@ -59,6 +59,7 @@ pub struct FfiPubkySessionAccess {
     pub(crate) session_secret: String,
     pub(crate) local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
     pub(crate) live_access: Option<PubkySessionAccess>,
+    pub(crate) live_client_config: Option<FfiPubkyClientConfig>,
 }
 
 impl fmt::Debug for FfiPubkySessionAccess {
@@ -73,6 +74,7 @@ impl fmt::Debug for FfiPubkySessionAccess {
                     .map(|key| format!("<redacted:{} bytes>", key.bytes.len())),
             )
             .field("live_access", &self.live_access.as_ref().map(|_| "<live>"))
+            .field("live_client_config", &self.live_client_config)
             .finish()
     }
 }
@@ -89,6 +91,7 @@ impl FfiPubkySessionAccess {
             session_secret,
             local_secret_key,
             live_access: None,
+            live_client_config: None,
         }
     }
 
@@ -233,6 +236,7 @@ pub trait FfiSdkPubkySessionProvider: Send + Sync {
 pub(crate) struct FfiSdkPubkySessionProviderAdapter {
     pub(crate) provider: Arc<dyn FfiSdkPubkySessionProvider>,
     pub(crate) pubky: Pubky,
+    pub(crate) pubky_client: FfiPubkyClientConfig,
 }
 
 #[async_trait]
@@ -253,10 +257,12 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
             .transpose()
             .map_err(|err| ffi_error_to_sdk(err, "load local Pubky secret key"))?;
 
-        if let Some(live_access) = &access.live_access {
-            let mut live_access = live_access.clone();
-            live_access.local_secret_key = local_secret_key;
-            return Ok(Some(live_access));
+        if access.live_client_config.as_ref() == Some(&self.pubky_client) {
+            if let Some(live_access) = &access.live_access {
+                let mut live_access = live_access.clone();
+                live_access.local_secret_key = local_secret_key;
+                return Ok(Some(live_access));
+            }
         }
 
         let session =
@@ -293,6 +299,7 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
 #[derive(uniffi::Object)]
 pub struct FfiPubkySessionBootstrap {
     inner: PubkySessionBootstrap,
+    pubky_client: FfiPubkyClientConfig,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -308,8 +315,10 @@ impl FfiPubkySessionBootstrap {
     pub fn with_pubky_client_config(
         pubky_client: FfiPubkyClientConfig,
     ) -> Result<Self, PaykitFfiError> {
+        let inner = PubkySessionBootstrap::with_pubky(pubky_from_config(&pubky_client)?);
         Ok(Self {
-            inner: PubkySessionBootstrap::with_pubky(pubky_from_config(&pubky_client)?),
+            inner,
+            pubky_client,
         })
     }
 
@@ -332,7 +341,11 @@ impl FfiPubkySessionBootstrap {
                 &required_capabilities,
             )
             .await?;
-        Ok(bootstrap_result_to_ffi(result, Some(secret)))
+        Ok(bootstrap_result_to_ffi(
+            result,
+            Some(secret),
+            &self.pubky_client,
+        ))
     }
 
     /// Sign in with a local Pubky secret key and return session access material.
@@ -343,7 +356,11 @@ impl FfiPubkySessionBootstrap {
     ) -> Result<FfiPubkySessionBootstrapResult, PaykitFfiError> {
         let secret = local_secret_from_bytes(local_secret_key.export_bytes())?;
         let result = self.inner.sign_in(&secret, &required_capabilities).await?;
-        Ok(bootstrap_result_to_ffi(result, Some(secret)))
+        Ok(bootstrap_result_to_ffi(
+            result,
+            Some(secret),
+            &self.pubky_client,
+        ))
     }
 
     /// Import an exported Pubky session secret.
@@ -360,7 +377,7 @@ impl FfiPubkySessionBootstrap {
             .inner
             .import_session(&session_secret, secret.clone(), &required_capabilities)
             .await?;
-        Ok(bootstrap_result_to_ffi(result, secret))
+        Ok(bootstrap_result_to_ffi(result, secret, &self.pubky_client))
     }
 
     /// Start a sign-in auth flow for an external signer.
@@ -370,6 +387,7 @@ impl FfiPubkySessionBootstrap {
     ) -> Result<Arc<FfiPubkyAuthRequest>, PaykitFfiError> {
         Ok(Arc::new(FfiPubkyAuthRequest {
             inner: AsyncMutex::new(Some(self.inner.start_sign_in_auth(&capabilities).await?)),
+            pubky_client: self.pubky_client.clone(),
         }))
     }
 
@@ -387,6 +405,7 @@ impl FfiPubkySessionBootstrap {
                     .start_sign_up_auth(&capabilities, &homeserver, signup_token)
                     .await?,
             )),
+            pubky_client: self.pubky_client.clone(),
         }))
     }
 
@@ -402,6 +421,7 @@ impl FfiPubkySessionBootstrap {
                     .resume_auth(&authorization_url, &expected_capabilities)
                     .await?,
             )),
+            pubky_client: self.pubky_client.clone(),
         }))
     }
 
@@ -452,6 +472,7 @@ impl FfiPubkySessionBootstrap {
 #[derive(uniffi::Object)]
 pub struct FfiPubkyAuthRequest {
     inner: AsyncMutex<Option<PubkyAuthRequest>>,
+    pubky_client: FfiPubkyClientConfig,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -483,7 +504,7 @@ impl FfiPubkyAuthRequest {
         let result = request
             .complete(secret.clone(), &required_capabilities)
             .await?;
-        Ok(bootstrap_result_to_ffi(result, secret))
+        Ok(bootstrap_result_to_ffi(result, secret, &self.pubky_client))
     }
 }
 
@@ -606,6 +627,7 @@ pub(crate) fn secret_to_ffi(secret: &PubkyLocalSecretKey) -> Arc<FfiPubkyLocalSe
 fn bootstrap_result_to_ffi(
     result: PubkySessionBootstrapResult,
     local_secret_key: Option<PubkyLocalSecretKey>,
+    pubky_client: &FfiPubkyClientConfig,
 ) -> FfiPubkySessionBootstrapResult {
     let session_secret = result.export_session_secret().into_inner();
     let live_access = result.access.clone();
@@ -614,6 +636,7 @@ fn bootstrap_result_to_ffi(
             session_secret,
             local_secret_key: local_secret_key.as_ref().map(secret_to_ffi),
             live_access: Some(live_access),
+            live_client_config: Some(pubky_client.clone()),
         }),
         public_key: app_public_key(&result.public_key),
         capability: result.capability.into(),

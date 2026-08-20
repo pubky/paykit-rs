@@ -16,7 +16,7 @@ fn app_capabilities() -> PaykitAppCapabilities {
 #[tokio::test]
 async fn test_app_registry_round_trips_through_public_storage() {
     let setup = TestSetup::new().await;
-    let mut registry = PaykitAppRegistry::new(Keypair::random().public_key());
+    let mut registry = PaykitAppRegistry::new(Some(Keypair::random().public_key()));
     registry
         .register_app(
             app_id(),
