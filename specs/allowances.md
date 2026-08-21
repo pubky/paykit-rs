@@ -10,7 +10,7 @@ This document describes the product model and ownership boundaries for Allowance
 
 ## What an Allowance is
 
-An Allowance is shared permission from an Allower to an Allowee. The Allower keeps control of the funds and approves the terms in advance. The Allowee can then request payments that fit those terms.
+An Allowance is privately shared permission from an Allower to an Allowee. The Allower keeps control of the funds and approves the terms in advance. The Allowee can then request payments that fit those terms.
 
 An Allowance creates no payment by itself and does not schedule payments. It is used only when the Allowee submits a payment instruction. The Payee named by that instruction may be the Allowee or another party.
 
@@ -30,8 +30,6 @@ flowchart LR
     B -- "payment instruction through Paykit" --> W["Allower's wallet<br/>checks and decides"]
     W -- "if approved, pushes payment" --> P["Payee<br/>Allowee or another party"]
 ```
-
-Here, **payment instruction** is plain language for a request under an Allowance. A future protocol specification will define its final name and message shape.
 
 ## Relationship to Payment Requests and Subscriptions
 
@@ -59,15 +57,14 @@ Every configured Allowance rule must pass. V1 excludes OR groups, ordered allow 
 
 Rules may cover:
 
-- an inclusive amount range for each payment;
-- total amount or instruction count within a period;
-- a lifetime amount limit;
-- activation and expiry times;
-- whether the Allowee may pay itself, other Payees, or both;
-- restrictions on Payees; and
-- allowed Payment Endpoint Identifiers.
+- an inclusive amount range for each payment
+- total amount or instruction count within a period
+- a lifetime amount limit
+- activation and expiry times
+- restrictions on Payees
+- allowed Payment Endpoint Identifiers
 
-Each Allowance uses one asset. Amounts reuse Payment Amount and use exact decimal arithmetic. Asset values must match exactly; Paykit does not convert assets or define asset precision.
+Each Allowance uses one asset for shared limits and usage accounting. A payment instruction's Payment Amount must use that asset, and the Allower's wallet enforces the match. The wallet may fund or route the payment using another asset, but Paykit does not define conversion or compare usage across assets. Amounts reuse Payment Amount and use exact decimal arithmetic. Asset values must match exactly; Paykit does not define asset precision.
 
 Period limits may use anchored periods or rolling windows. Months and years are UTC calendar periods with deterministic end-of-month handling. Rolling windows use fixed minutes, hours, days, or weeks.
 
@@ -103,7 +100,7 @@ Paykit Library remains stateless and payment-method-neutral: it does not evaluat
 
 An Allowance ID is a correlation identifier, not a bearer credential.
 
-## Decision log
+## Decision log (dont worry about manually reviewing this)
 
 This is the audit trail for the product discussion, not required reading for the main concept. Later decisions take precedence where noted.
 
