@@ -7,6 +7,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc46] - 2026-08-20
+
+### Fixed
+- Configured the canonical Git LFS endpoint so Swift Package Manager can fetch
+  Android native artifacts through its local source-control mirror.
+
+## [0.1.0-rc45] - 2026-08-20
+
+### Fixed
+- Republished complete iOS and Android binding artifacts so package consumers
+  can resolve the release from a clean cache.
+
+## [0.1.0-rc44] - 2026-08-20
+
+### Fixed
+- Kept locally accepted or rejected incoming Payment Requests out of the
+  actionable queue after their private response was queued locally.
+
 ## [0.1.0-rc43] - 2026-08-05
 
 ### Fixed
@@ -392,7 +410,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc43...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc46...HEAD
+[0.1.0-rc46]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc45...v0.1.0-rc46
+[0.1.0-rc45]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc44...v0.1.0-rc45
+[0.1.0-rc44]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc43...v0.1.0-rc44
 [0.1.0-rc43]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc43
 [0.1.0-rc42]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc42
 [0.1.0-rc41]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc41
