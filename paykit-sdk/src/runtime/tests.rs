@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use super::*;
@@ -88,6 +91,27 @@ impl PubkySessionProvider for FailingClearSessionProvider {
             context: "failed to clear Pubky session access".into(),
             source: None,
         })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingClearSessionProvider {
+    cleared: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl PubkySessionProvider for RecordingClearSessionProvider {
+    async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
+        Ok(None)
+    }
+
+    async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+        Ok(None)
+    }
+
+    async fn clear_session_access(&self) -> Result<()> {
+        self.cleared.store(true, Ordering::SeqCst);
+        Ok(())
     }
 }
 

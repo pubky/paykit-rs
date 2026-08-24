@@ -81,7 +81,7 @@ pub use pubky_noise;
 #[doc(inline)]
 pub use pubky_routing::{
     PAYKIT_APP_REGISTRY_PATH, PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX, PAYKIT_PATH_PREFIX,
-    PAYKIT_PRIVATE_PATH_PREFIX,
+    PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_SHARED_STATE_PATH,
 };
 #[doc(inline)]
 pub use receipt::{

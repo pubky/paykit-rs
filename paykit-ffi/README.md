@@ -16,6 +16,9 @@ on low-level `paykit-lib` protocol bindings.
 ### Runtime
 
 - `PaykitSdk` — stateful SDK runtime handle.
+- `PaykitSdk.withPubkySharedState` and
+  `PaykitSdk.withPaymentAdapterAndPubkySharedState` — use the first-party
+  encrypted Pubky state instead of platform blob callbacks.
 - `SdkStateBlobStore` — platform callback interface for opaque SDK state
   blob load/save.
 - `SdkPubkySessionProvider` — platform callback interface for live Pubky
@@ -25,7 +28,7 @@ on low-level `paykit-lib` protocol bindings.
   construction.
 - `PaykitSdk.initialize`, `identityStatus`, and `signOut` — app-facing
   account/session lifecycle for the current Paykit runtime.
-- `PaykitSdk.stateRevision` — return the platform SDK state revision so
+- `PaykitSdk.stateRevision` — return the latest observed SDK state revision so
   apps can detect when SDK-managed state changed.
 - `PubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
@@ -265,8 +268,9 @@ local secret.
 
 `PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.
-`PaykitSdk.stateRevision` lets apps compare the platform state revision
-before and after SDK-mutating workflows to mark app backups dirty.
+`PaykitSdk.stateRevision` returns the latest revision observed by the selected
+storage mode. Callback storage can compare it before and after SDK-mutating
+workflows to mark app backups dirty.
 `encodeSdkStateBlobSnapshot` and `decodeSdkStateBlobSnapshot` are convenience
 helpers for apps that store the opaque state blob and revision in one platform
 record.
@@ -290,18 +294,27 @@ sdk.initialize()
 status = sdk.identityStatus()
 ```
 
+Apps that share one identity-wide Pubky state can instead construct the handle
+with `withPaymentAdapterAndPubkySharedState`. This mode does not use
+`SdkStateBlobStore` callbacks. It requires active session access with the
+matching local identity secret for every operation, and independent runtimes
+must serialize writes until the homeserver provides conditional writes or
+durable locking.
+
 Use `identityStatus` to gate product actions. `publicKey` identifies the last
 initialized identity when known. `SignedOut` means Pubky-backed workflows must
-wait even though the identity and its Paykit state remain available;
-`PublicOnly` permits public workflows, and `PrivateLinkCapable` also permits
-Encrypted Link workflows.
+wait even though the identity and its Paykit state remain available. With
+callback storage, `PublicOnly` permits public workflows and
+`PrivateLinkCapable` also permits Encrypted Link workflows. Pubky shared-state
+storage requires `PrivateLinkCapable` access because decrypting state requires
+the local identity secret.
 
-`SdkStateBlobStore` must persist every blob save atomically. Every runtime for
-the same Pubky identity must resolve to the same logical blob. A protected
-device-local blob is suitable only while one process owns the runtime. If the
-app also stores the SDK blob inside a larger app backup record, compare `stateRevision`
-before and after SDK-mutating workflows and mark the app backup dirty when it
-changes.
+When callback storage is selected, `SdkStateBlobStore` must persist every blob
+save atomically. Every runtime for the same Pubky identity must resolve to the
+same logical blob. A protected device-local blob is suitable only while one
+process owns the runtime. If the app also stores the SDK blob inside a larger
+app backup record, compare `stateRevision` before and after SDK-mutating
+workflows and mark the app backup dirty when it changes.
 
 State-store callbacks run while the SDK holds its per-handle storage lock. They
 must only load or save the blob and must not call back into that SDK handle.

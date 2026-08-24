@@ -4,12 +4,199 @@ use paykit_lib::{
     PaymentRequestTerms, Recurrence, RecurrenceUnit,
 };
 use paykit_sdk::{
-    PaykitSdkError, PaymentRequestLifecycleState, PrivatePaymentEndpointReservation,
-    PrivateReceivingDetail, PubkyIdentityCapability, StorageAdapter,
+    PaykitApp, PaykitAppCapabilities, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
+    PaymentRequestLifecycleState, PrivatePaymentEndpointReservation, PrivateReceivingDetail,
+    PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionBootstrap,
+    PubkySharedStateStorage, StorageAdapter, PAYKIT_SESSION_CAPABILITIES,
 };
 use serde_json::Map as JsonMap;
 
-use crate::harness::{app_id, linked_two_party};
+use crate::harness::{
+    app_id, build_testnet, linked_two_party, TestnetPaymentAdapter, TestnetSessionProvider,
+};
+
+#[tokio::test]
+async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sign_out() {
+    let testnet = build_testnet().await;
+    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap())
+        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .unwrap()
+        .access;
+
+    let mut public_only_access = access.clone();
+    public_only_access.local_secret_key = None;
+    let public_only_storage =
+        PubkySharedStateStorage::new(TestnetSessionProvider::new(public_only_access));
+    let error = public_only_storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        PaykitSdkError::Identity { context, .. }
+            if context.contains("requires the local identity secret")
+    ));
+
+    let bitkit_provider = TestnetSessionProvider::new(access.clone());
+    let bitkit = PaykitSdk::new(
+        PubkySharedStateStorage::new(bitkit_provider.clone()),
+        bitkit_provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    bitkit.initialize().await.unwrap();
+    bitkit.publish_paykit_app(test_app("Bitkit")).await.unwrap();
+
+    let server_provider = TestnetSessionProvider::new(access);
+    let server_storage = PubkySharedStateStorage::new(server_provider.clone());
+    let server = PaykitSdk::new(
+        server_storage.clone(),
+        server_provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("paykit-server").unwrap(),
+    );
+    server.initialize().await.unwrap();
+    server
+        .publish_paykit_app(test_app("Paykit Server"))
+        .await
+        .unwrap();
+
+    let before_sign_out = server_storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap();
+    assert_eq!(before_sign_out.registered_paykit_apps.len(), 2);
+
+    bitkit.sign_out().await.unwrap();
+
+    let after_sign_out = server_storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap();
+    assert_eq!(after_sign_out, before_sign_out);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_pubky_shared_state_rejects_a_stale_writer() {
+    let testnet = build_testnet().await;
+    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap())
+        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .unwrap()
+        .access;
+    let first_provider = TestnetSessionProvider::new(access.clone());
+    let first = PubkySharedStateStorage::new(first_provider.clone());
+    let second = PubkySharedStateStorage::new(TestnetSessionProvider::new(access));
+    let sdk = PaykitSdk::new(
+        first.clone(),
+        first_provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    sdk.initialize().await.unwrap();
+
+    let (loaded_tx, loaded_rx) = std::sync::mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+    let stale_write = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(first.transaction(move |tx| {
+                loaded_tx.send(()).unwrap();
+                continue_rx.recv().unwrap();
+                let mut identity = tx.load_identity_state().unwrap();
+                identity.initialized_at += chrono::Duration::seconds(2);
+                tx.save_identity_state(identity);
+                Ok(())
+            }))
+    });
+    loaded_rx.recv().unwrap();
+    second
+        .transaction(|tx| {
+            let mut identity = tx.load_identity_state().unwrap();
+            identity.initialized_at += chrono::Duration::seconds(1);
+            tx.save_identity_state(identity);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    continue_tx.send(()).unwrap();
+
+    let error = stale_write.join().unwrap().unwrap_err();
+    assert!(matches!(
+        error,
+        PaykitSdkError::Storage { context, .. }
+            if context.contains("changed during transaction")
+    ));
+}
+
+#[tokio::test]
+async fn test_pubky_shared_state_rejects_a_missing_previously_observed_resource() {
+    let testnet = build_testnet().await;
+    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap())
+        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .unwrap()
+        .access;
+    let provider = TestnetSessionProvider::new(access.clone());
+    let storage = PubkySharedStateStorage::new(provider.clone());
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    sdk.initialize().await.unwrap();
+    let observer = PubkySharedStateStorage::new(TestnetSessionProvider::new(access.clone()));
+    let callback_error = observer
+        .transaction(|_| -> paykit_sdk::Result<()> {
+            Err(PaykitSdkError::Policy {
+                context: "test callback failure".into(),
+                source: None,
+            })
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(callback_error, PaykitSdkError::Policy { .. }));
+    access
+        .session
+        .storage()
+        .delete(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap();
+
+    let error = observer
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        PaykitSdkError::Storage { context, .. }
+            if context.contains("previously observed Pubky shared state is missing")
+    ));
+}
+
+fn test_app(name: &str) -> PaykitApp {
+    PaykitApp::new(
+        name,
+        PaykitAppCapabilities {
+            private_payments: true,
+            payment_requests: true,
+            receipts: true,
+            outgoing_payments: true,
+        },
+    )
+    .unwrap()
+}
 
 #[tokio::test]
 async fn test_two_apps_concurrently_claim_one_payment_request_response() {

@@ -1493,6 +1493,14 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1820,7 +1828,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_sign_out() != 3191.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 21336.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 17936.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 59922.toShort()) {
@@ -1967,7 +1975,19 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_client_config() != 36484.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state() != 40170.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state_and_client_config() != 1168.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_client_config() != 13764.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state() != 14843.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config() != 2605.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_constructor_ffipaymentpayload_new() != 12481.toShort()) {
@@ -2439,7 +2459,19 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_client_config(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state_and_client_config(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_client_config(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_constructor_ffipaymentpayload_new(
@@ -2528,8 +2560,36 @@ internal object UniffiLib : Library {
         uniffiCallStatus: UniffiRustCallStatus,
     ): Pointer?
     @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state(
+        `sessionProvider`: Pointer?,
+        `paymentAdapter`: Pointer?,
+        `config`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state_and_client_config(
+        `sessionProvider`: Pointer?,
+        `paymentAdapter`: Pointer?,
+        `config`: RustBufferByValue,
+        `pubkyClient`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
     external fun uniffi_paykit_fn_constructor_ffipaykitsdk_with_pubky_client_config(
         `stateStore`: Pointer?,
+        `sessionProvider`: Pointer?,
+        `config`: RustBufferByValue,
+        `pubkyClient`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffipaykitsdk_with_pubky_shared_state(
+        `sessionProvider`: Pointer?,
+        `config`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config(
         `sessionProvider`: Pointer?,
         `config`: RustBufferByValue,
         `pubkyClient`: RustBufferByValue,
@@ -5979,7 +6039,7 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
-     * Return the current platform SDK state revision, when a state blob exists.
+     * Return the latest observed SDK state revision, when one exists.
      */
     @Throws(PaykitException::class)
     public override fun `stateRevision`(): kotlin.String? {
@@ -6245,6 +6305,47 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
 
 
         /**
+         * Create a Pubky shared-state runtime with payment adapter callbacks.
+         *
+         * Requires active session access with the matching local identity secret
+         * and `required_session_capabilities()`, plus externally serialized writes
+         * across independent runtimes.
+         */
+        @Throws(PaykitException::class)
+        public fun `withPaymentAdapterAndPubkySharedState`(`sessionProvider`: SdkPubkySessionProvider, `paymentAdapter`: SdkPaymentAdapter, `config`: PaykitSdkConfig): PaykitSdk {
+            return FfiConverterTypePaykitSdk.lift(uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state(
+                    FfiConverterTypeSdkPubkySessionProvider.lower(`sessionProvider`),
+                    FfiConverterTypeSdkPaymentAdapter.lower(`paymentAdapter`),
+                    FfiConverterTypePaykitSdkConfig.lower(`config`),
+                    uniffiRustCallStatus,
+                )
+            }!!)
+        }
+
+
+        /**
+         * Create a Pubky shared-state runtime with payment and client configuration.
+         *
+         * Requires active session access with the matching local identity secret
+         * and `required_session_capabilities()`, plus externally serialized writes
+         * across independent runtimes.
+         */
+        @Throws(PaykitException::class)
+        public fun `withPaymentAdapterAndPubkySharedStateAndClientConfig`(`sessionProvider`: SdkPubkySessionProvider, `paymentAdapter`: SdkPaymentAdapter, `config`: PaykitSdkConfig, `pubkyClient`: PubkyClientConfig): PaykitSdk {
+            return FfiConverterTypePaykitSdk.lift(uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state_and_client_config(
+                    FfiConverterTypeSdkPubkySessionProvider.lower(`sessionProvider`),
+                    FfiConverterTypeSdkPaymentAdapter.lower(`paymentAdapter`),
+                    FfiConverterTypePaykitSdkConfig.lower(`config`),
+                    FfiConverterTypePubkyClientConfig.lower(`pubkyClient`),
+                    uniffiRustCallStatus,
+                )
+            }!!)
+        }
+
+
+        /**
          * Create an SDK runtime with explicit Pubky client configuration.
          */
         @Throws(PaykitException::class)
@@ -6252,6 +6353,46 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
             return FfiConverterTypePaykitSdk.lift(uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
                 UniffiLib.uniffi_paykit_fn_constructor_ffipaykitsdk_with_pubky_client_config(
                     FfiConverterTypeSdkStateBlobStore.lower(`stateStore`),
+                    FfiConverterTypeSdkPubkySessionProvider.lower(`sessionProvider`),
+                    FfiConverterTypePaykitSdkConfig.lower(`config`),
+                    FfiConverterTypePubkyClientConfig.lower(`pubkyClient`),
+                    uniffiRustCallStatus,
+                )
+            }!!)
+        }
+
+
+        /**
+         * Create an SDK runtime with encrypted identity-wide state stored in Pubky.
+         *
+         * Every operation requires active session access with the matching local
+         * identity secret and `required_session_capabilities()`. Independent
+         * runtimes must serialize writes until the homeserver supports conditional
+         * writes or durable locking.
+         */
+        @Throws(PaykitException::class)
+        public fun `withPubkySharedState`(`sessionProvider`: SdkPubkySessionProvider, `config`: PaykitSdkConfig): PaykitSdk {
+            return FfiConverterTypePaykitSdk.lift(uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_constructor_ffipaykitsdk_with_pubky_shared_state(
+                    FfiConverterTypeSdkPubkySessionProvider.lower(`sessionProvider`),
+                    FfiConverterTypePaykitSdkConfig.lower(`config`),
+                    uniffiRustCallStatus,
+                )
+            }!!)
+        }
+
+
+        /**
+         * Create a Pubky shared-state runtime with explicit client configuration.
+         *
+         * Requires active session access with the matching local identity secret
+         * and `required_session_capabilities()`, plus externally serialized writes
+         * across independent runtimes.
+         */
+        @Throws(PaykitException::class)
+        public fun `withPubkySharedStateAndClientConfig`(`sessionProvider`: SdkPubkySessionProvider, `config`: PaykitSdkConfig, `pubkyClient`: PubkyClientConfig): PaykitSdk {
+            return FfiConverterTypePaykitSdk.lift(uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config(
                     FfiConverterTypeSdkPubkySessionProvider.lower(`sessionProvider`),
                     FfiConverterTypePaykitSdkConfig.lower(`config`),
                     FfiConverterTypePubkyClientConfig.lower(`pubkyClient`),

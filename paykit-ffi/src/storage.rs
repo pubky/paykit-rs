@@ -5,7 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use paykit_sdk::storage::{
-    run_storage_state_transaction, StorageAdapter, StorageState, StorageTransactionCallback,
+    decode_storage_state_blob, encode_storage_state_blob, run_storage_state_transaction,
+    PubkySharedStateStorage, StorageAdapter, StorageState, StorageTransactionCallback,
 };
 use paykit_sdk::{validate_storage_state, PaykitSdkError, SdkBackupState};
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,34 @@ pub trait FfiSdkStateBlobStore: Send + Sync {
 pub(crate) struct FfiSdkStorage {
     pub(crate) store: Arc<dyn FfiSdkStateBlobStore>,
     pub(crate) transaction_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Clone)]
+pub(crate) enum FfiSdkStorageAdapter {
+    Callback(FfiSdkStorage),
+    PubkyShared(PubkySharedStateStorage),
+}
+
+impl FfiSdkStorageAdapter {
+    pub(crate) fn state_revision(&self) -> Result<Option<String>, PaykitFfiError> {
+        match self {
+            Self::Callback(storage) => storage.state_revision(),
+            Self::PubkyShared(storage) => storage.last_revision().map_err(Into::into),
+        }
+    }
+}
+
+#[async_trait]
+impl StorageAdapter for FfiSdkStorageAdapter {
+    async fn transaction_erased<'a>(
+        &self,
+        f: StorageTransactionCallback<'a>,
+    ) -> paykit_sdk::Result<Box<dyn Any + Send>> {
+        match self {
+            Self::Callback(storage) => storage.transaction_erased(f).await,
+            Self::PubkyShared(storage) => storage.transaction_erased(f).await,
+        }
+    }
 }
 
 impl FfiSdkStorage {
@@ -107,6 +136,7 @@ impl StorageAdapter for FfiSdkStorage {
         let (updated_state, result) = run_storage_state_transaction(initial_state.clone(), f)?;
 
         if updated_state != initial_state {
+            drop(initial_state);
             validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
                 context: INVALID_STATE_BLOB_CONTEXT.into(),
                 source: None,
@@ -137,12 +167,6 @@ impl StorageAdapter for FfiSdkStorage {
 }
 
 #[derive(Serialize, Deserialize)]
-struct StorageStateEnvelope {
-    version: u32,
-    state: StorageState,
-}
-
-#[derive(Serialize, Deserialize)]
 struct BackupStateEnvelope {
     version: u32,
     backup: SdkBackupState,
@@ -156,27 +180,11 @@ struct StateBlobSnapshotEnvelope {
 }
 
 pub(crate) fn encode_storage_state(state: &StorageState) -> Result<Vec<u8>, PaykitFfiError> {
-    postcard::to_allocvec(&StorageStateEnvelope {
-        version: SDK_STATE_BLOB_VERSION,
-        state: state.clone(),
-    })
-    .map_err(|err| storage_error("encode_state_blob", format!("encode SDK state blob: {err}")))
+    encode_storage_state_blob(state).map_err(Into::into)
 }
 
 pub(crate) fn decode_storage_state(bytes: &[u8]) -> Result<StorageState, PaykitFfiError> {
-    let envelope: StorageStateEnvelope = postcard::from_bytes(bytes)
-        .map_err(|_| storage_error("decode_state_blob", "could not decode SDK state blob"))?;
-    if envelope.version != SDK_STATE_BLOB_VERSION {
-        return Err(storage_error(
-            "unsupported_state_blob_version",
-            format!(
-                "unsupported SDK state blob version {}, expected {}",
-                envelope.version, SDK_STATE_BLOB_VERSION
-            ),
-        ));
-    }
-    validate_storage_state(&envelope.state).map_err(|_| invalid_state_blob_error())?;
-    Ok(envelope.state)
+    decode_storage_state_blob(bytes).map_err(|_| invalid_state_blob_error())
 }
 
 fn decode_state_blob_snapshot(revision: &str, blob: &[u8]) -> Result<StorageState, PaykitFfiError> {

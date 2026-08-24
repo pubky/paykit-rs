@@ -60,6 +60,14 @@ fn test_pubky_local_secret_key_returns_public_key() {
 }
 
 #[test]
+fn test_shared_state_key_is_deterministic_and_separate_from_noise_key() {
+    let key = PubkyLocalSecretKey::new([9; 32]);
+
+    assert_eq!(key.paykit_shared_state_key(), key.paykit_shared_state_key());
+    assert_ne!(key.paykit_shared_state_key(), key.paykit_noise_secret_key());
+}
+
+#[test]
 fn test_session_capabilities_cover_required_paykit_scopes() {
     let root = pubky::Capabilities::builder()
         .read_write("/")

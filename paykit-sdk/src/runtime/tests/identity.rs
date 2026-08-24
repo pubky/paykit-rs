@@ -278,33 +278,28 @@ async fn test_sign_out_preserves_identity_scoped_state() {
 }
 
 #[tokio::test]
+async fn test_sign_out_without_initialized_state_does_not_create_state() {
+    let storage = InMemoryStorage::new();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let status = sdk.sign_out().await.unwrap();
+
+    assert_eq!(status.capability, PubkyIdentityCapability::SignedOut);
+    assert!(storage.snapshot().unwrap().identity_state.is_none());
+}
+
+#[tokio::test]
 async fn test_sign_out_waits_for_live_session_operations() {
     use std::{
         future::Future,
-        sync::atomic::{AtomicBool, Ordering},
         task::{Context, Poll, Waker},
     };
-
-    #[derive(Clone)]
-    struct RecordingClearSessionProvider {
-        cleared: Arc<AtomicBool>,
-    }
-
-    #[async_trait]
-    impl PubkySessionProvider for RecordingClearSessionProvider {
-        async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
-            Ok(None)
-        }
-
-        async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
-            Ok(None)
-        }
-
-        async fn clear_session_access(&self) -> Result<()> {
-            self.cleared.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-    }
 
     let cleared = Arc::new(AtomicBool::new(false));
     let sdk = PaykitSdk::with_clock(
@@ -449,4 +444,39 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
     let snapshot = storage.snapshot().unwrap();
     assert!(snapshot.identity_state.is_some());
     assert_eq!(snapshot.contact_records.len(), 1);
+}
+
+#[tokio::test]
+async fn test_sign_out_clears_session_when_storage_is_unavailable() {
+    #[derive(Clone)]
+    struct FailingStorage;
+
+    #[async_trait]
+    impl StorageAdapter for FailingStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            _f: crate::storage::StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn std::any::Any + Send>> {
+            Err(PaykitSdkError::Storage {
+                context: "shared state is unavailable".into(),
+                source: None,
+            })
+        }
+    }
+
+    let cleared = Arc::new(AtomicBool::new(false));
+    let sdk = PaykitSdk::with_clock(
+        FailingStorage,
+        RecordingClearSessionProvider {
+            cleared: Arc::clone(&cleared),
+        },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let result = sdk.sign_out().await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
+    assert!(cleared.load(Ordering::SeqCst));
 }

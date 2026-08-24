@@ -38,16 +38,18 @@ a local identity secret and initialize the registry's immutable Noise key.
 
 Multiple app processes using the same identity must also use the same durable
 SDK state and serialize updates to the shared Encrypted Link checkpoint. The
-storage contract can represent that shared logical state. Concurrent
-independent apps require an encrypted Pubky-hosted implementation with a
-pending-send journal and homeserver compare-and-swap or locking; separate local
-state blobs are only suitable when one process owns the runtime.
+SDK ships `PubkySharedStateStorage`, which stores that logical state as one
+encrypted Pubky resource. Separate local state blobs are only suitable when
+one process owns the runtime. Concurrent independent writers still require
+homeserver-enforced conditional writes or locking, and crash-safe shared sends
+require a pending-send journal.
 
 ## Current Scope
 
 Implemented in this Rust SDK crate:
 
 - SDK runtime facade and atomic storage adapter contract
+- encrypted identity-wide SDK state stored in Pubky for serialized runtimes
 - Pubky session bootstrap helpers, identity status tracking, and sign-out handling
 - request-bound application-defined companion claims for Pubky Auth
 - public Payment Endpoint sync
@@ -64,8 +66,7 @@ Not implemented in this crate yet:
 - first-party durable mobile storage helpers
 - payment execution, settlement confirmation, balances, fees, or route policy
 - product UI/profile screens, localization, and app backup transport
-- Pubky-hosted shared SDK state, crash-safe shared Noise journaling, and
-  cross-app concurrency coordination
+- crash-safe shared Noise journaling and concurrent cross-app state updates
 - multi-device checkpoint synchronization and recurring payment scheduling
 
 ## Integration Shape
@@ -78,6 +79,12 @@ Apps construct `PaykitSdk` with three pieces:
   during sign-out
 - a `PaymentAdapter` that supplies receiving details, endpoint selection, and
   payment-target construction
+
+`PubkySharedStateStorage` is the first-party shared implementation. It derives
+an encryption key from the local Pubky secret and stores the complete encrypted
+state at `/pub/paykit/v0/shared-state.bin`. It requires live session access and
+the matching local secret for every operation. Signing out clears the app's
+session access but leaves the encrypted resource intact.
 
 The session provider is only the boundary for live Pubky access. It is not a
 requirement to use Ring or another wallet as an identity coordinator before an

@@ -958,7 +958,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func signOut() async throws  -> IdentityStatus
 
     /**
-     * Return the current platform SDK state revision, when a state blob exists.
+     * Return the latest observed SDK state revision, when one exists.
      */
     func stateRevision() throws  -> String?
 
@@ -1104,12 +1104,81 @@ public static func withPaymentAdapterAndPubkyClientConfig(stateStore: SdkStateBl
 }
 
     /**
+     * Create a Pubky shared-state runtime with payment adapter callbacks.
+     *
+     * Requires active session access with the matching local identity secret
+     * and `required_session_capabilities()`, plus externally serialized writes
+     * across independent runtimes.
+     */
+public static func withPaymentAdapterAndPubkySharedState(sessionProvider: SdkPubkySessionProvider, paymentAdapter: SdkPaymentAdapter, config: PaykitSdkConfig)throws  -> PaykitSdk  {
+    return try  FfiConverterTypePaykitSdk_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state(
+        FfiConverterTypeSdkPubkySessionProvider_lower(sessionProvider),
+        FfiConverterTypeSdkPaymentAdapter_lower(paymentAdapter),
+        FfiConverterTypePaykitSdkConfig_lower(config),$0
+    )
+})
+}
+
+    /**
+     * Create a Pubky shared-state runtime with payment and client configuration.
+     *
+     * Requires active session access with the matching local identity secret
+     * and `required_session_capabilities()`, plus externally serialized writes
+     * across independent runtimes.
+     */
+public static func withPaymentAdapterAndPubkySharedStateAndClientConfig(sessionProvider: SdkPubkySessionProvider, paymentAdapter: SdkPaymentAdapter, config: PaykitSdkConfig, pubkyClient: PubkyClientConfig)throws  -> PaykitSdk  {
+    return try  FfiConverterTypePaykitSdk_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state_and_client_config(
+        FfiConverterTypeSdkPubkySessionProvider_lower(sessionProvider),
+        FfiConverterTypeSdkPaymentAdapter_lower(paymentAdapter),
+        FfiConverterTypePaykitSdkConfig_lower(config),
+        FfiConverterTypePubkyClientConfig_lower(pubkyClient),$0
+    )
+})
+}
+
+    /**
      * Create an SDK runtime with explicit Pubky client configuration.
      */
 public static func withPubkyClientConfig(stateStore: SdkStateBlobStore, sessionProvider: SdkPubkySessionProvider, config: PaykitSdkConfig, pubkyClient: PubkyClientConfig)throws  -> PaykitSdk  {
     return try  FfiConverterTypePaykitSdk_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
     uniffi_paykit_fn_constructor_ffipaykitsdk_with_pubky_client_config(
         FfiConverterTypeSdkStateBlobStore_lower(stateStore),
+        FfiConverterTypeSdkPubkySessionProvider_lower(sessionProvider),
+        FfiConverterTypePaykitSdkConfig_lower(config),
+        FfiConverterTypePubkyClientConfig_lower(pubkyClient),$0
+    )
+})
+}
+
+    /**
+     * Create an SDK runtime with encrypted identity-wide state stored in Pubky.
+     *
+     * Every operation requires active session access with the matching local
+     * identity secret and `required_session_capabilities()`. Independent
+     * runtimes must serialize writes until the homeserver supports conditional
+     * writes or durable locking.
+     */
+public static func withPubkySharedState(sessionProvider: SdkPubkySessionProvider, config: PaykitSdkConfig)throws  -> PaykitSdk  {
+    return try  FfiConverterTypePaykitSdk_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffipaykitsdk_with_pubky_shared_state(
+        FfiConverterTypeSdkPubkySessionProvider_lower(sessionProvider),
+        FfiConverterTypePaykitSdkConfig_lower(config),$0
+    )
+})
+}
+
+    /**
+     * Create a Pubky shared-state runtime with explicit client configuration.
+     *
+     * Requires active session access with the matching local identity secret
+     * and `required_session_capabilities()`, plus externally serialized writes
+     * across independent runtimes.
+     */
+public static func withPubkySharedStateAndClientConfig(sessionProvider: SdkPubkySessionProvider, config: PaykitSdkConfig, pubkyClient: PubkyClientConfig)throws  -> PaykitSdk  {
+    return try  FfiConverterTypePaykitSdk_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config(
         FfiConverterTypeSdkPubkySessionProvider_lower(sessionProvider),
         FfiConverterTypePaykitSdkConfig_lower(config),
         FfiConverterTypePubkyClientConfig_lower(pubkyClient),$0
@@ -2756,7 +2825,7 @@ open func signOut()async throws  -> IdentityStatus  {
 }
 
     /**
-     * Return the current platform SDK state revision, when a state blob exists.
+     * Return the latest observed SDK state revision, when one exists.
      */
 open func stateRevision()throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
@@ -18160,7 +18229,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sign_out() != 3191) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 21336) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 17936) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 59922) {
@@ -18307,7 +18376,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_client_config() != 36484) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state() != 40170) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state_and_client_config() != 1168) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_client_config() != 13764) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state() != 14843) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config() != 2605) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipaymentpayload_new() != 12481) {

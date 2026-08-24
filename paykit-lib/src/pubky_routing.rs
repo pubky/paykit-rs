@@ -25,6 +25,9 @@ pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
 /// Public path for the identity-wide Paykit App Registry.
 pub const PAYKIT_APP_REGISTRY_PATH: &str = "/pub/paykit/v0/app-registry.json";
 
+/// Pubky path for the encrypted identity-wide SDK state.
+pub const PAYKIT_SHARED_STATE_PATH: &str = "/pub/paykit/v0/shared-state.bin";
+
 /// Conventional prefix for private (encrypted) Paykit data.
 ///
 /// This prefix is used as the base path for pubky-noise's encrypted messaging.

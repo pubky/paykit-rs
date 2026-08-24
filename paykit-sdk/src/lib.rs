@@ -9,7 +9,7 @@ mod identity;
 mod json_serde;
 mod pubky_session;
 mod runtime;
-/// Durable storage traits and in-memory test storage.
+/// Durable storage traits plus in-memory and encrypted Pubky-backed storage.
 pub mod storage;
 
 #[doc(inline)]
@@ -99,7 +99,7 @@ pub use pubky_session::{
 #[doc(inline)]
 pub use runtime::{Clock, PaykitAppRemovalBlockers, PaykitSdk, SystemClock};
 #[doc(inline)]
-pub use storage::{InMemoryStorage, StorageAdapter, StorageTransaction};
+pub use storage::{InMemoryStorage, PubkySharedStateStorage, StorageAdapter, StorageTransaction};
 
 /// Common result alias for Paykit SDK operations.
 pub type Result<T> = std::result::Result<T, PaykitSdkError>;

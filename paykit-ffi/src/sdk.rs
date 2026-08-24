@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use paykit_sdk::{IdentityStatus, PaykitSdk, RestoreReport};
+use paykit_sdk::{IdentityStatus, PaykitSdk, PubkySharedStateStorage, RestoreReport};
 
 use crate::config::{default_pubky_client_config, FfiPaykitSdkConfig, FfiPubkyClientConfig};
 use crate::errors::{validation_error, PaykitFfiError};
@@ -14,6 +14,7 @@ use crate::session::{
 };
 use crate::storage::{
     decode_backup_state, encode_backup_state, FfiSdkStateBlobStore, FfiSdkStorage,
+    FfiSdkStorageAdapter,
 };
 
 /// Current identity status returned to apps.
@@ -59,13 +60,13 @@ pub struct FfiRestoreReport {
 }
 
 pub(crate) type FfiSdkRuntime =
-    PaykitSdk<FfiSdkStorage, FfiSdkPubkySessionProviderAdapter, FfiSdkPaymentAdapterAdapter>;
+    PaykitSdk<FfiSdkStorageAdapter, FfiSdkPubkySessionProviderAdapter, FfiSdkPaymentAdapterAdapter>;
 
 /// Stateful Paykit SDK runtime handle.
 #[derive(uniffi::Object)]
 pub struct FfiPaykitSdk {
     pub(crate) runtime: FfiSdkRuntime,
-    storage: FfiSdkStorage,
+    storage: FfiSdkStorageAdapter,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -128,26 +129,87 @@ impl FfiPaykitSdk {
         config: FfiPaykitSdkConfig,
         pubky_client: FfiPubkyClientConfig,
     ) -> Result<Self, PaykitFfiError> {
-        let pubky = pubky_from_config(&pubky_client)?;
-        let storage = FfiSdkStorage {
+        let session_provider = ffi_session_provider(session_provider, pubky_client)?;
+        let storage = FfiSdkStorageAdapter::Callback(FfiSdkStorage {
             store: state_store,
             transaction_lock: Arc::new(Mutex::new(())),
-        };
-        let session_provider = FfiSdkPubkySessionProviderAdapter {
-            provider: session_provider,
-            pubky,
+        });
+        build_sdk(storage, session_provider, payment_adapter, config)
+    }
+
+    /// Create an SDK runtime with encrypted identity-wide state stored in Pubky.
+    ///
+    /// Every operation requires active session access with the matching local
+    /// identity secret and `required_session_capabilities()`. Independent
+    /// runtimes must serialize writes until the homeserver supports conditional
+    /// writes or durable locking.
+    #[uniffi::constructor]
+    pub fn with_pubky_shared_state(
+        session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        config: FfiPaykitSdkConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        Self::with_pubky_shared_state_and_client_config(
+            session_provider,
+            config,
+            default_pubky_client_config(),
+        )
+    }
+
+    /// Create a Pubky shared-state runtime with explicit client configuration.
+    ///
+    /// Requires active session access with the matching local identity secret
+    /// and `required_session_capabilities()`, plus externally serialized writes
+    /// across independent runtimes.
+    #[uniffi::constructor]
+    pub fn with_pubky_shared_state_and_client_config(
+        session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        config: FfiPaykitSdkConfig,
+        pubky_client: FfiPubkyClientConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        Self::with_payment_adapter_and_pubky_shared_state_and_client_config(
+            session_provider,
+            Arc::new(FfiNoopSdkPaymentAdapter),
+            config,
             pubky_client,
-        };
-        let payment_adapter = FfiSdkPaymentAdapterAdapter {
-            adapter: payment_adapter,
-        };
-        let runtime = PaykitSdk::new(
-            storage.clone(),
+        )
+    }
+
+    /// Create a Pubky shared-state runtime with payment adapter callbacks.
+    ///
+    /// Requires active session access with the matching local identity secret
+    /// and `required_session_capabilities()`, plus externally serialized writes
+    /// across independent runtimes.
+    #[uniffi::constructor]
+    pub fn with_payment_adapter_and_pubky_shared_state(
+        session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        payment_adapter: Arc<dyn FfiSdkPaymentAdapter>,
+        config: FfiPaykitSdkConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        Self::with_payment_adapter_and_pubky_shared_state_and_client_config(
             session_provider,
             payment_adapter,
-            config.try_into()?,
-        );
-        Ok(Self { runtime, storage })
+            config,
+            default_pubky_client_config(),
+        )
+    }
+
+    /// Create a Pubky shared-state runtime with payment and client configuration.
+    ///
+    /// Requires active session access with the matching local identity secret
+    /// and `required_session_capabilities()`, plus externally serialized writes
+    /// across independent runtimes.
+    #[uniffi::constructor]
+    pub fn with_payment_adapter_and_pubky_shared_state_and_client_config(
+        session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        payment_adapter: Arc<dyn FfiSdkPaymentAdapter>,
+        config: FfiPaykitSdkConfig,
+        pubky_client: FfiPubkyClientConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        let session_provider = ffi_session_provider(session_provider, pubky_client)?;
+        let storage = FfiSdkStorageAdapter::PubkyShared(PubkySharedStateStorage::new(
+            session_provider.clone(),
+        ));
+        build_sdk(storage, session_provider, payment_adapter, config)
     }
 
     /// Return this runtime's configuration.
@@ -155,7 +217,7 @@ impl FfiPaykitSdk {
         self.runtime.config().clone().into()
     }
 
-    /// Return the current platform SDK state revision, when a state blob exists.
+    /// Return the latest observed SDK state revision, when one exists.
     pub fn state_revision(&self) -> Result<Option<String>, PaykitFfiError> {
         self.storage.state_revision()
     }
@@ -225,6 +287,34 @@ impl FfiPaykitSdk {
         self.restore_backup_state(Arc::new(FfiSdkBackupBlob::new(bytes)))
             .await
     }
+}
+
+fn ffi_session_provider(
+    provider: Arc<dyn FfiSdkPubkySessionProvider>,
+    pubky_client: FfiPubkyClientConfig,
+) -> Result<FfiSdkPubkySessionProviderAdapter, PaykitFfiError> {
+    Ok(FfiSdkPubkySessionProviderAdapter {
+        provider,
+        pubky: pubky_from_config(&pubky_client)?,
+        pubky_client,
+    })
+}
+
+fn build_sdk(
+    storage: FfiSdkStorageAdapter,
+    session_provider: FfiSdkPubkySessionProviderAdapter,
+    payment_adapter: Arc<dyn FfiSdkPaymentAdapter>,
+    config: FfiPaykitSdkConfig,
+) -> Result<FfiPaykitSdk, PaykitFfiError> {
+    let runtime = PaykitSdk::new(
+        storage.clone(),
+        session_provider,
+        FfiSdkPaymentAdapterAdapter {
+            adapter: payment_adapter,
+        },
+        config.try_into()?,
+    );
+    Ok(FfiPaykitSdk { runtime, storage })
 }
 
 impl From<IdentityStatus> for FfiIdentityStatus {

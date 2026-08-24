@@ -96,6 +96,12 @@ and is not the public SDK backup export format. Bindings should treat it as an
 opaque `SdkStateBlob`, and Rust should own schema validation and version
 handling.
 
+Bindings also expose constructors backed by `PubkySharedStateStorage`. This
+stores the same logical state as one encrypted Pubky resource and does not
+require platform state-blob callbacks. It is suitable when app operations are
+serialized; independent concurrent writers require homeserver-enforced
+conditional writes or locking.
+
 Each SDK storage transaction should load the current blob, mutate the full
 logical state in Rust, then save the replacement with the loaded revision. If
 the revision is stale, the platform store must fail with a structured storage
@@ -354,18 +360,19 @@ debug/string output.
 
 State blobs and exported backups should use explicit object names such as
 `SdkStateBlob` and `SdkBackupBlob`. Shared state must be encrypted before it is
-stored remotely. Exported backups likewise require caller-managed encryption
+stored remotely. `PubkySharedStateStorage` performs that encryption itself.
+Exported backups likewise require caller-managed encryption
 before cloud transport. A device-local implementation must use platform-protected
 storage, but separate device-local blobs are not a valid cross-app shared-state
 implementation.
 
 Platform docs should also make the durability consequence explicit: if the
-sensitive SDK state blob or exported SDK backup is lost, private Paykit runtime
-state cannot be safely reconstructed from homeserver data alone. Apps may
-recover by relinking peers and receiving fresh private data, but they should not
-promise restoration of old private links, Receipt Access keys, private stream
-history, Contact Records, or Payment Request/Receipt history without SDK
-backup data.
+authoritative SDK state (a platform blob or the Pubky shared-state resource)
+and every exported backup are lost, private Paykit runtime state cannot be
+safely reconstructed from the remaining public and message resources alone.
+Apps may recover by relinking peers and receiving fresh private data, but they
+should not promise restoration of old private links, Receipt Access keys,
+private stream history, Contact Records, or Payment Request/Receipt history.
 
 ## Default App Workflows
 
@@ -451,10 +458,10 @@ misconstruction.
 
 - Start SDK bindings from a clean SDK-first FFI surface. Protocol-only exports
   should be added intentionally, not preserved by default.
-- Mobile bindings use app-provided state-blob callbacks until the Pubky-hosted
-  shared-state implementation is available. The callbacks must still represent
-  one logical state backing per identity; first-party local file/keychain
-  helpers are not a substitute for cross-app shared state.
+- Mobile bindings support app-provided state-blob callbacks and encrypted
+  Pubky-hosted shared state. Callback storage must still represent one logical
+  state backing per identity; first-party local file/keychain helpers are not a
+  substitute for cross-app shared state.
 - Paykit SDK bindings should give integrators one Paykit SDK package/import for
   normal app integration. That package should expose SDK workflows first; any
   lower-level protocol helpers should be intentionally added, documented, and

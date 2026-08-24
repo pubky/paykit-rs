@@ -100,14 +100,14 @@ The current Rust SDK implementation covers:
 - Payment Request lifecycle state, Receipt Access indexing, receipt issuance,
   and receipt retrieval
 - Paykit-facing profile/contact helpers
+- encrypted Pubky-hosted identity-wide SDK state for serialized runtimes
 - SDK backup/export/restore validation
 
 The workspace also exposes Swift and Kotlin SDK bindings through `paykit-ffi`.
-First-party durable mobile storage helpers, Pubky-hosted shared SDK state and
-Noise journaling, payment execution, settlement confirmation, product UI, app
-backup transport, multi-device checkpoint synchronization, and recurring
-payment scheduling remain separate implementation areas unless they are
-explicitly listed above.
+First-party durable mobile storage helpers, crash-safe shared Noise journaling,
+payment execution, settlement confirmation, product UI, app backup transport,
+multi-device checkpoint synchronization, and recurring payment scheduling
+remain separate implementation areas unless they are explicitly listed above.
 
 ## Crate Layout
 
@@ -160,8 +160,10 @@ paykit-sdk/
     storage/
       mod.rs
       in_memory.rs
+      pubky_shared.rs
       queue.rs
       records.rs
+      state_blob.rs
     backup/
       mod.rs
       validation/
@@ -256,8 +258,29 @@ The Rust SDK storage model supports records for:
 - receipt records
 - recovery/fail-closed markers
 
-The SDK should ship an in-memory storage implementation for tests and examples.
-Production apps should provide a durable implementation.
+The SDK ships in-memory storage for tests and examples and encrypted
+Pubky-hosted storage for serialized shared-identity runtimes. Custom adapters
+remain available for app-owned durable storage.
+
+`PubkySharedStateStorage` stores one encrypted blob at
+`/pub/paykit/v0/shared-state.bin`. The inner state uses the SDK state-blob
+codec. The outer envelope uses XChaCha20-Poly1305 with a fresh random nonce, a
+key derived from the local Pubky secret with BLAKE3 context
+`paykit/shared-state`, and the Pubky public key as associated data. Reads reject
+invalid, undecryptable, or internally inconsistent state. Encrypted blobs are
+limited to 64 MiB; whole-state transactions require additional working memory.
+Encryption does not hide the resource's existence, size, or update timing, and
+does not by itself detect a homeserver replay of an older valid blob.
+
+Each transaction fetches and decrypts the latest blob, applies the existing
+`StorageTransaction`, validates and encrypts changed state, checks that the
+remote revision is unchanged, and replaces the whole resource. The check
+detects ordinary stale writers but is not atomic with the PUT. Independent
+writers must therefore remain serialized until the homeserver can enforce a
+conditional write or durable lock. A storage instance also fails closed if a
+resource it previously observed disappears. After a write transport error, the
+adapter reads the resource again and reports success only when the exact
+encrypted revision was committed.
 
 ### PubkySessionProvider
 
@@ -1189,8 +1212,8 @@ Restore flow:
 Backup restore preserves private history and derived records. Valid restored
 Encrypted Link checkpoints are resumed; missing, malformed, mismatched, or
 otherwise unsafe checkpoints pause private automation until relink. Concurrent
-multi-app and multi-device synchronization requires the shared-state protocol
-described in the later design areas.
+multi-app and multi-device updates require homeserver-enforced conditional
+writes or locking plus crash-safe shared Noise journaling.
 
 ## Public SDK API Shape
 
@@ -1342,8 +1365,6 @@ Platform tests:
 
 ## Later Design Areas
 
-- Pubky-hosted encrypted SDK state and Noise snapshots shared by authorized
-  apps under one identity.
 - Homeserver-backed locks and conditional writes for shared-state updates.
 - A pending-send journal that durably couples exact ciphertext with the
   advanced Noise snapshot before publication.
@@ -1358,5 +1379,5 @@ Platform tests:
 - Unknown Private Application Message retention defaults for mobile storage
   budgets.
 - higher-level platform wrapper/package policy on top of the SDK bindings
-- Multi-device synchronization and recovery policy after the identity-wide
-  shared-state protocol is available.
+- Multi-device synchronization and recovery policy on top of the
+  identity-wide shared-state resource.

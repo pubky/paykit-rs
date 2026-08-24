@@ -190,6 +190,10 @@ impl PubkyLocalSecretKey {
         paykit_lib::derive_paykit_noise_secret_key(&self.0)
     }
 
+    pub(crate) fn paykit_shared_state_key(&self) -> [u8; 32] {
+        blake3::derive_key("paykit/shared-state", &self.0)
+    }
+
     pub(crate) fn keypair(&self) -> pubky::Keypair {
         pubky::Keypair::from_secret(&self.0)
     }

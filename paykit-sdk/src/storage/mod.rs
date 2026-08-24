@@ -4,14 +4,20 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 mod in_memory;
+mod pubky_shared;
 mod queue;
 mod records;
+mod state_blob;
 
 pub use in_memory::{run_storage_state_transaction, InMemoryStorage};
+pub use pubky_shared::PubkySharedStateStorage;
 pub use records::{
     EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, NewOutboundPrivateMessage,
     NewPrivateStreamItem, OutboundPrivateMessageRecord, PaymentEndpointReservationRecord,
     PeerLinkOperationLease, PrivateStreamItemRecord, PublicEndpointRecord, StorageState,
+};
+pub use state_blob::{
+    decode_storage_state_blob, encode_storage_state_blob, SDK_STATE_BLOB_VERSION,
 };
 
 pub(crate) use queue::outbound_private_queue_head_is_claimable;

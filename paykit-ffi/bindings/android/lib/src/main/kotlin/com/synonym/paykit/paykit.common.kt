@@ -622,7 +622,7 @@ public interface PaykitSdkInterface {
     public suspend fun `signOut`(): IdentityStatus
 
     /**
-     * Return the current platform SDK state revision, when a state blob exists.
+     * Return the latest observed SDK state revision, when one exists.
      */
     @Throws(PaykitException::class)
     public fun `stateRevision`(): kotlin.String?

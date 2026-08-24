@@ -275,27 +275,24 @@ where
     /// Clear this application's live Pubky session access.
     ///
     /// Stored Paykit state remains intact so the same identity can resume it
-    /// later and other applications are not affected.
+    /// later and other applications are not affected. Session clearing is
+    /// still attempted if the stored identity status cannot be read.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
         let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
-        self.pubky.clear_session_access().await?;
-
         let now = self.clock.now();
-        let state = self
+        let state_result = self
             .storage
             .transaction(move |tx| {
-                if let Some(state) = tx.load_identity_state() {
-                    return Ok(state);
-                }
-                let state = IdentityState {
+                Ok(tx.load_identity_state().unwrap_or(IdentityState {
                     public_key: None,
                     initialized_at: now,
-                };
-                tx.save_identity_state(state.clone());
-                Ok(state)
+                }))
             })
-            .await?;
+            .await;
+        let clear_result = self.pubky.clear_session_access().await;
+        clear_result?;
+        let state = state_result?;
 
         Ok(IdentityStatus::from_state(&state, false, false))
     }
