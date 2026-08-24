@@ -320,6 +320,8 @@ Current v0.2 private Paykit wire messages are closed-world JSON objects: unknown
 
 Payment Requests are payee-initiated private protocol objects exchanged over an Encrypted Link. Their lifecycle messages (`paykit.payment_request`, acceptance, rejection, cancellation, and proof) use Event Message semantics. Paykit serializes, encrypts, sends, receives, and structurally validates these messages, but does not execute payments, schedule recurring jobs, manage wallet state, validate sender-role intent, or validate payment-method-specific proofs.
 
+An accepted Recurring Payment Request is the protocol object behind a product Subscription; Paykit does not define a separate Subscription protocol or execute its periodic payments. See [Recurring Payment Requests And Subscriptions](../specs/payment-requests.md#recurring-payment-requests-and-subscriptions) for the complete responsibility split and lifecycle.
+
 - `send_payment_request(link, event: &PaymentRequest) -> Result<()>`
   Sends a `paykit.payment_request` proposal with immutable terms. Terms include `PaymentAmount`, a payee-provided `PaymentReference`, required nullable `proposal_expires_at` (`None`/`null` means no protocol-level proposal expiry before acceptance), optional `Recurrence`, accepted Payment Endpoint Identifiers, and optional metadata.
 - `serialize_payment_request_event(event: &PaymentRequestEvent) -> Result<String>`
