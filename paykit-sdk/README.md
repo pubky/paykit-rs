@@ -71,6 +71,11 @@ Not implemented in this crate yet:
 - product UI/profile screens, localization, and app backup transport
 - multi-device checkpoint synchronization and recurring payment scheduling
 
+The SDK derives and persists Recurring Payment Request lifecycle state, but the
+integrating application owns scheduling, payment authorization, execution,
+settlement validation, and service-access policy. See
+[Recurring Payment Requests And Subscriptions](../specs/payment-requests.md#recurring-payment-requests-and-subscriptions).
+
 ## Integration Shape
 
 Apps construct `PaykitSdk` with three pieces:

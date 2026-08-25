@@ -535,9 +535,12 @@ request-specific context is defined.
 
 ### Recurring Scheduling
 
-Recurring Payment Request scheduling is outside this SDK scope. The SDK should
-derive eligibility and durable state, while the integrating app/runtime may
-still own the actual timer service.
+The SDK derives durable Recurring Payment Request lifecycle state and exposes
+accepted requests through `active_recurring_payment_requests`. It does not
+calculate due Billing Periods, run timers, authorize or execute payments,
+validate payment-method-specific settlement, or decide service entitlements.
+Those responsibilities belong to the integrating application/runtime. See
+[Recurring Payment Requests And Subscriptions](payment-requests.md#recurring-payment-requests-and-subscriptions).
 
 ### Logger And Clock
 
