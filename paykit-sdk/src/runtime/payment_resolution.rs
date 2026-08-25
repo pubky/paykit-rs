@@ -566,6 +566,9 @@ pub(super) fn merge_outbound_report(
     current
         .recovery_marker_failures
         .append(&mut report.recovery_marker_failures);
+    current
+        .parked_unsupported
+        .append(&mut report.parked_unsupported);
 }
 
 pub(super) fn merge_receive_report(
@@ -581,6 +584,9 @@ pub(super) fn merge_receive_report(
 }
 
 fn outbound_report_made_progress(report: &OutboundPrivateSendReport) -> bool {
+    // Parked entries intentionally do not count as progress: a parked
+    // unknown-kind head blocks its peer's queue without state changing, so
+    // counting it would spin the sync round loop without draining anything.
     !report.attempted.is_empty() || !report.sent.is_empty() || !report.failed.is_empty()
 }
 

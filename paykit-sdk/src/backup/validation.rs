@@ -680,6 +680,17 @@ pub(super) fn validate_outbound_private_messages(
         ) {
             continue;
         }
+        if outbound_record_is_acceptable_parked(record) {
+            // A well-formed unknown-kind record is a parked queue entry
+            // written by a newer build: restore preserves it verbatim so the
+            // runtime can keep it parked at the head of its peer's queue.
+            // Restore stays strict when the kind column diverges from the
+            // payload body kind and FAILS below, while the runtime parks that
+            // divergence safely -- a deliberate asymmetry: restore validates
+            // a whole snapshot up front, whereas the flush path must never
+            // destroy unknown outbound intent it encounters live.
+            continue;
+        }
         validate_queued_outbound_private_message(record)?;
         let kind = validate_outbound_private_message(&record.raw_json)?;
         if kind == PrivateMessageKind::ReceiptAccess.as_str() {
@@ -706,6 +717,20 @@ pub(super) fn validate_outbound_private_messages(
         }
     }
     Ok(())
+}
+
+/// Whether a restored outbound record is an acceptable parked unknown-kind
+/// queue entry: a well-formed envelope with an unrecognized body kind whose
+/// `kind` column matches that body kind exactly.
+///
+/// Inspection reads only `raw_json`, so its `parsed_kind` for an unknown-kind
+/// payload is the top-level `kind` field of the payload document itself --
+/// the same body-authoritative field the stamping invariant on
+/// `OutboundPrivateMessageRecord::kind` mirrors into the column.
+fn outbound_record_is_acceptable_parked(record: &OutboundPrivateMessageRecord) -> bool {
+    let inspection = paykit_lib::inspect_private_application_message(&record.raw_json);
+    inspection.structure == paykit_lib::PrivateMessageStructure::UnknownKind
+        && inspection.parsed_kind.as_deref() == Some(record.kind.as_str())
 }
 
 fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Result<()> {

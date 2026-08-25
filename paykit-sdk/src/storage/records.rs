@@ -289,6 +289,12 @@ pub struct OutboundPrivateMessageRecord {
     /// Counterparty receiver/runtime folder.
     pub counterparty_receiver_path: PaykitReceiverPath,
     /// Private Message Kind string.
+    ///
+    /// Stamping invariant: enqueue validation stamps this column from the
+    /// payload document itself, so it always mirrors the body `kind` inside
+    /// `raw_json`. The body stays authoritative everywhere; a divergent
+    /// column is treated as corruption of an understood message (invalid at
+    /// flush, rejected at restore).
     pub kind: String,
     /// Exact outbound JSON payload to send.
     pub raw_json: String,

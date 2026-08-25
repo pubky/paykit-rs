@@ -15,7 +15,9 @@ pub use records::{
     PublicEndpointRecord, StorageState,
 };
 
-pub(crate) use queue::outbound_private_queue_head_is_claimable;
+pub(crate) use queue::{
+    is_parked_unknown_kind_outbound_message, outbound_private_queue_head_is_claimable,
+};
 pub(crate) use records::NewPrivateStreamItemDetails;
 
 use crate::{
@@ -30,12 +32,53 @@ use crate::{
 pub type StorageTransactionCallback<'a> =
     Box<dyn FnOnce(&mut dyn StorageTransaction) -> Result<Box<dyn Any + Send>> + Send + 'a>;
 
+/// Compatibility generation of SDK storage state semantics.
+///
+/// This versions the meaning of persisted SDK storage state, not its record
+/// layout: generation bumps guard semantic changes that an older reader would
+/// mishandle -- redacted parse-error categories in persisted classification,
+/// classification normalization, and parked unknown-kind outbound queue
+/// heads. New Private Message kinds do NOT bump the generation. Generation 2
+/// code reads state persisted under generation 1 or 2 and always writes
+/// generation 2.
+///
+/// The upgrade is lazy: adapters persist only on state change, so a blob
+/// whose state is never mutated keeps its stored generation byte for byte.
+/// Opening the app does not by itself re-stamp generation-1 state, and
+/// rollback to a generation-1 binary remains possible until the first real
+/// state change writes generation 2.
+///
+/// Custom durable Rust [`StorageAdapter`] implementations MUST persist a
+/// generation marker equal to this constant alongside their state and MUST
+/// refuse to open state persisted under a higher generation. Rollback to an
+/// older binary is unsupported for adapters without that fence. The built-in
+/// FFI state and backup envelopes enforce this through their envelope version
+/// checks.
+pub const SDK_STORAGE_STATE_GENERATION: u32 = 2;
+
+/// Oldest storage-state generation this build still reads.
+///
+/// Internal compatibility bound. It is `pub` only so `paykit-ffi` shares one
+/// lockstep min-read bound with this crate; it is not part of the documented
+/// public API and may change without notice.
+#[doc(hidden)]
+pub const SDK_STORAGE_STATE_MIN_READ_GENERATION: u32 = 1;
+
 /// Durable storage boundary for Paykit SDK.
 ///
 /// Production adapters must provide atomic transactions with monotonic id
 /// allocation, stable FIFO ordering for outbound/private-stream records, and
 /// lease-aware writes. The SDK assumes all mutation methods called inside one
 /// transaction either commit together or roll back together.
+///
+/// # Contract revisions
+///
+/// - Revision 1: the original transaction contract.
+/// - Revision 2: [`StorageTransaction`] gains the four classification
+///   normalization mutators (see that trait's contract revisions), and custom
+///   durable adapters take on the generation fence duty documented on
+///   [`SDK_STORAGE_STATE_GENERATION`]: persist a generation marker equal to
+///   that constant and refuse to open state persisted under a higher one.
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
     /// Run an atomic storage transaction through an object-safe erased callback.
@@ -119,6 +162,17 @@ where
 }
 
 /// Mutable operations available inside one storage transaction.
+///
+/// # Contract revisions
+///
+/// - Revision 1: the original method set.
+/// - Revision 2: adds the four narrowly scoped classification normalization
+///   mutators [`update_private_stream_item_classification`](Self::update_private_stream_item_classification),
+///   [`remove_event_dedup_record`](Self::remove_event_dedup_record),
+///   [`remove_receipt_access_record`](Self::remove_receipt_access_record), and
+///   [`remove_receipt_record`](Self::remove_receipt_record). Implementations
+///   backed by custom durable storage must also honor the generation fence
+///   documented on [`SDK_STORAGE_STATE_GENERATION`].
 pub trait StorageTransaction {
     /// Export the full logical SDK storage state.
     fn export_storage_state(&self) -> StorageState;

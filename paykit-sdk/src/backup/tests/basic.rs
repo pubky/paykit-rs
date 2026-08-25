@@ -252,6 +252,70 @@ async fn test_backup_round_trips_receiver_rejected_receipt_access() {
     assert!(restored.receipt_access_records.is_empty());
 }
 
+/// Empty backup fixture for schema-version tests.
+fn empty_backup(version: u32) -> SdkBackupState {
+    SdkBackupState {
+        version,
+        local_receiver_path: receiver_path(),
+        identity_state: None,
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: Vec::new(),
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
+        next_outbound_private_message_id: 0,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    }
+}
+
+#[tokio::test]
+async fn test_restore_accepts_version_1_backup() {
+    let storage = InMemoryStorage::new();
+
+    let report = restore_backup_state(&storage, empty_backup(1))
+        .await
+        .unwrap();
+
+    assert_eq!(report.version, 1);
+}
+
+#[tokio::test]
+async fn test_restore_rejects_version_3_backup() {
+    let storage = InMemoryStorage::new();
+
+    let result = restore_backup_state(&storage, empty_backup(SDK_BACKUP_VERSION + 1)).await;
+
+    match result {
+        Err(PaykitSdkError::Protocol { context, .. }) => {
+            assert!(
+                context.contains("unsupported SDK backup version 3"),
+                "{context}"
+            );
+            assert!(context.contains("expected 1 through 2"), "{context}");
+        }
+        other => panic!("expected protocol error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_export_backup_state_stamps_version_2() {
+    let storage = InMemoryStorage::new();
+
+    let backup = export_backup_state(&storage, receiver_path())
+        .await
+        .unwrap();
+
+    assert_eq!(backup.version, SDK_BACKUP_VERSION);
+    assert_eq!(backup.version, 2);
+}
+
 #[tokio::test]
 async fn test_restore_backup_state_rejects_inconsistent_contact_marker_state() {
     let storage = InMemoryStorage::new();

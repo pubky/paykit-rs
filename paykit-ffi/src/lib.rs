@@ -36,8 +36,14 @@ pub use storage::*;
 
 uniffi::setup_scaffolding!();
 
-pub(crate) const SDK_STATE_BLOB_VERSION: u32 = 1;
-pub(crate) const SDK_BACKUP_BLOB_VERSION: u32 = 1;
+// The FFI blob envelope versions alias the SDK generation constants so the
+// envelopes move in lockstep with SDK storage/backup semantics by
+// construction rather than by convention.
+pub(crate) const SDK_STATE_BLOB_VERSION: u32 = paykit_sdk::storage::SDK_STORAGE_STATE_GENERATION;
+pub(crate) const SDK_STATE_BLOB_MIN_READ_VERSION: u32 =
+    paykit_sdk::storage::SDK_STORAGE_STATE_MIN_READ_GENERATION;
+pub(crate) const SDK_BACKUP_BLOB_VERSION: u32 = paykit_sdk::SDK_BACKUP_VERSION;
+pub(crate) const SDK_BACKUP_BLOB_MIN_READ_VERSION: u32 = paykit_sdk::SDK_BACKUP_MIN_READ_VERSION;
 pub(crate) const DEFAULT_PUBKY_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 #[cfg(target_os = "android")]

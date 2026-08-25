@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     storage::{
-        require_peer_link_operation_lease, NewOutboundPrivateMessage, OutboundPrivateMessageRecord,
-        PeerLinkOperationLease, StorageAdapter,
+        is_parked_unknown_kind_outbound_message, require_peer_link_operation_lease,
+        NewOutboundPrivateMessage, OutboundPrivateMessageRecord, PeerLinkOperationLease,
+        StorageAdapter,
     },
     PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
@@ -94,6 +95,33 @@ impl fmt::Debug for RecoveryMarkerPublishFailure {
     }
 }
 
+/// Reason an outbound private message is parked instead of processed.
+///
+/// SECURITY / REDACTION: this closed vocabulary is the entire parked-message
+/// signal. It never carries payload data or the unrecognized kind text, so it
+/// is stable and safe to surface across the FFI boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum OutboundPrivateParkReason {
+    /// The queued payload carries a Private Message Kind this build does not
+    /// recognize. A newer build wrote it; only a build that understands the
+    /// kind may process it.
+    UnsupportedKind,
+}
+
+/// One outbound private message left parked at the head of a peer's queue.
+///
+/// SECURITY / REDACTION: contains only the local outbound message id plus a
+/// closed-vocabulary [`OutboundPrivateParkReason`] -- never payload bytes and
+/// never the unrecognized kind string.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundPrivateParkedMessage {
+    /// Outbound message id of the parked queue head.
+    pub outbound_message_id: u64,
+    /// Why the message is parked.
+    pub reason: OutboundPrivateParkReason,
+}
+
 /// Summary returned after processing outbound private messages.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundPrivateSendReport {
@@ -108,6 +136,11 @@ pub struct OutboundPrivateSendReport {
     /// Recovery marker publication failures observed after fail-closed recovery.
     #[serde(default)]
     pub recovery_marker_failures: Vec<RecoveryMarkerPublishFailure>,
+    /// Queue heads left parked because this build does not recognize their
+    /// Private Message Kind. Parked records are never claimed, mutated, or
+    /// invalidated; entries carry only ids and a closed-vocabulary reason.
+    #[serde(default)]
+    pub parked_unsupported: Vec<OutboundPrivateParkedMessage>,
 }
 
 /// Summary for processing outbound private messages for one counterparty.
@@ -260,6 +293,47 @@ where
         .await
 }
 
+/// Report the parked unknown-kind queue head for one counterparty, if any.
+///
+/// One lease-checked read of the queued messages; the parked record itself is
+/// never claimed, mutated, or invalidated (its `attempt_count` and timestamps
+/// must not move). Returns `None` when the queue is empty or its head is not
+/// parked -- for example a head that is merely backing off between retries.
+/// The flush loop calls this after the claim path returns no work, so the
+/// parked-head signal re-surfaces on every flush until a newer build
+/// processes the message.
+pub(crate) async fn parked_unsupported_queue_head<S>(
+    storage: &S,
+    counterparty: &PubkyPublicKey,
+    lease: &PeerLinkOperationLease,
+) -> Result<Option<OutboundPrivateParkedMessage>>
+where
+    S: StorageAdapter,
+{
+    let head = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let lease = lease.clone();
+            move |tx| {
+                require_peer_link_operation_lease(tx, &lease)?;
+                Ok(tx
+                    .queued_outbound_private_messages(
+                        &counterparty,
+                        &lease.counterparty_receiver_path,
+                    )
+                    .into_iter()
+                    .next())
+            }
+        })
+        .await?;
+    Ok(head
+        .filter(is_parked_unknown_kind_outbound_message)
+        .map(|record| OutboundPrivateParkedMessage {
+            outbound_message_id: record.outbound_message_id,
+            reason: OutboundPrivateParkReason::UnsupportedKind,
+        }))
+}
+
 pub(crate) fn mark_outbound_sent(
     mut record: OutboundPrivateMessageRecord,
     now: DateTime<Utc>,
@@ -320,6 +394,13 @@ pub(crate) fn validate_queued_outbound_private_message(
     Ok(())
 }
 
+/// Validate one outbound payload and return the kind string enqueue stamps
+/// into the record's `kind` column.
+///
+/// Stamping invariant: the returned kind is read from the payload document
+/// itself and validation fails unless it names a recognized body kind, so a
+/// stored `kind` column always mirrors the payload body kind. The body stays
+/// authoritative everywhere a record is re-judged later.
 pub(crate) fn validate_outbound_private_message(raw_json: &str) -> Result<String> {
     if raw_json.len() > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
         return Err(PaykitSdkError::Protocol {

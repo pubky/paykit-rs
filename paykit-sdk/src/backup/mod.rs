@@ -49,7 +49,21 @@ pub(crate) use validation::validate_private_stream_items;
 type PeerStorageKey = (PubkyPublicKey, PaykitReceiverPath);
 
 /// Current SDK backup schema version.
-pub const SDK_BACKUP_VERSION: u32 = 1;
+///
+/// Version 2 code reads backups stamped with version 1 or 2 and always writes
+/// version 2. Restore rejects versions outside that range. Version 2 marks
+/// the classification-normalization generation (redacted parse-error
+/// categories, normalized derived state); new Private Message kinds do NOT
+/// bump this version.
+pub const SDK_BACKUP_VERSION: u32 = 2;
+
+/// Oldest SDK backup schema version this build still restores.
+///
+/// Internal compatibility bound. It is `pub` only so `paykit-ffi` shares one
+/// lockstep min-read bound with this crate; it is not part of the documented
+/// public API and may change without notice.
+#[doc(hidden)]
+pub const SDK_BACKUP_MIN_READ_VERSION: u32 = 1;
 
 /// Versioned SDK-managed backup payload.
 ///
@@ -59,6 +73,10 @@ pub const SDK_BACKUP_VERSION: u32 = 1;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SdkBackupState {
     /// Backup schema version.
+    ///
+    /// Stamped by export with [`SDK_BACKUP_VERSION`]; do not construct or
+    /// alter this value manually. Restore rejects versions outside the
+    /// supported range.
     pub version: u32,
     /// Local Paykit receiver/runtime folder that exported this backup.
     pub local_receiver_path: PaykitReceiverPath,
@@ -143,6 +161,9 @@ impl fmt::Debug for SdkBackupState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreReport {
     /// Restored backup schema version.
+    ///
+    /// Echoes the restored backup's own version, which may be older than
+    /// [`SDK_BACKUP_VERSION`].
     pub version: u32,
     /// Whether identity state was restored.
     pub restored_identity: bool,
@@ -623,9 +644,12 @@ impl SdkBackupState {
         current_identity: Option<&IdentityState>,
         local_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
-        if self.version != SDK_BACKUP_VERSION {
+        if !(SDK_BACKUP_MIN_READ_VERSION..=SDK_BACKUP_VERSION).contains(&self.version) {
             return Err(PaykitSdkError::Protocol {
-                context: format!("unsupported SDK backup version {}", self.version),
+                context: format!(
+                    "unsupported SDK backup version {}, expected {} through {}",
+                    self.version, SDK_BACKUP_MIN_READ_VERSION, SDK_BACKUP_VERSION
+                ),
                 source: None,
             });
         }

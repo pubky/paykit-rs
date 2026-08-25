@@ -5,7 +5,7 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::domain::outbound_private::{
     claim_next_outbound_private_message, mark_outbound_failed, mark_outbound_invalid,
-    mark_outbound_sent, queued_outbound_private_messages,
+    mark_outbound_sent, queued_outbound_private_messages, validate_queued_outbound_private_message,
 };
 use crate::{
     LinkedPeerState, OutboundPrivateMessageStatus, PrivateStreamParseStatus, PublicationStatus,
@@ -560,6 +560,285 @@ async fn test_invalid_outbound_private_message_does_not_block_later_records() {
         .unwrap();
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].outbound_message_id, second.outbound_message_id);
+}
+
+/// Outbound record carrying a Private Message Kind this build does not
+/// recognize, inserted directly (bypassing enqueue validation) like a record
+/// written by a newer build. Per the stamping invariant the kind column
+/// mirrors the body kind.
+fn unknown_kind_outbound_message(counterparty: PubkyPublicKey) -> NewOutboundPrivateMessage {
+    NewOutboundPrivateMessage::new(
+        counterparty,
+        receiver_path(),
+        "paykit.allowance".into(),
+        r#"{"version":1,"kind":"paykit.allowance","body":{}}"#.into(),
+        timestamp(),
+    )
+}
+
+async fn claim_head(
+    storage: &InMemoryStorage,
+    counterparty: &PubkyPublicKey,
+) -> Option<OutboundPrivateMessageRecord> {
+    claim_next_outbound_private_message(
+        storage,
+        counterparty,
+        &receiver_path(),
+        timestamp(),
+        timestamp() - chrono::Duration::seconds(60),
+        timestamp() - chrono::Duration::seconds(60),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_unknown_kind_queue_head_is_parked_never_claimed() {
+    let storage = InMemoryStorage::new();
+    let counterparty = random_public_key();
+    let head = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                Ok(tx.insert_outbound_private_message(unknown_kind_outbound_message(counterparty)))
+            }
+        })
+        .await
+        .unwrap();
+
+    // Pending head: parked, and the record stays field-for-field unchanged.
+    assert!(claim_head(&storage, &counterparty).await.is_none());
+    let after = storage.snapshot().unwrap().outbound_private_messages;
+    assert_eq!(after, vec![head.clone()]);
+
+    // Failed head eligible for retry and stale Sending head: still parked.
+    for status in [
+        OutboundPrivateMessageStatus::Failed,
+        OutboundPrivateMessageStatus::Sending,
+    ] {
+        let mut record = head.clone();
+        record.status = status.clone();
+        record.attempt_count = 1;
+        record.last_attempt_at = Some(timestamp() - chrono::Duration::seconds(120));
+        record.last_error = (record.status == OutboundPrivateMessageStatus::Failed)
+            .then(|| "send failed".to_owned());
+        storage
+            .transaction({
+                let record = record.clone();
+                move |tx| {
+                    tx.save_outbound_private_message(record)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        assert!(claim_head(&storage, &counterparty).await.is_none());
+        let after = storage.snapshot().unwrap().outbound_private_messages;
+        assert_eq!(after, vec![record], "parked {status:?} head was mutated");
+    }
+}
+
+#[tokio::test]
+async fn test_parked_head_blocks_later_messages_for_same_peer() {
+    let storage = InMemoryStorage::new();
+    let counterparty = random_public_key();
+    let (head, second) = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let head = tx.insert_outbound_private_message(unknown_kind_outbound_message(
+                    counterparty.clone(),
+                ));
+                let second =
+                    tx.insert_outbound_private_message(outbound_private_message(counterparty));
+                Ok((head, second))
+            }
+        })
+        .await
+        .unwrap();
+
+    // No leapfrog: repeated claims return no work, the later valid message
+    // stays Pending, and the parked head never changes (attempt_count 0).
+    for _ in 0..3 {
+        assert!(claim_head(&storage, &counterparty).await.is_none());
+        let after = storage.snapshot().unwrap().outbound_private_messages;
+        assert_eq!(after, vec![head.clone(), second.clone()]);
+        assert_eq!(after[1].status, OutboundPrivateMessageStatus::Pending);
+        assert_eq!(after[0].attempt_count, 0);
+    }
+}
+
+#[tokio::test]
+async fn test_parked_head_does_not_block_other_peers() {
+    let storage = InMemoryStorage::new();
+    let parked_peer = random_public_key();
+    let other_peer = random_public_key();
+    let expected = storage
+        .transaction({
+            let parked_peer = parked_peer.clone();
+            let other_peer = other_peer.clone();
+            move |tx| {
+                tx.insert_outbound_private_message(unknown_kind_outbound_message(parked_peer));
+                Ok(tx.insert_outbound_private_message(outbound_private_message(other_peer)))
+            }
+        })
+        .await
+        .unwrap();
+
+    assert!(claim_head(&storage, &parked_peer).await.is_none());
+    let claimed = claim_head(&storage, &other_peer).await.unwrap();
+    assert_eq!(claimed.outbound_message_id, expected.outbound_message_id);
+    assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
+}
+
+#[tokio::test]
+async fn test_parking_is_body_authoritative_in_both_directions() {
+    let storage = InMemoryStorage::new();
+    let recognized_column = random_public_key();
+    let unknown_column = random_public_key();
+    storage
+        .transaction({
+            let recognized_column = recognized_column.clone();
+            let unknown_column = unknown_column.clone();
+            move |tx| {
+                // Recognized kind column, unknown body kind: parked.
+                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    recognized_column,
+                    receiver_path(),
+                    "paykit.private_payment_list".into(),
+                    r#"{"version":1,"kind":"paykit.allowance","body":{}}"#.into(),
+                    timestamp(),
+                ));
+                // Unknown kind column, recognized valid body: corruption of
+                // an understood message, so it stays on the invalid path.
+                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    unknown_column,
+                    receiver_path(),
+                    "paykit.allowance".into(),
+                    r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#
+                        .into(),
+                    timestamp(),
+                ));
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    assert!(claim_head(&storage, &recognized_column).await.is_none());
+
+    let claimed = claim_head(&storage, &unknown_column).await.unwrap();
+    assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
+    // The flush path then routes the claimed record to the existing
+    // kind-mismatch invalid path.
+    assert!(validate_queued_outbound_private_message(&claimed).is_err());
+}
+
+/// Divergent record a corrupt or invariant-breaking writer could produce:
+/// the `kind` column claims Private Payment List while the body carries an
+/// unknown kind. Parking is body-authoritative, so the record is parked, and
+/// the column-keyed supersede pass must never count or mutate it.
+fn divergent_parked_list_column_message(counterparty: PubkyPublicKey) -> NewOutboundPrivateMessage {
+    NewOutboundPrivateMessage::new(
+        counterparty,
+        receiver_path(),
+        "paykit.private_payment_list".into(),
+        r#"{"version":1,"kind":"paykit.allowance","body":{}}"#.into(),
+        timestamp(),
+    )
+}
+
+#[tokio::test]
+async fn test_supersede_pass_never_mutates_divergent_parked_head() {
+    let storage = InMemoryStorage::new();
+    let counterparty = random_public_key();
+    let (head, newer_list) = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let head = tx.insert_outbound_private_message(
+                    divergent_parked_list_column_message(counterparty.clone()),
+                );
+                let newer_list =
+                    tx.insert_outbound_private_message(outbound_private_message(counterparty));
+                Ok((head, newer_list))
+            }
+        })
+        .await
+        .unwrap();
+
+    // The supersede pass keys on the kind column; it must not retire the
+    // parked head as Superseded, and the newer genuine list must not
+    // leapfrog it: both records stay Pending, field for field.
+    assert!(claim_head(&storage, &counterparty).await.is_none());
+    let after = storage.snapshot().unwrap().outbound_private_messages;
+    assert_eq!(after, vec![head, newer_list]);
+    assert_eq!(after[0].status, OutboundPrivateMessageStatus::Pending);
+    assert_eq!(after[1].status, OutboundPrivateMessageStatus::Pending);
+}
+
+#[tokio::test]
+async fn test_divergent_parked_record_never_supersedes_genuine_lists() {
+    let storage = InMemoryStorage::new();
+    let counterparty = random_public_key();
+    let (genuine_list, parked) = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let genuine_list = tx.insert_outbound_private_message(outbound_private_message(
+                    counterparty.clone(),
+                ));
+                let parked = tx.insert_outbound_private_message(
+                    divergent_parked_list_column_message(counterparty),
+                );
+                Ok((genuine_list, parked))
+            }
+        })
+        .await
+        .unwrap();
+
+    // The parked record holds the highest id in the list column, but it can
+    // never send, so it must not become the "latest list" that retires the
+    // genuine head as Superseded.
+    let claimed = claim_head(&storage, &counterparty).await.unwrap();
+    assert_eq!(
+        claimed.outbound_message_id,
+        genuine_list.outbound_message_id
+    );
+    assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
+    let after = storage.snapshot().unwrap().outbound_private_messages;
+    assert_eq!(after[1], parked);
+    assert_eq!(after[1].status, OutboundPrivateMessageStatus::Pending);
+}
+
+#[tokio::test]
+async fn test_recognized_malformed_head_is_still_claimed_for_invalid_path() {
+    let storage = InMemoryStorage::new();
+    let counterparty = random_public_key();
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    counterparty,
+                    receiver_path(),
+                    "paykit.private_payment_list".into(),
+                    // Recognized kind with a structurally invalid body.
+                    r#"{"version":1,"kind":"paykit.private_payment_list"}"#.into(),
+                    timestamp(),
+                ));
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    // Parking must not swallow recognized-but-malformed heads: the claim
+    // succeeds and validation routes the record to the existing invalid path.
+    let claimed = claim_head(&storage, &counterparty).await.unwrap();
+    assert_eq!(claimed.status, OutboundPrivateMessageStatus::Sending);
+    assert!(validate_queued_outbound_private_message(&claimed).is_err());
 }
 
 #[tokio::test]

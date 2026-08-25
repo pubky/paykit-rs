@@ -13,6 +13,10 @@ pub mod storage;
 
 #[doc(inline)]
 pub use backup::{export_backup_state, RestoreReport, SdkBackupState, SDK_BACKUP_VERSION};
+// Internal lockstep bound for paykit-ffi; hidden because the `backup` module
+// itself is private and the constant is not part of the documented API.
+#[doc(hidden)]
+pub use backup::SDK_BACKUP_MIN_READ_VERSION;
 #[doc(inline)]
 pub use config::{
     EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
@@ -40,9 +44,9 @@ pub use domain::linked_peers::{
 };
 #[doc(inline)]
 pub use domain::outbound_private::{
-    OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
-    OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
-    ReservationCleanupFailure,
+    OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus, OutboundPrivateParkReason,
+    OutboundPrivateParkedMessage, OutboundPrivateSendFailure, OutboundPrivateSendReport,
+    RecoveryMarkerPublishFailure, ReservationCleanupFailure,
 };
 #[doc(inline)]
 pub use domain::payment_requests::{

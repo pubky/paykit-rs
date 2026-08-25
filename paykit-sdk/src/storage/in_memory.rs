@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use super::queue::{
-    is_claimable_outbound_private_message, supersede_outdated_private_payment_lists,
+    is_claimable_outbound_private_message, is_parked_unknown_kind_outbound_message,
+    supersede_outdated_private_payment_lists,
 };
 use super::*;
 use crate::OutboundPrivateMessageStatus;
@@ -392,6 +393,12 @@ impl StorageTransaction for StorageStateTransaction {
 
         let (index, _) = indexes.first().copied()?;
         let message = &mut self.state.outbound_private_messages[index];
+        // COMPATIBILITY: a well-formed unknown-kind head was written by a
+        // newer build; leave it byte-for-byte and status-for-status
+        // unchanged and let it block this peer's FIFO queue (no leapfrog).
+        if is_parked_unknown_kind_outbound_message(message) {
+            return None;
+        }
         if !is_claimable_outbound_private_message(message, stale_before, failed_retry_after) {
             return None;
         }

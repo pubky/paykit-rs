@@ -4,8 +4,9 @@ use paykit_sdk::storage::LinkedPeerRecord;
 use paykit_sdk::{
     EncryptedLinkHandshakeRole, EncryptedLinkRecoveryMarkerReport, EventIdConflict,
     LinkedPeerHandshakeReport, LinkedPeerState, OutboundPrivateCounterpartySendReport,
-    OutboundPrivateSendFailure, OutboundPrivateSendReport, PrivateStreamCounterpartyIntakeReport,
-    PrivateStreamIntakeReport, RecoveryMarkerPublishFailure, ReservationCleanupFailure,
+    OutboundPrivateParkReason, OutboundPrivateParkedMessage, OutboundPrivateSendFailure,
+    OutboundPrivateSendReport, PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,
+    RecoveryMarkerPublishFailure, ReservationCleanupFailure,
 };
 
 use crate::{
@@ -208,6 +209,31 @@ pub struct FfiRecoveryMarkerPublishFailure {
     pub error: Arc<FfiPrivateOperationError>,
 }
 
+/// Reason an outbound private message is parked instead of processed.
+///
+/// A closed vocabulary: parked-message reports never carry payload data or
+/// the unrecognized kind text.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiOutboundPrivateParkReason {
+    /// The queued payload carries a Private Message Kind this build does not
+    /// recognize; only a build that understands the kind may process it.
+    UnsupportedKind,
+    /// SDK returned a value this binding version does not understand.
+    Unknown,
+}
+
+/// One outbound private message left parked at the head of a peer's queue.
+///
+/// Carries only the local outbound message id plus a closed-vocabulary
+/// reason; never payload bytes and never the unrecognized kind string.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiOutboundPrivateParkedMessage {
+    /// Outbound message id of the parked queue head.
+    pub outbound_message_id: u64,
+    /// Why the message is parked.
+    pub reason: FfiOutboundPrivateParkReason,
+}
+
 /// Summary returned after processing outbound private messages.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiOutboundPrivateSendReport {
@@ -221,6 +247,10 @@ pub struct FfiOutboundPrivateSendReport {
     pub reservation_cleanup_failures: Vec<FfiReservationCleanupFailure>,
     /// Recovery marker publication failures observed after fail-closed recovery.
     pub recovery_marker_failures: Vec<FfiRecoveryMarkerPublishFailure>,
+    /// Queue heads left parked because this build does not recognize their
+    /// Private Message Kind. Parked records are never claimed, mutated, or
+    /// invalidated; they block their peer's queue until a newer build runs.
+    pub parked_unsupported: Vec<FfiOutboundPrivateParkedMessage>,
 }
 
 /// Summary for processing outbound private messages for one counterparty.
@@ -647,6 +677,26 @@ impl From<RecoveryMarkerPublishFailure> for FfiRecoveryMarkerPublishFailure {
     }
 }
 
+impl From<OutboundPrivateParkReason> for FfiOutboundPrivateParkReason {
+    fn from(value: OutboundPrivateParkReason) -> Self {
+        match value {
+            OutboundPrivateParkReason::UnsupportedKind => Self::UnsupportedKind,
+            // The SDK enum is non-exhaustive; future reasons map to the
+            // terminal Unknown variant like the other FFI output enums.
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl From<OutboundPrivateParkedMessage> for FfiOutboundPrivateParkedMessage {
+    fn from(value: OutboundPrivateParkedMessage) -> Self {
+        Self {
+            outbound_message_id: value.outbound_message_id,
+            reason: value.reason.into(),
+        }
+    }
+}
+
 impl From<OutboundPrivateSendReport> for FfiOutboundPrivateSendReport {
     fn from(value: OutboundPrivateSendReport) -> Self {
         Self {
@@ -660,6 +710,11 @@ impl From<OutboundPrivateSendReport> for FfiOutboundPrivateSendReport {
                 .collect(),
             recovery_marker_failures: value
                 .recovery_marker_failures
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            parked_unsupported: value
+                .parked_unsupported
                 .into_iter()
                 .map(Into::into)
                 .collect(),

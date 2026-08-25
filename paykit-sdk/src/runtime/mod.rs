@@ -59,10 +59,10 @@ use crate::{
     domain::outbound_private::{
         claim_next_outbound_private_message_with_peer_lease, mark_outbound_failed,
         mark_outbound_invalid, mark_outbound_recovery_required, mark_outbound_sent,
-        queued_outbound_private_messages, validate_queued_outbound_private_message,
-        OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
-        OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
-        ReservationCleanupFailure,
+        parked_unsupported_queue_head, queued_outbound_private_messages,
+        validate_queued_outbound_private_message, OutboundPrivateCounterpartySendReport,
+        OutboundPrivateMessageStatus, OutboundPrivateSendFailure, OutboundPrivateSendReport,
+        RecoveryMarkerPublishFailure, ReservationCleanupFailure,
     },
     domain::payment_requests::{
         enqueue_payment_proof as enqueue_payment_proof_message,

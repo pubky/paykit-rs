@@ -1797,6 +1797,70 @@ async fn test_restore_backup_state_rejects_recovery_required_outbound_with_sent_
     assert_restore_rejects_outbound_record(recovery_required).await;
 }
 
+/// Parked unknown-kind outbound queue entry as a newer build writes it: the
+/// kind column mirrors the unrecognized body kind.
+fn parked_unknown_kind_outbound(counterparty: PubkyPublicKey) -> OutboundPrivateMessageRecord {
+    OutboundPrivateMessageRecord {
+        outbound_message_id: 7,
+        counterparty,
+        counterparty_receiver_path: receiver_path(),
+        kind: "paykit.allowance".into(),
+        raw_json: r#"{"version":1,"kind":"paykit.allowance","body":{}}"#.into(),
+        status: OutboundPrivateMessageStatus::Pending,
+        attempt_count: 0,
+        created_at: timestamp(),
+        updated_at: timestamp(),
+        last_attempt_at: None,
+        sent_at: None,
+        last_error: None,
+    }
+}
+
+#[tokio::test]
+async fn test_restore_backup_state_preserves_parked_unknown_kind_outbound() {
+    let storage = InMemoryStorage::new();
+    let counterparty = public_key();
+    let parked = parked_unknown_kind_outbound(counterparty.clone());
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        local_receiver_path: receiver_path(),
+        identity_state: Some(identity(counterparty)),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: vec![parked.clone()],
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
+        next_outbound_private_message_id: 8,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    };
+
+    restore_backup_state(&storage, backup).await.unwrap();
+    let restored = storage.snapshot().unwrap();
+
+    // The parked record round-trips field-for-field: a backup written by a
+    // newer build restores here without destroying its outbound intent.
+    assert_eq!(restored.outbound_private_messages, vec![parked]);
+}
+
+#[tokio::test]
+async fn test_restore_backup_state_rejects_unknown_kind_record_with_mismatched_kind_column() {
+    let counterparty = public_key();
+    let mut mismatched = parked_unknown_kind_outbound(counterparty);
+    // Kind column diverges from the payload body kind: restore stays strict
+    // and fails, while the runtime parks this divergence safely (deliberate
+    // asymmetry pinned here).
+    mismatched.kind = "paykit.allowance_v2".into();
+
+    assert_restore_rejects_outbound_record(mismatched).await;
+}
+
 #[tokio::test]
 async fn test_restore_backup_state_rejects_wrong_identity() {
     let storage = InMemoryStorage::new();

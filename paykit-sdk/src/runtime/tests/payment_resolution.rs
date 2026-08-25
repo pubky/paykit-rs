@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::payment_resolution::{merge_outbound_report, merge_receive_report};
+use crate::{OutboundPrivateParkReason, OutboundPrivateParkedMessage};
 
 #[test]
 fn test_payable_from_batch_rejects_foreign_candidates() {
@@ -49,21 +50,21 @@ fn test_merge_outbound_report_preserves_multiple_rounds() {
     let mut report = Some(OutboundPrivateSendReport {
         attempted: vec![1],
         sent: vec![1],
-        failed: Vec::new(),
-        reservation_cleanup_failures: Vec::new(),
-        recovery_marker_failures: Vec::new(),
+        ..OutboundPrivateSendReport::default()
     });
     merge_outbound_report(
         &mut report,
         OutboundPrivateSendReport {
             attempted: vec![2],
-            sent: Vec::new(),
             failed: vec![OutboundPrivateSendFailure {
                 outbound_message_id: 2,
                 error: "transport failed".into(),
             }],
-            reservation_cleanup_failures: Vec::new(),
-            recovery_marker_failures: Vec::new(),
+            parked_unsupported: vec![OutboundPrivateParkedMessage {
+                outbound_message_id: 3,
+                reason: OutboundPrivateParkReason::UnsupportedKind,
+            }],
+            ..OutboundPrivateSendReport::default()
         },
     );
 
@@ -71,6 +72,8 @@ fn test_merge_outbound_report_preserves_multiple_rounds() {
     assert_eq!(report.attempted, vec![1, 2]);
     assert_eq!(report.sent, vec![1]);
     assert_eq!(report.failed[0].outbound_message_id, 2);
+    assert_eq!(report.parked_unsupported.len(), 1);
+    assert_eq!(report.parked_unsupported[0].outbound_message_id, 3);
 }
 
 #[test]

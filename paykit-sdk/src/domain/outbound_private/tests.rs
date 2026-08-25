@@ -39,6 +39,10 @@ fn test_failure_report_debug_redacts_errors() {
                 outbound_message_id: Some(1),
                 error: "marker-secret".into(),
             }],
+            parked_unsupported: vec![OutboundPrivateParkedMessage {
+                outbound_message_id: 2,
+                reason: OutboundPrivateParkReason::UnsupportedKind,
+            }],
         }),
         error: Some("counterparty-secret".into()),
     };
@@ -244,6 +248,108 @@ async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
         .unwrap();
     assert_eq!(queued[0].status, OutboundPrivateMessageStatus::Pending);
     assert_eq!(queued[0].attempt_count, 0);
+}
+
+/// The parked-head report path: one lease-checked read that surfaces a
+/// stable redacted block for a parked unknown-kind queue head. The full
+/// runtime flush entry point requires a live Pubky session, so the helper the
+/// flush loop calls is exercised at the domain layer it lives in.
+#[tokio::test]
+async fn test_parked_unsupported_queue_head_reports_stable_redacted_block() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let unknown_kind = format!("paykit.{SENTINEL}");
+    let (head, lease) = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let unknown_kind = unknown_kind.clone();
+            move |tx| {
+                let head = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    counterparty.clone(),
+                    receiver_path(),
+                    unknown_kind.clone(),
+                    format!(r#"{{"version":1,"kind":"{unknown_kind}","body":{{}}}}"#),
+                    timestamp(),
+                ));
+                let lease = tx
+                    .claim_peer_link_operation(
+                        &counterparty,
+                        &receiver_path(),
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(60),
+                    )
+                    .unwrap();
+                Ok((head, lease))
+            }
+        })
+        .await
+        .unwrap();
+
+    // The signal is stable across repeated flushes: the same entry every
+    // time, and the parked record is never mutated (attempt_count 0).
+    for _ in 0..3 {
+        let parked = parked_unsupported_queue_head(&storage, &counterparty, &lease)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parked,
+            OutboundPrivateParkedMessage {
+                outbound_message_id: head.outbound_message_id,
+                reason: OutboundPrivateParkReason::UnsupportedKind,
+            }
+        );
+        let state = storage.snapshot().unwrap().outbound_private_messages;
+        assert_eq!(state, vec![head.clone()]);
+
+        // SECURITY: the report entry is id plus closed vocabulary only; the
+        // unrecognized kind text never crosses into it.
+        let report = OutboundPrivateSendReport {
+            parked_unsupported: vec![parked],
+            ..OutboundPrivateSendReport::default()
+        };
+        let debug = format!("{report:?}");
+        assert!(
+            !debug.contains(SENTINEL),
+            "kind leaked into report: {debug}"
+        );
+        assert!(!serde_json::to_string(&report).unwrap().contains(SENTINEL));
+    }
+}
+
+#[tokio::test]
+async fn test_parked_unsupported_queue_head_ignores_recognized_head() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let lease = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    counterparty.clone(),
+                    receiver_path(),
+                    "paykit.private_payment_list".into(),
+                    raw_private_list(),
+                    timestamp(),
+                ));
+                Ok(tx
+                    .claim_peer_link_operation(
+                        &counterparty,
+                        &receiver_path(),
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(60),
+                    )
+                    .unwrap())
+            }
+        })
+        .await
+        .unwrap();
+
+    let parked = parked_unsupported_queue_head(&storage, &counterparty, &lease)
+        .await
+        .unwrap();
+
+    assert_eq!(parked, None);
 }
 
 const SENTINEL: &str = "SENTINEL-9f4c-DO-NOT-PRINT";

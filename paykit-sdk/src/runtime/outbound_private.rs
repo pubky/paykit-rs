@@ -190,6 +190,15 @@ where
             )
             .await?;
             let Some(sending) = sending else {
+                // No claimable work. When that is because the queue head is a
+                // parked unknown-kind message, surface the stable redacted
+                // parked block instead of silently reporting an empty run;
+                // the record itself is never claimed or mutated.
+                if let Some(parked) =
+                    parked_unsupported_queue_head(&self.storage, &counterparty, &lease).await?
+                {
+                    report.parked_unsupported.push(parked);
+                }
                 report.reservation_cleanup_failures.extend(
                     self.cancel_terminal_private_list_reservations(
                         &counterparty,

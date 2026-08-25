@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{ffi_error_to_sdk, storage_error, PaykitFfiError};
 use crate::secrets::FfiSdkStateBlob;
-use crate::{SDK_BACKUP_BLOB_VERSION, SDK_STATE_BLOB_VERSION};
+use crate::{
+    SDK_BACKUP_BLOB_MIN_READ_VERSION, SDK_BACKUP_BLOB_VERSION, SDK_STATE_BLOB_MIN_READ_VERSION,
+    SDK_STATE_BLOB_VERSION,
+};
 
 /// Current SDK state blob with its platform storage revision.
 #[derive(uniffi::Record, Clone, Debug)]
@@ -71,6 +74,10 @@ impl StorageAdapter for FfiSdkStorage {
 
         let (updated_state, result) = run_storage_state_transaction(initial_state.clone(), f)?;
 
+        // Lazy generation upgrade: skipping the save when the state is
+        // unchanged leaves an old-generation blob byte-for-byte intact, so
+        // rollback to an older binary stays possible until the first real
+        // state change re-stamps the blob at the current generation.
         if updated_state != initial_state {
             let blob = Arc::new(FfiSdkStateBlob::new(
                 encode_storage_state(&updated_state)
@@ -104,6 +111,22 @@ struct StateBlobSnapshotEnvelope {
     blob: Vec<u8>,
 }
 
+/// Leading version field shared by every FFI blob envelope.
+///
+/// Postcard is positional and non-self-describing, so a full-envelope decode
+/// of an unknown future layout could succeed with garbage. Every envelope
+/// leads with a `u32` version, which is decoded on its own first; the full
+/// envelope body is decoded only for versions this build supports. Bodies are
+/// identical across supported versions, so one body decode covers the range.
+#[derive(Deserialize)]
+struct EnvelopeVersionPrefix {
+    version: u32,
+}
+
+fn envelope_version(bytes: &[u8]) -> Result<u32, postcard::Error> {
+    postcard::take_from_bytes::<EnvelopeVersionPrefix>(bytes).map(|(prefix, _)| prefix.version)
+}
+
 pub(crate) fn encode_storage_state(state: &StorageState) -> Result<Vec<u8>, PaykitFfiError> {
     postcard::to_allocvec(&StorageStateEnvelope {
         version: SDK_STATE_BLOB_VERSION,
@@ -112,22 +135,31 @@ pub(crate) fn encode_storage_state(state: &StorageState) -> Result<Vec<u8>, Payk
     .map_err(|err| storage_error("encode_state_blob", format!("encode SDK state blob: {err}")))
 }
 
+// SECURITY: decode errors cross the FFI boundary as platform exception text,
+// so they must name only version numbers and postcard error variants, never
+// blob bytes or decoded content.
 pub(crate) fn decode_storage_state(bytes: &[u8]) -> paykit_sdk::Result<StorageState> {
-    let envelope: StorageStateEnvelope =
-        postcard::from_bytes(bytes).map_err(|err| PaykitSdkError::Storage {
-            context: format!("decode SDK state blob: {err}"),
-            source: None,
-        })?;
-    if envelope.version != SDK_STATE_BLOB_VERSION {
-        return Err(PaykitSdkError::Storage {
+    let version = envelope_version(bytes).map_err(|err| PaykitSdkError::Storage {
+        context: format!("decode SDK state blob: {err}"),
+        source: None,
+    })?;
+    match version {
+        SDK_STATE_BLOB_MIN_READ_VERSION..=SDK_STATE_BLOB_VERSION => {
+            let envelope: StorageStateEnvelope =
+                postcard::from_bytes(bytes).map_err(|err| PaykitSdkError::Storage {
+                    context: format!("decode SDK state blob: {err}"),
+                    source: None,
+                })?;
+            Ok(envelope.state)
+        }
+        other => Err(PaykitSdkError::Storage {
             context: format!(
-                "unsupported SDK state blob version {}, expected {}",
-                envelope.version, SDK_STATE_BLOB_VERSION
+                "unsupported SDK state blob version {other}, expected \
+                 {SDK_STATE_BLOB_MIN_READ_VERSION} through {SDK_STATE_BLOB_VERSION}"
             ),
             source: None,
-        });
+        }),
     }
-    Ok(envelope.state)
 }
 
 pub(crate) fn encode_backup_state(backup: &SdkBackupState) -> Result<Vec<u8>, PaykitFfiError> {
@@ -144,22 +176,30 @@ pub(crate) fn encode_backup_state(backup: &SdkBackupState) -> Result<Vec<u8>, Pa
 }
 
 pub(crate) fn decode_backup_state(bytes: &[u8]) -> Result<SdkBackupState, PaykitFfiError> {
-    let envelope: BackupStateEnvelope = postcard::from_bytes(bytes).map_err(|err| {
+    let version = envelope_version(bytes).map_err(|err| {
         storage_error(
             "decode_backup_blob",
             format!("decode SDK backup blob: {err}"),
         )
     })?;
-    if envelope.version != SDK_BACKUP_BLOB_VERSION {
-        return Err(storage_error(
+    match version {
+        SDK_BACKUP_BLOB_MIN_READ_VERSION..=SDK_BACKUP_BLOB_VERSION => {
+            let envelope: BackupStateEnvelope = postcard::from_bytes(bytes).map_err(|err| {
+                storage_error(
+                    "decode_backup_blob",
+                    format!("decode SDK backup blob: {err}"),
+                )
+            })?;
+            Ok(envelope.backup)
+        }
+        other => Err(storage_error(
             "unsupported_backup_blob_version",
             format!(
-                "unsupported SDK backup blob version {}, expected {}",
-                envelope.version, SDK_BACKUP_BLOB_VERSION
+                "unsupported SDK backup blob version {other}, expected \
+                 {SDK_BACKUP_BLOB_MIN_READ_VERSION} through {SDK_BACKUP_BLOB_VERSION}"
             ),
-        ));
+        )),
     }
-    Ok(envelope.backup)
 }
 
 /// Encode an SDK state blob snapshot for apps that store blob and revision together.
@@ -185,23 +225,32 @@ pub fn encode_sdk_state_blob_snapshot(
 pub fn decode_sdk_state_blob_snapshot(
     bytes: Vec<u8>,
 ) -> Result<FfiSdkStateBlobSnapshot, PaykitFfiError> {
-    let envelope: StateBlobSnapshotEnvelope = postcard::from_bytes(&bytes).map_err(|err| {
+    let version = envelope_version(&bytes).map_err(|err| {
         storage_error(
             "decode_state_snapshot_blob",
             format!("decode SDK state blob snapshot: {err}"),
         )
     })?;
-    if envelope.version != SDK_STATE_BLOB_VERSION {
-        return Err(storage_error(
+    match version {
+        SDK_STATE_BLOB_MIN_READ_VERSION..=SDK_STATE_BLOB_VERSION => {
+            let envelope: StateBlobSnapshotEnvelope =
+                postcard::from_bytes(&bytes).map_err(|err| {
+                    storage_error(
+                        "decode_state_snapshot_blob",
+                        format!("decode SDK state blob snapshot: {err}"),
+                    )
+                })?;
+            Ok(FfiSdkStateBlobSnapshot {
+                blob: Arc::new(FfiSdkStateBlob::new(envelope.blob)),
+                revision: envelope.revision,
+            })
+        }
+        other => Err(storage_error(
             "unsupported_state_snapshot_blob_version",
             format!(
-                "unsupported SDK state snapshot blob version {}, expected {}",
-                envelope.version, SDK_STATE_BLOB_VERSION
+                "unsupported SDK state snapshot blob version {other}, expected \
+                 {SDK_STATE_BLOB_MIN_READ_VERSION} through {SDK_STATE_BLOB_VERSION}"
             ),
-        ));
+        )),
     }
-    Ok(FfiSdkStateBlobSnapshot {
-        blob: Arc::new(FfiSdkStateBlob::new(envelope.blob)),
-        revision: envelope.revision,
-    })
 }
