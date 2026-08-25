@@ -651,6 +651,14 @@ async fn test_intake_parse_summaries_never_contain_sentinels() {
                 "parse_error is not a stable redacted summary: {parse_error}"
             );
         }
+        // Debug output must redact every channel that can echo message
+        // content: raw_json, parse_error, and a non-canonical parsed kind
+        // (the unknown-kind payload's sentinel is its kind string).
+        let debug = format!("{item:?}");
+        assert!(
+            !debug.contains(SENTINEL),
+            "sentinel leaked into Debug output: {debug}"
+        );
     }
 }
 

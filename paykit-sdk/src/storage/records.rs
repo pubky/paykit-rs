@@ -455,6 +455,19 @@ pub(crate) struct NewPrivateStreamItemDetails {
     pub(crate) received_at: DateTime<Utc>,
 }
 
+/// Debug form of a parsed kind: a canonical Private Message Kind string is
+/// public closed vocabulary and stays readable, while anything else is
+/// arbitrary decrypted counterparty plaintext and must be redacted.
+fn debug_parsed_kind(parsed_kind: &Option<String>) -> Option<String> {
+    parsed_kind.as_ref().map(|kind| {
+        if PrivateMessageKind::parse(kind).is_some() {
+            kind.clone()
+        } else {
+            format!("<redacted:{} bytes>", kind.len())
+        }
+    })
+}
+
 impl fmt::Debug for NewPrivateStreamItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NewPrivateStreamItem")
@@ -469,7 +482,7 @@ impl fmt::Debug for NewPrivateStreamItem {
                 &format!("<redacted:{} bytes>", self.raw_json.len()),
             )
             .field("parsed_version", &self.parsed_version)
-            .field("parsed_kind", &self.parsed_kind)
+            .field("parsed_kind", &debug_parsed_kind(&self.parsed_kind))
             .field("known_paykit_kind", &self.known_paykit_kind)
             .field("parse_status", &self.parse_status)
             .field(
@@ -486,7 +499,8 @@ impl fmt::Debug for NewPrivateStreamItem {
 
 /// Durable private stream item.
 ///
-/// The payload may contain private Paykit secrets. `Debug` redacts it.
+/// The payload may contain private Paykit secrets. `Debug` redacts it, along
+/// with the parse error and any non-canonical parsed kind.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivateStreamItemRecord {
     /// Assigned stream item id.
@@ -528,7 +542,7 @@ impl fmt::Debug for PrivateStreamItemRecord {
                 &format!("<redacted:{} bytes>", self.raw_json.len()),
             )
             .field("parsed_version", &self.parsed_version)
-            .field("parsed_kind", &self.parsed_kind)
+            .field("parsed_kind", &debug_parsed_kind(&self.parsed_kind))
             .field("known_paykit_kind", &self.known_paykit_kind)
             .field("parse_status", &self.parse_status)
             .field(
@@ -588,16 +602,7 @@ impl fmt::Debug for PrivateStreamItemClassificationUpdate {
         f.debug_struct("PrivateStreamItemClassificationUpdate")
             .field("stream_item_id", &self.stream_item_id)
             .field("parsed_version", &self.parsed_version)
-            .field(
-                "parsed_kind",
-                &self.parsed_kind.as_ref().map(|kind| {
-                    if PrivateMessageKind::parse(kind).is_some() {
-                        kind.clone()
-                    } else {
-                        format!("<redacted:{} bytes>", kind.len())
-                    }
-                }),
-            )
+            .field("parsed_kind", &debug_parsed_kind(&self.parsed_kind))
             .field("known_paykit_kind", &self.known_paykit_kind)
             .field("parse_status", &self.parse_status)
             .field(

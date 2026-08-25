@@ -1850,6 +1850,58 @@ async fn test_restore_backup_state_preserves_parked_unknown_kind_outbound() {
 }
 
 #[tokio::test]
+async fn test_restore_backup_state_accepts_sending_parked_unknown_kind_outbound() {
+    let storage = InMemoryStorage::new();
+    let counterparty = public_key();
+    // The claim_next metadata shape of a mid-send parked record on a newer
+    // build: one attempt made, last_error cleared by the claim.
+    let mut sending = parked_unknown_kind_outbound(counterparty.clone());
+    sending.status = OutboundPrivateMessageStatus::Sending;
+    sending.attempt_count = 1;
+    sending.last_attempt_at = Some(timestamp());
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        local_receiver_path: receiver_path(),
+        identity_state: Some(identity(counterparty)),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: vec![sending.clone()],
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
+        next_outbound_private_message_id: 8,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    };
+
+    restore_backup_state(&storage, backup).await.unwrap();
+    let restored = storage.snapshot().unwrap();
+
+    // The Sending status row accepts the claim shape, so a backup taken
+    // mid-send restores instead of being rejected. With no active link
+    // snapshot in the backup, restore rewrites Sending to RecoveryRequired
+    // (pinned above for recognized kinds) while preserving the unknown
+    // outbound intent un-destroyed.
+    assert_eq!(restored.outbound_private_messages.len(), 1);
+    let record = &restored.outbound_private_messages[0];
+    assert_eq!(record.raw_json, sending.raw_json);
+    assert_eq!(record.kind, "paykit.allowance");
+    assert_eq!(record.counterparty, sending.counterparty);
+    assert_eq!(record.attempt_count, 1);
+    assert_eq!(record.sent_at, None);
+    assert_eq!(
+        record.status,
+        OutboundPrivateMessageStatus::RecoveryRequired
+    );
+    assert!(record.last_error.is_some());
+}
+
+#[tokio::test]
 async fn test_restore_backup_state_rejects_unknown_kind_record_with_mismatched_kind_column() {
     let counterparty = public_key();
     let mut mismatched = parked_unknown_kind_outbound(counterparty);
