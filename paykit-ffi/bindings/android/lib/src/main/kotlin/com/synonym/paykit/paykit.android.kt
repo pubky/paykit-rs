@@ -9894,6 +9894,28 @@ public object FfiConverterTypeOutboundPrivateCounterpartySendReport: FfiConverte
 
 
 
+public object FfiConverterTypeOutboundPrivateParkedMessage: FfiConverterRustBuffer<OutboundPrivateParkedMessage> {
+    override fun read(buf: ByteBuffer): OutboundPrivateParkedMessage {
+        return OutboundPrivateParkedMessage(
+            FfiConverterULong.read(buf),
+            FfiConverterTypeOutboundPrivateParkReason.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: OutboundPrivateParkedMessage): ULong = (
+            FfiConverterULong.allocationSize(value.`outboundMessageId`) +
+            FfiConverterTypeOutboundPrivateParkReason.allocationSize(value.`reason`)
+    )
+
+    override fun write(value: OutboundPrivateParkedMessage, buf: ByteBuffer) {
+        FfiConverterULong.write(value.`outboundMessageId`, buf)
+        FfiConverterTypeOutboundPrivateParkReason.write(value.`reason`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeOutboundPrivateSendFailure: FfiConverterRustBuffer<OutboundPrivateSendFailure> {
     override fun read(buf: ByteBuffer): OutboundPrivateSendFailure {
         return OutboundPrivateSendFailure(
@@ -9924,6 +9946,7 @@ public object FfiConverterTypeOutboundPrivateSendReport: FfiConverterRustBuffer<
             FfiConverterSequenceTypeOutboundPrivateSendFailure.read(buf),
             FfiConverterSequenceTypeReservationCleanupFailure.read(buf),
             FfiConverterSequenceTypeRecoveryMarkerPublishFailure.read(buf),
+            FfiConverterSequenceTypeOutboundPrivateParkedMessage.read(buf),
         )
     }
 
@@ -9932,7 +9955,8 @@ public object FfiConverterTypeOutboundPrivateSendReport: FfiConverterRustBuffer<
             FfiConverterSequenceULong.allocationSize(value.`sent`) +
             FfiConverterSequenceTypeOutboundPrivateSendFailure.allocationSize(value.`failed`) +
             FfiConverterSequenceTypeReservationCleanupFailure.allocationSize(value.`reservationCleanupFailures`) +
-            FfiConverterSequenceTypeRecoveryMarkerPublishFailure.allocationSize(value.`recoveryMarkerFailures`)
+            FfiConverterSequenceTypeRecoveryMarkerPublishFailure.allocationSize(value.`recoveryMarkerFailures`) +
+            FfiConverterSequenceTypeOutboundPrivateParkedMessage.allocationSize(value.`parkedUnsupported`)
     )
 
     override fun write(value: OutboundPrivateSendReport, buf: ByteBuffer) {
@@ -9941,6 +9965,7 @@ public object FfiConverterTypeOutboundPrivateSendReport: FfiConverterRustBuffer<
         FfiConverterSequenceTypeOutboundPrivateSendFailure.write(value.`failed`, buf)
         FfiConverterSequenceTypeReservationCleanupFailure.write(value.`reservationCleanupFailures`, buf)
         FfiConverterSequenceTypeRecoveryMarkerPublishFailure.write(value.`recoveryMarkerFailures`, buf)
+        FfiConverterSequenceTypeOutboundPrivateParkedMessage.write(value.`parkedUnsupported`, buf)
     }
 }
 
@@ -11818,6 +11843,24 @@ public object FfiConverterTypeOutboundPrivateMessageStatus: FfiConverterRustBuff
 
 
 
+public object FfiConverterTypeOutboundPrivateParkReason: FfiConverterRustBuffer<OutboundPrivateParkReason> {
+    override fun read(buf: ByteBuffer): OutboundPrivateParkReason = try {
+        OutboundPrivateParkReason.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: OutboundPrivateParkReason): ULong = 4UL
+
+    override fun write(value: OutboundPrivateParkReason, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 public object FfiConverterTypePaymentRequestLifecycleState: FfiConverterRustBuffer<PaymentRequestLifecycleState> {
     override fun read(buf: ByteBuffer): PaymentRequestLifecycleState = try {
         PaymentRequestLifecycleState.entries[buf.getInt() - 1]
@@ -13318,6 +13361,31 @@ public object FfiConverterSequenceTypeOutboundPrivateCounterpartySendReport: Ffi
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeOutboundPrivateCounterpartySendReport.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeOutboundPrivateParkedMessage: FfiConverterRustBuffer<List<OutboundPrivateParkedMessage>> {
+    override fun read(buf: ByteBuffer): List<OutboundPrivateParkedMessage> {
+        val len = buf.getInt()
+        return List<OutboundPrivateParkedMessage>(len) {
+            FfiConverterTypeOutboundPrivateParkedMessage.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<OutboundPrivateParkedMessage>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeOutboundPrivateParkedMessage.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<OutboundPrivateParkedMessage>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeOutboundPrivateParkedMessage.write(it, buf)
         }
     }
 }

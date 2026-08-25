@@ -7512,6 +7512,96 @@ public func FfiConverterTypeOutboundPrivateCounterpartySendReport_lower(_ value:
 
 
 /**
+ * One outbound private message left parked at the head of a peer's queue.
+ *
+ * Carries only the local outbound message id plus a closed-vocabulary
+ * reason; never payload bytes and never the unrecognized kind string.
+ */
+public struct OutboundPrivateParkedMessage {
+    /**
+     * Outbound message id of the parked queue head.
+     */
+    public var outboundMessageId: UInt64
+    /**
+     * Why the message is parked.
+     */
+    public var reason: OutboundPrivateParkReason
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Outbound message id of the parked queue head.
+         */outboundMessageId: UInt64,
+        /**
+         * Why the message is parked.
+         */reason: OutboundPrivateParkReason) {
+        self.outboundMessageId = outboundMessageId
+        self.reason = reason
+    }
+}
+
+#if compiler(>=6)
+extension OutboundPrivateParkedMessage: Sendable {}
+#endif
+
+
+extension OutboundPrivateParkedMessage: Equatable, Hashable {
+    public static func ==(lhs: OutboundPrivateParkedMessage, rhs: OutboundPrivateParkedMessage) -> Bool {
+        if lhs.outboundMessageId != rhs.outboundMessageId {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(outboundMessageId)
+        hasher.combine(reason)
+    }
+}
+
+extension OutboundPrivateParkedMessage: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOutboundPrivateParkedMessage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OutboundPrivateParkedMessage {
+        return
+            try OutboundPrivateParkedMessage(
+                outboundMessageId: FfiConverterUInt64.read(from: &buf),
+                reason: FfiConverterTypeOutboundPrivateParkReason.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OutboundPrivateParkedMessage, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.outboundMessageId, into: &buf)
+        FfiConverterTypeOutboundPrivateParkReason.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOutboundPrivateParkedMessage_lift(_ buf: RustBuffer) throws -> OutboundPrivateParkedMessage {
+    return try FfiConverterTypeOutboundPrivateParkedMessage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOutboundPrivateParkedMessage_lower(_ value: OutboundPrivateParkedMessage) -> RustBuffer {
+    return FfiConverterTypeOutboundPrivateParkedMessage.lower(value)
+}
+
+
+/**
  * Failed outbound private send attempt.
  */
 public struct OutboundPrivateSendFailure {
@@ -7602,6 +7692,12 @@ public struct OutboundPrivateSendReport {
      * Recovery marker publication failures observed after fail-closed recovery.
      */
     public var recoveryMarkerFailures: [RecoveryMarkerPublishFailure]
+    /**
+     * Queue heads left parked because this build does not recognize their
+     * Private Message Kind. Parked records are never claimed, mutated, or
+     * invalidated; they block their peer's queue until a newer build runs.
+     */
+    public var parkedUnsupported: [OutboundPrivateParkedMessage]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7620,12 +7716,18 @@ public struct OutboundPrivateSendReport {
          */reservationCleanupFailures: [ReservationCleanupFailure],
         /**
          * Recovery marker publication failures observed after fail-closed recovery.
-         */recoveryMarkerFailures: [RecoveryMarkerPublishFailure]) {
+         */recoveryMarkerFailures: [RecoveryMarkerPublishFailure],
+        /**
+         * Queue heads left parked because this build does not recognize their
+         * Private Message Kind. Parked records are never claimed, mutated, or
+         * invalidated; they block their peer's queue until a newer build runs.
+         */parkedUnsupported: [OutboundPrivateParkedMessage]) {
         self.attempted = attempted
         self.sent = sent
         self.failed = failed
         self.reservationCleanupFailures = reservationCleanupFailures
         self.recoveryMarkerFailures = recoveryMarkerFailures
+        self.parkedUnsupported = parkedUnsupported
     }
 }
 
@@ -7646,7 +7748,8 @@ public struct FfiConverterTypeOutboundPrivateSendReport: FfiConverterRustBuffer 
                 sent: FfiConverterSequenceUInt64.read(from: &buf),
                 failed: FfiConverterSequenceTypeOutboundPrivateSendFailure.read(from: &buf),
                 reservationCleanupFailures: FfiConverterSequenceTypeReservationCleanupFailure.read(from: &buf),
-                recoveryMarkerFailures: FfiConverterSequenceTypeRecoveryMarkerPublishFailure.read(from: &buf)
+                recoveryMarkerFailures: FfiConverterSequenceTypeRecoveryMarkerPublishFailure.read(from: &buf),
+                parkedUnsupported: FfiConverterSequenceTypeOutboundPrivateParkedMessage.read(from: &buf)
         )
     }
 
@@ -7656,6 +7759,7 @@ public struct FfiConverterTypeOutboundPrivateSendReport: FfiConverterRustBuffer 
         FfiConverterSequenceTypeOutboundPrivateSendFailure.write(value.failed, into: &buf)
         FfiConverterSequenceTypeReservationCleanupFailure.write(value.reservationCleanupFailures, into: &buf)
         FfiConverterSequenceTypeRecoveryMarkerPublishFailure.write(value.recoveryMarkerFailures, into: &buf)
+        FfiConverterSequenceTypeOutboundPrivateParkedMessage.write(value.parkedUnsupported, into: &buf)
     }
 }
 
@@ -14526,6 +14630,91 @@ extension OutboundPrivateMessageStatus: Codable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Reason an outbound private message is parked instead of processed.
+ *
+ * A closed vocabulary: parked-message reports never carry payload data or
+ * the unrecognized kind text.
+ */
+
+public enum OutboundPrivateParkReason {
+
+    /**
+     * The queued payload carries a Private Message Kind this build does not
+     * recognize; only a build that understands the kind may process it.
+     */
+    case unsupportedKind
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension OutboundPrivateParkReason: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOutboundPrivateParkReason: FfiConverterRustBuffer {
+    typealias SwiftType = OutboundPrivateParkReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OutboundPrivateParkReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .unsupportedKind
+
+        case 2: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: OutboundPrivateParkReason, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .unsupportedKind:
+            writeInt(&buf, Int32(1))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOutboundPrivateParkReason_lift(_ buf: RustBuffer) throws -> OutboundPrivateParkReason {
+    return try FfiConverterTypeOutboundPrivateParkReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOutboundPrivateParkReason_lower(_ value: OutboundPrivateParkReason) -> RustBuffer {
+    return FfiConverterTypeOutboundPrivateParkReason.lower(value)
+}
+
+
+extension OutboundPrivateParkReason: Equatable, Hashable {}
+
+extension OutboundPrivateParkReason: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * SDK-derived Payment Request lifecycle state.
  */
 
@@ -16968,6 +17157,31 @@ fileprivate struct FfiConverterSequenceTypeOutboundPrivateCounterpartySendReport
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeOutboundPrivateCounterpartySendReport.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeOutboundPrivateParkedMessage: FfiConverterRustBuffer {
+    typealias SwiftType = [OutboundPrivateParkedMessage]
+
+    public static func write(_ value: [OutboundPrivateParkedMessage], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeOutboundPrivateParkedMessage.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [OutboundPrivateParkedMessage] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [OutboundPrivateParkedMessage]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeOutboundPrivateParkedMessage.read(from: &buf))
         }
         return seq
     }

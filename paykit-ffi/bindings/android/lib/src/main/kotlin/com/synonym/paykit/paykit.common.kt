@@ -1490,6 +1490,28 @@ public data class OutboundPrivateCounterpartySendReport (
 
 
 /**
+ * One outbound private message left parked at the head of a peer's queue.
+ *
+ * Carries only the local outbound message id plus a closed-vocabulary
+ * reason; never payload bytes and never the unrecognized kind string.
+ */
+@kotlinx.serialization.Serializable
+public data class OutboundPrivateParkedMessage (
+    /**
+     * Outbound message id of the parked queue head.
+     */
+    val `outboundMessageId`: kotlin.ULong,
+    /**
+     * Why the message is parked.
+     */
+    val `reason`: OutboundPrivateParkReason
+) {
+    public companion object
+}
+
+
+
+/**
  * Failed outbound private send attempt.
  */
 
@@ -1538,7 +1560,13 @@ public data class OutboundPrivateSendReport (
     /**
      * Recovery marker publication failures observed after fail-closed recovery.
      */
-    val `recoveryMarkerFailures`: List<RecoveryMarkerPublishFailure>
+    val `recoveryMarkerFailures`: List<RecoveryMarkerPublishFailure>,
+    /**
+     * Queue heads left parked because this build does not recognize their
+     * Private Message Kind. Parked records are never claimed, mutated, or
+     * invalidated; they block their peer's queue until a newer build runs.
+     */
+    val `parkedUnsupported`: List<OutboundPrivateParkedMessage>
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
@@ -1547,6 +1575,7 @@ public data class OutboundPrivateSendReport (
             this.`failed`,
             this.`reservationCleanupFailures`,
             this.`recoveryMarkerFailures`,
+            this.`parkedUnsupported`,
         )
     }
     public companion object
@@ -3823,6 +3852,33 @@ public enum class OutboundPrivateMessageStatus {
      * Newer latest-state data made this message unnecessary to send.
      */
     SUPERSEDED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Reason an outbound private message is parked instead of processed.
+ *
+ * A closed vocabulary: parked-message reports never carry payload data or
+ * the unrecognized kind text.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class OutboundPrivateParkReason {
+
+    /**
+     * The queued payload carries a Private Message Kind this build does not
+     * recognize; only a build that understands the kind may process it.
+     */
+    UNSUPPORTED_KIND,
     /**
      * SDK returned a value this binding version does not understand.
      */
