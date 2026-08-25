@@ -20,11 +20,13 @@ mod validation;
 #[doc(inline)]
 pub use encrypted_link::{
     accept_encrypted_link, advance_handshake, clear_encrypted_link_outbox, close_encrypted_link,
-    initiate_encrypted_link, restore_encrypted_link, restore_encrypted_link_from_config,
-    restore_encrypted_link_handshake, restore_encrypted_link_handshake_from_config, EncryptedLink,
-    EncryptedLinkHandshake, EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot,
-    HandshakeProgress, PrivateApplicationMessage, PrivateMessageKind, PrivateMessageParseCategory,
-    PrivateMessageParseError, DEFAULT_MAX_RECOVERY_ATTEMPTS, DEFAULT_MAX_SEND_RETRIES,
+    initiate_encrypted_link, inspect_private_application_message, restore_encrypted_link,
+    restore_encrypted_link_from_config, restore_encrypted_link_handshake,
+    restore_encrypted_link_handshake_from_config, EncryptedLink, EncryptedLinkHandshake,
+    EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot, HandshakeProgress,
+    PrivateApplicationMessage, PrivateMessageInspection, PrivateMessageKind,
+    PrivateMessageParseCategory, PrivateMessageParseError, PrivateMessageSemantics,
+    PrivateMessageStructure, DEFAULT_MAX_RECOVERY_ATTEMPTS, DEFAULT_MAX_SEND_RETRIES,
 };
 #[doc(inline)]
 pub use encrypted_link_recovery::{

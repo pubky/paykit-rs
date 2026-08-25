@@ -1042,17 +1042,19 @@ pub(super) fn validate_receipt_access_records(
                 source: None,
             });
         }
-        let event = paykit_lib::parse_receipt_access_event_message(&private_application_message(
-            item,
-            PrivateMessageKind::ReceiptAccess,
-        ))
-        .ok_or_else(|| PaykitSdkError::Protocol {
-            context: format!(
-                "Receipt Access record '{}' stream item is not parseable",
-                record.event_id
-            ),
-            source: None,
-        })?;
+        let event =
+            paykit_lib::parse_receipt_access_event_message(&private_application_message_from_raw(
+                item.raw_json.clone(),
+                item.parsed_version,
+                item.parsed_kind.clone(),
+            ))
+            .ok_or_else(|| PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access record '{}' stream item is not parseable",
+                    record.event_id
+                ),
+                source: None,
+            })?;
         let Some(access) = event.parsed_access() else {
             return Err(PaykitSdkError::Protocol {
                 context: format!(
@@ -1485,13 +1487,20 @@ fn validate_valid_private_stream_body(
     record: &PrivateStreamItemRecord,
     kind: PrivateMessageKind,
 ) -> Result<()> {
+    // The typed parsers below take the stored envelope columns but classify
+    // from `raw_json` alone (the body's kind is authoritative), so no
+    // synthetic envelope metadata is constructed here.
     match kind {
         PrivateMessageKind::PrivatePaymentList => {
             paykit_lib::parse_private_payment_list_json(&record.raw_json)?;
         }
         PrivateMessageKind::ReceiptAccess => {
             let event = paykit_lib::parse_receipt_access_event_message(
-                &private_application_message(record, kind),
+                &private_application_message_from_raw(
+                    record.raw_json.clone(),
+                    record.parsed_version,
+                    record.parsed_kind.clone(),
+                ),
             )
             .ok_or_else(|| PaykitSdkError::Protocol {
                 context: format!(
@@ -1528,7 +1537,11 @@ fn validate_valid_private_stream_body(
         | PrivateMessageKind::PaymentRequestCancellation
         | PrivateMessageKind::PaymentProof => {
             let event = paykit_lib::parse_payment_request_event_message(
-                &private_application_message(record, kind),
+                &private_application_message_from_raw(
+                    record.raw_json.clone(),
+                    record.parsed_version,
+                    record.parsed_kind.clone(),
+                ),
             )
             .ok_or_else(|| PaykitSdkError::Protocol {
                 context: format!(
@@ -1546,17 +1559,4 @@ fn validate_valid_private_stream_body(
         }
     }
     Ok(())
-}
-
-fn private_application_message(
-    record: &PrivateStreamItemRecord,
-    kind: PrivateMessageKind,
-) -> PrivateApplicationMessage {
-    PrivateApplicationMessage {
-        version: record
-            .parsed_version
-            .and_then(|version| u8::try_from(version).ok()),
-        kind: Some(kind.as_str().to_owned()),
-        raw_json: record.raw_json.clone(),
-    }
 }

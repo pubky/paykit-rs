@@ -35,7 +35,7 @@ use crate::{
 };
 use paykit_lib::{
     parse_private_payment_list_json, PaykitReceiverPath, PaymentEndpointIdentifier,
-    PrivateApplicationMessage, PrivateMessageKind, ReceiptId,
+    PrivateMessageKind, ReceiptId,
 };
 
 mod validation;

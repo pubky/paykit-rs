@@ -712,16 +712,11 @@ fn require_state(
 }
 
 fn is_payment_request_kind(kind: Option<&str>) -> bool {
-    matches!(
-        kind.and_then(PrivateMessageKind::parse),
-        Some(
-            PrivateMessageKind::PaymentRequest
-                | PrivateMessageKind::PaymentRequestAcceptance
-                | PrivateMessageKind::PaymentRequestRejection
-                | PrivateMessageKind::PaymentRequestCancellation
-                | PrivateMessageKind::PaymentProof
-        )
-    )
+    // Option shim over the lib predicate so call sites can pass stored
+    // Option-typed kind columns unchanged; the routing decision itself lives
+    // in the exhaustive `PrivateMessageKind::is_payment_request_event`.
+    kind.and_then(PrivateMessageKind::parse)
+        .is_some_and(PrivateMessageKind::is_payment_request_event)
 }
 
 fn sort_payment_requests_newest_first(records: &mut [PaymentRequestRecord]) {

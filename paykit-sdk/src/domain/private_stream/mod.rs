@@ -14,9 +14,8 @@ use crate::{
 };
 
 use paykit_lib::{
-    parse_payment_request_event_message, parse_private_payment_list_json,
-    parse_receipt_access_event_message, PrivateApplicationMessage, PrivateMessageKind,
-    PrivateMessageParseCategory, ReceiptAccess,
+    inspect_private_application_message, parse_receipt_access_event_message,
+    PrivateApplicationMessage, PrivateMessageKind, PrivateMessageStructure, ReceiptAccess,
 };
 
 #[cfg(test)]
@@ -242,101 +241,63 @@ pub(crate) struct PrivateStreamEventHeader {
 pub(crate) fn classify_private_application_message(
     message: &PrivateApplicationMessage,
 ) -> PrivateStreamMessageClassification {
-    let Some(kind) = message.known_kind() else {
-        return PrivateStreamMessageClassification {
-            status: if message.version.is_some() && message.kind.is_some() {
-                PrivateStreamParseStatus::UnknownKind
-            } else {
-                PrivateStreamParseStatus::InvalidJson
-            },
-            parse_error: message.invalid_utf8_error().map(str::to_owned),
-            event: None,
-            receipt_access: None,
-        };
+    // One shared inspection call supplies every derived decision; intake only
+    // maps it onto the persisted classification shape. Inspection reads
+    // `raw_json` alone, so the body's kind stays authoritative over the
+    // envelope fields of `message` exactly as before.
+    let inspection = inspect_private_application_message(&message.raw_json);
+
+    // SECURITY / REDACTION: persist exactly the stable redacted category
+    // string, never free-form error text. The stored value is byte-compared
+    // against fresh classifier output on backup restore, and it crosses the
+    // FFI boundary in intake summaries, so serde detail (which can echo
+    // decrypted plaintext) must not reach it. This match is deliberately
+    // exhaustive: a new structural outcome must be classified here explicitly.
+    let (status, parse_error) = match inspection.structure {
+        PrivateMessageStructure::Valid => (PrivateStreamParseStatus::Valid, None),
+        PrivateMessageStructure::MalformedRecognized => (
+            PrivateStreamParseStatus::MalformedRecognized,
+            inspection
+                .error_category
+                .map(|category| category.as_str().to_owned()),
+        ),
+        // Unrecognized payloads persist no parse summary.
+        PrivateMessageStructure::UnknownKind => (PrivateStreamParseStatus::UnknownKind, None),
+        // Invalid payloads persist no parse summary either, except the
+        // invalid-UTF-8 receive marker: inspection reports that one case with
+        // a category, and its string is the persisted sentinel parse error.
+        PrivateMessageStructure::InvalidJson => (
+            PrivateStreamParseStatus::InvalidJson,
+            inspection
+                .error_category
+                .map(|category| category.as_str().to_owned()),
+        ),
     };
 
-    match kind {
-        PrivateMessageKind::PrivatePaymentList => {
-            match parse_private_payment_list_json(&message.raw_json) {
-                Ok(_) => PrivateStreamMessageClassification {
-                    status: PrivateStreamParseStatus::Valid,
-                    parse_error: None,
-                    event: None,
-                    receipt_access: None,
-                },
-                // SECURITY / REDACTION: persist exactly the stable redacted
-                // category string, never the error Display text. The stored
-                // value is byte-compared against fresh classifier output on
-                // backup restore, and it crosses the FFI boundary in intake
-                // summaries, so serde detail (which can echo decrypted
-                // plaintext) must not reach it.
-                Err(err) => PrivateStreamMessageClassification {
-                    status: PrivateStreamParseStatus::MalformedRecognized,
-                    parse_error: Some(
-                        err.private_message_parse_category()
-                            .unwrap_or(PrivateMessageParseCategory::InvalidStructure)
-                            .as_str()
-                            .to_owned(),
-                    ),
-                    event: None,
-                    receipt_access: None,
-                },
-            }
-        }
-        PrivateMessageKind::ReceiptAccess => {
-            let parsed = parse_receipt_access_event_message(message);
-            let event = parsed
-                .as_ref()
-                .and_then(|parsed| parsed.event_id())
-                .map(|event_id| PrivateStreamEventHeader {
-                    event_id: event_id.as_str().to_owned(),
-                    event_kind: kind.as_str().to_owned(),
-                });
-            PrivateStreamMessageClassification {
-                status: status_from_event_validity(
-                    parsed.as_ref().is_some_and(|parsed| parsed.is_valid()),
-                ),
-                parse_error: parsed
-                    .as_ref()
-                    .and_then(|parsed| parsed.validation_error())
-                    .map(str::to_owned),
-                event,
-                receipt_access: parsed.and_then(|parsed| parsed.parsed_access().cloned()),
-            }
-        }
-        PrivateMessageKind::PaymentRequest
-        | PrivateMessageKind::PaymentRequestAcceptance
-        | PrivateMessageKind::PaymentRequestRejection
-        | PrivateMessageKind::PaymentRequestCancellation
-        | PrivateMessageKind::PaymentProof => {
-            let parsed = parse_payment_request_event_message(message);
-            let event = parsed
-                .as_ref()
-                .and_then(|parsed| parsed.event_id())
-                .map(|event_id| PrivateStreamEventHeader {
-                    event_id: event_id.as_str().to_owned(),
-                    event_kind: kind.as_str().to_owned(),
-                });
-            PrivateStreamMessageClassification {
-                status: status_from_event_validity(
-                    parsed.as_ref().is_some_and(|parsed| parsed.is_valid()),
-                ),
-                parse_error: parsed
-                    .as_ref()
-                    .and_then(|parsed| parsed.validation_error())
-                    .map(str::to_owned),
-                event,
-                receipt_access: None,
-            }
-        }
-    }
-}
+    // A recoverable Event ID exists only for recognized Event Message kinds,
+    // even when the body is malformed, matching what intake persists.
+    let event = match (&inspection.event_id, inspection.known_kind) {
+        (Some(event_id), Some(kind)) => Some(PrivateStreamEventHeader {
+            event_id: event_id.clone(),
+            event_kind: kind.as_str().to_owned(),
+        }),
+        _ => None,
+    };
 
-fn status_from_event_validity(is_valid: bool) -> PrivateStreamParseStatus {
-    if is_valid {
-        PrivateStreamParseStatus::Valid
+    // Inspection carries no parsed payloads, so the Receipt Access body is
+    // re-parsed once, only for the single kind whose payload intake indexes.
+    let receipt_access = if inspection.known_kind == Some(PrivateMessageKind::ReceiptAccess) {
+        parse_receipt_access_event_message(message)
+            .and_then(|parsed| parsed.parsed_access().cloned())
     } else {
-        PrivateStreamParseStatus::MalformedRecognized
+        None
+    };
+
+    PrivateStreamMessageClassification {
+        status,
+        parse_error,
+        event,
+        receipt_access,
     }
 }
 
@@ -406,21 +367,17 @@ pub(crate) fn payload_hash(raw_json: &str) -> String {
 pub(crate) fn private_message_header(
     raw_json: &str,
 ) -> Result<(Option<u32>, Option<String>, Option<PrivateMessageKind>)> {
-    let value = match serde_json::from_str::<serde_json::Value>(raw_json) {
-        Ok(value) => value,
-        Err(_) => return Ok((None, None, None)),
-    };
-    let parsed_version = value
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|version| u8::try_from(version).ok())
-        .map(u32::from);
-    let parsed_kind = value
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let known_kind = parsed_kind.as_deref().and_then(PrivateMessageKind::parse);
-    Ok((parsed_version, parsed_kind, known_kind))
+    // Header derivation reuses the exact lib code the shared inspection entry
+    // point uses (`from_plaintext` + `known_kind`), so it cannot drift from
+    // the classification the SDK persists, while skipping the body parsers:
+    // the stream-wide callers (normalization and restore) already follow up
+    // with a full `classify_private_application_message` pass per item. The
+    // wrapper only widens the version to the stored `u32` column type; the
+    // Result is kept for call-site stability even though derivation is
+    // infallible today.
+    let message = PrivateApplicationMessage::from_plaintext(raw_json.to_owned());
+    let known_kind = message.known_kind();
+    Ok((message.version.map(u32::from), message.kind, known_kind))
 }
 
 pub(crate) fn private_application_message_from_raw(

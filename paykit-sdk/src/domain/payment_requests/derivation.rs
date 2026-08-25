@@ -596,8 +596,11 @@ fn record_for<'a>(
 fn payment_request_message_from_item(
     item: &PrivateStreamItemRecord,
 ) -> Option<PrivateApplicationMessage> {
+    // The kind gate goes through the exhaustive `PrivateMessageKind`
+    // classification rather than string literals, so adding a variant forces
+    // an explicit routing decision instead of silently skipping items.
     let kind = item.known_paykit_kind.as_deref()?;
-    if !is_payment_request_kind(kind) {
+    if !PrivateMessageKind::parse(kind).is_some_and(PrivateMessageKind::is_payment_request_event) {
         return None;
     }
     Some(PrivateApplicationMessage {
@@ -607,17 +610,6 @@ fn payment_request_message_from_item(
         kind: item.parsed_kind.clone(),
         raw_json: item.raw_json.clone(),
     })
-}
-
-fn is_payment_request_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "paykit.payment_request"
-            | "paykit.payment_request_acceptance"
-            | "paykit.payment_request_rejection"
-            | "paykit.payment_request_cancellation"
-            | "paykit.payment_proof"
-    )
 }
 
 fn apply_event(

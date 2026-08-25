@@ -1315,6 +1315,153 @@ async fn test_frozen_classification_fixture_matches_current_classifier() {
     }
 }
 
+#[tokio::test]
+async fn test_inspection_and_boundary_decisions_match_frozen_fixtures() {
+    // The shared inspection entry point is now the single classification core
+    // behind intake, outbound validation, and backup validation. This proof
+    // replays the frozen fixture through all three boundaries (byte-comparing
+    // the full decision set) and then checks, message by message, that direct
+    // inspection agrees with the frozen intake decisions under the documented
+    // mapping. The one deliberate divergence is the Receipt Access
+    // receiver-scope POLICY pass: it is not inspection, so intake and backup
+    // downgrade a payload-intrinsically Valid message after classification
+    // while outbound validation never applies it.
+    let actual = classification_fixture::replay_classification_matrix().await;
+    let expected: serde_json::Value =
+        serde_json::from_str(classification_fixture::CLASSIFICATION_MATRIX_EXPECTED_JSON)
+            .expect("frozen classification fixture must parse");
+    assert_eq!(
+        actual, expected,
+        "boundary replay must match the frozen fixture"
+    );
+
+    let messages = classification_fixture::classification_fixture_messages();
+    let frozen = expected["messages"]
+        .as_array()
+        .expect("frozen fixture must list messages");
+    assert_eq!(messages.len(), frozen.len());
+
+    for (message, decision) in messages.iter().zip(frozen) {
+        let label = decision["label"].as_str().expect("label");
+        assert_eq!(label, message.label, "fixture order drifted");
+        let intake = &decision["intake"];
+        let inspection = paykit_lib::inspect_private_application_message(&message.raw_json);
+
+        // The recognized kind is exactly the persisted `known_paykit_kind`
+        // column: both classify from the body, never the envelope.
+        assert_eq!(
+            inspection.known_kind.map(PrivateMessageKind::as_str),
+            intake["known_paykit_kind"].as_str(),
+            "{label}: known kind"
+        );
+
+        let frozen_status = intake["parse_status"].as_str().expect("parse status");
+        let frozen_parse_error = intake["parse_error"].as_str();
+        let scope_downgraded =
+            frozen_parse_error == Some(RECEIPT_ACCESS_RECEIVER_SCOPE_PARSE_ERROR);
+
+        if scope_downgraded {
+            // Receiver-scope divergence pin: the payload is intrinsically
+            // valid with a recoverable Event ID, and the policy pass (not
+            // inspection) downgraded the persisted status and cleared the
+            // event header.
+            assert_eq!(
+                inspection.structure,
+                PrivateMessageStructure::Valid,
+                "{label}: out-of-scope Receipt Access is payload-intrinsically valid"
+            );
+            assert_eq!(
+                inspection.known_kind,
+                Some(PrivateMessageKind::ReceiptAccess),
+                "{label}: scope policy applies only to Receipt Access"
+            );
+            assert_eq!(
+                frozen_status, "MalformedRecognized",
+                "{label}: policy status"
+            );
+            assert!(
+                inspection.event_id.is_some() && intake["event_id"].is_null(),
+                "{label}: policy pass must clear the persisted event header"
+            );
+        } else {
+            // structure <-> parse_status mapping, exhaustively.
+            let expected_status = match inspection.structure {
+                PrivateMessageStructure::Valid => "Valid",
+                PrivateMessageStructure::MalformedRecognized => "MalformedRecognized",
+                PrivateMessageStructure::UnknownKind => "UnknownKind",
+                PrivateMessageStructure::InvalidJson => "InvalidJson",
+            };
+            assert_eq!(expected_status, frozen_status, "{label}: parse status");
+
+            // Category string <-> persisted parse summary, byte-for-byte
+            // (absent on both sides for Valid, UnknownKind, and non-sentinel
+            // InvalidJson payloads).
+            assert_eq!(
+                inspection
+                    .error_category
+                    .map(paykit_lib::PrivateMessageParseCategory::as_str),
+                frozen_parse_error,
+                "{label}: parse summary"
+            );
+
+            // Recoverable Event ID <-> persisted event header, including for
+            // malformed recognized Event Message bodies.
+            assert_eq!(
+                inspection.event_id.as_deref(),
+                intake["event_id"].as_str(),
+                "{label}: event id"
+            );
+            let expected_event_kind = if inspection.event_id.is_some() {
+                inspection.known_kind.map(PrivateMessageKind::as_str)
+            } else {
+                None
+            };
+            assert_eq!(
+                intake["event_kind"].as_str(),
+                expected_event_kind,
+                "{label}: event kind"
+            );
+
+            // Semantics tie-in: for valid payloads, exactly the Event
+            // Message kinds carry a persisted event header.
+            if inspection.structure == PrivateMessageStructure::Valid {
+                assert_eq!(
+                    inspection.semantics == Some(paykit_lib::PrivateMessageSemantics::Event),
+                    intake["event_id"].as_str().is_some(),
+                    "{label}: semantics vs event header"
+                );
+            }
+        }
+
+        // Outbound boundary: every fixture payload fits the size limit, so
+        // outbound accepts exactly the payload-intrinsically Valid messages
+        // (receiver scope is not enforced there) and reports the canonical
+        // kind string.
+        let outbound = &decision["outbound"];
+        if inspection.structure == PrivateMessageStructure::Valid {
+            assert_eq!(
+                outbound["ok"].as_str(),
+                inspection.known_kind.map(PrivateMessageKind::as_str),
+                "{label}: outbound accept"
+            );
+        } else {
+            assert!(
+                outbound["ok"].is_null() && outbound["error"].is_string(),
+                "{label}: outbound must reject non-Valid structures"
+            );
+        }
+
+        // Backup boundary: the fixture state was persisted by the current
+        // classifier, so restore validation accepts every item regardless of
+        // structure.
+        assert_eq!(
+            decision["backup"]["ok"].as_bool(),
+            Some(true),
+            "{label}: backup accept"
+        );
+    }
+}
+
 // Null out the two error-text fields (`intake.parse_error` and
 // `outbound.error`) on every fixture message so the remaining decision trees
 // can be compared for byte-identity across classifier generations.

@@ -11,8 +11,10 @@ use crate::{
 // Local marker used when decrypted private plaintext is not valid UTF-8.
 // This is not a protocol message. It lets receive callers persist the malformed
 // stream item, advance their local link checkpoint, and avoid wedging on the
-// same encrypted slot forever.
-const INVALID_UTF8_PRIVATE_MESSAGE_PREFIX: &str = "paykit.invalid_utf8_private_message:";
+// same encrypted slot forever. Visible to the sibling `inspection` module so
+// the shared inspection entry point can special-case persisted marker payloads
+// without widening the marker's visibility beyond the encrypted_link tree.
+pub(super) const INVALID_UTF8_PRIVATE_MESSAGE_PREFIX: &str = "paykit.invalid_utf8_private_message:";
 const LIST_PAGE_LIMIT: u16 = 100;
 
 /// Private Message Kind values understood by Paykit.
@@ -40,6 +42,56 @@ pub enum PrivateMessageKind {
 }
 
 impl PrivateMessageKind {
+    /// Every Private Message Kind, in canonical declaration order.
+    ///
+    /// [`PrivateMessageKind::parse`] is a lookup over this table, so a new
+    /// variant is only parseable once listed here. The table's length is
+    /// derived from the private `LAST` pin next to `variant_index`, so once
+    /// that pin is re-pointed at a new variant this table fails to compile
+    /// until the variant is appended; the const guard below this impl asserts
+    /// every listed entry sits at its declaration-order index.
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::PrivatePaymentList,
+        Self::ReceiptAccess,
+        Self::PaymentRequest,
+        Self::PaymentRequestAcceptance,
+        Self::PaymentRequestRejection,
+        Self::PaymentRequestCancellation,
+        Self::PaymentProof,
+    ];
+
+    /// The final declared variant, pinned by name.
+    ///
+    /// This pin is the one completeness edit the compiler cannot force: when
+    /// adding a variant, re-point it at the new last variant. The derived
+    /// [`PrivateMessageKind::ALL`] length and the const guard below this impl
+    /// then reject any table that does not cover the enum in declaration
+    /// order.
+    const LAST: Self = Self::PaymentProof;
+
+    /// Number of declared variants, derived from the `LAST` pin.
+    const COUNT: usize = Self::LAST.variant_index() + 1;
+
+    /// Declaration-order index of this variant, used only by the `LAST` and
+    /// `COUNT` pins and the const completeness guard below this impl.
+    ///
+    /// When adding a variant: give it the next index here and re-point `LAST`
+    /// at it; [`PrivateMessageKind::ALL`] then fails to compile until the
+    /// variant is appended, and the exhaustive matches in
+    /// [`PrivateMessageKind::as_str`], `semantics`, and
+    /// `is_payment_request_event` force their own arms.
+    const fn variant_index(self) -> usize {
+        match self {
+            Self::PrivatePaymentList => 0,
+            Self::ReceiptAccess => 1,
+            Self::PaymentRequest => 2,
+            Self::PaymentRequestAcceptance => 3,
+            Self::PaymentRequestRejection => 4,
+            Self::PaymentRequestCancellation => 5,
+            Self::PaymentProof => 6,
+        }
+    }
+
     /// Return the canonical private message kind string used on the wire.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -54,24 +106,93 @@ impl PrivateMessageKind {
     }
 
     /// Parse a canonical private message kind string.
+    ///
+    /// Implemented as a lookup over [`PrivateMessageKind::ALL`] so a new
+    /// variant is parseable as soon as it is listed there; there is no
+    /// wildcard arm to defeat exhaustiveness.
     pub fn parse(kind: &str) -> Option<Self> {
-        match kind {
-            "paykit.private_payment_list" => Some(Self::PrivatePaymentList),
-            "paykit.receipt_access" => Some(Self::ReceiptAccess),
-            "paykit.payment_request" => Some(Self::PaymentRequest),
-            "paykit.payment_request_acceptance" => Some(Self::PaymentRequestAcceptance),
-            "paykit.payment_request_rejection" => Some(Self::PaymentRequestRejection),
-            "paykit.payment_request_cancellation" => Some(Self::PaymentRequestCancellation),
-            "paykit.payment_proof" => Some(Self::PaymentProof),
-            _ => None,
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == kind)
+    }
+
+    /// Return the message-processing semantics for this Private Message Kind.
+    ///
+    /// The match is deliberately exhaustive with no wildcard: adding a
+    /// variant fails to compile until its Latest-State Message versus Event
+    /// Message semantics are chosen explicitly here.
+    pub fn semantics(self) -> PrivateMessageSemantics {
+        match self {
+            Self::PrivatePaymentList => PrivateMessageSemantics::LatestState,
+            Self::ReceiptAccess => PrivateMessageSemantics::Event,
+            Self::PaymentRequest => PrivateMessageSemantics::Event,
+            Self::PaymentRequestAcceptance => PrivateMessageSemantics::Event,
+            Self::PaymentRequestRejection => PrivateMessageSemantics::Event,
+            Self::PaymentRequestCancellation => PrivateMessageSemantics::Event,
+            Self::PaymentProof => PrivateMessageSemantics::Event,
+        }
+    }
+
+    /// Whether this kind is a Payment Request protocol Event Message kind,
+    /// i.e. one [`crate::parse_payment_request_event_message`] parses.
+    ///
+    /// This mirrors the wildcard-free Payment Request event routing in
+    /// `payment_request::api::parse_event`: the five Payment Request
+    /// lifecycle kinds route to a parser, while Private Payment List and
+    /// Receipt Access do not. The match is deliberately exhaustive so adding
+    /// a variant fails to compile until it is classified explicitly here as
+    /// well.
+    pub fn is_payment_request_event(self) -> bool {
+        match self {
+            Self::PaymentRequest
+            | Self::PaymentRequestAcceptance
+            | Self::PaymentRequestRejection
+            | Self::PaymentRequestCancellation
+            | Self::PaymentProof => true,
+            Self::PrivatePaymentList | Self::ReceiptAccess => false,
         }
     }
 }
+
+// Const completeness guard for `PrivateMessageKind::ALL`: every `ALL` entry
+// must sit at its declaration-order index, and the table's length is derived
+// from the `LAST` pin, so `ALL` holds exactly the declared variants in order,
+// provided `LAST` names the enum's true final variant. The guard is only
+// as strong as that pin: re-pointing `LAST` when adding a variant is a
+// documented manual step at the `variant_index` compile error, not something
+// the compiler can force.
+const _: () = {
+    let mut index = 0;
+    while index < PrivateMessageKind::ALL.len() {
+        assert!(
+            PrivateMessageKind::ALL[index].variant_index() == index,
+            "PrivateMessageKind::ALL must list every variant in declaration order"
+        );
+        index += 1;
+    }
+};
 
 impl std::fmt::Display for PrivateMessageKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Message-processing semantics of a recognized Private Message Kind.
+///
+/// The vocabulary follows `THESAURUS.md`: a Latest-State Message is one FIFO
+/// private Paykit message where the latest valid message of a kind supersedes
+/// older messages of the same kind, while an Event Message is one where every
+/// valid message matters and receivers must process messages in send order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivateMessageSemantics {
+    /// Latest-State Message semantics: newer valid messages of this kind
+    /// supersede older ones (the Private Payment List).
+    LatestState,
+    /// Event Message semantics: every valid message matters, is processed in
+    /// send order, and carries an Event ID (Receipt Access and the Payment
+    /// Request lifecycle kinds).
+    Event,
 }
 
 /// Stable redacted category for a private-message parse failure.
@@ -109,8 +230,7 @@ impl PrivateMessageParseCategory {
     ///
     /// [`PrivateMessageParseCategory::parse`] is a lookup over this table, so
     /// a new variant is only parseable once listed here. Adding a variant is
-    /// a compile error at the exhaustive
-    /// [`PrivateMessageParseCategory::variant_index`] match, whose
+    /// a compile error at the exhaustive private `variant_index` match, whose
     /// instructions walk through extending this table; the const guard below
     /// this impl asserts every listed entry sits at its declared index and
     /// that the table ends at the guard's named last variant.
@@ -250,7 +370,18 @@ impl std::fmt::Debug for PrivateApplicationMessage {
 }
 
 impl PrivateApplicationMessage {
-    pub(super) fn from_plaintext(plaintext: String) -> Self {
+    /// Build a Private Application Message from decrypted plaintext, deriving
+    /// the envelope header fields.
+    ///
+    /// `version` and `kind` are best-effort reads of the top-level JSON
+    /// fields: a non-JSON payload, an absent field, or an out-of-range
+    /// version becomes `None`. This is the single header-derivation code
+    /// path: the receive decoder, [`crate::inspect_private_application_message`],
+    /// and SDK header re-derivation over persisted `raw_json` all construct
+    /// messages here, so header semantics cannot drift between them. Callers
+    /// that only need header fields use this directly instead of running the
+    /// body parsers behind the full inspection entry point.
+    pub fn from_plaintext(plaintext: String) -> Self {
         let value = serde_json::from_str::<serde_json::Value>(&plaintext).ok();
         let version = value
             .as_ref()
@@ -509,6 +640,73 @@ mod tests {
         PrivatePaymentList,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn test_private_message_kind_parse_round_trips_all() {
+        for kind in PrivateMessageKind::ALL {
+            assert_eq!(
+                PrivateMessageKind::parse(kind.as_str()),
+                Some(kind),
+                "kind {kind:?} must round-trip through its canonical string"
+            );
+        }
+        for near_miss in [
+            "",
+            "paykit",
+            "paykit.",
+            "payment_request",
+            "paykit.allowance",
+            "paykit.private_payment_lists",
+            " paykit.private_payment_list",
+            "paykit.private_payment_list ",
+            "paykit.Payment_Request",
+            "paykit.payment-request",
+            "paykit.payment_request2",
+            "paykit.receipt_access\0",
+        ] {
+            assert_eq!(
+                PrivateMessageKind::parse(near_miss),
+                None,
+                "near-miss string {near_miss:?} must not parse as a kind"
+            );
+        }
+    }
+
+    #[test]
+    fn test_semantics_assignments() {
+        // Latest-State Message semantics apply only to the Private Payment
+        // List; every other kind is an Event Message. Iterating ALL keeps this
+        // pin complete when a variant is added.
+        for kind in PrivateMessageKind::ALL {
+            let expected = if kind == PrivateMessageKind::PrivatePaymentList {
+                PrivateMessageSemantics::LatestState
+            } else {
+                PrivateMessageSemantics::Event
+            };
+            assert_eq!(
+                kind.semantics(),
+                expected,
+                "kind {kind:?} has unexpected semantics"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_payment_request_event_matches_parse_event_routing() {
+        // Cross-check the predicate against the actual Payment Request event
+        // routing: `parse_payment_request_event_message` returns `Some`
+        // exactly for the kinds its internal `parse_event` routes to a
+        // parser, so the predicate and the dispatch cannot drift apart.
+        for kind in PrivateMessageKind::ALL {
+            let raw = format!(r#"{{"version":1,"kind":"{}"}}"#, kind.as_str());
+            let message = PrivateApplicationMessage::from_plaintext(raw);
+            assert_eq!(
+                crate::parse_payment_request_event_message(&message).is_some(),
+                kind.is_payment_request_event(),
+                "kind {kind:?} predicate disagrees with parse_event routing"
+            );
+        }
+    }
 
     #[test]
     fn test_private_message_parse_category_round_trips_through_all() {

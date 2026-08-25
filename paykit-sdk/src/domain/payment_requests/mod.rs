@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use paykit_lib::{
     parse_payment_request_event_message, serialize_payment_request_event, PaymentProof,
     PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
-    PaymentRequestRejection, PrivateApplicationMessage,
+    PaymentRequestRejection, PrivateApplicationMessage, PrivateMessageKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};

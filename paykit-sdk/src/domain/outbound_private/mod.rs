@@ -3,7 +3,10 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use paykit_lib::PrivateMessageKind;
+use paykit_lib::{
+    inspect_private_application_message, PrivateMessageInspection, PrivateMessageKind,
+    PrivateMessageStructure,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -325,6 +328,14 @@ pub(crate) fn validate_outbound_private_message(raw_json: &str) -> Result<String
         });
     }
 
+    // One shared inspection call drives kind recognition and body validity
+    // below; the raw header probe stays because outbound header policy
+    // distinguishes decisions inspection deliberately conflates (invalid JSON
+    // versus a well-formed document missing a header field, and a header
+    // version outside the u8 range still reports "unsupported"), and those
+    // error strings are a frozen contract.
+    let inspection = inspect_private_application_message(raw_json);
+
     // SECURITY / REDACTION: the contexts below are persisted as outbound
     // `last_error` values and cross the FFI boundary. They must be stable
     // static strings with no serde detail and no payload/kind/version echo
@@ -354,72 +365,84 @@ pub(crate) fn validate_outbound_private_message(raw_json: &str) -> Result<String
             context: "private message kind is missing".into(),
             source: None,
         })?;
-    let parsed_kind = PrivateMessageKind::parse(kind).ok_or_else(|| PaykitSdkError::Protocol {
-        context: "unsupported private message kind".into(),
-        source: None,
-    })?;
-    validate_outbound_private_message_body(parsed_kind, raw_json)?;
+    // The probe and inspection read the same top-level `kind` field of the
+    // same document, so recognition cannot diverge between them.
+    let parsed_kind = inspection
+        .known_kind
+        .ok_or_else(|| PaykitSdkError::Protocol {
+            context: "unsupported private message kind".into(),
+            source: None,
+        })?;
+    validate_outbound_private_message_body(parsed_kind, &inspection, raw_json)?;
 
     Ok(kind.to_owned())
 }
 
-fn validate_outbound_private_message_body(kind: PrivateMessageKind, raw_json: &str) -> Result<()> {
+fn validate_outbound_private_message_body(
+    kind: PrivateMessageKind,
+    inspection: &PrivateMessageInspection,
+    raw_json: &str,
+) -> Result<()> {
+    // Deliberately exhaustive per-kind match at this security boundary: a new
+    // Private Message Kind fails to compile until it is routed explicitly.
     match kind {
         PrivateMessageKind::PrivatePaymentList => {
+            // The typed parse is kept so the propagated error context
+            // ("failed to parse Private Payment List JSON") stays
+            // byte-identical; inspection carries only the parse category.
             paykit_lib::parse_private_payment_list_json(raw_json)?;
         }
         PrivateMessageKind::ReceiptAccess => {
-            let message = private_application_message(kind, raw_json);
-            let event =
-                paykit_lib::parse_receipt_access_event_message(&message).ok_or_else(|| {
-                    PaykitSdkError::Protocol {
-                        context: "Receipt Access payload does not match private message kind"
-                            .into(),
-                        source: None,
-                    }
-                })?;
-            if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol {
-                    context: error.to_owned(),
-                    source: None,
-                });
-            }
+            validate_recognized_outbound_body(
+                inspection,
+                "Receipt Access payload does not match private message kind",
+            )?;
         }
         PrivateMessageKind::PaymentRequest
         | PrivateMessageKind::PaymentRequestAcceptance
         | PrivateMessageKind::PaymentRequestRejection
         | PrivateMessageKind::PaymentRequestCancellation
         | PrivateMessageKind::PaymentProof => {
-            let message = private_application_message(kind, raw_json);
-            let event =
-                paykit_lib::parse_payment_request_event_message(&message).ok_or_else(|| {
-                    PaykitSdkError::Protocol {
-                        context:
-                            "Payment Request event payload does not match private message kind"
-                                .into(),
-                        source: None,
-                    }
-                })?;
-            if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol {
-                    context: error.to_owned(),
-                    source: None,
-                });
-            }
+            validate_recognized_outbound_body(
+                inspection,
+                "Payment Request event payload does not match private message kind",
+            )?;
         }
     }
 
     Ok(())
 }
 
-fn private_application_message(
-    kind: PrivateMessageKind,
-    raw_json: &str,
-) -> paykit_lib::PrivateApplicationMessage {
-    paykit_lib::PrivateApplicationMessage {
-        version: Some(1),
-        kind: Some(kind.as_str().to_owned()),
-        raw_json: raw_json.to_owned(),
+/// Map an inspected recognized-kind body onto the outbound validation result.
+///
+/// `mismatch_context` preserves the pre-inspection error text for the
+/// parser-returned-nothing case, which is unreachable in practice because the
+/// typed parsers accept every message whose body kind matches their own.
+fn validate_recognized_outbound_body(
+    inspection: &PrivateMessageInspection,
+    mismatch_context: &'static str,
+) -> Result<()> {
+    match inspection.structure {
+        PrivateMessageStructure::Valid => Ok(()),
+        PrivateMessageStructure::MalformedRecognized => Err(PaykitSdkError::Protocol {
+            context: match inspection.error_category {
+                // The category string is exactly the wrapper's
+                // `validation_error()` text, so the persisted `last_error`
+                // stays byte-identical to the pre-inspection behavior.
+                Some(category) => category.as_str().to_owned(),
+                None => mismatch_context.to_owned(),
+            },
+            source: None,
+        }),
+        // Unreachable: a recognized kind always inspects as Valid or
+        // MalformedRecognized. Kept wildcard-free without panicking on
+        // caller-supplied payload bytes.
+        PrivateMessageStructure::UnknownKind | PrivateMessageStructure::InvalidJson => {
+            Err(PaykitSdkError::Protocol {
+                context: mismatch_context.to_owned(),
+                source: None,
+            })
+        }
     }
 }
 
