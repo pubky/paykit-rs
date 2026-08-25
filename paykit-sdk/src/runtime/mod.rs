@@ -1,7 +1,10 @@
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
@@ -86,6 +89,7 @@ use crate::{
         PrivatePaymentListSyncReport,
     },
     domain::private_stream::{
+        normalize::normalize_private_stream_classifications,
         persist_private_stream_batch_with_link_lease, PrivateStreamCounterpartyIntakeReport,
         PrivateStreamIntakeReport,
     },
@@ -158,6 +162,7 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     config: PaykitSdkConfig,
     clock: C,
     identity_operation_in_progress: Arc<Mutex<bool>>,
+    private_stream_normalized: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,7 +223,27 @@ where
             config,
             clock,
             identity_operation_in_progress: Arc::new(Mutex::new(false)),
+            private_stream_normalized: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Normalize stored derived private stream classification state once per
+    /// process before it is projected or re-validated.
+    ///
+    /// The memo flag is rescan-avoidance only: normalization is idempotent, a
+    /// fresh process re-runs it once, and a concurrent double-run is harmless.
+    /// The flag is set only after the normalization transaction commits, so a
+    /// failed run is retried by the next guarded operation.
+    pub(crate) async fn ensure_private_stream_classifications_normalized(&self) -> Result<()> {
+        if self.private_stream_normalized.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.storage
+            .transaction(|tx| normalize_private_stream_classifications(tx))
+            .await?;
+        self.private_stream_normalized
+            .store(true, Ordering::Release);
+        Ok(())
     }
 
     fn claim_identity_operation(&self, context: &str) -> Result<RuntimeOperationGuard> {
@@ -254,6 +279,8 @@ where
         let _identity_guard = self.claim_identity_operation("initialize")?;
         let (session, state) = self.load_session_access_and_refresh_identity().await?;
         let live_session_available = session.is_some();
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
 
         Ok(InitializationReport {
             identity: IdentityStatus::from_state(&state, live_session_available),

@@ -16,6 +16,8 @@ where
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<PrivateStreamIntakeReport> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (session_access, _) = self.private_link_session_access().await?;
         self.ensure_peer_allows_private_automation(&counterparty, &counterparty_receiver_path)
             .await?;
@@ -32,6 +34,8 @@ where
     pub async fn receive_private_messages_from_linked_peers(
         &self,
     ) -> Result<Vec<PrivateStreamCounterpartyIntakeReport>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let counterparties = self
             .linked_peers()
             .await?

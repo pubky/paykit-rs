@@ -30,6 +30,8 @@ where
         amount: Option<PaymentAmountContext>,
         after_private_payment_list_version: Option<u64>,
     ) -> Result<PrivateContactPaymentResolution> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         let private_live = session_access.is_some();
         let mut state = PrivatePaymentResolutionState::NoPrivateEndpoint;
@@ -201,6 +203,8 @@ where
         after_private_payment_list_version: Option<u64>,
         max_advance_steps: u32,
     ) -> Result<PreparedPrivateContactPayment> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let mut link_report = None;
         let mut receive_report = None;
         let mut outbound_report = None;

@@ -79,10 +79,6 @@ async fn test_receipt_listing_helpers_match_record_views() {
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
-                tx.save_receipt_access_record(receipt_access_record(
-                    counterparty.clone(),
-                    "550e8400-e29b-41d4-a716-446655440000",
-                ));
                 tx.save_receipt_record(receipt_record(
                     counterparty,
                     "550e8400-e29b-41d4-a716-446655440000",
@@ -93,6 +89,12 @@ async fn test_receipt_listing_helpers_match_record_views() {
         })
         .await
         .unwrap();
+    seed_backed_receipt_access(
+        &storage,
+        receipt_access_record(counterparty.clone(), "550e8400-e29b-41d4-a716-446655440000"),
+        false,
+    )
+    .await;
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
@@ -397,7 +399,6 @@ async fn test_receipt_access_records_allow_identity_without_live_session() {
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .transaction({
-            let counterparty = counterparty.clone();
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
@@ -406,15 +407,17 @@ async fn test_receipt_access_records_allow_identity_without_live_session() {
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
-                tx.save_receipt_access_record(receipt_access_record(
-                    counterparty,
-                    "550e8400-e29b-41d4-a716-446655440000",
-                ));
                 Ok(())
             }
         })
         .await
         .unwrap();
+    seed_backed_receipt_access(
+        &storage,
+        receipt_access_record(counterparty.clone(), "550e8400-e29b-41d4-a716-446655440000"),
+        false,
+    )
+    .await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
@@ -439,7 +442,6 @@ async fn test_receipt_access_records_hide_conflicted_event_ids() {
     let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     storage
         .transaction({
-            let counterparty = counterparty.clone();
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
@@ -448,14 +450,17 @@ async fn test_receipt_access_records_hide_conflicted_event_ids() {
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
-                let access = receipt_access_record(counterparty.clone(), receipt_id);
-                tx.save_event_dedup_record(conflicted_event_dedup_record(&access));
-                tx.save_receipt_access_record(access);
                 Ok(())
             }
         })
         .await
         .unwrap();
+    seed_backed_receipt_access(
+        &storage,
+        receipt_access_record(counterparty.clone(), receipt_id),
+        true,
+    )
+    .await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
@@ -477,10 +482,9 @@ async fn test_retrieve_receipt_reports_conflicted_access_before_missing_public_s
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let receipt_id = "receipt-1";
+    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     storage
         .transaction({
-            let counterparty = counterparty.clone();
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
@@ -489,14 +493,17 @@ async fn test_retrieve_receipt_reports_conflicted_access_before_missing_public_s
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
-                let access = receipt_access_record(counterparty.clone(), receipt_id);
-                tx.save_event_dedup_record(conflicted_event_dedup_record(&access));
-                tx.save_receipt_access_record(access);
                 Ok(())
             }
         })
         .await
         .unwrap();
+    seed_backed_receipt_access(
+        &storage,
+        receipt_access_record(counterparty.clone(), receipt_id),
+        true,
+    )
+    .await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
@@ -589,7 +596,7 @@ async fn test_retrieve_receipt_rejects_clean_mismatched_access_for_cached_receip
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let receipt_id = "receipt-1";
+    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     storage
         .transaction({
             let counterparty = counterparty.clone();
@@ -601,17 +608,17 @@ async fn test_retrieve_receipt_rejects_clean_mismatched_access_for_cached_receip
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
-                let mut access = receipt_access_record(counterparty.clone(), receipt_id);
-                access.event_id = "750e8400-e29b-41d4-a716-446655440000".into();
-                access.stream_item_id = 2;
-                access.payment_reference = "other-invoice".into();
-                tx.save_receipt_access_record(access);
                 tx.save_receipt_record(receipt_record(counterparty, receipt_id, local_public_key));
                 Ok(())
             }
         })
         .await
         .unwrap();
+    let mut access = receipt_access_record(counterparty.clone(), receipt_id);
+    access.event_id = "750e8400-e29b-41d4-a716-446655440000".into();
+    access.stream_item_id = 2;
+    access.payment_reference = "other-invoice".into();
+    seed_backed_receipt_access(&storage, access, false).await;
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
@@ -643,7 +650,7 @@ async fn test_retrieve_receipt_rejects_conflicted_access_for_cached_receipt() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let receipt_id = "receipt-1";
+    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     storage
         .transaction({
             let counterparty = counterparty.clone();
@@ -655,15 +662,18 @@ async fn test_retrieve_receipt_rejects_conflicted_access_for_cached_receipt() {
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
-                let access = receipt_access_record(counterparty.clone(), receipt_id);
-                tx.save_event_dedup_record(conflicted_event_dedup_record(&access));
-                tx.save_receipt_access_record(access);
                 tx.save_receipt_record(receipt_record(counterparty, receipt_id, local_public_key));
                 Ok(())
             }
         })
         .await
         .unwrap();
+    seed_backed_receipt_access(
+        &storage,
+        receipt_access_record(counterparty.clone(), receipt_id),
+        true,
+    )
+    .await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
@@ -684,7 +694,7 @@ async fn test_retrieve_receipt_rejects_conflicted_cached_provenance_with_clean_a
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let receipt_id = "receipt-1";
+    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     storage
         .transaction({
             let counterparty = counterparty.clone();
@@ -696,19 +706,18 @@ async fn test_retrieve_receipt_rejects_conflicted_cached_provenance_with_clean_a
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
-                let conflicted_access = receipt_access_record(counterparty.clone(), receipt_id);
-                let mut clean_access = receipt_access_record(counterparty.clone(), receipt_id);
-                clean_access.event_id = "750e8400-e29b-41d4-a716-446655440000".into();
-                clean_access.stream_item_id = 2;
-                tx.save_event_dedup_record(conflicted_event_dedup_record(&conflicted_access));
-                tx.save_receipt_access_record(conflicted_access);
-                tx.save_receipt_access_record(clean_access);
                 tx.save_receipt_record(receipt_record(counterparty, receipt_id, local_public_key));
                 Ok(())
             }
         })
         .await
         .unwrap();
+    let conflicted_access = receipt_access_record(counterparty.clone(), receipt_id);
+    let mut clean_access = receipt_access_record(counterparty.clone(), receipt_id);
+    clean_access.event_id = "750e8400-e29b-41d4-a716-446655440000".into();
+    clean_access.stream_item_id = 3;
+    seed_backed_receipt_access(&storage, conflicted_access, true).await;
+    seed_backed_receipt_access(&storage, clean_access, false).await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
@@ -775,6 +784,7 @@ async fn test_receipt_records_hide_conflicted_receipt_access_provenance() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let issuer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     storage
         .transaction({
             let issuer = issuer.clone();
@@ -786,14 +796,18 @@ async fn test_receipt_records_hide_conflicted_receipt_access_provenance() {
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
-                let access = receipt_access_record(issuer.clone(), "receipt-1");
-                tx.save_event_dedup_record(conflicted_event_dedup_record(&access));
-                tx.save_receipt_record(receipt_record(issuer, "receipt-1", local_public_key));
+                tx.save_receipt_record(receipt_record(issuer, receipt_id, local_public_key));
                 Ok(())
             }
         })
         .await
         .unwrap();
+    seed_backed_receipt_access(
+        &storage,
+        receipt_access_record(issuer.clone(), receipt_id),
+        true,
+    )
+    .await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },
@@ -815,10 +829,9 @@ async fn test_retrieve_receipt_requires_public_storage_when_uncached() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let receipt_id = "receipt-1";
+    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
     storage
         .transaction({
-            let counterparty = counterparty.clone();
             let local_public_key = local_public_key.clone();
             move |tx| {
                 tx.save_identity_state(IdentityState {
@@ -827,12 +840,17 @@ async fn test_retrieve_receipt_requires_public_storage_when_uncached() {
                     initialized_at: FixedClock.now(),
                     sign_out_generation: 0,
                 });
-                tx.save_receipt_access_record(receipt_access_record(counterparty, receipt_id));
                 Ok(())
             }
         })
         .await
         .unwrap();
+    seed_backed_receipt_access(
+        &storage,
+        receipt_access_record(counterparty.clone(), receipt_id),
+        false,
+    )
+    .await;
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },

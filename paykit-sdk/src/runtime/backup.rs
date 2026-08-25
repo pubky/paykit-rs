@@ -9,6 +9,8 @@ where
 {
     /// Export SDK-managed backup state.
     pub async fn export_backup_state(&self) -> Result<SdkBackupState> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         export_sdk_backup_state(&self.storage, self.config.receiver_path.clone()).await
     }
 
@@ -20,13 +22,17 @@ where
             let session_access = self.validate_backup_restore_session(&backup).await?;
             trusted_identity = Some(self.restore_validation_identity(&session_access).await?);
         }
-        restore_sdk_backup_state(
+        let report = restore_sdk_backup_state(
             &self.storage,
             backup,
             self.config.receiver_path.clone(),
             trusted_identity,
         )
-        .await
+        .await?;
+        // Restore normalizes derived classification state by construction.
+        self.private_stream_normalized
+            .store(true, Ordering::Release);
+        Ok(report)
     }
 
     async fn validate_backup_restore_session(

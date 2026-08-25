@@ -3,11 +3,37 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     domain::outbound_private::OutboundPrivateMessageStatus,
-    domain::private_stream::PrivateStreamParseStatus, storage::InMemoryStorage,
+    domain::private_stream::normalize::{
+        normalize_private_stream_classifications, PrivateStreamNormalizationReport,
+    },
+    domain::private_stream::PrivateStreamParseStatus,
+    storage::{run_storage_state_transaction, InMemoryStorage},
 };
 
 fn timestamp() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
+}
+
+/// Assert restored storage is a fixpoint of classification normalization and
+/// return it, proving the restore path already normalized derived state.
+fn assert_normalization_fixpoint(storage: &InMemoryStorage) -> StorageState {
+    let state = storage.snapshot().unwrap();
+    let (normalized, report) = run_storage_state_transaction(
+        state.clone(),
+        Box::new(|tx| {
+            Ok(Box::new(normalize_private_stream_classifications(tx)?)
+                as Box<dyn std::any::Any + Send>)
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        *report
+            .downcast::<PrivateStreamNormalizationReport>()
+            .unwrap(),
+        PrivateStreamNormalizationReport::default()
+    );
+    assert_eq!(normalized, state);
+    state
 }
 
 fn public_key() -> PubkyPublicKey {

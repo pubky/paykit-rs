@@ -19,6 +19,10 @@ use paykit_lib::{
     ReceiptAccess,
 };
 
+#[cfg(test)]
+pub(crate) mod classification_fixture;
+pub(crate) mod normalize;
+
 /// Parse status for one received Private Application Message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -378,6 +382,38 @@ fn update_event_dedupe(
 pub(crate) fn payload_hash(raw_json: &str) -> String {
     let digest = Sha256::digest(raw_json.as_bytes());
     format!("sha256:{digest:x}")
+}
+
+pub(crate) fn private_message_header(
+    raw_json: &str,
+) -> Result<(Option<u32>, Option<String>, Option<PrivateMessageKind>)> {
+    let value = match serde_json::from_str::<serde_json::Value>(raw_json) {
+        Ok(value) => value,
+        Err(_) => return Ok((None, None, None)),
+    };
+    let parsed_version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u8::try_from(version).ok())
+        .map(u32::from);
+    let parsed_kind = value
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let known_kind = parsed_kind.as_deref().and_then(PrivateMessageKind::parse);
+    Ok((parsed_version, parsed_kind, known_kind))
+}
+
+pub(crate) fn private_application_message_from_raw(
+    raw_json: String,
+    parsed_version: Option<u32>,
+    parsed_kind: Option<String>,
+) -> PrivateApplicationMessage {
+    PrivateApplicationMessage {
+        version: parsed_version.and_then(|version| u8::try_from(version).ok()),
+        kind: parsed_kind,
+        raw_json,
+    }
 }
 
 #[cfg(test)]

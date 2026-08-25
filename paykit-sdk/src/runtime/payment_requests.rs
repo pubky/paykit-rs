@@ -20,6 +20,8 @@ where
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PaymentRequestRecord>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
@@ -51,6 +53,8 @@ where
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PaymentRequestRecord>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
@@ -82,6 +86,8 @@ where
         &self,
         filter: PaymentRequestFilter,
     ) -> Result<Vec<PaymentRequestRecord>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
@@ -150,12 +156,16 @@ where
 
     /// Return all Payment Requests across non-blocked counterparties.
     pub async fn payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         self.list_payment_requests(PaymentRequestFilter::default())
             .await
     }
 
     /// Return accepted recurring Payment Requests across non-blocked counterparties.
     pub async fn active_recurring_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         self.list_payment_requests(PaymentRequestFilter {
             states: vec![PaymentRequestLifecycleState::ActiveRecurring],
             recurring: Some(true),
@@ -166,6 +176,8 @@ where
 
     /// Return received Payment Requests that need a local payer response.
     pub async fn actionable_received_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         self.list_payment_requests(PaymentRequestFilter {
             local_role: Some(PaymentRequestLocalRole::Payer),
             states: vec![
@@ -336,6 +348,8 @@ where
         counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let record = self
             .load_payment_request_record(
                 &counterparty,
@@ -375,6 +389,8 @@ where
         payment_request_id: &PaymentRequestId,
         reason: Option<String>,
     ) -> Result<PaymentRequestRecord> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let record = self
             .load_payment_request_record(
                 &counterparty,
@@ -418,6 +434,8 @@ where
         payment_request_id: &PaymentRequestId,
         reason: Option<String>,
     ) -> Result<PaymentRequestRecord> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let record = self
             .load_payment_request_record(
                 &counterparty,
@@ -465,6 +483,8 @@ where
         payment_endpoint_identifier: PaymentEndpointIdentifier,
         proof: JsonMap<String, JsonValue>,
     ) -> Result<PaymentRequestRecord> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let record = self
             .load_payment_request_record(
                 &counterparty,

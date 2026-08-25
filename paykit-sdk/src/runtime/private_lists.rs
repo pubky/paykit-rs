@@ -13,6 +13,8 @@ where
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<crate::PrivatePaymentListView>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.local_pubky_public_key.is_none() {
             return Ok(None);
@@ -177,6 +179,8 @@ where
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<PrivatePaymentListDeliveryReport> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         self.sync_private_payment_lists_with_reservations_and_process_outbound(
             vec![PrivatePaymentListReservationUpdate {
                 counterparty,
@@ -197,6 +201,8 @@ where
         &self,
         clear_unlisted_linked_peers: bool,
     ) -> Result<PrivatePaymentListSyncReport> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         self.require_initialized_identity("sync contact Private Payment Lists")
             .await?;
         let (mut contacts, mut clear_counterparties) = self
@@ -295,6 +301,8 @@ where
         &self,
         clear_unlisted_linked_peers: bool,
     ) -> Result<PrivatePaymentListDeliveryReport> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let sync = self
             .sync_contact_private_payment_lists(clear_unlisted_linked_peers)
             .await?;
@@ -339,6 +347,8 @@ where
         mut updates: Vec<PrivatePaymentListReservationUpdate>,
         clear_unlisted_linked_peers: bool,
     ) -> Result<PrivatePaymentListDeliveryReport> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         self.require_initialized_identity("sync reservation-backed Private Payment Lists")
             .await?;
 

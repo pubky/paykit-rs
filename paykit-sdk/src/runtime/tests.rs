@@ -21,10 +21,10 @@ use crate::{
         PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
     },
     domain::endpoint_reservations::queue_private_payment_list_with_reservations,
-    domain::private_stream::persist_private_stream_batch,
+    domain::private_stream::{payload_hash, persist_private_stream_batch},
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
-        NewOutboundPrivateMessage, PublicEndpointRecord,
+        NewOutboundPrivateMessage, PrivateStreamItemRecord, PublicEndpointRecord,
     },
     EventIdConflict, OutboundPrivateMessageStatus, PubkySessionAccess,
 };
@@ -418,13 +418,97 @@ fn receipt_access_record(counterparty: PubkyPublicKey, receipt_id: &str) -> Rece
         payment_request_id: None,
         billing_period: None,
         location: format!("/pub/paykit/v0/private/bitkit/wallet/receipts/{receipt_id}"),
-        key: "receipt-secret-key".into(),
+        key: paykit_lib::ReceiptDecryptionKey::generate().as_str().into(),
         retrieval_status: ReceiptRetrievalStatus::Pending,
         retrieval_attempted_at: None,
         retrieved_at: None,
         last_retrieval_error: None,
         received_at: FixedClock.now(),
     }
+}
+
+fn receipt_access_carrier_item(access: &ReceiptAccessRecord) -> PrivateStreamItemRecord {
+    PrivateStreamItemRecord {
+        stream_item_id: access.stream_item_id,
+        counterparty: access.counterparty.clone(),
+        counterparty_receiver_path: access.counterparty_receiver_path.clone(),
+        receive_batch_id: access.receive_batch_id,
+        raw_json: format!(
+            r#"{{"version":1,"kind":"paykit.receipt_access","event_id":"{}","receipt_id":"{}","payment_reference":"{}","location":"{}","key":"{}"}}"#,
+            access.event_id,
+            access.receipt_id,
+            access.payment_reference,
+            access.location,
+            access.key
+        ),
+        parsed_version: Some(1),
+        parsed_kind: Some("paykit.receipt_access".into()),
+        known_paykit_kind: Some("paykit.receipt_access".into()),
+        parse_status: crate::PrivateStreamParseStatus::Valid,
+        parse_error: None,
+        received_at: access.received_at,
+    }
+}
+
+/// Seed a Receipt Access record together with the carrier private stream item
+/// and Event dedupe record that back it, so classification normalization keeps
+/// the derived state instead of removing unbacked index records. A conflicted
+/// seed adds a second carrier with the same Event ID and a different payload.
+async fn seed_backed_receipt_access(
+    storage: &InMemoryStorage,
+    access: ReceiptAccessRecord,
+    conflicted: bool,
+) {
+    let first = receipt_access_carrier_item(&access);
+    let mut dedup = EventDedupRecord {
+        counterparty: access.counterparty.clone(),
+        counterparty_receiver_path: access.counterparty_receiver_path.clone(),
+        event_id: access.event_id.clone(),
+        event_kind: "paykit.receipt_access".into(),
+        payload_hash: payload_hash(&first.raw_json),
+        first_stream_item_id: first.stream_item_id,
+        duplicate_stream_item_ids: Vec::new(),
+        conflicting_stream_item_ids: Vec::new(),
+    };
+    let mut items = vec![first];
+    if conflicted {
+        let mut conflicting = access.clone();
+        conflicting.payment_reference = "conflicting-invoice".into();
+        let mut conflicting = receipt_access_carrier_item(&conflicting);
+        conflicting.stream_item_id = access.stream_item_id + 1;
+        dedup
+            .conflicting_stream_item_ids
+            .push(conflicting.stream_item_id);
+        items.push(conflicting);
+    }
+
+    let mut state = storage.snapshot().unwrap();
+    for item in items {
+        state.next_private_stream_item_id = state
+            .next_private_stream_item_id
+            .max(item.stream_item_id.saturating_add(1));
+        state.next_receive_batch_id = state
+            .next_receive_batch_id
+            .max(item.receive_batch_id.saturating_add(1));
+        state.private_stream_items.push(item);
+    }
+    state
+        .private_stream_items
+        .sort_by_key(|item| item.stream_item_id);
+    let key = (
+        access.counterparty.clone(),
+        access.counterparty_receiver_path.clone(),
+        access.event_id.clone(),
+    );
+    state.event_dedup_records.insert(key.clone(), dedup);
+    state.receipt_access_records.insert(key, access);
+    storage
+        .transaction(move |tx| {
+            tx.replace_storage_state(crate::backup::ValidatedStorageState::new(state));
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 fn receipt_record(
@@ -447,19 +531,6 @@ fn receipt_record(
         metadata: JsonMap::new(),
         location: format!("/pub/paykit/v0/private/bitkit/wallet/receipts/{receipt_id}"),
         retrieved_at: FixedClock.now(),
-    }
-}
-
-fn conflicted_event_dedup_record(access: &ReceiptAccessRecord) -> EventDedupRecord {
-    EventDedupRecord {
-        counterparty: access.counterparty.clone(),
-        counterparty_receiver_path: access.counterparty_receiver_path.clone(),
-        event_id: access.event_id.clone(),
-        event_kind: "paykit.receipt_access".into(),
-        payload_hash: "sha256:first".into(),
-        first_stream_item_id: access.stream_item_id,
-        duplicate_stream_item_ids: Vec::new(),
-        conflicting_stream_item_ids: vec![access.stream_item_id + 1],
     }
 }
 
@@ -592,6 +663,7 @@ mod contacts;
 mod encrypted_links;
 mod identity;
 mod linked_peers;
+mod normalization;
 mod not_found_classifier;
 mod outbound_private;
 mod payment_requests;

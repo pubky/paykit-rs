@@ -458,6 +458,33 @@ impl StorageTransaction for StorageStateTransaction {
             .collect()
     }
 
+    fn update_private_stream_item_classification(
+        &mut self,
+        update: PrivateStreamItemClassificationUpdate,
+    ) -> Result<()> {
+        if let Some(existing) = self
+            .state
+            .private_stream_items
+            .iter_mut()
+            .find(|item| item.stream_item_id == update.stream_item_id)
+        {
+            existing.parsed_version = update.parsed_version;
+            existing.parsed_kind = update.parsed_kind;
+            existing.known_paykit_kind = update.known_paykit_kind;
+            existing.parse_status = update.parse_status;
+            existing.parse_error = update.parse_error;
+            Ok(())
+        } else {
+            Err(PaykitSdkError::Storage {
+                context: format!(
+                    "private stream item {} does not exist",
+                    update.stream_item_id
+                ),
+                source: None,
+            })
+        }
+    }
+
     fn event_dedup_record(
         &self,
         counterparty: &PubkyPublicKey,
@@ -483,6 +510,19 @@ impl StorageTransaction for StorageStateTransaction {
             ),
             record,
         );
+    }
+
+    fn remove_event_dedup_record(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+        event_id: &str,
+    ) -> Option<EventDedupRecord> {
+        self.state.event_dedup_records.remove(&(
+            counterparty.clone(),
+            counterparty_receiver_path.clone(),
+            event_id.to_owned(),
+        ))
     }
 
     fn save_receipt_access_record(&mut self, record: ReceiptAccessRecord) {
@@ -533,6 +573,19 @@ impl StorageTransaction for StorageStateTransaction {
             .cloned()
     }
 
+    fn remove_receipt_access_record(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+        event_id: &str,
+    ) -> Option<ReceiptAccessRecord> {
+        self.state.receipt_access_records.remove(&(
+            counterparty.clone(),
+            counterparty_receiver_path.clone(),
+            event_id.to_owned(),
+        ))
+    }
+
     fn save_receipt_record(&mut self, record: ReceiptRecord) {
         self.state.receipt_records.insert(
             (
@@ -558,6 +611,19 @@ impl StorageTransaction for StorageStateTransaction {
                 receipt_id.to_owned(),
             ))
             .cloned()
+    }
+
+    fn remove_receipt_record(
+        &mut self,
+        issuer: &PubkyPublicKey,
+        issuer_receiver_path: &PaykitReceiverPath,
+        receipt_id: &str,
+    ) -> Option<ReceiptRecord> {
+        self.state.receipt_records.remove(&(
+            issuer.clone(),
+            issuer_receiver_path.clone(),
+            receipt_id.to_owned(),
+        ))
     }
 
     fn save_receipt_issuance_record(&mut self, record: ReceiptIssuanceRecord) {

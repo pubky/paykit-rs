@@ -15,8 +15,9 @@ use crate::{
         validate_outbound_private_message, validate_queued_outbound_private_message,
     },
     domain::private_stream::{
-        classify_private_application_message, enforce_receipt_access_receiver_scope, payload_hash,
-        PrivateStreamParseStatus,
+        classify_private_application_message, enforce_receipt_access_receiver_scope,
+        normalize::compute_private_stream_normalization, payload_hash,
+        private_application_message_from_raw, private_message_header, PrivateStreamParseStatus,
     },
     domain::publication::PublicationStatus,
     domain::receipts::{
@@ -40,6 +41,10 @@ use paykit_lib::{
 mod validation;
 
 use validation::*;
+
+// Test-only crate-wide access for the frozen classification fixture replay.
+#[cfg(test)]
+pub(crate) use validation::validate_private_stream_items;
 
 type PeerStorageKey = (PubkyPublicKey, PaykitReceiverPath);
 
@@ -428,18 +433,15 @@ impl SdkBackupState {
             },
             "Payment Endpoint Reservation",
         )?;
-        let mut encrypted_link_states =
-            keyed_by_peer(self.encrypted_link_states, "Encrypted Link state")?;
-        validate_encrypted_link_snapshots(&encrypted_link_states, local_receiver_path)?;
-        let mut outbound_private_messages =
-            unique_outbound_messages(self.outbound_private_messages)?;
-        validate_outbound_private_messages(&outbound_private_messages, &self.local_receiver_path)?;
-        validate_payment_endpoint_reservations(
-            &payment_endpoint_reservations,
-            &outbound_private_messages,
-        )?;
-        let private_stream_items = unique_private_stream_items(self.private_stream_items)?;
-        validate_private_stream_items(&private_stream_items)?;
+        // Normalize derived private stream classification and index state from
+        // raw message data before any private-message re-validation, so
+        // backups written by an older classifier generation restore instead of
+        // failing byte-for-byte derived-state comparison. Cached Receipt
+        // records orphaned by that reconciliation are dropped the same way.
+        // Immutable source context stays validated: the uniqueness checks
+        // here still reject, and every check below runs against the
+        // normalized state.
+        let mut private_stream_items = unique_private_stream_items(self.private_stream_items)?;
         let event_dedup_records = keyed_by_tuple(
             self.event_dedup_records,
             |record| {
@@ -451,7 +453,6 @@ impl SdkBackupState {
             },
             "Event dedupe",
         )?;
-        validate_event_dedup_records(&event_dedup_records, &private_stream_items)?;
         let receipt_access_records = keyed_by_tuple(
             self.receipt_access_records,
             |record| {
@@ -463,13 +464,7 @@ impl SdkBackupState {
             },
             "Receipt Access",
         )?;
-        validate_receipt_access_records(&receipt_access_records, &private_stream_items)?;
-        validate_required_private_stream_indexes(
-            &private_stream_items,
-            &event_dedup_records,
-            &receipt_access_records,
-        )?;
-        let receipt_records = keyed_by_tuple(
+        let mut receipt_records = keyed_by_tuple(
             self.receipt_records,
             |record| {
                 (
@@ -479,6 +474,50 @@ impl SdkBackupState {
                 )
             },
             "Receipt",
+        )?;
+        let normalization = compute_private_stream_normalization(
+            &private_stream_items,
+            &event_dedup_records,
+            &receipt_access_records,
+            &receipt_records,
+        );
+        for update in normalization.item_updates {
+            // Updates are derived from these items, so every id resolves; a
+            // skipped update would still fail stream-item validation below.
+            let Some(item) = private_stream_items
+                .iter_mut()
+                .find(|item| item.stream_item_id == update.stream_item_id)
+            else {
+                continue;
+            };
+            item.parsed_version = update.parsed_version;
+            item.parsed_kind = update.parsed_kind;
+            item.known_paykit_kind = update.known_paykit_kind;
+            item.parse_status = update.parse_status;
+            item.parse_error = update.parse_error;
+        }
+        let event_dedup_records = normalization.expected_event_dedup_records;
+        let receipt_access_records = normalization.expected_receipt_access_records;
+        for key in &normalization.removed_receipt_record_keys {
+            receipt_records.remove(key);
+        }
+        let mut encrypted_link_states =
+            keyed_by_peer(self.encrypted_link_states, "Encrypted Link state")?;
+        validate_encrypted_link_snapshots(&encrypted_link_states, local_receiver_path)?;
+        let mut outbound_private_messages =
+            unique_outbound_messages(self.outbound_private_messages)?;
+        validate_outbound_private_messages(&outbound_private_messages, &self.local_receiver_path)?;
+        validate_payment_endpoint_reservations(
+            &payment_endpoint_reservations,
+            &outbound_private_messages,
+        )?;
+        validate_private_stream_items(&private_stream_items)?;
+        validate_event_dedup_records(&event_dedup_records, &private_stream_items)?;
+        validate_receipt_access_records(&receipt_access_records, &private_stream_items)?;
+        validate_required_private_stream_indexes(
+            &private_stream_items,
+            &event_dedup_records,
+            &receipt_access_records,
         )?;
         let expected_receipt_recipient = identity_state
             .as_ref()

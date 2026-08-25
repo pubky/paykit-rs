@@ -1,0 +1,799 @@
+{
+  "event_dedup_records": [
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000001",
+      "event_kind": "paykit.receipt_access",
+      "first_stream_item_id": 1,
+      "payload_hash": "sha256:cf21f1935f7d067ab58c521240e5ffb32f3309774838ec8b5e575a3faf45ace7"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000002",
+      "event_kind": "paykit.payment_request",
+      "first_stream_item_id": 2,
+      "payload_hash": "sha256:c30c594604c3ec320fd10862544afb9da431e1fb1c0d54411fde30870b4ebb0b"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000003",
+      "event_kind": "paykit.payment_request_acceptance",
+      "first_stream_item_id": 3,
+      "payload_hash": "sha256:9a48d3fd7e5759fcca62ffdbd6062866520835bab2885c29605b4e1e94f910c0"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000004",
+      "event_kind": "paykit.payment_request_rejection",
+      "first_stream_item_id": 4,
+      "payload_hash": "sha256:6f4d5ec3e61544aa10e1bdd62bd8718044bd2ee7d62be68b79801fa6fde96629"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000005",
+      "event_kind": "paykit.payment_request_cancellation",
+      "first_stream_item_id": 5,
+      "payload_hash": "sha256:96b9a3fe37e3c64efb430009bf54007bb04a3bc717754e4b0ced0b662f1b308c"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000006",
+      "event_kind": "paykit.payment_proof",
+      "first_stream_item_id": 6,
+      "payload_hash": "sha256:a03b5501495eec160397114d1e31d8596dd4269487b6ff0b256ec588eecdee6d"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000007",
+      "event_kind": "paykit.receipt_access",
+      "first_stream_item_id": 8,
+      "payload_hash": "sha256:1fde5908933a1498a97d49391825da71610654011b16e1cf9e2e5770739aea5a"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000008",
+      "event_kind": "paykit.payment_request",
+      "first_stream_item_id": 9,
+      "payload_hash": "sha256:ebdcc844e9978383d1d573ae905e48cd630d240cd55fab258695e94c2d7e0f2b"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000009",
+      "event_kind": "paykit.payment_request_acceptance",
+      "first_stream_item_id": 10,
+      "payload_hash": "sha256:78a5e0f6e3e41ff97250e1f9683a3544c894cb5d4c0b61ccdd0125952f64d836"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-00000000000a",
+      "event_kind": "paykit.payment_request_rejection",
+      "first_stream_item_id": 11,
+      "payload_hash": "sha256:3ac16967958a83376e8b54a177445a9772a447e60de00bdb6d1396391dabca6d"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-00000000000b",
+      "event_kind": "paykit.payment_request_cancellation",
+      "first_stream_item_id": 12,
+      "payload_hash": "sha256:1d585fa141fdffb11f77b49b843005a3e42f2fc988b96f6a54e48a0373281539"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-00000000000c",
+      "event_kind": "paykit.payment_proof",
+      "first_stream_item_id": 13,
+      "payload_hash": "sha256:d925ec5126d9ba807f523342052c33d170ea8aa2149ae91515a05bf57423dfee"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-00000000000d",
+      "event_kind": "paykit.receipt_access",
+      "first_stream_item_id": 15,
+      "payload_hash": "sha256:7204965413a864b68c698ea8e47abd3ba1f0ef0064bb703748e684e8a4dd2cb2"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-00000000000e",
+      "event_kind": "paykit.payment_request",
+      "first_stream_item_id": 16,
+      "payload_hash": "sha256:693746c70b897c95a0de9f1fefa4581a151b2d75d751b733faa3741d1b2a056e"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-00000000000f",
+      "event_kind": "paykit.payment_request_acceptance",
+      "first_stream_item_id": 17,
+      "payload_hash": "sha256:951c7323d82b4ec724f6fb0b2f0514dc91485d2eea98f006abfe8cd7c6756ad3"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000010",
+      "event_kind": "paykit.payment_request_rejection",
+      "first_stream_item_id": 18,
+      "payload_hash": "sha256:54dbdf2e68ae101473305dea2857b87621552c9c86f7dd5a5f13f83f62adb5eb"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000011",
+      "event_kind": "paykit.payment_request_cancellation",
+      "first_stream_item_id": 19,
+      "payload_hash": "sha256:5ae74e2512caae2c9bdb352709d7c4d64bb266fdd472bd70f4f384230b2f86d3"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000012",
+      "event_kind": "paykit.payment_proof",
+      "first_stream_item_id": 20,
+      "payload_hash": "sha256:d6597f7ff56a1ccf5801904d189ca9e13b51c80c7dd055a59c640307878d2d96"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000013",
+      "event_kind": "paykit.payment_request_acceptance",
+      "first_stream_item_id": 21,
+      "payload_hash": "sha256:ade92eef7f64e4899ed4d2af0d3d11eb6240cbc049789d873a0665bfb90b2a31"
+    },
+    {
+      "conflicting_stream_item_ids": [],
+      "duplicate_stream_item_ids": [
+        27
+      ],
+      "event_id": "11111111-1111-4111-8111-000000000016",
+      "event_kind": "paykit.payment_request",
+      "first_stream_item_id": 26,
+      "payload_hash": "sha256:008a48de0bdf9124ca3c6aeb22fbf38e86ccfd8652727390793c230999aa05c1"
+    },
+    {
+      "conflicting_stream_item_ids": [
+        29
+      ],
+      "duplicate_stream_item_ids": [],
+      "event_id": "11111111-1111-4111-8111-000000000017",
+      "event_kind": "paykit.payment_request",
+      "first_stream_item_id": 28,
+      "payload_hash": "sha256:dba776b05fd197ec0358595c8f5f36f5e3adc650de78a42ea25c9c7a6e53db1d"
+    }
+  ],
+  "intake_event_conflicts": [
+    {
+      "conflicting_stream_item_id": 29,
+      "event_id": "11111111-1111-4111-8111-000000000017",
+      "first_stream_item_id": 28
+    }
+  ],
+  "messages": [
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": null,
+        "event_id": null,
+        "event_kind": null,
+        "known_paykit_kind": "paykit.private_payment_list",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.private_payment_list",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "private_payment_list_valid",
+      "outbound": {
+        "ok": "paykit.private_payment_list"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000001",
+        "event_kind": "paykit.receipt_access",
+        "known_paykit_kind": "paykit.receipt_access",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.receipt_access",
+        "parsed_version": 1,
+        "receipt_access_indexed": true
+      },
+      "label": "receipt_access_valid",
+      "outbound": {
+        "ok": "paykit.receipt_access"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000002",
+        "event_kind": "paykit.payment_request",
+        "known_paykit_kind": "paykit.payment_request",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.payment_request",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_valid",
+      "outbound": {
+        "ok": "paykit.payment_request"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000003",
+        "event_kind": "paykit.payment_request_acceptance",
+        "known_paykit_kind": "paykit.payment_request_acceptance",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.payment_request_acceptance",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_acceptance_valid",
+      "outbound": {
+        "ok": "paykit.payment_request_acceptance"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000004",
+        "event_kind": "paykit.payment_request_rejection",
+        "known_paykit_kind": "paykit.payment_request_rejection",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.payment_request_rejection",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_rejection_valid",
+      "outbound": {
+        "ok": "paykit.payment_request_rejection"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000005",
+        "event_kind": "paykit.payment_request_cancellation",
+        "known_paykit_kind": "paykit.payment_request_cancellation",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.payment_request_cancellation",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_cancellation_valid",
+      "outbound": {
+        "ok": "paykit.payment_request_cancellation"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000006",
+        "event_kind": "paykit.payment_proof",
+        "known_paykit_kind": "paykit.payment_proof",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.payment_proof",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_proof_valid",
+      "outbound": {
+        "ok": "paykit.payment_proof"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": null,
+        "event_id": null,
+        "event_kind": null,
+        "known_paykit_kind": "paykit.private_payment_list",
+        "parse_error": "invalid data: failed to parse Private Payment List JSON: missing field `payment_endpoints` at line 1 column 50",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.private_payment_list",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "private_payment_list_malformed",
+      "outbound": {
+        "error": "protocol error: failed to parse Private Payment List JSON: missing field `payment_endpoints` at line 1 column 50"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000007",
+        "event_kind": "paykit.receipt_access",
+        "known_paykit_kind": "paykit.receipt_access",
+        "parse_error": "invalid data: failed to parse Receipt Access JSON",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.receipt_access",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "receipt_access_malformed",
+      "outbound": {
+        "error": "protocol error: invalid data: failed to parse Receipt Access JSON"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000008",
+        "event_kind": "paykit.payment_request",
+        "known_paykit_kind": "paykit.payment_request",
+        "parse_error": "invalid data: Payment Request: Payment Request amount.value must be a decimal string",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_request",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_malformed",
+      "outbound": {
+        "error": "protocol error: invalid data: Payment Request: Payment Request amount.value must be a decimal string"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000009",
+        "event_kind": "paykit.payment_request_acceptance",
+        "known_paykit_kind": "paykit.payment_request_acceptance",
+        "parse_error": "invalid data: Payment Request Acceptance must not include reason",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_request_acceptance",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_acceptance_malformed",
+      "outbound": {
+        "error": "protocol error: invalid data: Payment Request Acceptance must not include reason"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-00000000000a",
+        "event_kind": "paykit.payment_request_rejection",
+        "known_paykit_kind": "paykit.payment_request_rejection",
+        "parse_error": "invalid data: failed to parse Payment Request Rejection JSON: reason must be a string when present at line 1 column 179",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_request_rejection",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_rejection_malformed",
+      "outbound": {
+        "error": "protocol error: invalid data: failed to parse Payment Request Rejection JSON: reason must be a string when present at line 1 column 179"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-00000000000b",
+        "event_kind": "paykit.payment_request_cancellation",
+        "known_paykit_kind": "paykit.payment_request_cancellation",
+        "parse_error": "invalid data: failed to parse Payment Request Cancellation JSON: missing field `payment_request_id` at line 1 column 108",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_request_cancellation",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_cancellation_malformed",
+      "outbound": {
+        "error": "protocol error: invalid data: failed to parse Payment Request Cancellation JSON: missing field `payment_request_id` at line 1 column 108"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-00000000000c",
+        "event_kind": "paykit.payment_proof",
+        "known_paykit_kind": "paykit.payment_proof",
+        "parse_error": "invalid data: failed to parse Payment Proof JSON: missing field `billing_period` at line 1 column 276",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_proof",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_proof_malformed",
+      "outbound": {
+        "error": "protocol error: invalid data: failed to parse Payment Proof JSON: missing field `billing_period` at line 1 column 276"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": null,
+        "event_id": null,
+        "event_kind": null,
+        "known_paykit_kind": "paykit.private_payment_list",
+        "parse_error": "invalid data: unsupported Private Payment List version 2",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.private_payment_list",
+        "parsed_version": 2,
+        "receipt_access_indexed": false
+      },
+      "label": "private_payment_list_wrong_version",
+      "outbound": {
+        "error": "protocol error: unsupported private message version 2"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-00000000000d",
+        "event_kind": "paykit.receipt_access",
+        "known_paykit_kind": "paykit.receipt_access",
+        "parse_error": "invalid data: unsupported Receipt Access version/kind",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.receipt_access",
+        "parsed_version": 2,
+        "receipt_access_indexed": false
+      },
+      "label": "receipt_access_wrong_version",
+      "outbound": {
+        "error": "protocol error: unsupported private message version 2"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-00000000000e",
+        "event_kind": "paykit.payment_request",
+        "known_paykit_kind": "paykit.payment_request",
+        "parse_error": "invalid data: unsupported Payment Request event version/kind",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_request",
+        "parsed_version": 2,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_wrong_version",
+      "outbound": {
+        "error": "protocol error: unsupported private message version 2"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-00000000000f",
+        "event_kind": "paykit.payment_request_acceptance",
+        "known_paykit_kind": "paykit.payment_request_acceptance",
+        "parse_error": "invalid data: unsupported Payment Request event version/kind",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_request_acceptance",
+        "parsed_version": 2,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_acceptance_wrong_version",
+      "outbound": {
+        "error": "protocol error: unsupported private message version 2"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000010",
+        "event_kind": "paykit.payment_request_rejection",
+        "known_paykit_kind": "paykit.payment_request_rejection",
+        "parse_error": "invalid data: unsupported Payment Request event version/kind",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_request_rejection",
+        "parsed_version": 2,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_rejection_wrong_version",
+      "outbound": {
+        "error": "protocol error: unsupported private message version 2"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000011",
+        "event_kind": "paykit.payment_request_cancellation",
+        "known_paykit_kind": "paykit.payment_request_cancellation",
+        "parse_error": "invalid data: unsupported Payment Request event version/kind",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_request_cancellation",
+        "parsed_version": 2,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_request_cancellation_wrong_version",
+      "outbound": {
+        "error": "protocol error: unsupported private message version 2"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000012",
+        "event_kind": "paykit.payment_proof",
+        "known_paykit_kind": "paykit.payment_proof",
+        "parse_error": "invalid data: unsupported Payment Request event version/kind",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_proof",
+        "parsed_version": 2,
+        "receipt_access_indexed": false
+      },
+      "label": "payment_proof_wrong_version",
+      "outbound": {
+        "error": "protocol error: unsupported private message version 2"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000013",
+        "event_kind": "paykit.payment_request_acceptance",
+        "known_paykit_kind": "paykit.payment_request_acceptance",
+        "parse_error": "invalid data: failed to parse Payment Request Acceptance JSON: unknown field `request`, expected one of `version`, `kind`, `event_id`, `payment_request_id`, `reason` at line 1 column 175",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.payment_request_acceptance",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "kind_structure_mismatch",
+      "outbound": {
+        "error": "protocol error: invalid data: failed to parse Payment Request Acceptance JSON: unknown field `request`, expected one of `version`, `kind`, `event_id`, `payment_request_id`, `reason` at line 1 column 175"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": null,
+        "event_id": null,
+        "event_kind": null,
+        "known_paykit_kind": null,
+        "parse_error": null,
+        "parse_status": "UnknownKind",
+        "parsed_kind": "paykit.allowance",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "unknown_kind",
+      "outbound": {
+        "error": "protocol error: unsupported private message kind 'paykit.allowance'"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": null,
+        "event_id": null,
+        "event_kind": null,
+        "known_paykit_kind": null,
+        "parse_error": null,
+        "parse_status": "InvalidJson",
+        "parsed_kind": null,
+        "parsed_version": null,
+        "receipt_access_indexed": false
+      },
+      "label": "invalid_json",
+      "outbound": {
+        "error": "protocol error: invalid private message JSON: expected ident at line 1 column 2"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": null,
+        "event_id": null,
+        "event_kind": null,
+        "known_paykit_kind": null,
+        "parse_error": "Private Application Message plaintext is not valid UTF-8",
+        "parse_status": "InvalidJson",
+        "parsed_kind": null,
+        "parsed_version": null,
+        "receipt_access_indexed": false
+      },
+      "label": "invalid_utf8_sentinel",
+      "outbound": {
+        "error": "protocol error: invalid private message JSON: expected value at line 1 column 1"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": null,
+        "event_id": null,
+        "event_kind": null,
+        "known_paykit_kind": "paykit.receipt_access",
+        "parse_error": "Receipt Access location does not match counterparty receiver bitkit/wallet",
+        "parse_status": "MalformedRecognized",
+        "parsed_kind": "paykit.receipt_access",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "receipt_access_out_of_scope",
+      "outbound": {
+        "ok": "paykit.receipt_access"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000016",
+        "event_kind": "paykit.payment_request",
+        "known_paykit_kind": "paykit.payment_request",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.payment_request",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "event_duplicate_first",
+      "outbound": {
+        "ok": "paykit.payment_request"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "duplicate",
+        "event_id": "11111111-1111-4111-8111-000000000016",
+        "event_kind": "paykit.payment_request",
+        "known_paykit_kind": "paykit.payment_request",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.payment_request",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "event_duplicate_repeat",
+      "outbound": {
+        "ok": "paykit.payment_request"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "first",
+        "event_id": "11111111-1111-4111-8111-000000000017",
+        "event_kind": "paykit.payment_request",
+        "known_paykit_kind": "paykit.payment_request",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.payment_request",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "event_conflict_first",
+      "outbound": {
+        "ok": "paykit.payment_request"
+      }
+    },
+    {
+      "backup": {
+        "ok": true
+      },
+      "intake": {
+        "dedupe": "conflict",
+        "event_id": "11111111-1111-4111-8111-000000000017",
+        "event_kind": "paykit.payment_request",
+        "known_paykit_kind": "paykit.payment_request",
+        "parse_error": null,
+        "parse_status": "Valid",
+        "parsed_kind": "paykit.payment_request",
+        "parsed_version": 1,
+        "receipt_access_indexed": false
+      },
+      "label": "event_conflict_variant",
+      "outbound": {
+        "ok": "paykit.payment_request"
+      }
+    }
+  ],
+  "receipt_access_records": [
+    {
+      "billing_period": null,
+      "event_id": "11111111-1111-4111-8111-000000000001",
+      "key": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+      "location": "/pub/paykit/v0/private/bitkit/wallet/receipts/22222222-2222-4222-8222-000000000001",
+      "payment_reference": "invoice-2026-0001",
+      "payment_request_id": null,
+      "receipt_id": "22222222-2222-4222-8222-000000000001",
+      "receive_batch_id": 0,
+      "retrieval_status": "Pending",
+      "stream_item_id": 1
+    }
+  ]
+}

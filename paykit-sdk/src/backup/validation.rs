@@ -744,7 +744,9 @@ fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Re
     Ok(())
 }
 
-pub(super) fn validate_private_stream_items(records: &[PrivateStreamItemRecord]) -> Result<()> {
+// pub(crate) (not pub(super)) so the test-only re-export in backup/mod.rs can
+// expose it to the frozen classification fixture replay.
+pub(crate) fn validate_private_stream_items(records: &[PrivateStreamItemRecord]) -> Result<()> {
     for record in records {
         let (parsed_version, parsed_kind, known_kind) = private_message_header(&record.raw_json)?;
         let mut classification =
@@ -1465,26 +1467,6 @@ fn validate_receipt_issuance_status(record: &ReceiptIssuanceRecord) -> Result<()
     Ok(())
 }
 
-fn private_message_header(
-    raw_json: &str,
-) -> Result<(Option<u32>, Option<String>, Option<PrivateMessageKind>)> {
-    let value = match serde_json::from_str::<serde_json::Value>(raw_json) {
-        Ok(value) => value,
-        Err(_) => return Ok((None, None, None)),
-    };
-    let parsed_version = value
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|version| u8::try_from(version).ok())
-        .map(u32::from);
-    let parsed_kind = value
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let known_kind = parsed_kind.as_deref().and_then(PrivateMessageKind::parse);
-    Ok((parsed_version, parsed_kind, known_kind))
-}
-
 fn validate_valid_private_stream_body(
     record: &PrivateStreamItemRecord,
     kind: PrivateMessageKind,
@@ -1562,17 +1544,5 @@ fn private_application_message(
             .and_then(|version| u8::try_from(version).ok()),
         kind: Some(kind.as_str().to_owned()),
         raw_json: record.raw_json.clone(),
-    }
-}
-
-fn private_application_message_from_raw(
-    raw_json: String,
-    parsed_version: Option<u32>,
-    parsed_kind: Option<String>,
-) -> PrivateApplicationMessage {
-    PrivateApplicationMessage {
-        version: parsed_version.and_then(|version| u8::try_from(version).ok()),
-        kind: parsed_kind,
-        raw_json,
     }
 }

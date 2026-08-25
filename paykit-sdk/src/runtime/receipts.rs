@@ -133,6 +133,8 @@ where
         counterparty_receiver_path: PaykitReceiverPath,
         receipt_id: &str,
     ) -> Result<ReceiptIssuanceView> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (session_access, _) = self.private_link_session_access().await?;
         let record = load_receipt_issuance_record(
             &self.storage,
@@ -281,6 +283,8 @@ where
         counterparty_receiver_path: PaykitReceiverPath,
         receipt_id: &str,
     ) -> Result<ReceiptRecord> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         let local_public_key =
             identity
@@ -469,6 +473,8 @@ where
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptAccessView>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
@@ -495,12 +501,16 @@ where
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptAccessView>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         self.receipt_access_records(counterparty, counterparty_receiver_path)
             .await
     }
 
     /// List Receipt Access across non-blocked counterparties, newest first.
     pub async fn receipt_access(&self) -> Result<Vec<ReceiptAccessView>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.local_pubky_public_key.is_none() {
             return Ok(Vec::new());
@@ -535,6 +545,8 @@ where
         issuer: &PubkyPublicKey,
         issuer_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptRecord>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         let Some(local_public_key) = identity.local_pubky_public_key else {
             return Ok(Vec::new());
@@ -564,11 +576,15 @@ where
         issuer: &PubkyPublicKey,
         issuer_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<ReceiptRecord>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         self.receipt_records(issuer, issuer_receiver_path).await
     }
 
     /// List decrypted receipts across non-blocked issuers, newest first.
     pub async fn receipts(&self) -> Result<Vec<ReceiptRecord>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         let Some(local_public_key) = identity.local_pubky_public_key else {
             return Ok(Vec::new());

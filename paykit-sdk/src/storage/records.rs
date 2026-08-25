@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt};
 
 use chrono::{DateTime, Utc};
+use paykit_lib::PrivateMessageKind;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -551,6 +552,56 @@ impl PrivateStreamItemRecord {
             parse_error: item.parse_error,
             received_at: item.received_at,
         }
+    }
+}
+
+/// Update for the rebuildable derived classification of one private stream item.
+///
+/// This deliberately omits `raw_json` and the immutable source context
+/// (counterparty, receiver path, batch id, and receive time), so a
+/// classification update can never rewrite the durable source of truth.
+/// `Debug` redacts the parse error and any non-canonical parsed kind.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PrivateStreamItemClassificationUpdate {
+    /// Stream item id of the existing record to update.
+    pub stream_item_id: u64,
+    /// Parsed Private Application Message version.
+    pub parsed_version: Option<u32>,
+    /// Parsed Private Application Message kind.
+    pub parsed_kind: Option<String>,
+    /// Whether the kind is a known Paykit kind.
+    pub known_paykit_kind: Option<String>,
+    /// Parse status.
+    pub parse_status: PrivateStreamParseStatus,
+    /// Parse error, when available.
+    pub parse_error: Option<String>,
+}
+
+impl fmt::Debug for PrivateStreamItemClassificationUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivateStreamItemClassificationUpdate")
+            .field("stream_item_id", &self.stream_item_id)
+            .field("parsed_version", &self.parsed_version)
+            .field(
+                "parsed_kind",
+                &self.parsed_kind.as_ref().map(|kind| {
+                    if PrivateMessageKind::parse(kind).is_some() {
+                        kind.clone()
+                    } else {
+                        format!("<redacted:{} bytes>", kind.len())
+                    }
+                }),
+            )
+            .field("known_paykit_kind", &self.known_paykit_kind)
+            .field("parse_status", &self.parse_status)
+            .field(
+                "parse_error",
+                &self
+                    .parse_error
+                    .as_ref()
+                    .map(|error| format!("<redacted:{} bytes>", error.len())),
+            )
+            .finish()
     }
 }
 

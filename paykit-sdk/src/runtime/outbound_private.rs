@@ -13,6 +13,8 @@ where
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<OutboundPrivateSendReport> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let mut report = OutboundPrivateSendReport::default();
         self.ensure_peer_not_recovery_required_or_blocked(
             &counterparty,
@@ -61,6 +63,8 @@ where
     pub async fn pending_outbound_private_counterparties(
         &self,
     ) -> Result<Vec<(PubkyPublicKey, PaykitReceiverPath)>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let now = self.clock.now();
         let (stale_before, failed_retry_after) = self.outbound_retry_thresholds(now)?;
         self.storage
@@ -133,6 +137,8 @@ where
     pub async fn process_pending_private_messages(
         &self,
     ) -> Result<Vec<OutboundPrivateCounterpartySendReport>> {
+        self.ensure_private_stream_classifications_normalized()
+            .await?;
         let counterparties = self.pending_outbound_private_counterparties().await?;
         let mut reports = Vec::with_capacity(counterparties.len());
         for (counterparty, counterparty_receiver_path) in counterparties {

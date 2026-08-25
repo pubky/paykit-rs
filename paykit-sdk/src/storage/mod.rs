@@ -11,7 +11,8 @@ pub use in_memory::{run_storage_state_transaction, InMemoryStorage};
 pub use records::{
     EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, NewOutboundPrivateMessage,
     NewPrivateStreamItem, OutboundPrivateMessageRecord, PaymentEndpointReservationRecord,
-    PeerLinkOperationLease, PrivateStreamItemRecord, PublicEndpointRecord, StorageState,
+    PeerLinkOperationLease, PrivateStreamItemClassificationUpdate, PrivateStreamItemRecord,
+    PublicEndpointRecord, StorageState,
 };
 
 pub(crate) use queue::outbound_private_queue_head_is_claimable;
@@ -279,6 +280,18 @@ pub trait StorageTransaction {
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Vec<PrivateStreamItemRecord>;
 
+    /// Update the derived classification of one existing private stream item.
+    ///
+    /// This exists for classification normalization of derived data only; it
+    /// is not a general mutation surface. It never changes the raw payload or
+    /// the immutable source context of the item. Returns
+    /// [`PaykitSdkError::Storage`] when no item with the given stream item id
+    /// exists, so normalization fails closed instead of silently skipping.
+    fn update_private_stream_item_classification(
+        &mut self,
+        update: PrivateStreamItemClassificationUpdate,
+    ) -> Result<()>;
+
     /// Load an Event Message dedupe record.
     fn event_dedup_record(
         &self,
@@ -289,6 +302,18 @@ pub trait StorageTransaction {
 
     /// Save an Event Message dedupe record.
     fn save_event_dedup_record(&mut self, record: EventDedupRecord);
+
+    /// Remove one Event Message dedupe record.
+    ///
+    /// This exists for classification normalization of derived dedupe indexes
+    /// only; it is not a general mutation surface. Returns the removed
+    /// record, or `None` when no record exists for the Event ID.
+    fn remove_event_dedup_record(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+        event_id: &str,
+    ) -> Option<EventDedupRecord>;
 
     /// Save one indexed Receipt Access record.
     fn save_receipt_access_record(&mut self, record: ReceiptAccessRecord);
@@ -308,12 +333,37 @@ pub trait StorageTransaction {
         receipt_id: &str,
     ) -> Option<ReceiptAccessRecord>;
 
+    /// Remove one indexed Receipt Access record.
+    ///
+    /// This exists for classification normalization of derived Receipt Access
+    /// indexes only; it is not a general mutation surface. Returns the
+    /// removed record, or `None` when no record exists for the Event ID.
+    fn remove_receipt_access_record(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+        event_id: &str,
+    ) -> Option<ReceiptAccessRecord>;
+
     /// Save one decrypted Receipt record.
     fn save_receipt_record(&mut self, record: ReceiptRecord);
 
     /// Load one decrypted Receipt record.
     fn receipt_record(
         &self,
+        issuer: &PubkyPublicKey,
+        issuer_receiver_path: &PaykitReceiverPath,
+        receipt_id: &str,
+    ) -> Option<ReceiptRecord>;
+
+    /// Remove one decrypted Receipt record.
+    ///
+    /// This exists for classification normalization of cached Receipts whose
+    /// Receipt Access record was removed or rewritten; it is not a general
+    /// mutation surface. Returns the removed record, or `None` when no record
+    /// exists for the Receipt ID.
+    fn remove_receipt_record(
+        &mut self,
         issuer: &PubkyPublicKey,
         issuer_receiver_path: &PaykitReceiverPath,
         receipt_id: &str,

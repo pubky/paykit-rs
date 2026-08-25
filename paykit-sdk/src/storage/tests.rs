@@ -207,6 +207,14 @@ fn test_sensitive_storage_debug_is_redacted() {
         received_at: timestamp(),
     });
     let stream = PrivateStreamItemRecord::from_new(0, new_stream.clone());
+    let classification_update = PrivateStreamItemClassificationUpdate {
+        stream_item_id: 0,
+        parsed_version: Some(1),
+        parsed_kind: Some("paykit.kind-secret".into()),
+        known_paykit_kind: None,
+        parse_status: PrivateStreamParseStatus::UnknownKind,
+        parse_error: Some("parse-error-secret".into()),
+    };
     let receipt_access = receipt_access_record(stream.counterparty.clone());
     let receipt = receipt_record(receipt_access.counterparty.clone());
     let reservation = payment_endpoint_reservation_record(receipt_access.counterparty.clone());
@@ -254,7 +262,7 @@ fn test_sensitive_storage_debug_is_redacted() {
     };
 
     let debug = format!(
-            "{link_state:?} {outbound:?} {new_stream:?} {stream:?} {linked_peer:?} {receipt_access:?} {receipt:?} {reservation:?} {public_endpoint:?} {contact:?} {storage_state:?}"
+            "{link_state:?} {outbound:?} {new_stream:?} {stream:?} {classification_update:?} {linked_peer:?} {receipt_access:?} {receipt:?} {reservation:?} {public_endpoint:?} {contact:?} {storage_state:?}"
         );
     assert!(debug.contains("<redacted:"));
     assert!(!debug.contains("secret"));
@@ -1134,4 +1142,188 @@ async fn test_transaction_rolls_back_on_error() {
     assert!(result.is_err());
     let snapshot = storage.snapshot().unwrap();
     assert!(snapshot.linked_peers.is_empty());
+}
+
+#[tokio::test]
+async fn test_update_private_stream_item_classification_updates_only_derived_fields() {
+    let storage = InMemoryStorage::new();
+    let counterparty = random_public_key();
+
+    let stream_item_id = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                Ok(tx.insert_private_stream_item(NewPrivateStreamItem::new(
+                    NewPrivateStreamItemDetails {
+                        counterparty,
+                        counterparty_receiver_path: receiver_path(),
+                        receive_batch_id: 7,
+                        raw_json: r#"{"version":1,"kind":"paykit.receipt_access"}"#.into(),
+                        parsed_version: Some(1),
+                        parsed_kind: Some("paykit.test".into()),
+                        known_paykit_kind: None,
+                        parse_status: PrivateStreamParseStatus::UnknownKind,
+                        parse_error: Some("stale-parse-error".into()),
+                        received_at: timestamp(),
+                    },
+                )))
+            }
+        })
+        .await
+        .unwrap();
+
+    let before = storage.snapshot().unwrap().private_stream_items[0].clone();
+    storage
+        .transaction(move |tx| {
+            tx.update_private_stream_item_classification(PrivateStreamItemClassificationUpdate {
+                stream_item_id,
+                parsed_version: Some(2),
+                parsed_kind: Some("paykit.receipt_access".into()),
+                known_paykit_kind: Some("paykit.receipt_access".into()),
+                parse_status: PrivateStreamParseStatus::Valid,
+                parse_error: None,
+            })
+        })
+        .await
+        .unwrap();
+
+    let after = storage.snapshot().unwrap().private_stream_items[0].clone();
+    assert_eq!(after.stream_item_id, before.stream_item_id);
+    assert_eq!(after.counterparty, before.counterparty);
+    assert_eq!(
+        after.counterparty_receiver_path,
+        before.counterparty_receiver_path
+    );
+    assert_eq!(after.receive_batch_id, before.receive_batch_id);
+    assert_eq!(after.raw_json, before.raw_json);
+    assert_eq!(after.received_at, before.received_at);
+    assert_eq!(after.parsed_version, Some(2));
+    assert_eq!(after.parsed_kind.as_deref(), Some("paykit.receipt_access"));
+    assert_eq!(
+        after.known_paykit_kind.as_deref(),
+        Some("paykit.receipt_access")
+    );
+    assert_eq!(after.parse_status, PrivateStreamParseStatus::Valid);
+    assert_eq!(after.parse_error, None);
+}
+
+#[tokio::test]
+async fn test_update_private_stream_item_classification_unknown_item_errors() {
+    let storage = InMemoryStorage::new();
+
+    let result: Result<()> = storage
+        .transaction(|tx| {
+            tx.update_private_stream_item_classification(PrivateStreamItemClassificationUpdate {
+                stream_item_id: 99,
+                parsed_version: None,
+                parsed_kind: None,
+                known_paykit_kind: None,
+                parse_status: PrivateStreamParseStatus::InvalidJson,
+                parse_error: None,
+            })
+        })
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
+    assert!(storage.snapshot().unwrap().private_stream_items.is_empty());
+}
+
+#[tokio::test]
+async fn test_remove_event_dedup_record_removes_and_returns() {
+    let storage = InMemoryStorage::new();
+    let counterparty = random_public_key();
+
+    let saved = EventDedupRecord {
+        counterparty: counterparty.clone(),
+        counterparty_receiver_path: receiver_path(),
+        event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
+        event_kind: "paykit.receipt_access".into(),
+        payload_hash: "hash".into(),
+        first_stream_item_id: 0,
+        duplicate_stream_item_ids: Vec::new(),
+        conflicting_stream_item_ids: Vec::new(),
+    };
+    let (removed, removed_again) = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let saved = saved.clone();
+            move |tx| {
+                tx.save_event_dedup_record(saved.clone());
+                let removed =
+                    tx.remove_event_dedup_record(&counterparty, &receiver_path(), &saved.event_id);
+                let removed_again =
+                    tx.remove_event_dedup_record(&counterparty, &receiver_path(), &saved.event_id);
+                Ok((removed, removed_again))
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(removed, Some(saved));
+    assert_eq!(removed_again, None);
+    assert!(storage.snapshot().unwrap().event_dedup_records.is_empty());
+}
+
+#[tokio::test]
+async fn test_remove_receipt_access_record_removes_and_returns() {
+    let storage = InMemoryStorage::new();
+    let counterparty = random_public_key();
+
+    let saved = receipt_access_record(counterparty.clone());
+    let (removed, removed_again) = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let saved = saved.clone();
+            move |tx| {
+                tx.save_receipt_access_record(saved.clone());
+                let removed = tx.remove_receipt_access_record(
+                    &counterparty,
+                    &receiver_path(),
+                    &saved.event_id,
+                );
+                let removed_again = tx.remove_receipt_access_record(
+                    &counterparty,
+                    &receiver_path(),
+                    &saved.event_id,
+                );
+                Ok((removed, removed_again))
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(removed, Some(saved));
+    assert_eq!(removed_again, None);
+    assert!(storage
+        .snapshot()
+        .unwrap()
+        .receipt_access_records
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_remove_receipt_record_removes_and_returns() {
+    let storage = InMemoryStorage::new();
+    let issuer = random_public_key();
+
+    let saved = receipt_record(issuer.clone());
+    let (removed, removed_again) = storage
+        .transaction({
+            let issuer = issuer.clone();
+            let saved = saved.clone();
+            move |tx| {
+                tx.save_receipt_record(saved.clone());
+                let removed =
+                    tx.remove_receipt_record(&issuer, &receiver_path(), &saved.receipt_id);
+                let removed_again =
+                    tx.remove_receipt_record(&issuer, &receiver_path(), &saved.receipt_id);
+                Ok((removed, removed_again))
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(removed, Some(saved));
+    assert_eq!(removed_again, None);
+    assert!(storage.snapshot().unwrap().receipt_records.is_empty());
 }

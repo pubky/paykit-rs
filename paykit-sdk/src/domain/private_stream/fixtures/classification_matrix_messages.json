@@ -1,0 +1,122 @@
+[
+  {
+    "label": "private_payment_list_valid",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.private_payment_list\",\"payment_endpoints\":{\"btc-lightning-bolt11\":\"lnbc-fixture-endpoint\"}}"
+  },
+  {
+    "label": "receipt_access_valid",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.receipt_access\",\"event_id\":\"11111111-1111-4111-8111-000000000001\",\"receipt_id\":\"22222222-2222-4222-8222-000000000001\",\"payment_reference\":\"invoice-2026-0001\",\"location\":\"/pub/paykit/v0/private/bitkit/wallet/receipts/22222222-2222-4222-8222-000000000001\",\"key\":\"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY\"}"
+  },
+  {
+    "label": "payment_request_valid",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request\",\"event_id\":\"11111111-1111-4111-8111-000000000002\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"request\":{\"amount\":{\"value\":\"0.001\",\"asset\":\"btc\"},\"payment_reference\":\"invoice-2026-0001\",\"proposal_expires_at\":null,\"recurrence\":null,\"accepted_payment_endpoint_identifiers\":[\"btc-lightning-bolt11\"],\"metadata\":{}}}"
+  },
+  {
+    "label": "payment_request_acceptance_valid",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request_acceptance\",\"event_id\":\"11111111-1111-4111-8111-000000000003\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\"}"
+  },
+  {
+    "label": "payment_request_rejection_valid",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request_rejection\",\"event_id\":\"11111111-1111-4111-8111-000000000004\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"reason\":\"amount too high\"}"
+  },
+  {
+    "label": "payment_request_cancellation_valid",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request_cancellation\",\"event_id\":\"11111111-1111-4111-8111-000000000005\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"reason\":\"no longer needed\"}"
+  },
+  {
+    "label": "payment_proof_valid",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_proof\",\"event_id\":\"11111111-1111-4111-8111-000000000006\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"payment_reference\":\"invoice-2026-0001\",\"billing_period\":null,\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"preimage\":\"a1b2c3\"}}"
+  },
+  {
+    "label": "private_payment_list_malformed",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.private_payment_list\"}"
+  },
+  {
+    "label": "receipt_access_malformed",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.receipt_access\",\"event_id\":\"11111111-1111-4111-8111-000000000007\",\"receipt_id\":\"22222222-2222-4222-8222-000000000002\",\"payment_reference\":\"invoice-2026-0001\",\"location\":\"/pub/paykit/v0/private/bitkit/wallet/receipts/22222222-2222-4222-8222-000000000002\"}"
+  },
+  {
+    "label": "payment_request_malformed",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request\",\"event_id\":\"11111111-1111-4111-8111-000000000008\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"request\":{\"amount\":{\"value\":\"ten\",\"asset\":\"btc\"},\"payment_reference\":\"invoice-2026-0001\",\"proposal_expires_at\":null,\"recurrence\":null,\"accepted_payment_endpoint_identifiers\":[\"btc-lightning-bolt11\"],\"metadata\":{}}}"
+  },
+  {
+    "label": "payment_request_acceptance_malformed",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request_acceptance\",\"event_id\":\"11111111-1111-4111-8111-000000000009\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"reason\":\"accepted\"}"
+  },
+  {
+    "label": "payment_request_rejection_malformed",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request_rejection\",\"event_id\":\"11111111-1111-4111-8111-00000000000a\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"reason\":null}"
+  },
+  {
+    "label": "payment_request_cancellation_malformed",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request_cancellation\",\"event_id\":\"11111111-1111-4111-8111-00000000000b\"}"
+  },
+  {
+    "label": "payment_proof_malformed",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_proof\",\"event_id\":\"11111111-1111-4111-8111-00000000000c\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"payment_reference\":\"invoice-2026-0001\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"preimage\":\"a1b2c3\"}}"
+  },
+  {
+    "label": "private_payment_list_wrong_version",
+    "raw_json": "{\"version\":2,\"kind\":\"paykit.private_payment_list\",\"payment_endpoints\":{\"btc-lightning-bolt11\":\"lnbc-fixture-endpoint\"}}"
+  },
+  {
+    "label": "receipt_access_wrong_version",
+    "raw_json": "{\"version\":2,\"kind\":\"paykit.receipt_access\",\"event_id\":\"11111111-1111-4111-8111-00000000000d\",\"receipt_id\":\"22222222-2222-4222-8222-000000000003\",\"payment_reference\":\"invoice-2026-0001\",\"location\":\"/pub/paykit/v0/private/bitkit/wallet/receipts/22222222-2222-4222-8222-000000000003\",\"key\":\"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY\"}"
+  },
+  {
+    "label": "payment_request_wrong_version",
+    "raw_json": "{\"version\":2,\"kind\":\"paykit.payment_request\",\"event_id\":\"11111111-1111-4111-8111-00000000000e\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"request\":{\"amount\":{\"value\":\"0.001\",\"asset\":\"btc\"},\"payment_reference\":\"invoice-2026-0001\",\"proposal_expires_at\":null,\"recurrence\":null,\"accepted_payment_endpoint_identifiers\":[\"btc-lightning-bolt11\"],\"metadata\":{}}}"
+  },
+  {
+    "label": "payment_request_acceptance_wrong_version",
+    "raw_json": "{\"version\":2,\"kind\":\"paykit.payment_request_acceptance\",\"event_id\":\"11111111-1111-4111-8111-00000000000f\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\"}"
+  },
+  {
+    "label": "payment_request_rejection_wrong_version",
+    "raw_json": "{\"version\":2,\"kind\":\"paykit.payment_request_rejection\",\"event_id\":\"11111111-1111-4111-8111-000000000010\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"reason\":\"amount too high\"}"
+  },
+  {
+    "label": "payment_request_cancellation_wrong_version",
+    "raw_json": "{\"version\":2,\"kind\":\"paykit.payment_request_cancellation\",\"event_id\":\"11111111-1111-4111-8111-000000000011\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\"}"
+  },
+  {
+    "label": "payment_proof_wrong_version",
+    "raw_json": "{\"version\":2,\"kind\":\"paykit.payment_proof\",\"event_id\":\"11111111-1111-4111-8111-000000000012\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"payment_reference\":\"invoice-2026-0001\",\"billing_period\":null,\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"preimage\":\"a1b2c3\"}}"
+  },
+  {
+    "label": "kind_structure_mismatch",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request_acceptance\",\"event_id\":\"11111111-1111-4111-8111-000000000013\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"request\":{\"amount\":{\"value\":\"0.001\",\"asset\":\"btc\"}}}"
+  },
+  {
+    "label": "unknown_kind",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.allowance\",\"event_id\":\"11111111-1111-4111-8111-000000000014\",\"body\":{}}"
+  },
+  {
+    "label": "invalid_json",
+    "raw_json": "this is not JSON"
+  },
+  {
+    "label": "invalid_utf8_sentinel",
+    "raw_json": "paykit.invalid_utf8_private_message:_w"
+  },
+  {
+    "label": "receipt_access_out_of_scope",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.receipt_access\",\"event_id\":\"11111111-1111-4111-8111-000000000015\",\"receipt_id\":\"22222222-2222-4222-8222-000000000004\",\"payment_reference\":\"invoice-2026-0001\",\"location\":\"/pub/paykit/v0/private/tether/wallet/receipts/22222222-2222-4222-8222-000000000004\",\"key\":\"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY\"}"
+  },
+  {
+    "label": "event_duplicate_first",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request\",\"event_id\":\"11111111-1111-4111-8111-000000000016\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"request\":{\"amount\":{\"value\":\"0.001\",\"asset\":\"btc\"},\"payment_reference\":\"invoice-2026-0100\",\"proposal_expires_at\":null,\"recurrence\":null,\"accepted_payment_endpoint_identifiers\":[\"btc-lightning-bolt11\"],\"metadata\":{}}}"
+  },
+  {
+    "label": "event_duplicate_repeat",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request\",\"event_id\":\"11111111-1111-4111-8111-000000000016\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"request\":{\"amount\":{\"value\":\"0.001\",\"asset\":\"btc\"},\"payment_reference\":\"invoice-2026-0100\",\"proposal_expires_at\":null,\"recurrence\":null,\"accepted_payment_endpoint_identifiers\":[\"btc-lightning-bolt11\"],\"metadata\":{}}}"
+  },
+  {
+    "label": "event_conflict_first",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request\",\"event_id\":\"11111111-1111-4111-8111-000000000017\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"request\":{\"amount\":{\"value\":\"0.001\",\"asset\":\"btc\"},\"payment_reference\":\"invoice-2026-0200\",\"proposal_expires_at\":null,\"recurrence\":null,\"accepted_payment_endpoint_identifiers\":[\"btc-lightning-bolt11\"],\"metadata\":{}}}"
+  },
+  {
+    "label": "event_conflict_variant",
+    "raw_json": "{\"version\":1,\"kind\":\"paykit.payment_request\",\"event_id\":\"11111111-1111-4111-8111-000000000017\",\"payment_request_id\":\"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33\",\"request\":{\"amount\":{\"value\":\"0.001\",\"asset\":\"btc\"},\"payment_reference\":\"invoice-2026-0201\",\"proposal_expires_at\":null,\"recurrence\":null,\"accepted_payment_endpoint_identifiers\":[\"btc-lightning-bolt11\"],\"metadata\":{}}}"
+  }
+]

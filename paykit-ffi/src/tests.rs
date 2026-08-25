@@ -478,6 +478,143 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
         .unwrap();
 }
 
+#[tokio::test]
+async fn test_first_transaction_load_normalizes_stale_state() {
+    struct SeededSnapshotStore {
+        data: Mutex<Option<Vec<u8>>>,
+    }
+
+    impl FfiSdkStateBlobStore for SeededSnapshotStore {
+        fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
+            self.data
+                .lock()
+                .unwrap()
+                .clone()
+                .map(decode_sdk_state_blob_snapshot)
+                .transpose()
+        }
+
+        fn save_state_blob_atomically(
+            &self,
+            blob: Arc<FfiSdkStateBlob>,
+            expected_revision: Option<String>,
+        ) -> Result<String, PaykitFfiError> {
+            let mut data = self.data.lock().unwrap();
+            let current_revision = data
+                .clone()
+                .map(decode_sdk_state_blob_snapshot)
+                .transpose()?
+                .map(|snapshot| snapshot.revision);
+            assert_eq!(current_revision, expected_revision);
+
+            let revision = format!("revision-{}", blob.export_bytes().len());
+            let snapshot = FfiSdkStateBlobSnapshot {
+                blob,
+                revision: revision.clone(),
+            };
+            *data = Some(encode_sdk_state_blob_snapshot(snapshot)?);
+            Ok(revision)
+        }
+    }
+
+    struct OfflineSessionProvider;
+
+    impl FfiSdkPubkySessionProvider for OfflineSessionProvider {
+        fn load_session_access(
+            &self,
+        ) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError> {
+            Ok(None)
+        }
+
+        fn public_storage_available(&self) -> Result<bool, PaykitFfiError> {
+            Ok(false)
+        }
+
+        fn clear_session_access(&self) -> Result<(), PaykitFfiError> {
+            Ok(())
+        }
+    }
+
+    let now = Utc.with_ymd_and_hms(2026, 6, 22, 12, 0, 0).unwrap();
+    let local_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let raw_json = r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#;
+    let mut stale_state = StorageState {
+        identity_state: Some(IdentityState {
+            local_pubky_public_key: Some(local_key.clone()),
+            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+            initialized_at: now,
+            sign_out_generation: 0,
+        }),
+        ..StorageState::default()
+    };
+    // Valid Private Payment List payload stored with stale derived
+    // classification, as an older classifier generation could have left it.
+    stale_state.private_stream_items = vec![paykit_sdk::storage::PrivateStreamItemRecord {
+        stream_item_id: 0,
+        counterparty: counterparty.clone(),
+        counterparty_receiver_path: paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
+        receive_batch_id: 0,
+        raw_json: raw_json.into(),
+        parsed_version: Some(9),
+        parsed_kind: Some("paykit.stale".into()),
+        known_paykit_kind: None,
+        parse_status: PrivateStreamParseStatus::InvalidJson,
+        parse_error: Some("stale serde detail".into()),
+        received_at: now,
+    }];
+    stale_state.next_receive_batch_id = 1;
+    stale_state.next_private_stream_item_id = 1;
+
+    let seeded_snapshot = FfiSdkStateBlobSnapshot {
+        blob: Arc::new(FfiSdkStateBlob::new(
+            encode_storage_state(&stale_state).unwrap(),
+        )),
+        revision: "revision-0".into(),
+    };
+    let store = Arc::new(SeededSnapshotStore {
+        data: Mutex::new(Some(
+            encode_sdk_state_blob_snapshot(seeded_snapshot).unwrap(),
+        )),
+    });
+    let sdk = FfiPaykitSdk::new(
+        store.clone(),
+        Arc::new(OfflineSessionProvider),
+        default_config("bitkit/wallet".into()).unwrap(),
+    )
+    .unwrap();
+
+    sdk.initialize().await.unwrap();
+
+    let saved = store.data.lock().unwrap().clone().unwrap();
+    let snapshot = decode_sdk_state_blob_snapshot(saved).unwrap();
+    assert_ne!(snapshot.revision, "revision-0");
+    let normalized = decode_storage_state(&snapshot.blob.export_bytes()).unwrap();
+    let item = &normalized.private_stream_items[0];
+    assert_eq!(item.raw_json, raw_json);
+    assert_eq!(item.counterparty, counterparty);
+    assert_eq!(item.received_at, now);
+    assert_eq!(item.parsed_version, Some(1));
+    assert_eq!(
+        item.parsed_kind.as_deref(),
+        Some("paykit.private_payment_list")
+    );
+    assert_eq!(
+        item.known_paykit_kind.as_deref(),
+        Some("paykit.private_payment_list")
+    );
+    assert_eq!(item.parse_status, PrivateStreamParseStatus::Valid);
+    assert_eq!(item.parse_error, None);
+    assert_eq!(
+        normalized
+            .identity_state
+            .as_ref()
+            .unwrap()
+            .local_pubky_public_key,
+        Some(local_key)
+    );
+}
+
 #[test]
 fn test_blob_debug_redacts_bytes() {
     let state = FfiSdkStateBlob::new(vec![1, 2, 3]);
