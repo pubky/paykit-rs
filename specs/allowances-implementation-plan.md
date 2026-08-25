@@ -21,13 +21,15 @@ This eight-PR plan assumes the narrow V1 baseline described below. Optional prot
 
 Allowances fit the existing Private Application Message architecture. The important pressure points are:
 
-- [`PrivateMessageKind`](../paykit-lib/src/encrypted_link/private_application_message.rs) is intentionally exhaustive. A new kind currently forces explicit review of routing, intake, outbound validation, and backup validation.
-- Generic private-body inspection is repeated across [stream intake](../paykit-sdk/src/domain/private_stream/mod.rs), [outbound validation](../paykit-sdk/src/domain/outbound_private/mod.rs), and [backup validation](../paykit-sdk/src/backup/validation.rs).
-- [Payment Request derivation](../paykit-sdk/src/domain/payment_requests/derivation.rs) demonstrates that lifecycle views can be projected from the inbound raw stream plus outbound queue rather than materialized as a separate feature table.
-- [`StorageState`](../paykit-sdk/src/storage/records.rs) already persists raw inbound messages, outbound intent, Event ID dedupe, and Encrypted Link recovery state.
-- [FFI storage](../paykit-ffi/src/storage.rs) uses strict Postcard envelopes. Adding logical Allowance tables would require explicit state and backup migrations, while new string-valued message kinds do not by themselves change `StorageState`.
-- [`PaymentEndpointIdentifier`](../paykit-lib/src/payment_endpoint.rs) is a path-safe identifier and `PaymentEndpointPayload` is opaque UTF-8. Neither supplies owner, revision, expiry, replacement, withdrawal history, or freshness.
-- The existing [SDK Payment Adapter](../paykit-sdk/src/domain/adapters/mod.rs) and [FFI adapter](../paykit-ffi/src/payment_adapter.rs) select and build payment targets. They intentionally do not run wallet policy or payment execution, and foreign callbacks are synchronous.
+- [`PrivateMessageKind`](../paykit-lib/src/encrypted_link/private_application_message.rs) is intentionally exhaustive. A new kind currently forces explicit review of routing, intake, outbound validation, and backup validation. Two gaps weaken that guarantee: `PrivateMessageKind::parse` uses a wildcard arm, so a new variant compiles without a parse arm and silently classifies as unknown at runtime, and several SDK sites compare kind strings directly (including hard-coded literals in Payment Request derivation) instead of matching the enum.
+- Generic private-body inspection is repeated across [stream intake](../paykit-sdk/src/domain/private_stream/mod.rs), [outbound validation](../paykit-sdk/src/domain/outbound_private/mod.rs), and [backup validation](../paykit-sdk/src/backup/validation.rs): three hand-rolled header parses and three per-kind dispatch matches, with backup validation also partially delegating to the intake classifier.
+- No classification normalization exists today. Classification is computed once at intake and frozen; direct reads project from the stored classification, so a stale status permanently hides an item from newer code, and `initialize()` performs identity work only. Backup restore compares stored classification — including raw `parse_error` strings that currently embed serde detail — byte-for-byte against a fresh classification and rejects the whole restore on any drift, so today any classifier or serde-version change bricks existing backups.
+- An unknown-kind outbound queue head is destroyed today, not parked: the flush path marks it `Invalid` (leaking the kind string into `last_error`), cancels associated Payment Endpoint Reservations, and lets later peer messages advance the Encrypted Link past it.
+- [Payment Request derivation](../paykit-sdk/src/domain/payment_requests/derivation.rs) demonstrates that lifecycle views can be projected from the inbound raw stream plus outbound queue rather than materialized as a separate feature table. It is a template with known deviations from this plan's rules: the reducer takes a wall-clock `now` parameter, orders cross-stream events by local timestamps plus a hard-coded phase rank, applies the recovery overlay by overwriting the derived state in place, and reads across multiple storage transactions. PR 3 must define replacement ordering rules and PR 5 must not copy those behaviors.
+- [`StorageState`](../paykit-sdk/src/storage/records.rs) already persists raw inbound messages, outbound intent, Event ID dedupe, and Encrypted Link recovery state. Records bind the remote pair (counterparty, counterparty receiver path); the local receiver path is runtime configuration and is not persisted in any record.
+- [FFI storage](../paykit-ffi/src/storage.rs) uses strict Postcard envelopes with equality-checked versions in both directions and no migration path. The platform blob store already provides optimistic concurrency via an opaque revision, but every transaction — including read-only ones — takes a process-wide mutex, invokes the foreign load callback, decodes and deep-clones the full `StorageState`, and structurally compares it. Adding logical Allowance tables would require explicit state and backup migrations, while new string-valued message kinds do not by themselves change `StorageState`.
+- [`PaymentEndpointIdentifier`](../paykit-lib/src/payment_endpoint.rs) is a path-safe identifier and `PaymentEndpointPayload` is opaque UTF-8. Neither supplies owner, revision, expiry, replacement, withdrawal history, or freshness, and the Pubky read path exposes no freshness primitive. The exact single-endpoint read (`get_payment_endpoint`) exists in `paykit-lib` but currently has no SDK or FFI consumer.
+- The existing [SDK Payment Adapter](../paykit-sdk/src/domain/adapters/mod.rs) and [FFI adapter](../paykit-ffi/src/payment_adapter.rs) select and build payment targets. They intentionally do not run wallet policy or payment execution. The SDK trait is async; the FFI foreign callbacks are synchronous and block a runtime worker thread.
 
 The recommended baseline architecture is:
 
@@ -57,7 +59,7 @@ The eight-PR limit is achievable only with an explicit baseline:
 - Either linked party may propose, but both parties must accept the exact terms before authority exists. PR 3 freezes whether an authenticated proposal counts as the proposer's acceptance; no path may grant authority without an explicit authenticated action by the Allower.
 - Either linked party may end an accepted Allowance, subject to the lifecycle rules frozen in PR 3.
 - A Payment Instruction carries one exact amount, asset, Payee reference, destination reference, and semantic replay identity.
-- The destination model uses an exact public Payment Endpoint reference under the named Payee's authenticated Pubky scope. Observation can report only `Match`, `Missing`, `Mismatch`, or `Unverifiable`.
+- The destination model uses an exact public Payment Endpoint reference under the named Payee's authenticated Pubky scope. Observation can report only `Match`, `Missing`, `Mismatch`, or `Unverifiable`. In this track, removing or replacing the published value under the Payee's authenticated Pubky scope is the V1 withdrawal/replacement mechanism required by decision 50; PR 3 must confirm that mapping satisfies decision 50 or trigger the descriptor-track stop condition.
 - The SDK provides locally observed protocol state and an as-of marker. It does not claim that no newer remote event exists.
 - The wallet independently evaluates terms, time, usage, replay, balance, capacity, fees, and private safeguards, then decides whether and how to pay.
 - The wallet approves or declines the Instruction for its exact Payment Amount; it must not substitute a smaller, larger, or different-asset amount automatically.
@@ -78,7 +80,7 @@ If PR 3 concludes that any deferred extension is required for V1, or PR 6 proves
 
 ## Non-negotiable implementation boundaries
 
-- An Allowance ID alone is never authority. Every stored or derived record retains the authenticated counterparty and receiver context. PR 3 decides whether the receiver path is protocol authority or only the current storage/link namespace.
+- An Allowance ID alone is never authority. Every stored or derived record retains the authenticated counterparty and receiver context. PR 3 decides whether the receiver path is protocol authority or only the current storage/link namespace. Stored records currently bind only the counterparty pair — the local receiver path is runtime configuration — so binding the local side into the authority key requires an explicit persistence decision that cannot be smuggled into PR 1, which forbids `StorageState` changes.
 - All shared Allowance messages use the existing Encrypted Link. Do not add typed receive getters to `paykit-lib`; the durable mixed Private Application Message stream remains the receive API.
 - Do not add a generic transport trait, alternate backend seam, or hard-coded Pubky path. Any new Pubky path or storage operation belongs in `pubky_routing.rs`.
 - Keep `paykit-lib` stateless. It may validate construction invariants and causal or identifier correlation, but it must not decide whether a live Instruction qualifies under Allowance rules.
@@ -105,20 +107,21 @@ If PR 3 concludes that any deferred extension is required for V1, or PR 6 proves
 | 7 | Add unified Swift and Kotlin bindings | 1, 5, 6 | The complete selected V1 API crosses the platform boundary once |
 | 8 | Finish documentation and release readiness | 1-7 | Compatibility, security, integration guidance, and final verification are complete |
 
-PRs 1 and 2 may proceed in parallel. PR 3 may be drafted in parallel with them, but it must merge before PR 4. After PR 4, the remaining phases are sequential because each freezes an API consumed by the next layer.
+PRs 1 and 2 may proceed in parallel — provided PR 2 adds no `StorageAdapter`/`StorageTransaction` methods (PR 1 owns that contract change) and the two coordinate on the shared outbound-validation files they both touch. PR 3 may be drafted in parallel with them, but it must merge before PR 4. After PR 4, the remaining phases are sequential because each freezes an API consumed by the next layer.
 
 PR 6 is the largest phase. It remains one PR only because its subparts form one security outcome: produce an exact, locally observed Instruction handoff without authorizing payment. Its implementation order and stop conditions are explicit below.
 
 ## Code-PR verification and artifact policy
 
-PRs 1, 2, 4, 5, 6, and 7 all change Rust code consumed by the platform bindings. Each must run the repository Rust checks plus `cd paykit-ffi && ./build.sh all`; never build only one platform.
+PRs 1, 2, 4, 5, 6, and 7 all change Rust code consumed by the platform bindings. Each must run the repository Rust checks plus `cd paykit-ffi && ./build.sh all` (macOS-only; `all` is the only accepted target); never build only one platform.
 
 For every non-release code PR:
 
-- inventory generated Swift/Kotlin/header and the four tracked Android JNI library changes after the build;
+- inventory generated Swift/Kotlin/header and the four tracked Android JNI library (Git LFS) changes after the build;
 - commit only the generated and native changes intentionally produced by that PR, or state explicitly that there were none;
-- restore `Package.swift` after the iOS build and assert that its released tag, URL, and checksum have no diff;
+- revert the iOS build's `Package.swift` checksum rewrite and assert that its released tag, URL, and checksum have no diff. The build always recomputes the checksum from the locally built XCFramework (it never rewrites the URL, and rewrites the tag only in release mode), and the repository has historically committed those local checksums on feature commits, leaving `Package.swift` pairing the previous release's URL with a non-matching checksum. Reverting the rewrite is this plan's explicit rule, and it is a change of current practice;
 - do not substitute a locally built XCFramework checksum for the released artifact;
+- know that CI's stale-bindings gate covers only the six generated source files — `Package.swift` and the four `.so` files are not gated — so this policy is enforced by review, not CI;
 - record the exact verification commands and results in the PR description.
 
 Actual artifact publication changes the version, tag/URL/checksum, and matching iOS/Android artifacts together in the repository's release workflow. It is not an incidental side effect of a feature PR.
@@ -139,18 +142,18 @@ Classification normalization, redacted diagnostics, shared inspection, and downg
 - Treat the current Encrypted Link state and checkpoint as a mutable peer-level recovery overlay. Do not claim historical per-message checkpoint provenance that `PrivateStreamItemRecord` does not store.
 - Treat parsed headers, recognized-kind text, parse status, redacted parse summary, and Event ID dedupe membership as rebuildable derived data.
 - Add narrowly scoped `StorageTransaction` operations to update an existing stream item's derived classification and reconcile affected dedupe indexes. Do not expose full-state replacement as a general mutation escape hatch.
-- Reconcile Receipt Access indexing when first, duplicate, or conflicting Event ID membership changes. Preserve local retrieval state only when the same source event remains authoritative; fail closed otherwise.
-- Normalize derived classifications before any classification-dependent public workflow, not only when callers happen to invoke `initialize()`.
-- Make `initialize()` run normalization, and make direct lifecycle, private-stream, outbound, and backup operations call an internal idempotent guard.
-- During restore, validate immutable/contextual fields, normalize derived caches from raw data, and then validate the normalized state.
-- Replace private-message parse errors that can contain serde detail or offending values with stable redacted categories such as invalid JSON, unsupported version, wrong kind, and invalid structure.
-- Add one `paykit-lib` inspection entry point that reports recognized kind, Latest-State versus Event semantics, structural validity, recoverable Event ID, and stable redacted error category.
+- Reconcile Receipt Access indexing when first, duplicate, or conflicting Event ID membership changes. Preserve local retrieval state only when the same source event remains authoritative; fail closed otherwise. This is the hardest item in the PR: the Receipt Access index is written only for the first Event ID observation, and its retrieval state (status, timestamps, last error) is local and cannot be rebuilt from raw data.
+- Introduce classification normalization for the first time — none exists today, and `initialize()` performs identity work only. Make `initialize()` run normalization, and make direct lifecycle, private-stream, outbound, and backup operations call an internal idempotent guard, so no classification-dependent public workflow projects from stale derived data.
+- During restore, validate immutable/contextual fields, normalize derived caches from raw data, and then validate the normalized state. Normalization must run before outbound payload re-validation as well as before stream-item comparison, because outbound validation executes first in the current restore order.
+- Replace private-message parse errors that can contain serde detail or offending values with stable redacted categories such as invalid JSON, unsupported version, wrong kind, and invalid structure. Treat this as a compatibility prerequisite, not a nicety: restore currently compares stored `parse_error` strings byte-for-byte against fresh classifier output, so serde-derived error text makes every existing backup unrestorable after any serde version bump.
+- Close the classification escape hatches: make `PrivateMessageKind::parse` exhaustive by construction (its wildcard arm currently lets a new variant compile while classifying as unknown at runtime), and migrate string-literal kind comparisons — including Payment Request derivation's hard-coded strings — onto the enum.
+- Add one `paykit-lib` inspection entry point that reports recognized kind, Latest-State versus Event semantics, structural validity, recoverable Event ID, and stable redacted error category. It should accept raw JSON text rather than a pre-built message struct so the SDK's synthetic message constructions can be retired; it must preserve the pinned rule that the body's kind is authoritative over the envelope header; it must keep special-casing the invalid-UTF-8 sentinel marker (persisted raw JSON is not always the literal wire payload); and it must state whether Receipt Access receiver-scope enforcement is part of inspection or a separate policy pass — today intake and backup apply it and outbound validation does not.
 - Refactor SDK intake, outbound validation, and backup validation to use the common inspection result while retaining explicit exhaustive branches at those security boundaries.
-- Introduce the next compatibility generation for SDK backups and FFI state/backup envelopes without adding Allowance fields to `StorageState`.
-- Make new code read the previous generation and write the safeguarded generation. Ensure a pre-safeguard binary rejects the new generation before it can mutate unknown outbound intent.
+- Introduce the next compatibility generation for SDK backups and FFI state/backup envelopes without adding Allowance fields to `StorageState`. Move the three version constants in lockstep: `SDK_STATE_BLOB_VERSION` and `SDK_BACKUP_BLOB_VERSION` in `paykit-ffi` plus the publicly re-exported `SDK_BACKUP_VERSION` in `paykit-sdk`.
+- Make new code read the previous generation and write the safeguarded generation. Ensure a pre-safeguard binary rejects the new generation before it can mutate unknown outbound intent. Postcard is non-self-describing and both directions currently reject on strict version inequality, so reading the previous generation requires a genuinely new decode path, not `#[serde(default)]`.
 - Explicitly version the public `StorageAdapter`/`StorageTransaction` contract change introduced by normalization. Document the source-breaking adapter upgrade and provide a conformance fixture for third-party implementations.
-- For custom durable adapters outside the built-in envelopes, require an app-owned persisted generation fence that prevents a pre-safeguard binary from opening newer state. State plainly that rollback is unsupported when an adapter cannot provide that fence.
-- Make a safeguarded reader leave a well-formed but unknown pending, retryable, or stale/in-progress queue head byte-for-byte and status-for-status unchanged. The unknown head blocks later FIFO messages for that peer.
+- For custom durable adapters outside the built-in envelopes, require an app-owned persisted generation fence that prevents a pre-safeguard binary from opening newer state. State plainly that rollback is unsupported when an adapter cannot provide that fence. The FFI blob-store contract exchanges opaque bytes plus an opaque revision, so a platform store cannot refuse a newer generation without decoding; either add the minimal FFI surface for the fence (a binding compatibility change to inventory explicitly) or document that the fence is Rust-adapter-only.
+- Make a safeguarded reader leave a well-formed but unknown pending, retryable, or stale/in-progress queue head byte-for-byte and status-for-status unchanged. The unknown head blocks later FIFO messages for that peer. This is a behavior change: today the flush path marks an unknown head `Invalid`, cancels its Payment Endpoint Reservations, and continues past it.
 - Return a stable redacted SDK and platform-visible unsupported-kind block when an unknown queue head is parked; do not expose the raw body or silently report successful processing.
 - Keep malformed messages for recognized kinds on their existing invalid-message path.
 
@@ -168,7 +171,7 @@ These should be separate commits where practical, but they remain one PR because
 - Normalize stale header, status, summary, and Event ID index fixtures without changing raw JSON or immutable source context.
 - Rebuild first, duplicate, and conflicting Event ID membership deterministically in stream order.
 - Cover direct reads without prior `initialize()`, repeated initialization, FFI first-transaction loading, backup restore, and rollback on storage failure.
-- Use recognizable sentinel secrets and assert they do not appear in Rust `Display` or `Debug`, tracing output, persisted summaries, SDK errors, or FFI error mappings.
+- Use recognizable sentinel secrets and assert they do not appear in Rust `Display` or `Debug`, tracing output, persisted summaries, SDK errors, or FFI error mappings. The concrete leak channels today are persisted `parse_error` values, outbound `last_error` values, and the FFI `export_debug_details()` accessor, which is intentionally unredacted — so redaction must happen at error construction, and tests must cover `export_debug_details()` separately from `redacted_context()`. `paykit-sdk` currently emits no tracing, so tracing assertions alone prove nothing.
 - Matrix-test every existing Private Message kind through inspection, intake, outbound validation, and backup validation.
 - Freeze previous-generation state, snapshot, backup, and queue fixtures, including the last safe reader and an intermediate reader that knows some but not all future kinds.
 - Exercise the custom-adapter conformance fixture, generation rejection, and documented unsupported rollback path.
@@ -200,32 +203,33 @@ The Library send helper and SDK checked-enqueue seam are the two halves of outbo
 
 ### Scope
 
-- Make the existing generic internal JSON sender available to typed protocol modules with a static, redacted operation label.
-- Refactor Payment Request, Receipt Access, and Private Payment List typed sends to use it without changing public raw-send behavior or serialized bytes.
-- Add a transaction-scoped SDK primitive plus a concrete snapshot-input derivation seam so feature code can load raw/outbound history, derive current state, and append one exact outbound record atomically.
+- Make the existing generic internal JSON sender available to typed protocol modules with a static, redacted operation label. That sender already exists as a private labelled method with seven per-kind wrappers, so this is visibility and call-site plumbing, not new machinery. Route typed sends through the internal labelled method, not the public raw-JSON sender — the public path re-parses the payload, collapses the per-kind operation labels, and has an error path that embeds raw serde detail. Preserve the Receipt Access send's extra preconditions (access validation and receiver-location check).
+- Refactor Payment Request, Receipt Access, and Private Payment List typed sends to use it without changing public raw-send behavior or serialized bytes. The SDK's production sends flush raw JSON from the durable queue and never call the typed helpers, so this consolidation is a `paykit-lib` public-surface change with no SDK behavior impact.
+- Add a transaction-scoped SDK primitive plus a concrete snapshot-input derivation seam so feature code can load raw/outbound history, derive current state, and append one exact outbound record atomically. Follow the existing in-repo template — the Private Payment List reservation enqueue already validates outside the transaction, then re-checks the lease, reads dependent records, and appends inside one transaction.
+- Do not add methods to `StorageAdapter`/`StorageTransaction`; every operation the seam needs already exists on the trait. That constraint is what keeps PR 2 parallel-safe with PR 1's versioned adapter-contract change.
 - Construct and serialize the candidate protocol event before entering the storage transaction. Inside the transaction, revalidate the exact body, lifecycle precondition, link readiness, monotonic outbound ID allocation, and FIFO append.
-- Re-evaluate lifecycle preconditions and link/outbound readiness inside the transaction.
+- Re-evaluate lifecycle preconditions and link/outbound readiness inside the transaction. Only storage-backed checks can move inside the synchronous transaction closure; session and identity checks are async (a foreign callback on FFI builds) and stay outside. "Link readiness" is currently two different policies — Payment Requests require a linked peer with a snapshot, while Private Payment Lists also accept a restorable handshake — so the seam takes the readiness rule as an input per message family.
 - Do not perform Pubky, network, or foreign callback work while holding the transaction.
-- Migrate Payment Request accept, reject, cancel, and proof transitions to the seam as the production proof.
+- Migrate Payment Request propose, accept, reject, cancel, and proof transitions to the seam as the production proof. Propose shares the identical check-then-act race and must not be left on the old pattern.
 - Keep transport delivery processing separate from intent creation.
-- Preserve current return values, error mapping, payload bytes, queue ordering, retry semantics, and recovery behavior.
+- Preserve current return values, error mapping, payload bytes, queue ordering, retry semantics, and recovery behavior. Where moving checks inside the transaction necessarily changes error precedence (existing tests pin, for example, which of proposal expiry and outbound readiness wins), change the pinned tests deliberately and list every precedence change in the PR description.
 
 ### Review order inside the PR
 
 1. Mechanical typed-send consolidation with byte-equivalence tests.
 2. Storage transaction API and in-memory implementation.
-3. Revision-checked FFI storage implementation.
+3. FFI storage conflict classification. The blob store's compare-and-swap (`expected_revision`) already exists; what is missing is that a stale revision surfaces as an opaque storage error with no typed classification or retry decision.
 4. Payment Request command migration and concurrency tests.
 
 ### Verification
 
 - Assert byte-for-byte JSON input to pubky-noise is unchanged for existing message families.
 - Cover fixed-size rejection, retryable and non-retryable send mapping, and redacted operation context.
-- Prove concurrent valid transitions can append at most one legal event.
+- Prove concurrent valid transitions can append at most one legal event. Race tests must interleave at the call level (two futures racing the same command): both storage adapters serialize transactions on one mutex, so transaction-level tests cannot expose the check-then-act race, and no such concurrency test exists today. Note the enqueue path does not participate in Event ID dedupe, so uniqueness comes from the in-transaction lifecycle re-check, not the dedupe table.
 - Prove a failed precondition, storage error, or revision conflict appends nothing.
 - Exercise in-memory and FFI-backed storage, process restart, and recovery-required peers.
-- Prove no network call or platform callback occurs inside a transaction.
-- Run `cd paykit-ffi && ./build.sh all` because the revision-checked FFI storage implementation changes, then apply the non-release artifact policy above.
+- Prove no network call or platform callback occurs inside a transaction, excepting the FFI blob-store load/save pair, which is the transaction mechanism itself. SDK-side the guarantee is already true by construction because the transaction closure is synchronous; the test guards against regression to an async closure design.
+- Run `cd paykit-ffi && ./build.sh all` because the FFI error/status mapping for storage conflicts changes, then apply the non-release artifact policy above.
 
 ### Not in this PR
 
@@ -249,14 +253,14 @@ This is a specification-only review. Keeping it separate prevents Rust types fro
 
 ### Scope
 
-- Update `THESAURUS.md` first for any new public domain terms.
+- Update `THESAURUS.md` first for any new public domain terms. Allowance, Allower, Allowee, and Allowance ID already exist there (marked future/planned); Payment Instruction, Instruction ID, destination reference, the observation result vocabulary, semantic replay key, as-of marker, and proposer do not and must be added. Reconcile the existing THESAURUS note that an asset "appears as the first segment" of a Payment Endpoint Identifier with this plan's rule against inferring an asset from identifier syntax.
 - Freeze the roles of Allower, Allowee, Payee, proposer, receiver, and local wallet for both proposal directions.
-- Define exactly what is bound into an Allowance's authority key: Allowance ID, authenticated counterparty pair, local/remote roles, receiver path or namespace, and any protocol version or epoch.
+- Define exactly what is bound into an Allowance's authority key: Allowance ID, authenticated counterparty pair, local/remote roles, receiver path or namespace, and any protocol version or epoch. The local receiver path is runtime configuration today and is not persisted in any record; if it is part of the authority key, specify where it gets bound and persisted.
 - Define immutable terms and how changed accepted terms require a new proposal/new Allowance ID plus an end of the old Allowance. Freeze replacement/end ordering and whether events carry an explicit replacement link, without claiming cross-message atomicity.
 - Define proposal, acceptance by both parties, rejection, unilateral end, duplicate, conflict, and terminal ordering semantics, including whether proposing counts as proposer consent and how same-batch or in-flight races resolve.
-- Define causal references and deterministic conflict rules for the two directional streams, which have no shared global order. Do not use local receive timestamps as consent or cross-peer ordering authority.
+- Define causal references and deterministic conflict rules for the two directional streams, which have no shared global order. Do not use local receive timestamps as consent or cross-peer ordering authority. The existing Payment Request derivation orders cross-stream events by local wall-clock plus a hard-coded phase rank; the rules frozen here must replace that approach, not inherit it.
 - Decide whether accepted authority survives validated Encrypted Link recovery. The baseline recommendation is to retain the derived lifecycle but expose `RecoveryRequired` until relink is validated; requiring fresh consent is deferred.
-- Define exact decimal amount syntax, canonicalization, comparison, overflow bounds, and asset identification.
+- Define exact decimal amount syntax, canonicalization, comparison, overflow bounds, and asset identification. The workspace has no decimal library and no amount comparison semantics today — `PaymentAmount` is derived string equality with unvalidated production construction paths, and accepts forms like `.5` and `10.` — so if the exact-decimal value adds a dependency it must satisfy the CI-pinned MSRV; otherwise specify the hand-rolled invariants.
 - Define the all-rules-must-pass V1 model: inclusive per-Instruction amount range; period amount and count limits; lifetime amount limit; activation and expiry; allowed Payees; and allowed Payment Endpoint Identifiers.
 - Define canonical rule ordering, duplicate handling, maximum cardinalities, and whether an empty or unbounded rule set is legal. V1 excludes OR groups, ordered allow/deny rules, FX, and cross-asset evaluation.
 - Define one exact Allowance asset, exact-match semantics, anchored UTC calendar periods, fixed rolling windows, end-of-month behavior, and the accounting rule for failed or unknown payment outcomes.
@@ -266,11 +270,12 @@ This is a specification-only review. Keeping it separate prevents Rust types fro
 - Freeze the Payment Instruction ID, Event ID, causal references, semantic replay key, and canonical fingerprint fields.
 - Freeze Payee identity and the destination reference. The baseline should include the exact Payee Pubky identity/scope, receiver path, validated Payment Endpoint Identifier, and a domain-separated digest of the expected payload.
 - Define destination observation timing, cache/freshness guarantees, expiry, replacement, withdrawal, and the wallet's last safe recheck point. A missing or changed public value is fail-closed evidence for one observation, not proof of historical withdrawal or global currentness.
-- Define the exact observation result vocabulary: `Match`, `Missing`, `Mismatch`, and `Unverifiable`. Observation is evidence, not payment authorization.
+- Define the exact observation result vocabulary: `Match`, `Missing`, `Mismatch`, and `Unverifiable`. Observation is evidence, not payment authorization. Specify the mapping for degenerate reads against actual Pubky helper behavior: an empty published file currently reads as absent, only 404/GONE mean absence, and every other failure (including authorization errors) must map to `Unverifiable`, never `Missing`.
 - Decide whether V1 has any result, proof, Receipt, or processing acknowledgement. The baseline recommendation is no.
 - Allocate worst-case private JSON budgets for proposal, lifecycle controls, and Instruction messages below `PUBKY_NOISE_MSG_LEN`, including escaping and envelope overhead.
 - Freeze versioning, unknown-field rejection, unknown-kind behavior, downgrade guarantees, and compatibility fixtures.
 - Document which decisions are enforced structurally by the Library, derived by the SDK, and evaluated privately by the wallet.
+- Freeze the app-visible error contract in terms of what SDK and FFI callers actually observe: the SDK remaps Library `InvalidData` to its `Protocol` variant and drops the source, so a contract promising `InvalidData` at the app boundary would be wrong.
 - Freeze the platform exposure boundary: which values may be generated records, which sensitive or likely-to-evolve aggregates must be opaque getter-based objects, and which fields may appear in generated Swift/Kotlin constructors and stringification. Treat adding a record field later as a source-compatibility change.
 - Explicitly list every deferred extension that is not part of V1.
 
@@ -290,7 +295,7 @@ This is a specification-only review. Keeping it separate prevents Rust types fro
 - Provide truth tables for proposal orientation, acceptance authority, rejection/end ordering, duplicate/conflict handling, recovery, and semantic replay.
 - Include maximum-size worked examples for every private message.
 - Walk at least one Allower-as-proposer, Allowee-as-proposer, Allowee-as-Payee, and third-party-Payee scenario.
-- Validate the public Payment Endpoint observation assumptions against the concrete Pubky APIs and record what they do and do not prove.
+- Validate the public Payment Endpoint observation assumptions against the concrete Pubky APIs and record what they do and do not prove, including the explicit mapping that authenticated removal or replacement of the published value is V1's decision-50 withdrawal mechanism.
 - Confirm every public term matches `THESAURUS.md`.
 - Confirm the selected baseline still fits the eight-PR plan; otherwise update this plan before code begins.
 
@@ -321,7 +326,7 @@ Primitives, immutable terms, and lifecycle events form one low-level protocol co
 - Preserve recoverable Event ID and Allowance ID on malformed recognized payloads when safely possible.
 - Add raw parsed-message wrappers following existing Payment Request patterns.
 - Add typed send helpers using PR 2's internal sender.
-- Register every lifecycle kind with the PR 1 inspector and with explicit SDK intake, outbound, and backup audit branches.
+- Register every lifecycle kind with the PR 1 inspector and with explicit SDK intake, outbound, and backup audit branches. These SDK branches are mechanical exhaustive-match classification arms forced by the kind enum, not lifecycle logic; that boundary is what keeps this a Library-scoped PR.
 - Add fixtures showing a safeguarded older reader parks each new outbound kind unchanged.
 - Enforce the one-message size budget before an event can enter the durable outbound queue.
 
@@ -369,12 +374,12 @@ The pure reducer, storage-backed reads, and checked commands are one SDK use cas
 
 - Add a pure reducer that consumes normalized inbound events, outbound intent, Event ID dedupe, authenticated counterparty/receiver context, and stream ordering.
 - Bind every record to the exact party pair and receiver scope selected in PR 3.
-- Derive proposal, accepted, rejected, ended, conflicted, malformed, and other frozen states without a clock, storage handle, or network client.
+- Derive proposal, accepted, rejected, ended, conflicted, malformed, and other frozen states without a clock, storage handle, or network client. Unlike the Payment Request reducer, do not take a `now` parameter and do not use local receive/create timestamps as cross-peer ordering authority; use the PR 3 ordering rules.
 - Enforce authenticated direction, affirmative consent from both parties, and an explicit authenticated Allower action.
 - Define deterministic duplicate, causal-race, same-batch, and end-dominance behavior from the PR 3 truth tables.
 - Attach malformed lifecycle events only when the Allowance ID and source context are safely recoverable; otherwise leave them in the raw stream audit view.
-- Overlay `RecoveryRequired` without rewriting the underlying derived lifecycle.
-- Add storage-backed list/get APIs that load raw inbound, outbound, and dedupe inputs from one snapshot.
+- Overlay `RecoveryRequired` without rewriting the underlying derived lifecycle. This requires a separate overlay field: the Payment Request precedent overwrites the derived state in place, from two independent code paths that PR 5 must not multiply.
+- Add storage-backed list/get APIs that load raw inbound, outbound, and dedupe inputs from one snapshot. Single-snapshot reads are new behavior — the existing Payment Request list path reads across multiple transactions.
 - Keep raw events and outbound intent as the source of truth; do not add Allowance feature tables to `StorageState`.
 - Add propose, accept, reject, and end commands using PR 2's checked-enqueue seam.
 - Re-evaluate lifecycle state, local role, link readiness, and recovery state inside the transaction before appending exact serialized intent.
@@ -391,7 +396,7 @@ The pure reducer, storage-backed reads, and checked commands are one SDK use cas
 
 - Both proposer orientations, mutual consent, and explicit Allower authorization.
 - Duplicates, conflicting reuse, wrong sender/role, cross-peer ID reuse, causal mismatches, same-batch ordering, end races, and late events.
-- Restart and backup/restore reproduce the same underlying record.
+- Restart and backup/restore reproduce the same underlying record, expecting the recovery overlay: restore forces every peer into `RecoveryRequired` until relink is validated, so the comparison targets the underlying lifecycle, not the overlaid view.
 - Direct reads normalize old classifications before projection.
 - Concurrent commands append at most one legal transition; failures append nothing.
 - Recovery-required, blocked, and unlinked peers cannot enqueue new lifecycle commands.
@@ -437,8 +442,9 @@ Do not begin submission or platform API work until the scale gate passes.
 - Add a value containing the named Payee's Pubky identity/scope, receiver path, validated Payment Endpoint Identifier, and domain-separated expected-payload digest selected in PR 3.
 - Bind the digest to protocol/domain/version, Payee, receiver scope, identifier, and exact payload bytes so values cannot be replayed across owners or namespaces.
 - Add typed observation outcomes for `Match`, `Missing`, `Mismatch`, and `Unverifiable`.
-- Reuse `pubky_routing.rs` and existing public endpoint reads; do not hard-code a path or enumerate alternative endpoints.
+- Reuse `pubky_routing.rs` and existing public endpoint reads; do not hard-code a path or enumerate alternative endpoints. The exact single-endpoint read already exists in `paykit-lib` with no SDK or FFI consumer, so the SDK workflow and platform export are new plumbing over an existing helper.
 - Add one SDK workflow that reads only the exact referenced value from the named Payee's public storage scope near the wallet's execution decision.
+- Map observation outcomes against real read behavior per the PR 3 rules: the existing text-fetch helper returns absence for an empty published file, treats only 404/GONE as absence, and surfaces every other failure as a transport error, which must map to `Unverifiable`, never `Missing`.
 - Keep `PublicStorage` and network I/O out of the pure lifecycle and Instruction reducers.
 - Return observed evidence plus local observation time/source metadata explicitly marked as non-authoritative for wallet trusted time.
 - Report `Unverifiable` cleanly when Pubky access is unavailable or fails; timeout configuration remains the caller/Pubky client's responsibility.
@@ -467,7 +473,7 @@ Do not begin submission or platform API work until the scale gate passes.
 - Distinguish inbound Instructions observed by the local Allower from outbound audit records created by the local Allowee. Only the former can enter the wallet-qualified view.
 - Attach malformed Instructions only when their identifiers and source context are safely recoverable; otherwise retain them only in the raw stream.
 - Add audit list/get filters and a separate wallet-qualified read.
-- Include complete accepted terms or an exact terms object plus digest, semantic replay key, source Event IDs, Payee/destination reference, lifecycle/correlation status, recovery status, and a local as-of stream marker.
+- Include complete accepted terms or an exact terms object plus digest, semantic replay key, source Event IDs, Payee/destination reference, lifecycle/correlation status, recovery status, and a local as-of stream marker. The as-of marker is new surface; no read API exposes a stream position today.
 - Require and document the private-stream sync step needed for the freshest locally observed view.
 - State that the as-of marker cannot prove that no remote end event is in flight and cannot make the handoff atomic with wallet state.
 - Exclude `RecoveryRequired` and conflicted records from the wallet-qualified view while retaining them in the audit view.
@@ -480,8 +486,9 @@ Do not begin submission or platform API work until the scale gate passes.
 
 ### Scale gate
 
-- Establish representative V1 workload bounds before exposing the final SDK surface.
+- Establish representative V1 workload bounds before exposing the final SDK surface. No latency, memory, or blob budget exists anywhere in the specs today; this gate creates them, so record the workload model alongside the numbers.
 - Measure lifecycle plus high-volume Instruction projection, semantic dedupe/conflicts, restart, backup restore, and FFI storage transactions that clone and Postcard-encode `StorageState`.
+- Measure against the real FFI cost model: every storage transaction — including read-only projections — serializes behind one process-wide mutex and pays a full blob decode, deep clone, and structural comparison, so the gate must bound the length of that serialized critical section, not only blob size.
 - Record accepted latency, memory, and persisted-blob budgets in the relevant SDK specification.
 - Verify common filters do not repeatedly perform avoidable work outside the accepted raw-projection design.
 - If the budgets fail, do not merge an ad hoc cache. Stop, design a versioned index and rebuild/migration path, and update the PR plan. That outcome cannot honestly fit the current eight-PR baseline without changing scope.
@@ -530,13 +537,14 @@ One binding PR avoids two separate root Swift/Kotlin protocol breaks and repeate
 - Add a feature-local Allowances FFI facade with focused DTO and conversion modules.
 - Export async/suspend lifecycle list/get and propose/accept/reject/end methods.
 - Export Instruction submission, audit list/get, wallet-qualified handoff, and exact destination-observation methods.
-- Represent exact decimals as validated strings across the boundary.
+- Represent exact decimals as validated strings across the boundary. The FFI already carries three separate value/asset record shapes; adding the Allowance amount as a fourth must be a deliberate, documented choice rather than an accident.
 - Use typed public reference metadata for Pubky identity, receiver path, endpoint identifier, and digest.
 - Follow PR 3's frozen exposure boundary: use opaque getter-based objects for sensitive or likely-to-evolve aggregates, and freeze the complete field set of every generated record.
-- Include an explicit `Unknown` case in every new Allowances output FFI enum and map unsupported/non-exhaustive SDK values to it in exhaustive Rust conversions. Reject `Unknown` as caller input. Adding a new FFI wire discriminant later remains a binding compatibility change; old generated clients cannot decode an unknown tag automatically.
+- Include an explicit `Unknown` case in every new Allowances output FFI enum and map unsupported/non-exhaustive SDK values to it in exhaustive Rust conversions. Reject `Unknown` as caller input. Both halves follow existing convention: sixteen FFI output enums already carry a terminal `Unknown` with a standard doc line, and there is precedent for rejecting `Unknown` on input. Adding a new FFI wire discriminant later remains a binding compatibility change; old generated clients cannot decode an unknown tag automatically.
 - Provide stable status codes or typed data for correlation conflict, recovery block, unsupported kind, and observation uncertainty without casually expanding the top-level FFI error enum.
 - Document repeated delivery, semantic replay keys, app-owned atomic state, local as-of semantics, and generated Swift/Kotlin stringification risks.
-- Call out the root interface expansion for downstream fakes, mocks, and conformers.
+- Call out both root-interface expansions for downstream fakes, mocks, and conformers. The generated `PaykitSdkProtocol`/`PaykitSdkInterface` is already roughly one hundred methods assembled from `#[uniffi::export]` impl blocks across many files, so any new exported method widens it. The foreign `SdkPaymentAdapter` trait has no default methods, so any addition is a hard compile break for every app conformer — V1 must not add methods to it.
+- Account for the binding toolchain: generated names pass through a post-processor that strips the `Ffi` prefix, Kotlin is generated by a pinned fork of the bindgen (verify Swift and Kotlin agree on every new construct), and `./build.sh all` requires macOS.
 - Keep wallet execution app-driven; do not add synchronous foreign callbacks.
 
 ### Review strategy
@@ -639,7 +647,7 @@ The selected V1 is documented and verified across Library, SDK, storage, Pubky r
 - Public names match `THESAURUS.md`; vocabulary changes land in PR 3 before code depends on them.
 - Public APIs have rustdoc and use invariant-preserving structs/enums with private fields.
 - Wire DTOs remain private, versioned, closed-world, and separately validated.
-- Library caller-input failures use `PaykitError::Validation`; corrupt network data uses `PaykitError::InvalidData`; exhaustive matches cover `Transport`, `NotFound`, `InvalidData`, and `Validation`.
+- Library caller-input failures use `PaykitError::Validation`; corrupt network data uses `PaykitError::InvalidData`; exhaustive matches cover `Transport`, `NotFound`, `InvalidData`, and `Validation`. The SDK remaps Library `InvalidData` to its `Protocol` variant and drops the source, so contracts for SDK/FFI callers must be written in those terms.
 - Private plaintext, arbitrary metadata, payloads, proofs, serde details, and secret material cannot escape through internal diagnostics or FFI errors.
 - App-visible typed records are documented as sensitive; Rust `Debug` redaction is not claimed to control generated platform stringification.
 - No Pubky path is hard-coded outside `pubky_routing.rs`.
@@ -648,7 +656,7 @@ The selected V1 is documented and verified across Library, SDK, storage, Pubky r
 - Positive and failure tests accompany every protocol type; replay, conflict, recovery, normalization, restore, and concurrency tests accompany the SDK event families that need them.
 - A storage, backup, compatibility-envelope, or index change is explicit and never hidden inside a query or binding PR.
 - Binding changes run `cd paykit-ffi && ./build.sh all` and update both platforms together.
-- `Package.swift`'s release checksum changes only for the exact artifact release it names.
+- `Package.swift`'s release checksum changes only for the exact artifact release it names; feature PRs revert the build's checksum rewrite, and CI does not gate this file.
 - FFI tests focus on boundary mapping rather than duplicating core/SDK policy matrices.
 - No network request or foreign callback occurs while an SDK storage transaction is held.
 - No PR implies atomicity between SDK state and the wallet's payment store.
