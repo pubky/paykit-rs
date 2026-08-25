@@ -397,8 +397,15 @@ async fn test_persist_private_stream_batch_skips_wrong_receiver_receipt_access_i
     );
     assert_eq!(
         snapshot.private_stream_items[0].parse_error.as_deref(),
-        Some("Receipt Access location does not match counterparty receiver bitkit/wallet")
+        Some(RECEIPT_ACCESS_RECEIVER_SCOPE_PARSE_ERROR)
     );
+    // The persisted summary must not echo either receiver path.
+    let parse_error = snapshot.private_stream_items[0]
+        .parse_error
+        .as_deref()
+        .unwrap();
+    assert!(!parse_error.contains("bitkit/wallet"));
+    assert!(!parse_error.contains("tether"));
     let records =
         crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_path())
             .await
@@ -496,10 +503,15 @@ async fn test_persist_private_stream_batch_keeps_malformed_recognized_messages()
         item.parse_status,
         PrivateStreamParseStatus::MalformedRecognized
     );
-    assert!(item
-        .parse_error
-        .as_ref()
-        .is_some_and(|error| error.contains("amount.value")));
+    // The persisted summary is exactly the stable redacted category string,
+    // never serde detail or the offending value.
+    assert_eq!(
+        item.parse_error.as_deref(),
+        Some(paykit_lib::PrivateMessageParseCategory::InvalidStructure.as_str())
+    );
+    let parse_error = item.parse_error.as_deref().unwrap();
+    assert!(!parse_error.contains("amount.value"));
+    assert!(!parse_error.contains("decimal"));
     assert_eq!(snapshot.event_dedup_records.len(), 1);
 }
 
@@ -560,6 +572,86 @@ async fn test_persist_private_stream_batch_records_invalid_utf8_marker_error() {
         .parse_error
         .as_ref()
         .is_some_and(|error| error.contains("valid UTF-8")));
+}
+
+/// SECURITY: intake must persist only stable redacted parse summaries. A
+/// sentinel placed anywhere serde or validation errors used to echo message
+/// content (values, map keys, field names, kind strings, locations) must
+/// never reach a persisted `parse_error`.
+#[tokio::test]
+async fn test_intake_parse_summaries_never_contain_sentinels() {
+    const SENTINEL: &str = "SENTINEL-9f4c-DO-NOT-PRINT";
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let payloads = [
+        // serde type mismatch: the sentinel is the offending value.
+        format!(
+            r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":"{SENTINEL}"}}"#
+        ),
+        // Invalid Payment Endpoint Identifier: the sentinel is the map key
+        // (the trailing "!" makes the identifier fail validation).
+        format!(
+            r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"{SENTINEL}!":"ln"}}}}"#
+        ),
+        // Payment Request structural failure: the sentinel is the amount value.
+        format!(
+            r#"{{"version":1,"kind":"paykit.payment_request","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{{"amount":{{"value":"{SENTINEL}","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{{}}}}}}"#
+        ),
+        // serde unknown-field error: the sentinel is the field name.
+        format!(
+            r#"{{"version":1,"kind":"paykit.payment_request_acceptance","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","{SENTINEL}":true}}"#
+        ),
+        // Receipt Access invariant failure: the sentinel is the location.
+        receipt_access_raw_with_location(
+            "650e8400-e29b-41d4-a716-446655440000",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "invoice-2026-0001",
+            SENTINEL,
+        ),
+        // Unknown kind: the sentinel is the kind string itself.
+        format!(r#"{{"version":1,"kind":"{SENTINEL}"}}"#),
+        // Invalid JSON: the sentinel is trailing garbage.
+        format!(r#"{{"version":1,"kind":"paykit.payment_request","{SENTINEL}"#),
+    ];
+    let messages = payloads
+        .iter()
+        .map(|raw_json| {
+            let (parsed_version, parsed_kind, _) = private_message_header(raw_json).unwrap();
+            private_application_message_from_raw(raw_json.clone(), parsed_version, parsed_kind)
+        })
+        .collect::<Vec<_>>();
+
+    persist_private_stream_batch(
+        &storage,
+        counterparty,
+        receiver_path(),
+        messages,
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let snapshot = storage.snapshot().unwrap();
+    assert_eq!(snapshot.private_stream_items.len(), payloads.len());
+    // Every persisted summary comes from a closed stable vocabulary.
+    let allowed: Vec<&str> = paykit_lib::PrivateMessageParseCategory::ALL
+        .iter()
+        .map(|category| category.as_str())
+        .chain([RECEIPT_ACCESS_RECEIVER_SCOPE_PARSE_ERROR])
+        .collect();
+    for item in &snapshot.private_stream_items {
+        if let Some(parse_error) = item.parse_error.as_deref() {
+            assert!(
+                !parse_error.contains(SENTINEL),
+                "sentinel leaked into parse_error: {parse_error}"
+            );
+            assert!(
+                allowed.contains(&parse_error),
+                "parse_error is not a stable redacted summary: {parse_error}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -1219,6 +1311,143 @@ async fn test_frozen_classification_fixture_matches_current_classifier() {
             "classification decisions drifted from fixtures/classification_matrix_expected.json; \
              an intentional classifier change must re-freeze the file from this actual output:\n{}",
             serde_json::to_string_pretty(&actual).unwrap()
+        );
+    }
+}
+
+// Null out the two error-text fields (`intake.parse_error` and
+// `outbound.error`) on every fixture message so the remaining decision trees
+// can be compared for byte-identity across classifier generations.
+fn mask_fixture_error_text(mut decisions: serde_json::Value) -> serde_json::Value {
+    for message in decisions["messages"]
+        .as_array_mut()
+        .expect("fixture decisions must list messages")
+    {
+        message["intake"]
+            .as_object_mut()
+            .expect("fixture intake must be an object")
+            .insert("parse_error".into(), serde_json::Value::Null);
+        let outbound = message["outbound"]
+            .as_object_mut()
+            .expect("fixture outbound must be an object");
+        if outbound.contains_key("error") {
+            outbound.insert("error".into(), serde_json::Value::Null);
+        }
+    }
+    decisions
+}
+
+#[test]
+fn test_legacy_and_current_fixture_decisions_differ_only_in_error_text() {
+    // The redaction commit changed only error TEXT: parse summaries and
+    // outbound error contexts. Every other decision - parse status, parsed
+    // and recognized kinds, event headers, dedupe membership, Receipt Access
+    // indexing, backup accept/reject, outbound ok/err direction - must be
+    // byte-identical between the legacy generation and the re-frozen one.
+    let legacy: serde_json::Value =
+        serde_json::from_str(classification_fixture::CLASSIFICATION_MATRIX_EXPECTED_LEGACY_JSON)
+            .expect("legacy classification fixture must parse");
+    let current: serde_json::Value =
+        serde_json::from_str(classification_fixture::CLASSIFICATION_MATRIX_EXPECTED_JSON)
+            .expect("current classification fixture must parse");
+
+    assert_ne!(
+        legacy, current,
+        "the generations must actually differ, or the legacy fixture is stale"
+    );
+    assert_eq!(
+        mask_fixture_error_text(legacy),
+        mask_fixture_error_text(current),
+        "a non-error-text decision changed between classifier generations"
+    );
+}
+
+#[tokio::test]
+async fn test_old_serde_detail_parse_errors_normalize_to_categories() {
+    // A state persisted by the pre-redaction classifier carries serde-detail
+    // parse summaries (offending values, serde positions, interpolated
+    // receiver paths). Normalization must rewrite every one of them to the
+    // current stable category strings while leaving raw JSON, immutable
+    // source context, dedupe membership, and local retrieval state untouched.
+    let messages = classification_fixture::classification_fixture_messages();
+    let legacy: serde_json::Value =
+        serde_json::from_str(classification_fixture::CLASSIFICATION_MATRIX_EXPECTED_LEGACY_JSON)
+            .expect("legacy classification fixture must parse");
+    let current: serde_json::Value =
+        serde_json::from_str(classification_fixture::CLASSIFICATION_MATRIX_EXPECTED_JSON)
+            .expect("current classification fixture must parse");
+
+    let storage = InMemoryStorage::new();
+    persist_private_stream_batch(
+        &storage,
+        counterparty(),
+        classification_fixture::classification_fixture_receiver_path(),
+        messages
+            .iter()
+            .map(|message| classification_fixture::fixture_private_message(&message.raw_json))
+            .collect(),
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let pristine = storage.snapshot().unwrap();
+    assert_eq!(pristine.private_stream_items.len(), messages.len());
+    let mut stale = pristine.clone();
+    let mut expected = pristine;
+
+    // Local, non-rebuildable retrieval state recorded before the upgrade: the
+    // first carrier's classification is unchanged, so it must be preserved.
+    let retrieved_at = timestamp() + chrono::Duration::seconds(5);
+    for state in [&mut stale, &mut expected] {
+        assert_eq!(state.receipt_access_records.len(), 1);
+        let record = state.receipt_access_records.values_mut().next().unwrap();
+        record.retrieval_status = ReceiptRetrievalStatus::Retrieved;
+        record.retrieval_attempted_at = Some(retrieved_at);
+        record.retrieved_at = Some(retrieved_at);
+    }
+
+    // Overwrite every derived parse summary with the previous generation's
+    // string, verbatim from the frozen legacy fixture.
+    let mut stale_summaries = 0usize;
+    for (index, item) in stale.private_stream_items.iter_mut().enumerate() {
+        let legacy_error = legacy["messages"][index]["intake"]["parse_error"]
+            .as_str()
+            .map(str::to_owned);
+        if item.parse_error != legacy_error {
+            stale_summaries += 1;
+        }
+        item.parse_error = legacy_error;
+    }
+    assert!(
+        stale_summaries > 0,
+        "legacy fixture must carry pre-redaction parse summaries"
+    );
+    assert!(
+        stale.private_stream_items.iter().any(|item| {
+            item.parse_error
+                .as_deref()
+                .is_some_and(|error| error.contains("at line 1 column"))
+        }),
+        "legacy summaries must include serde positional detail"
+    );
+
+    let (normalized, report) = normalize_state(stale);
+
+    assert_eq!(
+        report,
+        PrivateStreamNormalizationReport {
+            items_reclassified: stale_summaries,
+            ..Default::default()
+        }
+    );
+    assert_eq!(normalized, expected);
+    for (index, item) in normalized.private_stream_items.iter().enumerate() {
+        assert_eq!(
+            item.parse_error.as_deref(),
+            current["messages"][index]["intake"]["parse_error"].as_str(),
+            "item {index} must match the re-frozen classification"
         );
     }
 }

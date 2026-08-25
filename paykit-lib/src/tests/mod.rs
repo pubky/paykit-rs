@@ -7,6 +7,7 @@ use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
 mod encrypted_link;
 mod event_id;
+mod parse_redaction;
 mod payment_endpoint;
 mod payment_request;
 mod payment_request_properties;

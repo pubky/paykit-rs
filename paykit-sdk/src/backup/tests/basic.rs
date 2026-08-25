@@ -241,8 +241,14 @@ async fn test_backup_round_trips_receiver_rejected_receipt_access() {
     );
     assert_eq!(
         restored.private_stream_items[0].parse_error.as_deref(),
-        Some("Receipt Access location does not match counterparty receiver bitkit/wallet")
+        Some(crate::domain::private_stream::RECEIPT_ACCESS_RECEIVER_SCOPE_PARSE_ERROR)
     );
+    // The persisted summary must not echo either receiver path.
+    assert!(!restored.private_stream_items[0]
+        .parse_error
+        .as_deref()
+        .unwrap()
+        .contains("bitkit"));
     assert!(restored.receipt_access_records.is_empty());
 }
 

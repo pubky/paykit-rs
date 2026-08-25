@@ -15,7 +15,7 @@ use super::{
     },
 };
 
-use crate::PrivateMessageKind;
+use crate::{PrivateMessageKind, PrivateMessageParseCategory};
 
 /// Parse `raw` as the Payment Request protocol event selected by `kind`, or
 /// return `None` when `kind` is not a Payment Request protocol event kind.
@@ -56,7 +56,15 @@ pub fn parse_payment_request_event_message(
     message: &PrivateApplicationMessage,
 ) -> Option<PaymentRequestEventMessage> {
     let kind = message.known_kind()?;
-    let event = parse_event(kind, &message.raw_json)?.map_err(|err| err.to_string());
+    // SECURITY / REDACTION: the stored validation error is exactly a stable
+    // redacted category string (persisted by SDK callers and byte-compared on
+    // backup restore), never free-form error text.
+    let event = parse_event(kind, &message.raw_json)?.map_err(|err| {
+        err.private_message_parse_category()
+            .unwrap_or(PrivateMessageParseCategory::InvalidStructure)
+            .as_str()
+            .to_owned()
+    });
     let (event_id, payment_request_id) = parse_event_header_ids(&message.raw_json);
     Some(PaymentRequestEventMessage {
         kind,

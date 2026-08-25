@@ -4,7 +4,9 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::{
     shared_wire::{BillingPeriodWire, PaymentAmountWire, RequiredNullable},
     validation::{
-        invalid_data, invalid_wire, validate_outgoing_version_kind, validate_wire_version_kind,
+        invalid_data, invalid_private_wire, json_error_category, private_message_parse_error,
+        private_message_parse_error_with_context, validate_outgoing_version_kind,
+        validate_wire_version_kind,
     },
     EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
@@ -300,12 +302,10 @@ pub(super) fn serialize_payment_request_json(event: &PaymentRequest) -> Result<S
         "Payment Request",
     )?;
     event.request.validate()?;
-    serde_json::to_string(&PaymentRequestWire::from(event)).map_err(|err| {
-        invalid_data(
-            format!("failed to serialize Payment Request JSON: {err}"),
-            Some(err.into()),
-        )
-    })
+    // Outbound serialize of locally constructed data: keep the serde source,
+    // keep the context static.
+    serde_json::to_string(&PaymentRequestWire::from(event))
+        .map_err(|err| invalid_data("failed to serialize Payment Request JSON", Some(err.into())))
 }
 
 fn serialize_basic_event_json(
@@ -321,7 +321,7 @@ fn serialize_basic_event_json(
     }
     serde_json::to_string(event).map_err(|err| {
         invalid_data(
-            format!("failed to serialize {label} JSON: {err}"),
+            format!("failed to serialize {label} JSON"),
             Some(err.into()),
         )
     })
@@ -361,22 +361,25 @@ pub(super) fn serialize_payment_proof_json(event: &PaymentProof) -> Result<Strin
     if let Some(period) = &event.billing_period {
         period.validate()?;
     }
-    serde_json::to_string(&PaymentProofWire::from(event)).map_err(|err| {
-        invalid_data(
-            format!("failed to serialize Payment Proof JSON: {err}"),
-            Some(err.into()),
-        )
-    })
+    // Outbound serialize of locally constructed data: keep the serde source,
+    // keep the context static.
+    serde_json::to_string(&PaymentProofWire::from(event))
+        .map_err(|err| invalid_data("failed to serialize Payment Proof JSON", Some(err.into())))
 }
 
+// SECURITY / REDACTION: the parse_* functions below consume decrypted
+// private-message plaintext. Their errors carry static contexts plus a typed
+// redacted category source only; serde detail and offending field values are
+// deliberately dropped because these errors can cross the FFI boundary as
+// exception text.
 pub(super) fn parse_payment_request_json(json: &str) -> Result<PaymentRequest> {
     let wire: PaymentRequestWire = serde_json::from_str(json).map_err(|err| {
-        invalid_data(
-            format!("failed to parse Payment Request JSON: {err}"),
-            Some(err.into()),
+        private_message_parse_error(
+            "failed to parse Payment Request JSON",
+            json_error_category(&err),
         )
     })?;
-    PaymentRequest::try_from(wire).map_err(|err| invalid_wire(err, "Payment Request"))
+    PaymentRequest::try_from(wire).map_err(|err| invalid_private_wire(err, "Payment Request"))
 }
 
 pub(super) fn parse_acceptance_json(json: &str) -> Result<PaymentRequestAcceptance> {
@@ -397,9 +400,9 @@ pub(super) fn parse_acceptance_json(json: &str) -> Result<PaymentRequestAcceptan
         version: 1,
         kind: PrivateMessageKind::PaymentRequestAcceptance,
         event_id: EventId::new(wire.event_id)
-            .map_err(|err| invalid_wire(err, "Payment Request Acceptance"))?,
+            .map_err(|err| invalid_private_wire(err, "Payment Request Acceptance"))?,
         payment_request_id: PaymentRequestId::new(wire.payment_request_id)
-            .map_err(|err| invalid_wire(err, "Payment Request Acceptance"))?,
+            .map_err(|err| invalid_private_wire(err, "Payment Request Acceptance"))?,
     })
 }
 
@@ -415,9 +418,9 @@ pub(super) fn parse_rejection_json(json: &str) -> Result<PaymentRequestRejection
         version: 1,
         kind: PrivateMessageKind::PaymentRequestRejection,
         event_id: EventId::new(wire.event_id)
-            .map_err(|err| invalid_wire(err, "Payment Request Rejection"))?,
+            .map_err(|err| invalid_private_wire(err, "Payment Request Rejection"))?,
         payment_request_id: PaymentRequestId::new(wire.payment_request_id)
-            .map_err(|err| invalid_wire(err, "Payment Request Rejection"))?,
+            .map_err(|err| invalid_private_wire(err, "Payment Request Rejection"))?,
         reason: wire.reason,
     })
 }
@@ -434,21 +437,21 @@ pub(super) fn parse_cancellation_json(json: &str) -> Result<PaymentRequestCancel
         version: 1,
         kind: PrivateMessageKind::PaymentRequestCancellation,
         event_id: EventId::new(wire.event_id)
-            .map_err(|err| invalid_wire(err, "Payment Request Cancellation"))?,
+            .map_err(|err| invalid_private_wire(err, "Payment Request Cancellation"))?,
         payment_request_id: PaymentRequestId::new(wire.payment_request_id)
-            .map_err(|err| invalid_wire(err, "Payment Request Cancellation"))?,
+            .map_err(|err| invalid_private_wire(err, "Payment Request Cancellation"))?,
         reason: wire.reason,
     })
 }
 
 pub(super) fn parse_payment_proof_json(json: &str) -> Result<PaymentProof> {
     let wire: PaymentProofWire = serde_json::from_str(json).map_err(|err| {
-        invalid_data(
-            format!("failed to parse Payment Proof JSON: {err}"),
-            Some(err.into()),
+        private_message_parse_error(
+            "failed to parse Payment Proof JSON",
+            json_error_category(&err),
         )
     })?;
-    PaymentProof::try_from(wire).map_err(|err| invalid_wire(err, "Payment Proof"))
+    PaymentProof::try_from(wire).map_err(|err| invalid_private_wire(err, "Payment Proof"))
 }
 
 pub(super) fn parse_event_header_ids(json: &str) -> (Option<EventId>, Option<PaymentRequestId>) {
@@ -468,9 +471,9 @@ pub(super) fn parse_event_header_ids(json: &str) -> (Option<EventId>, Option<Pay
 
 fn parse_basic_event_json(json: &str, label: &'static str) -> Result<BasicEventWire> {
     serde_json::from_str(json).map_err(|err| {
-        invalid_data(
-            format!("failed to parse {label} JSON: {err}"),
-            Some(err.into()),
+        private_message_parse_error_with_context(
+            format!("failed to parse {label} JSON"),
+            json_error_category(&err),
         )
     })
 }
@@ -478,6 +481,25 @@ fn parse_basic_event_json(json: &str, label: &'static str) -> Result<BasicEventW
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PrivateMessageParseCategory;
+
+    /// Assert the redacted parse-error shape: exact static context plus the
+    /// expected typed category, with no other error text.
+    fn assert_parse_error(
+        err: &PaykitError,
+        expected_context: &str,
+        expected_category: PrivateMessageParseCategory,
+    ) {
+        match err {
+            PaykitError::InvalidData { context, .. } => assert_eq!(context, expected_context),
+            other => panic!("expected InvalidData, got: {other}"),
+        }
+        assert_eq!(
+            err.private_message_parse_category(),
+            Some(expected_category),
+            "unexpected parse category for: {err}"
+        );
+    }
 
     fn request_terms() -> PaymentRequestTerms {
         PaymentRequestTerms {
@@ -561,8 +583,10 @@ mod tests {
         }"#;
 
         let err = parse_payment_request_json(json).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("missing field"))
+        assert_parse_error(
+            &err,
+            "failed to parse Payment Request JSON",
+            PrivateMessageParseCategory::InvalidStructure,
         );
     }
 
@@ -585,8 +609,14 @@ mod tests {
         }"#;
 
         let err = parse_payment_request_json(json).unwrap_err();
+        assert_parse_error(
+            &err,
+            "failed to parse Payment Request JSON",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field"))
+            !format!("{err} {err:?}").contains("ignored_extra_field"),
+            "offending field name leaked: {err:?}"
         );
     }
 
@@ -609,8 +639,14 @@ mod tests {
         }"#;
 
         let err = parse_payment_request_json(json).unwrap_err();
+        assert_parse_error(
+            &err,
+            "failed to parse Payment Request JSON",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field"))
+            !format!("{err} {err:?}").contains("unexpected"),
+            "offending field name leaked: {err:?}"
         );
     }
 
@@ -632,8 +668,14 @@ mod tests {
         }"#;
 
         let err = parse_payment_request_json(json).unwrap_err();
+        assert_parse_error(
+            &err,
+            "failed to parse Payment Request JSON",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field"))
+            !format!("{err} {err:?}").contains("currency"),
+            "offending field name leaked: {err:?}"
         );
     }
 
@@ -691,8 +733,10 @@ mod tests {
         }"#;
 
         let err = parse_payment_proof_json(json).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("missing field"))
+        assert_parse_error(
+            &err,
+            "failed to parse Payment Proof JSON",
+            PrivateMessageParseCategory::InvalidStructure,
         );
     }
 
@@ -713,8 +757,14 @@ mod tests {
         }"#;
 
         let err = parse_payment_proof_json(json).unwrap_err();
+        assert_parse_error(
+            &err,
+            "Payment Proof failed structural validation",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("ends_at must be after starts_at"))
+            !format!("{err} {err:?}").contains("ends_at"),
+            "validation detail leaked: {err:?}"
         );
     }
 
@@ -758,8 +808,10 @@ mod tests {
         }"#;
 
         let err = parse_payment_request_json(json).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("missing field"))
+        assert_parse_error(
+            &err,
+            "failed to parse Payment Request JSON",
+            PrivateMessageParseCategory::InvalidStructure,
         );
     }
 
@@ -787,8 +839,14 @@ mod tests {
         }"#;
 
         let err = parse_payment_request_json(json).unwrap_err();
+        assert_parse_error(
+            &err,
+            "Payment Request failed structural validation",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("ends_at must be after starts_at"))
+            !format!("{err} {err:?}").contains("ends_at"),
+            "validation detail leaked: {err:?}"
         );
     }
 
@@ -853,8 +911,14 @@ mod tests {
         }"#;
 
         let err = parse_acceptance_json(json).unwrap_err();
+        assert_parse_error(
+            &err,
+            "failed to parse Payment Request Acceptance JSON",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field"))
+            !format!("{err} {err:?}").contains("payment_reference"),
+            "offending field name leaked: {err:?}"
         );
     }
 
@@ -869,8 +933,10 @@ mod tests {
         }"#;
 
         let err = parse_rejection_json(json).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("reason must be a string"))
+        assert_parse_error(
+            &err,
+            "failed to parse Payment Request Rejection JSON",
+            PrivateMessageParseCategory::InvalidStructure,
         );
     }
 
@@ -885,8 +951,10 @@ mod tests {
         }"#;
 
         let err = parse_cancellation_json(json).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("reason must be a string"))
+        assert_parse_error(
+            &err,
+            "failed to parse Payment Request Cancellation JSON",
+            PrivateMessageParseCategory::InvalidStructure,
         );
     }
 
@@ -926,10 +994,13 @@ mod tests {
     }
 
     // The four tests below pin the value-level Validation -> InvalidData remap
-    // (`invalid_wire`) for network-delivered Payment Request JSON: each payload
+    // (`invalid_private_wire`) for network-delivered Payment Request JSON: each payload
     // is structurally valid JSON whose failure is in a field value, and the
     // parser must surface `PaykitError::InvalidData` because the data arrived
-    // from the network (see CLAUDE.md, Error Handling).
+    // from the network (see CLAUDE.md, Error Handling). The inner validation
+    // detail is deliberately redacted (it can echo decrypted field values);
+    // only the static label context and the typed InvalidStructure category
+    // survive.
 
     #[test]
     fn test_payment_request_rejects_zero_recurrence_every() {
@@ -945,8 +1016,14 @@ mod tests {
         );
 
         let err = parse_payment_request_json(&json).unwrap_err();
+        assert_parse_error(
+            &err,
+            "Payment Request failed structural validation",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("Recurrence every must be a positive integer"))
+            !format!("{err} {err:?}").contains("Recurrence every"),
+            "validation detail leaked: {err:?}"
         );
     }
 
@@ -964,8 +1041,14 @@ mod tests {
         );
 
         let err = parse_payment_request_json(&json).unwrap_err();
+        assert_parse_error(
+            &err,
+            "Payment Request failed structural validation",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported Recurrence unit"))
+            !format!("{err} {err:?}").contains("fortnight"),
+            "offending unit value leaked: {err:?}"
         );
     }
 
@@ -985,8 +1068,14 @@ mod tests {
         );
 
         let err = parse_payment_request_json(&json).unwrap_err();
+        assert_parse_error(
+            &err,
+            "Payment Request failed structural validation",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("Recurrence starts_at must be a valid RFC3339 timestamp"))
+            !format!("{err} {err:?}").contains("2026-13-01"),
+            "offending timestamp leaked: {err:?}"
         );
     }
 
@@ -997,8 +1086,14 @@ mod tests {
         let json = payment_request_json_with(r#""not-a-timestamp""#, "null");
 
         let err = parse_payment_request_json(&json).unwrap_err();
+        assert_parse_error(
+            &err,
+            "Payment Request failed structural validation",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("proposal_expires_at must be an RFC3339 UTC timestamp"))
+            !format!("{err} {err:?}").contains("not-a-timestamp"),
+            "offending timestamp leaked: {err:?}"
         );
     }
 

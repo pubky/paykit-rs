@@ -300,6 +300,31 @@ mod tests {
     }
 
     #[test]
+    fn test_recovery_marker_parse_error_keeps_diagnostic_and_no_parse_category() {
+        // Recovery markers are PUBLIC, unencrypted Pubky records: their parse
+        // failures keep the validator diagnostic and must NOT carry the
+        // redacted private-message parse category, which is reserved for
+        // decrypted private-message parse failures.
+        let raw = r#"{"version":1,"kind":"paykit.encrypted_link_recovery","attempt_id":"not-a-uuid","created_at":"2026-06-03T12:00:00Z"}"#;
+
+        let err = parse_encrypted_link_recovery_marker_json(raw).unwrap_err();
+
+        assert!(
+            err.private_message_parse_category().is_none(),
+            "public marker errors must not carry a private-message parse category, got: {err:?}"
+        );
+        assert!(
+            matches!(
+                &err,
+                PaykitError::InvalidData { context, .. }
+                    if context.contains("Encrypted Link recovery marker")
+                        && context.contains("must be a UUID v4 string")
+            ),
+            "expected preserved marker diagnostic, got: {err:?}"
+        );
+    }
+
+    #[test]
     fn test_recovery_marker_rejects_extra_fields() {
         let raw = r#"{"version":1,"kind":"paykit.encrypted_link_recovery","attempt_id":"650e8400-e29b-41d4-a716-446655440000","created_at":"2026-06-03T12:00:00Z","peer":"extra"}"#;
 

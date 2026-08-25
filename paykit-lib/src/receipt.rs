@@ -25,6 +25,7 @@ mod tests {
     use crate::{
         BillingPeriod, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier,
         PaymentReference, PaymentRequestId, PrivateApplicationMessage, PrivateMessageKind,
+        PrivateMessageParseCategory,
     };
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
@@ -294,6 +295,59 @@ mod tests {
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse receipt plaintext JSON")),
             "expected Receipt plaintext parse error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_decrypt_receipt_redacts_invalid_payment_endpoint_identifier() {
+        // SECURITY / REDACTION: field validators quote the offending decrypted
+        // value in their error Display, so a Receipt field-validation failure
+        // must carry only the typed redacted category as `source`. The
+        // sentinel must not survive into Display or Debug (Debug covers the
+        // full source chain).
+        const SENTINEL: &str = "SENTINEL-9f4c-DO-NOT-PRINT";
+        let receipt_id = ReceiptId::new("450e8400-e29b-41d4-a716-446655440000").unwrap();
+        let plaintext = serde_json::to_vec(&json!({
+            "version": 1,
+            "kind": "paykit.receipt",
+            "receipt_id": receipt_id.as_str(),
+            "payment_reference": "invoice-2026-0001",
+            "recipient_public_key": Keypair::random().public_key().to_string(),
+            // The trailing "!" makes the identifier invalid while keeping the
+            // sentinel recognizable.
+            "payment_endpoint_identifier": format!("{SENTINEL}!"),
+            "amount": null,
+            "metadata": {}
+        }))
+        .unwrap();
+        let location = ReceiptAccess::location(&receiver_path(), &receipt_id);
+        let key = ReceiptDecryptionKey::generate();
+        let encrypted = encrypt_receipt_plaintext_for_test_location(&plaintext, &key, &location);
+
+        let err = decrypt_receipt(&encrypted, &key, &location).unwrap_err();
+
+        let display = format!("{err}");
+        let debug = format!("{err:?}");
+        assert!(
+            !display.contains(SENTINEL),
+            "sentinel leaked into Display: {display}"
+        );
+        assert!(
+            !debug.contains(SENTINEL),
+            "sentinel leaked into Debug: {debug}"
+        );
+        assert_eq!(
+            err.private_message_parse_category(),
+            Some(PrivateMessageParseCategory::InvalidStructure),
+            "decrypted receipt field-validation failure must carry the typed category"
+        );
+        assert!(
+            matches!(
+                &err,
+                PaykitError::InvalidData { context, .. }
+                    if context == "Receipt contains invalid Payment Endpoint Identifier"
+            ),
+            "unexpected error: {err:?}"
         );
     }
 
@@ -594,14 +648,16 @@ mod tests {
 
         let err = decrypt_receipt(&encrypted, &key, &location).unwrap_err();
 
-        let (context, source) = match &err {
-            PaykitError::InvalidData { context, source } => (context.clone(), source),
+        let context = match &err {
+            PaykitError::InvalidData { context, .. } => context.clone(),
             other => panic!("expected InvalidData error, got {other:?}"),
         };
-        assert_eq!(context, "unsupported Receipt version/kind");
-        assert!(
-            source.is_none(),
-            "wire validation error must carry no source"
+        assert_eq!(context, "unsupported Receipt kind");
+        // The only source is the typed redacted category; the offending kind
+        // value is deliberately dropped.
+        assert_eq!(
+            err.private_message_parse_category(),
+            Some(crate::PrivateMessageParseCategory::WrongKind)
         );
         let rendered = format!("{err} / {err:?}");
         assert!(
@@ -621,14 +677,17 @@ mod tests {
 
         let err = parse_receipt_access_json(&json).unwrap_err();
 
-        let (context, source) = match &err {
-            PaykitError::InvalidData { context, source } => (context.clone(), source),
+        let context = match &err {
+            PaykitError::InvalidData { context, .. } => context.clone(),
             other => panic!("expected InvalidData error, got {other:?}"),
         };
         assert_eq!(context, "failed to parse Receipt Access JSON");
-        assert!(
-            source.is_none(),
-            "Receipt Access parse error must carry no source"
+        // The only source is the typed redacted category; the serde error is
+        // deliberately dropped. A string where u8 is expected is a
+        // Data-category serde error, so it classifies as InvalidStructure.
+        assert_eq!(
+            err.private_message_parse_category(),
+            Some(crate::PrivateMessageParseCategory::InvalidStructure)
         );
         let rendered = format!("{err} / {err:?}");
         assert!(
@@ -717,9 +776,16 @@ mod tests {
         assert_eq!(event_message.raw_json, raw_json);
         assert!(!event_message.is_valid());
         assert!(event_message.parsed_access().is_none());
-        assert!(event_message
-            .validation_error()
-            .is_some_and(|err| err.contains("Receipt Access location")));
+        // The stored validation error is exactly the stable redacted category
+        // string; the location-mismatch detail stays out of the wrapper.
+        assert_eq!(
+            event_message.validation_error(),
+            Some(crate::PrivateMessageParseCategory::InvalidStructure.as_str())
+        );
+        assert_eq!(
+            event_message.parse_category(),
+            Some(crate::PrivateMessageParseCategory::InvalidStructure)
+        );
     }
 
     #[test]

@@ -74,6 +74,149 @@ impl std::fmt::Display for PrivateMessageKind {
     }
 }
 
+/// Stable redacted category for a private-message parse failure.
+///
+/// COMPATIBILITY CONTRACT: the strings returned by
+/// [`PrivateMessageParseCategory::as_str`] are persisted in durable SDK state
+/// (stream-item `parse_error` fields) and byte-compared during backup restore.
+/// They are a permanent compatibility contract: never change an existing
+/// string once it has shipped. New failure modes get new variants with new
+/// strings, appended to [`PrivateMessageParseCategory::ALL`].
+///
+/// SECURITY / REDACTION: these categories exist so parse errors for decrypted
+/// private-message plaintext carry no serde detail. serde error text embeds
+/// verbatim document fragments on type mismatches, and these errors cross the
+/// FFI boundary as exception text, so the category string is the only
+/// diagnostic that may leave the parse site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivateMessageParseCategory {
+    /// The plaintext is not syntactically valid JSON.
+    InvalidJson,
+    /// The message declares a private message version this library does not
+    /// support.
+    UnsupportedVersion,
+    /// The message declares a kind the invoked parser does not accept.
+    WrongKind,
+    /// The plaintext is valid JSON but fails structural validation for its
+    /// recognized kind.
+    InvalidStructure,
+    /// The decrypted plaintext is not valid UTF-8 (the local receive marker).
+    InvalidUtf8Plaintext,
+}
+
+impl PrivateMessageParseCategory {
+    /// Every parse category, in declaration order.
+    ///
+    /// [`PrivateMessageParseCategory::parse`] is a lookup over this table, so
+    /// a new variant is only parseable once listed here. Adding a variant is
+    /// a compile error at the exhaustive
+    /// [`PrivateMessageParseCategory::variant_index`] match, whose
+    /// instructions walk through extending this table; the const guard below
+    /// this impl asserts every listed entry sits at its declared index and
+    /// that the table ends at the guard's named last variant.
+    pub const ALL: [Self; 5] = [
+        Self::InvalidJson,
+        Self::UnsupportedVersion,
+        Self::WrongKind,
+        Self::InvalidStructure,
+        Self::InvalidUtf8Plaintext,
+    ];
+
+    /// Declaration-order index of this variant, used only by the const
+    /// completeness guard below this impl.
+    ///
+    /// When adding a variant: give it the next index here, append it to
+    /// [`PrivateMessageParseCategory::ALL`] (with a NEW string in `as_str`;
+    /// existing strings are frozen), and point the guard's final-slot
+    /// assertion at the new last variant.
+    const fn variant_index(self) -> usize {
+        match self {
+            Self::InvalidJson => 0,
+            Self::UnsupportedVersion => 1,
+            Self::WrongKind => 2,
+            Self::InvalidStructure => 3,
+            Self::InvalidUtf8Plaintext => 4,
+        }
+    }
+
+    /// Return the canonical persisted string for this category.
+    ///
+    /// These strings are byte-compared on backup restore and must never
+    /// change (see the type-level compatibility contract).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidJson => "invalid private message JSON",
+            Self::UnsupportedVersion => "unsupported private message version",
+            Self::WrongKind => "unsupported private message kind",
+            Self::InvalidStructure => "invalid private message structure",
+            Self::InvalidUtf8Plaintext => {
+                "Private Application Message plaintext is not valid UTF-8"
+            }
+        }
+    }
+
+    /// Parse a canonical persisted category string.
+    ///
+    /// Implemented as a lookup over [`PrivateMessageParseCategory::ALL`] so a
+    /// new variant is parseable as soon as it is listed there; there is no
+    /// wildcard arm to defeat exhaustiveness.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|category| category.as_str() == value)
+    }
+}
+
+// Const completeness guard for `PrivateMessageParseCategory::ALL` (a
+// permanent compatibility contract): every `ALL` entry must sit at its
+// declaration-order index, and the final declared variant must occupy the
+// final slot, so `ALL` cannot silently fall out of sync with the enum.
+const _: () = {
+    let mut index = 0;
+    while index < PrivateMessageParseCategory::ALL.len() {
+        assert!(
+            PrivateMessageParseCategory::ALL[index].variant_index() == index,
+            "PrivateMessageParseCategory::ALL must list every variant in declaration order"
+        );
+        index += 1;
+    }
+    assert!(
+        PrivateMessageParseCategory::ALL.len()
+            == PrivateMessageParseCategory::InvalidUtf8Plaintext.variant_index() + 1,
+        "PrivateMessageParseCategory::ALL must end at the last declared variant"
+    );
+};
+
+impl std::fmt::Display for PrivateMessageParseCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Typed source attached to redacted private-message parse errors.
+///
+/// Carries only a [`PrivateMessageParseCategory`]; it never holds serde detail
+/// or plaintext fragments, so it is safe in error chains, logs, and
+/// FFI-facing strings. Recover it from a [`crate::PaykitError`] via
+/// [`crate::PaykitError::private_message_parse_category`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{}", .category.as_str())]
+pub struct PrivateMessageParseError {
+    category: PrivateMessageParseCategory,
+}
+
+impl PrivateMessageParseError {
+    /// Wrap a parse category as a typed error source.
+    pub fn new(category: PrivateMessageParseCategory) -> Self {
+        Self { category }
+    }
+
+    /// The redacted parse category this error carries.
+    pub fn category(&self) -> PrivateMessageParseCategory {
+        self.category
+    }
+}
+
 /// One Private Application Message received from an Encrypted Link.
 ///
 /// This is the low-level receive item for the Private Application Message stream.
@@ -145,9 +288,12 @@ impl PrivateApplicationMessage {
     /// malformed stream item while still advancing the local Encrypted Link
     /// checkpoint. This is not expected on valid protocol messages.
     pub fn invalid_utf8_error(&self) -> Option<&'static str> {
+        // The returned string is the persisted parse-error text for this case
+        // and is byte-compared on backup restore; sourcing it from the parse
+        // category keeps the two identical by construction.
         self.raw_json
             .starts_with(INVALID_UTF8_PRIVATE_MESSAGE_PREFIX)
-            .then_some("Private Application Message plaintext is not valid UTF-8")
+            .then_some(PrivateMessageParseCategory::InvalidUtf8Plaintext.as_str())
     }
 }
 
@@ -363,6 +509,82 @@ mod tests {
         PrivatePaymentList,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn test_private_message_parse_category_round_trips_through_all() {
+        for category in PrivateMessageParseCategory::ALL {
+            assert_eq!(
+                PrivateMessageParseCategory::parse(category.as_str()),
+                Some(category),
+                "category {category:?} must round-trip through its string"
+            );
+        }
+        assert_eq!(PrivateMessageParseCategory::parse("unrecognized"), None);
+        assert_eq!(PrivateMessageParseCategory::parse(""), None);
+    }
+
+    #[test]
+    fn test_private_message_parse_category_strings_are_frozen() {
+        // COMPATIBILITY CONTRACT: these strings are persisted in durable SDK
+        // state and byte-compared on backup restore. This test failing means a
+        // string changed; that breaks restore of existing backups and must
+        // never happen. Add new variants with new strings instead.
+        let expected = [
+            (
+                PrivateMessageParseCategory::InvalidJson,
+                "invalid private message JSON",
+            ),
+            (
+                PrivateMessageParseCategory::UnsupportedVersion,
+                "unsupported private message version",
+            ),
+            (
+                PrivateMessageParseCategory::WrongKind,
+                "unsupported private message kind",
+            ),
+            (
+                PrivateMessageParseCategory::InvalidStructure,
+                "invalid private message structure",
+            ),
+            (
+                PrivateMessageParseCategory::InvalidUtf8Plaintext,
+                "Private Application Message plaintext is not valid UTF-8",
+            ),
+        ];
+        assert_eq!(expected.len(), PrivateMessageParseCategory::ALL.len());
+        for (category, string) in expected {
+            assert_eq!(category.as_str(), string);
+        }
+    }
+
+    #[test]
+    fn test_private_message_parse_error_exposes_category_through_paykit_error() {
+        let err = PaykitError::InvalidData {
+            context: "failed to parse Private Payment List JSON".into(),
+            source: Some(anyhow::Error::new(PrivateMessageParseError::new(
+                PrivateMessageParseCategory::InvalidJson,
+            ))),
+        };
+        assert_eq!(
+            err.private_message_parse_category(),
+            Some(PrivateMessageParseCategory::InvalidJson)
+        );
+        // Display of the typed source is exactly the category string.
+        assert_eq!(
+            PrivateMessageParseError::new(PrivateMessageParseCategory::WrongKind).to_string(),
+            PrivateMessageParseCategory::WrongKind.as_str()
+        );
+
+        let untyped = PaykitError::InvalidData {
+            context: "no typed source".into(),
+            source: Some(anyhow::anyhow!("plain source")),
+        };
+        assert_eq!(untyped.private_message_parse_category(), None);
+        assert_eq!(
+            PaykitError::Validation("caller input".into()).private_message_parse_category(),
+            None
+        );
+    }
 
     #[test]
     fn test_send_attempts_from_retries_bounds() {

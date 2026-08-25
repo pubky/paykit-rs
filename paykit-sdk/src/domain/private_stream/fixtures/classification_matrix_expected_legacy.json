@@ -330,7 +330,7 @@
         "event_id": null,
         "event_kind": null,
         "known_paykit_kind": "paykit.private_payment_list",
-        "parse_error": "invalid private message structure",
+        "parse_error": "invalid data: failed to parse Private Payment List JSON: missing field `payment_endpoints` at line 1 column 50",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.private_payment_list",
         "parsed_version": 1,
@@ -338,7 +338,7 @@
       },
       "label": "private_payment_list_malformed",
       "outbound": {
-        "error": "protocol error: failed to parse Private Payment List JSON"
+        "error": "protocol error: failed to parse Private Payment List JSON: missing field `payment_endpoints` at line 1 column 50"
       }
     },
     {
@@ -350,7 +350,7 @@
         "event_id": "11111111-1111-4111-8111-000000000007",
         "event_kind": "paykit.receipt_access",
         "known_paykit_kind": "paykit.receipt_access",
-        "parse_error": "invalid private message structure",
+        "parse_error": "invalid data: failed to parse Receipt Access JSON",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.receipt_access",
         "parsed_version": 1,
@@ -358,7 +358,7 @@
       },
       "label": "receipt_access_malformed",
       "outbound": {
-        "error": "protocol error: invalid private message structure"
+        "error": "protocol error: invalid data: failed to parse Receipt Access JSON"
       }
     },
     {
@@ -370,7 +370,7 @@
         "event_id": "11111111-1111-4111-8111-000000000008",
         "event_kind": "paykit.payment_request",
         "known_paykit_kind": "paykit.payment_request",
-        "parse_error": "invalid private message structure",
+        "parse_error": "invalid data: Payment Request: Payment Request amount.value must be a decimal string",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_request",
         "parsed_version": 1,
@@ -378,7 +378,7 @@
       },
       "label": "payment_request_malformed",
       "outbound": {
-        "error": "protocol error: invalid private message structure"
+        "error": "protocol error: invalid data: Payment Request: Payment Request amount.value must be a decimal string"
       }
     },
     {
@@ -390,7 +390,7 @@
         "event_id": "11111111-1111-4111-8111-000000000009",
         "event_kind": "paykit.payment_request_acceptance",
         "known_paykit_kind": "paykit.payment_request_acceptance",
-        "parse_error": "invalid private message structure",
+        "parse_error": "invalid data: Payment Request Acceptance must not include reason",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_request_acceptance",
         "parsed_version": 1,
@@ -398,7 +398,7 @@
       },
       "label": "payment_request_acceptance_malformed",
       "outbound": {
-        "error": "protocol error: invalid private message structure"
+        "error": "protocol error: invalid data: Payment Request Acceptance must not include reason"
       }
     },
     {
@@ -410,7 +410,7 @@
         "event_id": "11111111-1111-4111-8111-00000000000a",
         "event_kind": "paykit.payment_request_rejection",
         "known_paykit_kind": "paykit.payment_request_rejection",
-        "parse_error": "invalid private message structure",
+        "parse_error": "invalid data: failed to parse Payment Request Rejection JSON: reason must be a string when present at line 1 column 179",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_request_rejection",
         "parsed_version": 1,
@@ -418,7 +418,7 @@
       },
       "label": "payment_request_rejection_malformed",
       "outbound": {
-        "error": "protocol error: invalid private message structure"
+        "error": "protocol error: invalid data: failed to parse Payment Request Rejection JSON: reason must be a string when present at line 1 column 179"
       }
     },
     {
@@ -430,7 +430,7 @@
         "event_id": "11111111-1111-4111-8111-00000000000b",
         "event_kind": "paykit.payment_request_cancellation",
         "known_paykit_kind": "paykit.payment_request_cancellation",
-        "parse_error": "invalid private message structure",
+        "parse_error": "invalid data: failed to parse Payment Request Cancellation JSON: missing field `payment_request_id` at line 1 column 108",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_request_cancellation",
         "parsed_version": 1,
@@ -438,7 +438,7 @@
       },
       "label": "payment_request_cancellation_malformed",
       "outbound": {
-        "error": "protocol error: invalid private message structure"
+        "error": "protocol error: invalid data: failed to parse Payment Request Cancellation JSON: missing field `payment_request_id` at line 1 column 108"
       }
     },
     {
@@ -450,7 +450,7 @@
         "event_id": "11111111-1111-4111-8111-00000000000c",
         "event_kind": "paykit.payment_proof",
         "known_paykit_kind": "paykit.payment_proof",
-        "parse_error": "invalid private message structure",
+        "parse_error": "invalid data: failed to parse Payment Proof JSON: missing field `billing_period` at line 1 column 276",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_proof",
         "parsed_version": 1,
@@ -458,7 +458,7 @@
       },
       "label": "payment_proof_malformed",
       "outbound": {
-        "error": "protocol error: invalid private message structure"
+        "error": "protocol error: invalid data: failed to parse Payment Proof JSON: missing field `billing_period` at line 1 column 276"
       }
     },
     {
@@ -470,7 +470,7 @@
         "event_id": null,
         "event_kind": null,
         "known_paykit_kind": "paykit.private_payment_list",
-        "parse_error": "unsupported private message version",
+        "parse_error": "invalid data: unsupported Private Payment List version 2",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.private_payment_list",
         "parsed_version": 2,
@@ -478,7 +478,7 @@
       },
       "label": "private_payment_list_wrong_version",
       "outbound": {
-        "error": "protocol error: unsupported private message version"
+        "error": "protocol error: unsupported private message version 2"
       }
     },
     {
@@ -490,7 +490,7 @@
         "event_id": "11111111-1111-4111-8111-00000000000d",
         "event_kind": "paykit.receipt_access",
         "known_paykit_kind": "paykit.receipt_access",
-        "parse_error": "unsupported private message version",
+        "parse_error": "invalid data: unsupported Receipt Access version/kind",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.receipt_access",
         "parsed_version": 2,
@@ -498,7 +498,7 @@
       },
       "label": "receipt_access_wrong_version",
       "outbound": {
-        "error": "protocol error: unsupported private message version"
+        "error": "protocol error: unsupported private message version 2"
       }
     },
     {
@@ -510,7 +510,7 @@
         "event_id": "11111111-1111-4111-8111-00000000000e",
         "event_kind": "paykit.payment_request",
         "known_paykit_kind": "paykit.payment_request",
-        "parse_error": "unsupported private message version",
+        "parse_error": "invalid data: unsupported Payment Request event version/kind",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_request",
         "parsed_version": 2,
@@ -518,7 +518,7 @@
       },
       "label": "payment_request_wrong_version",
       "outbound": {
-        "error": "protocol error: unsupported private message version"
+        "error": "protocol error: unsupported private message version 2"
       }
     },
     {
@@ -530,7 +530,7 @@
         "event_id": "11111111-1111-4111-8111-00000000000f",
         "event_kind": "paykit.payment_request_acceptance",
         "known_paykit_kind": "paykit.payment_request_acceptance",
-        "parse_error": "unsupported private message version",
+        "parse_error": "invalid data: unsupported Payment Request event version/kind",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_request_acceptance",
         "parsed_version": 2,
@@ -538,7 +538,7 @@
       },
       "label": "payment_request_acceptance_wrong_version",
       "outbound": {
-        "error": "protocol error: unsupported private message version"
+        "error": "protocol error: unsupported private message version 2"
       }
     },
     {
@@ -550,7 +550,7 @@
         "event_id": "11111111-1111-4111-8111-000000000010",
         "event_kind": "paykit.payment_request_rejection",
         "known_paykit_kind": "paykit.payment_request_rejection",
-        "parse_error": "unsupported private message version",
+        "parse_error": "invalid data: unsupported Payment Request event version/kind",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_request_rejection",
         "parsed_version": 2,
@@ -558,7 +558,7 @@
       },
       "label": "payment_request_rejection_wrong_version",
       "outbound": {
-        "error": "protocol error: unsupported private message version"
+        "error": "protocol error: unsupported private message version 2"
       }
     },
     {
@@ -570,7 +570,7 @@
         "event_id": "11111111-1111-4111-8111-000000000011",
         "event_kind": "paykit.payment_request_cancellation",
         "known_paykit_kind": "paykit.payment_request_cancellation",
-        "parse_error": "unsupported private message version",
+        "parse_error": "invalid data: unsupported Payment Request event version/kind",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_request_cancellation",
         "parsed_version": 2,
@@ -578,7 +578,7 @@
       },
       "label": "payment_request_cancellation_wrong_version",
       "outbound": {
-        "error": "protocol error: unsupported private message version"
+        "error": "protocol error: unsupported private message version 2"
       }
     },
     {
@@ -590,7 +590,7 @@
         "event_id": "11111111-1111-4111-8111-000000000012",
         "event_kind": "paykit.payment_proof",
         "known_paykit_kind": "paykit.payment_proof",
-        "parse_error": "unsupported private message version",
+        "parse_error": "invalid data: unsupported Payment Request event version/kind",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_proof",
         "parsed_version": 2,
@@ -598,7 +598,7 @@
       },
       "label": "payment_proof_wrong_version",
       "outbound": {
-        "error": "protocol error: unsupported private message version"
+        "error": "protocol error: unsupported private message version 2"
       }
     },
     {
@@ -610,7 +610,7 @@
         "event_id": "11111111-1111-4111-8111-000000000013",
         "event_kind": "paykit.payment_request_acceptance",
         "known_paykit_kind": "paykit.payment_request_acceptance",
-        "parse_error": "invalid private message structure",
+        "parse_error": "invalid data: failed to parse Payment Request Acceptance JSON: unknown field `request`, expected one of `version`, `kind`, `event_id`, `payment_request_id`, `reason` at line 1 column 175",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.payment_request_acceptance",
         "parsed_version": 1,
@@ -618,7 +618,7 @@
       },
       "label": "kind_structure_mismatch",
       "outbound": {
-        "error": "protocol error: invalid private message structure"
+        "error": "protocol error: invalid data: failed to parse Payment Request Acceptance JSON: unknown field `request`, expected one of `version`, `kind`, `event_id`, `payment_request_id`, `reason` at line 1 column 175"
       }
     },
     {
@@ -638,7 +638,7 @@
       },
       "label": "unknown_kind",
       "outbound": {
-        "error": "protocol error: unsupported private message kind"
+        "error": "protocol error: unsupported private message kind 'paykit.allowance'"
       }
     },
     {
@@ -658,7 +658,7 @@
       },
       "label": "invalid_json",
       "outbound": {
-        "error": "protocol error: invalid private message JSON"
+        "error": "protocol error: invalid private message JSON: expected ident at line 1 column 2"
       }
     },
     {
@@ -678,7 +678,7 @@
       },
       "label": "invalid_utf8_sentinel",
       "outbound": {
-        "error": "protocol error: invalid private message JSON"
+        "error": "protocol error: invalid private message JSON: expected value at line 1 column 1"
       }
     },
     {
@@ -690,7 +690,7 @@
         "event_id": null,
         "event_kind": null,
         "known_paykit_kind": "paykit.receipt_access",
-        "parse_error": "Receipt Access location does not match counterparty receiver",
+        "parse_error": "Receipt Access location does not match counterparty receiver bitkit/wallet",
         "parse_status": "MalformedRecognized",
         "parsed_kind": "paykit.receipt_access",
         "parsed_version": 1,

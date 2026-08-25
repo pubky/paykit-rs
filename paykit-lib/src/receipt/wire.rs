@@ -4,12 +4,12 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::{
     shared_wire::{deserialize_optional_no_null, BillingPeriodWire, PaymentAmountWire},
     validation::{
-        invalid_data, invalid_plaintext_json, validate_wire_version_kind,
+        invalid_data, json_error_category, private_message_parse_error, validate_wire_version_kind,
         validate_wire_version_kind_str,
     },
     BillingPeriod, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier,
-    PaymentReference, PaymentRequestId, PrivateApplicationMessage, PrivateMessageKind, PublicKey,
-    Result,
+    PaymentReference, PaymentRequestId, PrivateApplicationMessage, PrivateMessageKind,
+    PrivateMessageParseCategory, PrivateMessageParseError, PublicKey, Result,
 };
 
 use super::{Receipt, ReceiptAccess, ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptId};
@@ -93,57 +93,61 @@ impl TryFrom<ReceiptWire> for Receipt {
 
     fn try_from(wire: ReceiptWire) -> Result<Self> {
         validate_wire_version_kind_str(wire.version, &wire.kind, "paykit.receipt", "Receipt")?;
-        let receipt_id =
-            ReceiptId::new(wire.receipt_id).map_err(|err| PaykitError::InvalidData {
-                context: "Receipt contains invalid Receipt ID".into(),
-                source: Some(err.into()),
-            })?;
-        let payment_reference = PaymentReference::new(wire.payment_reference).map_err(|err| {
+        // SECURITY / REDACTION: this wire is parsed from DECRYPTED receipt
+        // plaintext, and the field validators quote the offending value in
+        // their error Display. Each dropped inner error is replaced by the
+        // typed redacted category so no decrypted value survives in the error
+        // chain (Debug, logs, `source()` walkers); only the static contexts
+        // may cross the FFI boundary as exception text.
+        let receipt_id = ReceiptId::new(wire.receipt_id).map_err(|_| PaykitError::InvalidData {
+            context: "Receipt contains invalid Receipt ID".into(),
+            source: receipt_invalid_structure(),
+        })?;
+        let payment_reference = PaymentReference::new(wire.payment_reference).map_err(|_| {
             PaykitError::InvalidData {
                 context: "Receipt contains invalid Payment Reference".into(),
-                source: Some(err.into()),
+                source: receipt_invalid_structure(),
             }
         })?;
         let payment_request_id = wire
             .payment_request_id
             .map(PaymentRequestId::new)
             .transpose()
-            .map_err(|err| PaykitError::InvalidData {
+            .map_err(|_| PaykitError::InvalidData {
                 context: "Receipt contains invalid Payment Request ID".into(),
-                source: Some(err.into()),
+                source: receipt_invalid_structure(),
             })?;
         let billing_period = wire.billing_period.map(BillingPeriod::from);
         if let Some(period) = &billing_period {
             period
                 .validate_with_label("Receipt Billing Period")
-                .map_err(|err| PaykitError::InvalidData {
+                .map_err(|_| PaykitError::InvalidData {
                     context: "Receipt contains invalid Billing Period".into(),
-                    source: Some(err.into()),
+                    source: receipt_invalid_structure(),
                 })?;
         }
-        // The parse error's Debug output can echo the offending decrypted field
-        // value; keep the context static and leave the detail in `source`,
-        // which stays local.
+        // The pkarr parse error's Debug output can echo the offending decrypted
+        // field value, so it is dropped like the validator errors above.
         let recipient_public_key = PublicKey::try_from(wire.recipient_public_key.as_str())
-            .map_err(|err| PaykitError::InvalidData {
+            .map_err(|_| PaykitError::InvalidData {
                 context: "Receipt contains invalid recipient public key".into(),
-                source: anyhow::anyhow!("invalid recipient public key: {err:?}").into(),
+                source: receipt_invalid_structure(),
             })?;
         let payment_endpoint_identifier = wire
             .payment_endpoint_identifier
             .map(PaymentEndpointIdentifier::new)
             .transpose()
-            .map_err(|err| PaykitError::InvalidData {
+            .map_err(|_| PaykitError::InvalidData {
                 context: "Receipt contains invalid Payment Endpoint Identifier".into(),
-                source: Some(err.into()),
+                source: receipt_invalid_structure(),
             })?;
         let amount = wire.amount.map(PaymentAmount::from);
         if let Some(amount) = &amount {
             amount
                 .validate_with_label("Receipt amount")
-                .map_err(|err| PaykitError::InvalidData {
+                .map_err(|_| PaykitError::InvalidData {
                     context: "Receipt contains invalid Payment Amount".into(),
-                    source: Some(err.into()),
+                    source: receipt_invalid_structure(),
                 })?;
         }
         let receipt = Self {
@@ -158,9 +162,9 @@ impl TryFrom<ReceiptWire> for Receipt {
         };
         receipt
             .validate_request_context()
-            .map_err(|err| PaykitError::InvalidData {
+            .map_err(|_| PaykitError::InvalidData {
                 context: "Receipt contains invalid Payment Request context".into(),
-                source: Some(err.into()),
+                source: receipt_invalid_structure(),
             })?;
         Ok(receipt)
     }
@@ -185,6 +189,18 @@ impl From<&ReceiptAccess> for ReceiptAccessWire {
     }
 }
 
+/// Typed redacted source for Receipt and Receipt Access invariant failures.
+///
+/// SECURITY / REDACTION: both wires are parsed from decrypted plaintext, and
+/// the dropped inner Validation message can echo decrypted field values
+/// (identifier, timestamp, and UUID validators quote the offending value), so
+/// only this typed category may travel as `source`.
+fn receipt_invalid_structure() -> Option<anyhow::Error> {
+    Some(anyhow::Error::new(PrivateMessageParseError::new(
+        PrivateMessageParseCategory::InvalidStructure,
+    )))
+}
+
 impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
     type Error = PaykitError;
 
@@ -195,36 +211,35 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
             PrivateMessageKind::ReceiptAccess,
             "Receipt Access",
         )?;
-        let event_id = EventId::new(wire.event_id).map_err(|err| PaykitError::InvalidData {
+        let event_id = EventId::new(wire.event_id).map_err(|_| PaykitError::InvalidData {
             context: "Receipt Access contains invalid Event ID".into(),
-            source: Some(err.into()),
+            source: receipt_invalid_structure(),
         })?;
-        let receipt_id =
-            ReceiptId::new(wire.receipt_id).map_err(|err| PaykitError::InvalidData {
-                context: "Receipt Access contains invalid Receipt ID".into(),
-                source: Some(err.into()),
-            })?;
-        let payment_reference = PaymentReference::new(wire.payment_reference).map_err(|err| {
+        let receipt_id = ReceiptId::new(wire.receipt_id).map_err(|_| PaykitError::InvalidData {
+            context: "Receipt Access contains invalid Receipt ID".into(),
+            source: receipt_invalid_structure(),
+        })?;
+        let payment_reference = PaymentReference::new(wire.payment_reference).map_err(|_| {
             PaykitError::InvalidData {
                 context: "Receipt Access contains invalid Payment Reference".into(),
-                source: Some(err.into()),
+                source: receipt_invalid_structure(),
             }
         })?;
         let payment_request_id = wire
             .payment_request_id
             .map(PaymentRequestId::new)
             .transpose()
-            .map_err(|err| PaykitError::InvalidData {
+            .map_err(|_| PaykitError::InvalidData {
                 context: "Receipt Access contains invalid Payment Request ID".into(),
-                source: Some(err.into()),
+                source: receipt_invalid_structure(),
             })?;
         let billing_period = wire.billing_period.map(BillingPeriod::from);
         if let Some(period) = &billing_period {
             period
                 .validate_with_label("Receipt Access Billing Period")
-                .map_err(|err| PaykitError::InvalidData {
+                .map_err(|_| PaykitError::InvalidData {
                     context: "Receipt Access contains invalid Billing Period".into(),
-                    source: Some(err.into()),
+                    source: receipt_invalid_structure(),
                 })?;
         }
         let access = Self {
@@ -236,16 +251,16 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
             payment_request_id,
             billing_period,
             location: wire.location,
-            key: ReceiptDecryptionKey::new(wire.key).map_err(|err| PaykitError::InvalidData {
+            key: ReceiptDecryptionKey::new(wire.key).map_err(|_| PaykitError::InvalidData {
                 context: "Receipt Access contains invalid Receipt Decryption Key".into(),
-                source: Some(err.into()),
+                source: receipt_invalid_structure(),
             })?,
         };
         access
             .validate_request_context()
-            .map_err(|err| PaykitError::InvalidData {
+            .map_err(|_| PaykitError::InvalidData {
                 context: "Receipt Access contains invalid Payment Request context".into(),
-                source: Some(err.into()),
+                source: receipt_invalid_structure(),
             })?;
         access.validate_wire_location()?;
         Ok(access)
@@ -253,12 +268,10 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
 }
 
 pub fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<String> {
-    serde_json::to_string(&ReceiptAccessWire::from(access)).map_err(|err| {
-        invalid_data(
-            format!("failed to serialize Receipt Access JSON: {err}"),
-            Some(err.into()),
-        )
-    })
+    // Outbound serialize of locally constructed data: keep the serde source,
+    // keep the context static.
+    serde_json::to_string(&ReceiptAccessWire::from(access))
+        .map_err(|err| invalid_data("failed to serialize Receipt Access JSON", Some(err.into())))
 }
 
 /// Parse a Receipt Access JSON message.
@@ -270,9 +283,14 @@ pub fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
     // carrying the Receipt Decryption Key and Receipt Location. The serde
     // error's Display embeds field values on type mismatches, so it must not
     // be folded into the context or kept as `source` -- this error can cross
-    // the FFI boundary as exception text.
-    let wire: ReceiptAccessWire = serde_json::from_str(json)
-        .map_err(|_| invalid_plaintext_json("failed to parse Receipt Access JSON"))?;
+    // the FFI boundary as exception text. Only the typed redacted category
+    // travels as `source`.
+    let wire: ReceiptAccessWire = serde_json::from_str(json).map_err(|err| {
+        private_message_parse_error(
+            "failed to parse Receipt Access JSON",
+            json_error_category(&err),
+        )
+    })?;
     ReceiptAccess::try_from(wire)
 }
 
@@ -302,7 +320,15 @@ pub fn parse_receipt_access_event_message(
     let kind = message.known_kind()?;
     (kind == PrivateMessageKind::ReceiptAccess).then(|| {
         let (event_id, receipt_id) = parse_receipt_access_header_ids(&message.raw_json);
-        let access = parse_receipt_access_json(&message.raw_json).map_err(|err| err.to_string());
+        // SECURITY / REDACTION: the stored validation error is exactly a
+        // stable redacted category string (persisted by SDK callers and
+        // byte-compared on backup restore), never free-form error text.
+        let access = parse_receipt_access_json(&message.raw_json).map_err(|err| {
+            err.private_message_parse_category()
+                .unwrap_or(PrivateMessageParseCategory::InvalidStructure)
+                .as_str()
+                .to_owned()
+        });
         ReceiptAccessEventMessage {
             kind,
             event_id,

@@ -292,3 +292,65 @@ fn test_string_variant_sources_never_reach_context() {
         );
     }
 }
+
+#[test]
+fn test_private_message_parse_errors_never_leak_plaintext_across_ffi() {
+    // End-to-end redaction proof for decrypted-plaintext parse failures: a
+    // sentinel standing in for private message plaintext is parsed by the real
+    // paykit-lib parsers, converted through `PaykitSdkError` exactly like SDK
+    // workflows do, and mapped into the FFI error that becomes platform
+    // exception text. The sentinel must appear in neither `code` nor
+    // `context` nor Display/Debug at any hop; pre-redaction, serde detail
+    // (`invalid type: string "SENTINEL..."`) would have carried it through.
+    const SENTINEL: &str = "SENTINEL-9f4c-DO-NOT-PRINT";
+
+    let type_mismatch = format!(
+        r#"{{"version":"{SENTINEL}","kind":"paykit.private_payment_list","payment_endpoints":{{}}}}"#
+    );
+    let unknown_kind = format!(r#"{{"version":1,"kind":"{SENTINEL}","payment_endpoints":{{}}}}"#);
+    let bad_identifier = format!(
+        r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"{SENTINEL}/x":"ln..."}}}}"#
+    );
+    let access_mismatch = format!(r#"{{"version":"{SENTINEL}"}}"#);
+    let cases = [
+        (
+            paykit_lib::parse_private_payment_list_json(&type_mismatch).unwrap_err(),
+            "Private Payment List type mismatch",
+        ),
+        (
+            paykit_lib::parse_private_payment_list_json(&unknown_kind).unwrap_err(),
+            "unrecognized kind string",
+        ),
+        (
+            paykit_lib::parse_private_payment_list_json(&bad_identifier).unwrap_err(),
+            "invalid Payment Endpoint Identifier",
+        ),
+        (
+            paykit_lib::parse_receipt_access_json(&access_mismatch).unwrap_err(),
+            "Receipt Access type mismatch",
+        ),
+    ];
+
+    for (lib_err, case) in cases {
+        let ffi = PaykitFfiError::from(PaykitSdkError::from(lib_err));
+        let (_, code, context) = parts(&ffi);
+        assert!(
+            !code.contains(SENTINEL),
+            "sentinel leaked into code for {case}: {code}"
+        );
+        assert!(
+            !context.contains(SENTINEL),
+            "sentinel leaked into context for {case}: {context}"
+        );
+        let rendered = ffi.to_string();
+        assert!(
+            !rendered.contains(SENTINEL),
+            "sentinel leaked into Display for {case}: {rendered}"
+        );
+        let debug = format!("{ffi:?}");
+        assert!(
+            !debug.contains(SENTINEL),
+            "sentinel leaked into Debug for {case}: {debug}"
+        );
+    }
+}

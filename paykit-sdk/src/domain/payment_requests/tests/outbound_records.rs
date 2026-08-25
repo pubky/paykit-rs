@@ -1126,8 +1126,15 @@ async fn test_payment_request_records_keep_malformed_inbound_audit_position() {
         PaymentRequestLifecycleState::InvalidConflict
     );
     assert_eq!(records[0].last_stream_item_id, Some(1));
-    assert!(records[0]
+    // The audit reason is exactly the stable redacted category string; the
+    // value-level serde detail must not survive into derived records.
+    assert_eq!(
+        records[0].invalid_reason.as_deref(),
+        Some(paykit_lib::PrivateMessageParseCategory::InvalidStructure.as_str())
+    );
+    assert!(!records[0]
         .invalid_reason
-        .as_ref()
-        .is_some_and(|reason| reason.contains("reason must be a string")));
+        .as_deref()
+        .unwrap()
+        .contains("reason must be a string"));
 }

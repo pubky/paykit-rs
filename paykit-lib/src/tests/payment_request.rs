@@ -284,9 +284,19 @@ fn payment_request_events_return_malformed_recognized_events_for_persistence() {
     assert_eq!(malformed_event.raw_json, malformed);
     assert!(!malformed_event.is_valid());
     assert!(malformed_event.parsed_event().is_none());
-    assert!(malformed_event
+    // The stored validation error is exactly the stable redacted category
+    // string; the invalid Event ID value never reaches the wrapper.
+    assert_eq!(
+        malformed_event.validation_error(),
+        Some(PrivateMessageParseCategory::InvalidStructure.as_str())
+    );
+    assert_eq!(
+        malformed_event.parse_category(),
+        Some(PrivateMessageParseCategory::InvalidStructure)
+    );
+    assert!(!malformed_event
         .validation_error()
-        .is_some_and(|err| err.contains("Event ID")));
+        .is_some_and(|err| err.contains("not-a-uuid")));
     assert_eq!(malformed_event.event_id(), None);
     assert_eq!(malformed_event.payment_request_id(), Some(&request_id()));
     assert_eq!(
@@ -311,9 +321,16 @@ fn payment_request_events_keep_valid_ids_when_body_is_invalid() {
         Some("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33")
     );
     assert!(!event.is_valid());
-    assert!(event
+    // The stored validation error is exactly the stable redacted category
+    // string; the offending amount value ("ten") and serde field detail
+    // ("amount.value") never reach the wrapper.
+    assert_eq!(
+        event.validation_error(),
+        Some(PrivateMessageParseCategory::InvalidStructure.as_str())
+    );
+    assert!(!event
         .validation_error()
-        .is_some_and(|err| err.contains("amount.value")));
+        .is_some_and(|err| err.contains("amount.value") || err.contains("ten")));
     assert_eq!(event.raw_json, malformed);
 }
 

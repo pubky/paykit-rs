@@ -5,7 +5,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::{
     validation::{parse_utc_timestamp, validate_uuid_v4},
     EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
-    PrivateMessageKind, Result,
+    PrivateMessageKind, PrivateMessageParseCategory, Result,
 };
 
 /// UUID-v4 identifier for one Payment Request.
@@ -528,8 +528,19 @@ impl PaymentRequestEventMessage {
     }
 
     /// Access the validation error when structural validation failed.
+    ///
+    /// The returned string is always a stable redacted parse category string
+    /// (see [`PrivateMessageParseCategory::as_str`]); it never carries serde
+    /// detail or decrypted field values.
     pub fn validation_error(&self) -> Option<&str> {
         self.event.as_ref().err().map(String::as_str)
+    }
+
+    /// Return the typed redacted parse category when structural validation
+    /// failed.
+    pub fn parse_category(&self) -> Option<PrivateMessageParseCategory> {
+        self.validation_error()
+            .and_then(PrivateMessageParseCategory::parse)
     }
 
     /// Access the Event ID.

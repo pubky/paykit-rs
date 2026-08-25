@@ -16,7 +16,7 @@ use crate::{
 use paykit_lib::{
     parse_payment_request_event_message, parse_private_payment_list_json,
     parse_receipt_access_event_message, PrivateApplicationMessage, PrivateMessageKind,
-    ReceiptAccess,
+    PrivateMessageParseCategory, ReceiptAccess,
 };
 
 #[cfg(test)]
@@ -201,6 +201,16 @@ where
         .await
 }
 
+/// Stable persisted parse summary for a Receipt Access message whose location
+/// is outside the counterparty receiver scope.
+///
+/// COMPATIBILITY: this string is persisted as `parse_error` and byte-compared
+/// against fresh classifier output on backup restore, so it must stay stable
+/// and must not interpolate the receiver path (or any other per-item value).
+/// Normalization rewrites older interpolated variants to this constant.
+pub(crate) const RECEIPT_ACCESS_RECEIVER_SCOPE_PARSE_ERROR: &str =
+    "Receipt Access location does not match counterparty receiver";
+
 pub(crate) fn enforce_receipt_access_receiver_scope(
     classification: &mut PrivateStreamMessageClassification,
     counterparty_receiver_path: &PaykitReceiverPath,
@@ -212,9 +222,7 @@ pub(crate) fn enforce_receipt_access_receiver_scope(
         return;
     }
     classification.status = PrivateStreamParseStatus::MalformedRecognized;
-    classification.parse_error = Some(format!(
-        "Receipt Access location does not match counterparty receiver {counterparty_receiver_path}"
-    ));
+    classification.parse_error = Some(RECEIPT_ACCESS_RECEIVER_SCOPE_PARSE_ERROR.to_owned());
     classification.event = None;
     classification.receipt_access = None;
 }
@@ -256,9 +264,20 @@ pub(crate) fn classify_private_application_message(
                     event: None,
                     receipt_access: None,
                 },
+                // SECURITY / REDACTION: persist exactly the stable redacted
+                // category string, never the error Display text. The stored
+                // value is byte-compared against fresh classifier output on
+                // backup restore, and it crosses the FFI boundary in intake
+                // summaries, so serde detail (which can echo decrypted
+                // plaintext) must not reach it.
                 Err(err) => PrivateStreamMessageClassification {
                     status: PrivateStreamParseStatus::MalformedRecognized,
-                    parse_error: Some(err.to_string()),
+                    parse_error: Some(
+                        err.private_message_parse_category()
+                            .unwrap_or(PrivateMessageParseCategory::InvalidStructure)
+                            .as_str()
+                            .to_owned(),
+                    ),
                     event: None,
                     receipt_access: None,
                 },

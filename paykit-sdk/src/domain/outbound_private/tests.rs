@@ -245,3 +245,146 @@ async fn test_claim_next_outbound_private_message_rejects_stale_peer_lease() {
     assert_eq!(queued[0].status, OutboundPrivateMessageStatus::Pending);
     assert_eq!(queued[0].attempt_count, 0);
 }
+
+const SENTINEL: &str = "SENTINEL-9f4c-DO-NOT-PRINT";
+
+/// SECURITY: the persisted `last_error` and the send-report failure text for
+/// an invalid queue head must never echo queued payload content. Records are
+/// inserted directly (bypassing enqueue validation, like a record written by
+/// a newer binary), then run through the exact validate-and-mark fold the
+/// runtime flush applies to a claimed head in
+/// `claimed_message_ready_for_send`. The full runtime flush entry point
+/// requires a live Pubky session, so the fold is exercised at the domain
+/// layer it lives in.
+#[tokio::test]
+async fn test_outbound_validation_and_last_error_never_contain_sentinels() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let unknown_kind_json = format!(r#"{{"version":1,"kind":"{SENTINEL}"}}"#);
+    let records = vec![
+        // Unknown body kind: the sentinel is the kind string (the old flush
+        // path leaked it into `last_error` via a kind echo).
+        (
+            "paykit.private_payment_list".to_owned(),
+            unknown_kind_json.clone(),
+        ),
+        // Kind column diverges from a valid body: the sentinel is the column.
+        (SENTINEL.to_owned(), raw_private_list()),
+        // Malformed recognized body: the sentinel is the offending value.
+        (
+            "paykit.private_payment_list".to_owned(),
+            format!(
+                r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":"{SENTINEL}"}}"#
+            ),
+        ),
+    ];
+    for (kind, raw_json) in records {
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                        counterparty,
+                        receiver_path(),
+                        kind,
+                        raw_json,
+                        timestamp(),
+                    ));
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+    }
+
+    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 3);
+    for record in queued {
+        let err = validate_queued_outbound_private_message(&record).unwrap_err();
+        assert!(!format!("{err}").contains(SENTINEL));
+        assert!(!format!("{err:?}").contains(SENTINEL));
+        // The runtime fold: stringify, report, persist as `last_error`.
+        let error = err.to_string();
+        let failure = OutboundPrivateSendFailure {
+            outbound_message_id: record.outbound_message_id,
+            error: error.clone(),
+        };
+        assert!(!failure.error.contains(SENTINEL));
+        let is_unknown_kind = record.raw_json == unknown_kind_json;
+        let invalid = mark_outbound_invalid(record, error, timestamp());
+        let last_error = invalid.last_error.as_deref().unwrap();
+        assert!(
+            !last_error.contains(SENTINEL),
+            "sentinel leaked into last_error: {last_error}"
+        );
+        if is_unknown_kind {
+            // The stable unsupported-kind block string, with no kind echo.
+            assert_eq!(
+                last_error,
+                "protocol error: unsupported private message kind"
+            );
+        }
+        storage
+            .transaction(move |tx| {
+                tx.save_outbound_private_message(invalid.clone())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    let snapshot = storage.snapshot().unwrap();
+    assert_eq!(snapshot.outbound_private_messages.len(), 3);
+    for message in &snapshot.outbound_private_messages {
+        assert_eq!(message.status, OutboundPrivateMessageStatus::Invalid);
+        assert!(!message.last_error.as_deref().unwrap().contains(SENTINEL));
+    }
+}
+
+/// SECURITY: `PaykitSdkError` values produced by outbound validation and by
+/// lib parse errors converted through `From<PaykitError>` must not echo
+/// message content in `Display` or `Debug` (the `Debug` check proves no
+/// retained source carries it either).
+#[test]
+fn test_sdk_error_contexts_never_contain_sentinels() {
+    let payloads = vec![
+        // Invalid JSON with sentinel content.
+        format!(r#"{{"version":1,"kind":"paykit.private_payment_list","{SENTINEL}"#),
+        // Unknown kind: the sentinel is the kind string.
+        format!(r#"{{"version":1,"kind":"{SENTINEL}"}}"#),
+        // Malformed recognized bodies: the sentinel is a value, a map key,
+        // a field name, and a Receipt Access location.
+        format!(
+            r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":"{SENTINEL}"}}"#
+        ),
+        format!(
+            r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"{SENTINEL}!":"ln"}}}}"#
+        ),
+        format!(
+            r#"{{"version":1,"kind":"paykit.payment_request_acceptance","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","{SENTINEL}":true}}"#
+        ),
+        format!(
+            r#"{{"version":1,"kind":"paykit.receipt_access","event_id":"650e8400-e29b-41d4-a716-446655440000","receipt_id":"550e8400-e29b-41d4-a716-446655440000","payment_reference":"invoice-2026-0001","location":"{SENTINEL}","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}"#
+        ),
+    ];
+    for raw_json in &payloads {
+        let err = validate_outbound_private_message(raw_json).unwrap_err();
+        assert!(
+            !format!("{err}").contains(SENTINEL),
+            "sentinel leaked into Display: {err}"
+        );
+        assert!(!format!("{err:?}").contains(SENTINEL));
+    }
+
+    // Lib parse errors crossing into the SDK through `From<PaykitError>`.
+    let lib_err = paykit_lib::parse_private_payment_list_json(&payloads[3]).unwrap_err();
+    let sdk_err = PaykitSdkError::from(lib_err);
+    assert!(!format!("{sdk_err}").contains(SENTINEL));
+    assert!(!format!("{sdk_err:?}").contains(SENTINEL));
+    let lib_err = paykit_lib::parse_receipt_access_json(&payloads[5]).unwrap_err();
+    let sdk_err = PaykitSdkError::from(lib_err);
+    assert!(!format!("{sdk_err}").contains(SENTINEL));
+    assert!(!format!("{sdk_err:?}").contains(SENTINEL));
+}

@@ -66,9 +66,14 @@ impl ReceiptAccess {
 
     pub(crate) fn validate_wire_location(&self) -> Result<()> {
         if !self.has_canonical_location() {
+            // Wire-parse invariant failure: carry the typed redacted parse
+            // category so callers can classify it without any echo of the
+            // decrypted location value.
             return Err(PaykitError::InvalidData {
                 context: "Receipt Access location does not match Receipt ID".into(),
-                source: None,
+                source: Some(anyhow::Error::new(crate::PrivateMessageParseError::new(
+                    crate::PrivateMessageParseCategory::InvalidStructure,
+                ))),
             });
         }
         Ok(())

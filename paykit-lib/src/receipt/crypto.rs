@@ -53,9 +53,11 @@ impl Receipt {
         // Scrub the raw key from the stack; the cipher holds its own key schedule.
         key_bytes.zeroize();
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        // Outbound serialize of locally constructed data: keep the serde
+        // source, keep the context static.
         let plaintext = serde_json::to_vec(&ReceiptWire::from(self)).map_err(|err| {
             PaykitError::InvalidData {
-                context: format!("failed to serialize receipt JSON: {err}"),
+                context: "failed to serialize receipt JSON".into(),
                 source: Some(err.into()),
             }
         })?;
@@ -78,8 +80,10 @@ impl Receipt {
             nonce: URL_SAFE_NO_PAD.encode(nonce),
             ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
         };
+        // Outbound serialize of locally constructed data: keep the serde
+        // source, keep the context static.
         serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to serialize encrypted receipt JSON: {err}"),
+            context: "failed to serialize encrypted receipt JSON".into(),
             source: Some(err.into()),
         })
     }

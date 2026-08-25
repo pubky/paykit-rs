@@ -779,8 +779,158 @@ async fn test_restore_backup_state_normalizes_wrong_receiver_receipt_access_dedu
     );
     assert_eq!(
         item.parse_error.as_deref(),
-        Some("Receipt Access location does not match counterparty receiver bitkit/wallet")
+        Some(crate::domain::private_stream::RECEIPT_ACCESS_RECEIVER_SCOPE_PARSE_ERROR)
     );
+    // Normalization rewrote the old interpolated value; the stable summary
+    // must not echo either receiver path.
+    assert!(!item.parse_error.as_deref().unwrap().contains("bitkit"));
+}
+
+#[tokio::test]
+async fn test_restore_of_pre_redaction_backup_succeeds() {
+    // A backup exported before parse-error redaction stores serde-detail
+    // summaries (offending values, serde positions, interpolated receiver
+    // paths) that no current classifier ever produces. Restore must still
+    // succeed: normalization rewrites the derived summaries from raw JSON
+    // BEFORE stream-item validation byte-compares them against fresh
+    // classifier output. The stale strings come verbatim from the frozen
+    // legacy classification fixture, so this replays a real previous
+    // generation, not a hand-authored approximation.
+    use crate::domain::private_stream::classification_fixture::{
+        classification_fixture_messages, classification_fixture_receiver_path,
+        CLASSIFICATION_MATRIX_EXPECTED_JSON, CLASSIFICATION_MATRIX_EXPECTED_LEGACY_JSON,
+    };
+
+    let storage = InMemoryStorage::new();
+    let counterparty = public_key();
+    let messages = classification_fixture_messages();
+    let legacy: serde_json::Value =
+        serde_json::from_str(CLASSIFICATION_MATRIX_EXPECTED_LEGACY_JSON)
+            .expect("legacy classification fixture must parse");
+    let current: serde_json::Value = serde_json::from_str(CLASSIFICATION_MATRIX_EXPECTED_JSON)
+        .expect("current classification fixture must parse");
+    assert!(
+        legacy["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["intake"]["parse_error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("at line 1 column"))
+            }),
+        "legacy summaries must include serde positional detail"
+    );
+
+    let private_stream_items: Vec<PrivateStreamItemRecord> = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let intake = &legacy["messages"][index]["intake"];
+            PrivateStreamItemRecord {
+                stream_item_id: index as u64,
+                counterparty: counterparty.clone(),
+                counterparty_receiver_path: classification_fixture_receiver_path(),
+                receive_batch_id: 0,
+                raw_json: message.raw_json.clone(),
+                parsed_version: intake["parsed_version"]
+                    .as_u64()
+                    .map(|version| version as u32),
+                parsed_kind: intake["parsed_kind"].as_str().map(str::to_owned),
+                known_paykit_kind: intake["known_paykit_kind"].as_str().map(str::to_owned),
+                parse_status: serde_json::from_value(intake["parse_status"].clone()).unwrap(),
+                parse_error: intake["parse_error"].as_str().map(str::to_owned),
+                received_at: timestamp(),
+            }
+        })
+        .collect();
+    let event_dedup_records: Vec<EventDedupRecord> = legacy["event_dedup_records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| EventDedupRecord {
+            counterparty: counterparty.clone(),
+            counterparty_receiver_path: classification_fixture_receiver_path(),
+            event_id: record["event_id"].as_str().unwrap().to_owned(),
+            event_kind: record["event_kind"].as_str().unwrap().to_owned(),
+            payload_hash: record["payload_hash"].as_str().unwrap().to_owned(),
+            first_stream_item_id: record["first_stream_item_id"].as_u64().unwrap(),
+            duplicate_stream_item_ids: serde_json::from_value(
+                record["duplicate_stream_item_ids"].clone(),
+            )
+            .unwrap(),
+            conflicting_stream_item_ids: serde_json::from_value(
+                record["conflicting_stream_item_ids"].clone(),
+            )
+            .unwrap(),
+        })
+        .collect();
+    // Local, non-rebuildable retrieval state recorded before the upgrade: the
+    // indexed first carrier classifies identically under the current
+    // classifier, so restore-time normalization must preserve it verbatim.
+    let retrieved_at = timestamp();
+    let receipt_access_records: Vec<ReceiptAccessRecord> = legacy["receipt_access_records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| ReceiptAccessRecord {
+            counterparty: counterparty.clone(),
+            counterparty_receiver_path: classification_fixture_receiver_path(),
+            stream_item_id: record["stream_item_id"].as_u64().unwrap(),
+            receive_batch_id: record["receive_batch_id"].as_u64().unwrap(),
+            event_id: record["event_id"].as_str().unwrap().to_owned(),
+            receipt_id: record["receipt_id"].as_str().unwrap().to_owned(),
+            payment_reference: record["payment_reference"].as_str().unwrap().to_owned(),
+            payment_request_id: record["payment_request_id"].as_str().map(str::to_owned),
+            billing_period: serde_json::from_value(record["billing_period"].clone()).unwrap(),
+            location: record["location"].as_str().unwrap().to_owned(),
+            key: record["key"].as_str().unwrap().to_owned(),
+            retrieval_status: crate::ReceiptRetrievalStatus::Retrieved,
+            retrieval_attempted_at: Some(retrieved_at),
+            retrieved_at: Some(retrieved_at),
+            last_retrieval_error: None,
+            received_at: timestamp(),
+        })
+        .collect();
+    assert_eq!(receipt_access_records.len(), 1);
+    let backup = SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        local_receiver_path: receiver_path(),
+        identity_state: Some(identity(counterparty.clone())),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: Vec::new(),
+        private_stream_items,
+        event_dedup_records,
+        receipt_access_records,
+        receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
+        next_outbound_private_message_id: 0,
+        next_receive_batch_id: 1,
+        next_private_stream_item_id: messages.len() as u64,
+    };
+
+    restore_backup_state(&storage, backup).await.unwrap();
+
+    let state = assert_normalization_fixpoint(&storage);
+    assert_eq!(state.private_stream_items.len(), messages.len());
+    for (index, item) in state.private_stream_items.iter().enumerate() {
+        assert_eq!(item.raw_json, messages[index].raw_json, "item {index}");
+        assert_eq!(
+            item.parse_error.as_deref(),
+            current["messages"][index]["intake"]["parse_error"].as_str(),
+            "item {index} summary must be rewritten to the current generation"
+        );
+    }
+    let access = state.receipt_access_records.values().next().unwrap();
+    assert_eq!(
+        access.retrieval_status,
+        crate::ReceiptRetrievalStatus::Retrieved
+    );
+    assert_eq!(access.retrieved_at, Some(retrieved_at));
 }
 
 #[tokio::test]

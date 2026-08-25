@@ -306,11 +306,11 @@ pub(crate) fn validate_queued_outbound_private_message(
 ) -> Result<()> {
     let kind = validate_outbound_private_message(&record.raw_json)?;
     if kind != record.kind {
+        // SECURITY / REDACTION: no kind echo. This context becomes the
+        // persisted outbound `last_error` on the flush path and crosses the
+        // FFI boundary, so it must stay a stable static string.
         return Err(PaykitSdkError::Protocol {
-            context: format!(
-                "queued private message kind '{}' does not match payload kind '{kind}'",
-                record.kind
-            ),
+            context: "queued private message kind does not match payload kind".into(),
             source: None,
         });
     }
@@ -325,9 +325,13 @@ pub(crate) fn validate_outbound_private_message(raw_json: &str) -> Result<String
         });
     }
 
+    // SECURITY / REDACTION: the contexts below are persisted as outbound
+    // `last_error` values and cross the FFI boundary. They must be stable
+    // static strings with no serde detail and no payload/kind/version echo
+    // (a malformed payload can place attacker-chosen bytes in any of those).
     let value: serde_json::Value =
-        serde_json::from_str(raw_json).map_err(|err| PaykitSdkError::Protocol {
-            context: format!("invalid private message JSON: {err}"),
+        serde_json::from_str(raw_json).map_err(|_| PaykitSdkError::Protocol {
+            context: "invalid private message JSON".into(),
             source: None,
         })?;
     let version = value
@@ -339,7 +343,7 @@ pub(crate) fn validate_outbound_private_message(raw_json: &str) -> Result<String
         })?;
     if version != 1 {
         return Err(PaykitSdkError::Protocol {
-            context: format!("unsupported private message version {version}"),
+            context: "unsupported private message version".into(),
             source: None,
         });
     }
@@ -351,7 +355,7 @@ pub(crate) fn validate_outbound_private_message(raw_json: &str) -> Result<String
             source: None,
         })?;
     let parsed_kind = PrivateMessageKind::parse(kind).ok_or_else(|| PaykitSdkError::Protocol {
-        context: format!("unsupported private message kind '{kind}'"),
+        context: "unsupported private message kind".into(),
         source: None,
     })?;
     validate_outbound_private_message_body(parsed_kind, raw_json)?;

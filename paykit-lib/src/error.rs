@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::{PrivateMessageParseCategory, PrivateMessageParseError};
+
 /// Domain-specific error type.
 ///
 /// Variants that wrap an underlying cause carry a `source` field backed by
@@ -86,6 +88,28 @@ impl PaykitError {
                     .downcast_ref::<NonRetryablePrivateReceiveError>()
                     .is_some()
         )
+    }
+
+    /// Return the stable redacted parse category when this error came from a
+    /// private-message parse failure.
+    ///
+    /// Redacted parse errors carry a typed [`PrivateMessageParseError`] source
+    /// instead of serde detail; this downcasts the source chain to recover the
+    /// machine-readable [`PrivateMessageParseCategory`]. Returns `None` for
+    /// every other error.
+    pub fn private_message_parse_category(&self) -> Option<PrivateMessageParseCategory> {
+        match self {
+            Self::InvalidData {
+                source: Some(source),
+                ..
+            } => source
+                .downcast_ref::<PrivateMessageParseError>()
+                .map(PrivateMessageParseError::category),
+            Self::InvalidData { source: None, .. }
+            | Self::Transport { .. }
+            | Self::NotFound(_)
+            | Self::Validation(_) => None,
+        }
     }
 }
 

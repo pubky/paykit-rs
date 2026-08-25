@@ -4,8 +4,10 @@ use serde::{de, Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use crate::{
-    error::map_error, validation::invalid_data, EncryptedLink, PaymentEndpointIdentifier,
-    PaymentEndpointPayload, PrivateMessageKind, Result,
+    error::map_error,
+    validation::{invalid_data, json_error_category, private_message_parse_error},
+    EncryptedLink, PaymentEndpointIdentifier, PaymentEndpointPayload, PrivateMessageKind,
+    PrivateMessageParseCategory, Result,
 };
 
 /// Versioned Private Payment List sent over an established Encrypted Link.
@@ -124,33 +126,41 @@ where
 }
 
 /// Parse a versioned Private Payment List JSON message.
+///
+/// SECURITY / REDACTION: `json` is decrypted private-message plaintext. Parse
+/// errors carry only static contexts plus a typed
+/// [`PrivateMessageParseCategory`] source (see
+/// [`crate::PaykitError::private_message_parse_category`]); serde detail and
+/// offending field values are deliberately dropped because these errors can
+/// cross the FFI boundary as exception text.
 pub fn parse_private_payment_list_json(json: &str) -> Result<PrivatePaymentList> {
     let wire: PrivatePaymentListWire = serde_json::from_str(json).map_err(|err| {
-        invalid_data(
-            format!("failed to parse Private Payment List JSON: {err}"),
-            Some(err.into()),
+        private_message_parse_error(
+            "failed to parse Private Payment List JSON",
+            json_error_category(&err),
         )
     })?;
     if wire.version != 1 {
-        return Err(invalid_data(
-            format!("unsupported Private Payment List version {}", wire.version),
-            None,
+        return Err(private_message_parse_error(
+            "unsupported Private Payment List version",
+            PrivateMessageParseCategory::UnsupportedVersion,
         ));
     }
     if wire.kind != PrivateMessageKind::PrivatePaymentList.as_str() {
-        return Err(invalid_data(
-            format!("unsupported Private Payment List kind '{}'", wire.kind),
-            None,
+        return Err(private_message_parse_error(
+            "unsupported Private Payment List kind",
+            PrivateMessageParseCategory::WrongKind,
         ));
     }
     let mut payment_endpoints = HashMap::new();
     for (key, value) in wire.payment_endpoints {
-        let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&key).map_err(|err| {
-            invalid_data(
-                format!(
-                    "Private Payment List contains invalid Payment Endpoint Identifier '{key}'"
-                ),
-                Some(err.into()),
+        // The offending key and the inner Validation message both echo the
+        // decrypted identifier value, so neither may survive as context or
+        // source.
+        let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&key).map_err(|_| {
+            private_message_parse_error(
+                "Private Payment List contains invalid Payment Endpoint Identifier",
+                PrivateMessageParseCategory::InvalidStructure,
             )
         })?;
         payment_endpoints.insert(
@@ -173,9 +183,12 @@ pub fn serialize_private_payment_list_json(list: &PrivatePaymentList) -> Result<
         kind: list.kind.as_str(),
         payment_endpoints,
     };
+    // Outbound serialize of locally constructed data: the serde source is
+    // retained for diagnosability, but the context stays static so payload
+    // content cannot ride along in the headline error text.
     serde_json::to_string(&wire).map_err(|err| {
         invalid_data(
-            format!("failed to serialize Private Payment List JSON: {err}"),
+            "failed to serialize Private Payment List JSON",
             Some(err.into()),
         )
     })
@@ -205,6 +218,24 @@ mod tests {
     use super::*;
     use crate::{PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload};
     use std::collections::HashMap;
+
+    /// Assert the redacted parse-error shape: exact static context plus the
+    /// expected typed category, with no other error text.
+    fn assert_parse_error(
+        err: &PaykitError,
+        expected_context: &str,
+        expected_category: PrivateMessageParseCategory,
+    ) {
+        match err {
+            PaykitError::InvalidData { context, .. } => assert_eq!(context, expected_context),
+            other => panic!("expected InvalidData, got: {other}"),
+        }
+        assert_eq!(
+            err.private_message_parse_category(),
+            Some(expected_category),
+            "unexpected parse category for: {err}"
+        );
+    }
 
     #[test]
     fn test_serialize_private_payment_list_json_uses_versioned_message() {
@@ -239,8 +270,14 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_requires_versioned_message() {
         let err = parse_private_payment_list_json(r#"{"lightning": "ln..."}"#).unwrap_err();
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("Private Payment List"))
+            !format!("{err} {err:?}").contains("lightning"),
+            "offending field name leaked: {err:?}"
         );
     }
 
@@ -250,9 +287,12 @@ mod tests {
             r#"{"version":2,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#,
         )
         .unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported Private Payment List version 2")),
-            "expected unsupported version error, got: {err}"
+        // Exact-context equality proves the offending version value is not
+        // echoed.
+        assert_parse_error(
+            &err,
+            "unsupported Private Payment List version",
+            PrivateMessageParseCategory::UnsupportedVersion,
         );
     }
 
@@ -262,9 +302,14 @@ mod tests {
             r#"{"version":1,"kind":"paykit.receipt","payment_endpoints":{}}"#,
         )
         .unwrap_err();
+        assert_parse_error(
+            &err,
+            "unsupported Private Payment List kind",
+            PrivateMessageParseCategory::WrongKind,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported Private Payment List kind")),
-            "expected unsupported kind error, got: {err}"
+            !format!("{err} {err:?}").contains("paykit.receipt"),
+            "offending kind value leaked: {err:?}"
         );
     }
 
@@ -274,9 +319,16 @@ mod tests {
             r#"{"version":1,"kind":"paykit.private_payment_list","reference":"invoice-2026-0001","payment_endpoints":{}}"#,
         )
         .unwrap_err();
+        // Rejection of the unknown field is what this pins; the serde detail
+        // ("unknown field `reference`") is deliberately redacted.
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field") && context.contains("reference")),
-            "expected unknown reference field error, got: {err}"
+            !format!("{err} {err:?}").contains("reference"),
+            "offending field name leaked: {err:?}"
         );
     }
 
@@ -285,9 +337,10 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_empty_string() {
         let err = parse_private_payment_list_json("").unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
-            "expected InvalidData parse error for empty string, got: {err}"
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidJson,
         );
     }
 
@@ -296,36 +349,46 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_truncated_object() {
         let err = parse_private_payment_list_json("{").unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
-            "expected InvalidData for truncated JSON, got: {err}"
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidJson,
         );
     }
 
     #[test]
     fn test_parse_private_payment_list_json_array_instead_of_object() {
+        // Valid JSON of the wrong shape is a Data-category serde error, so it
+        // classifies as InvalidStructure rather than InvalidJson.
         let err = parse_private_payment_list_json(r#"["lightning","onchain"]"#).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
-            "expected InvalidData for JSON array, got: {err}"
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidStructure,
         );
     }
 
     #[test]
     fn test_parse_private_payment_list_json_plain_string() {
         let err = parse_private_payment_list_json(r#""just a string""#).unwrap_err();
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
-            "expected InvalidData for plain JSON string, got: {err}"
+            !format!("{err} {err:?}").contains("just a string"),
+            "offending value leaked: {err:?}"
         );
     }
 
     #[test]
     fn test_parse_private_payment_list_json_number() {
         let err = parse_private_payment_list_json("42").unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
-            "expected InvalidData for JSON number, got: {err}"
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidStructure,
         );
     }
 
@@ -335,9 +398,14 @@ mod tests {
             r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"lightning":123,"onchain":true}}"#,
         )
         .unwrap_err();
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
-            "expected InvalidData for non-string values, got: {err}"
+            !format!("{err} {err:?}").contains("123"),
+            "offending value leaked: {err:?}"
         );
     }
 
@@ -347,31 +415,48 @@ mod tests {
             r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"lightning":"ln-one","lightning":"ln-two"}}"#,
         )
         .unwrap_err();
+        // Rejection is what this pins; the duplicate-identifier detail (which
+        // echoes the decrypted key) is deliberately redacted.
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("duplicate Payment Endpoint identifier")),
-            "expected InvalidData for duplicate identifiers, got: {err}"
+            !format!("{err} {err:?}").contains("lightning"),
+            "offending identifier leaked: {err:?}"
         );
     }
 
     #[test]
     fn test_parse_private_payment_list_json_trailing_comma() {
-        let err = parse_private_payment_list_json(r#"{"lightning": "ln...",}"#).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
-            "expected InvalidData for trailing comma, got: {err}"
+        // All fields are known so serde reaches the trailing comma itself,
+        // which is a Syntax-category error and classifies as InvalidJson.
+        let err = parse_private_payment_list_json(
+            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{},}"#,
+        )
+        .unwrap_err();
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidJson,
         );
     }
 
     #[test]
     fn test_parse_private_payment_list_json_null() {
         let err = parse_private_payment_list_json("null").unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("failed to parse")),
-            "expected InvalidData for JSON null, got: {err}"
+        assert_parse_error(
+            &err,
+            "failed to parse Private Payment List JSON",
+            PrivateMessageParseCategory::InvalidStructure,
         );
     }
 
     // ── Invalid Payment Endpoint Identifiers inside valid JSON ────────────────────────────
+
+    const INVALID_IDENTIFIER_CONTEXT: &str =
+        "Private Payment List contains invalid Payment Endpoint Identifier";
 
     #[test]
     fn test_parse_private_payment_list_json_empty_key() {
@@ -379,9 +464,10 @@ mod tests {
             r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"":"ln..."}}"#,
         )
         .unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
-            "expected InvalidData for empty key, got: {err}"
+        assert_parse_error(
+            &err,
+            INVALID_IDENTIFIER_CONTEXT,
+            PrivateMessageParseCategory::InvalidStructure,
         );
     }
 
@@ -391,9 +477,14 @@ mod tests {
             r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"..":"ln..."}}"#,
         )
         .unwrap_err();
+        assert_parse_error(
+            &err,
+            INVALID_IDENTIFIER_CONTEXT,
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
-            "expected InvalidData for path-traversal key, got: {err}"
+            !format!("{err} {err:?}").contains(".."),
+            "offending key leaked: {err:?}"
         );
     }
 
@@ -403,9 +494,14 @@ mod tests {
             r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"foo/bar":"ln..."}}"#,
         )
         .unwrap_err();
+        assert_parse_error(
+            &err,
+            INVALID_IDENTIFIER_CONTEXT,
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
-            "expected InvalidData for key with slash, got: {err}"
+            !format!("{err} {err:?}").contains("foo/bar"),
+            "offending key leaked: {err:?}"
         );
     }
 
@@ -415,9 +511,14 @@ mod tests {
             r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"private":"secret..."}}"#,
         )
         .unwrap_err();
+        assert_parse_error(
+            &err,
+            INVALID_IDENTIFIER_CONTEXT,
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
-            "expected InvalidData for reserved 'private' key, got: {err}"
+            !format!("{err} {err:?}").contains("secret"),
+            "endpoint payload leaked: {err:?}"
         );
     }
 
@@ -428,9 +529,14 @@ mod tests {
             r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"{long_key}":"ln..."}}}}"#
         );
         let err = parse_private_payment_list_json(&json).unwrap_err();
+        assert_parse_error(
+            &err,
+            INVALID_IDENTIFIER_CONTEXT,
+            PrivateMessageParseCategory::InvalidStructure,
+        );
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
-            "expected InvalidData for oversized key, got: {err}"
+            !format!("{err} {err:?}").contains(&long_key),
+            "offending key leaked: {err:?}"
         );
     }
 
@@ -439,9 +545,10 @@ mod tests {
         // The valid key should not mask the invalid one.
         let err =
             parse_private_payment_list_json(r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"lightning":"ln...","":"bc1..."}}"#).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
-            "expected InvalidData when one key is invalid, got: {err}"
+        assert_parse_error(
+            &err,
+            INVALID_IDENTIFIER_CONTEXT,
+            PrivateMessageParseCategory::InvalidStructure,
         );
     }
 

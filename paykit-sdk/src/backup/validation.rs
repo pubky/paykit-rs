@@ -640,9 +640,14 @@ pub(super) fn validate_payment_endpoint_reservations(
                 source: None,
             });
         }
-        let private_list = parse_private_payment_list_json(&outbound.raw_json).map_err(|err| {
+        // SECURITY / REDACTION: name only local ids, never the parse error
+        // text (it could echo the outbound payload into restore diagnostics).
+        let private_list = parse_private_payment_list_json(&outbound.raw_json).map_err(|_| {
             PaykitSdkError::Protocol {
-                context: err.to_string(),
+                context: format!(
+                    "Payment Endpoint Reservation '{}' outbound Private Payment List {} is unparseable",
+                    record.reservation_id, record.outbound_message_id
+                ),
                 source: None,
             }
         })?;
@@ -678,13 +683,17 @@ pub(super) fn validate_outbound_private_messages(
         validate_queued_outbound_private_message(record)?;
         let kind = validate_outbound_private_message(&record.raw_json)?;
         if kind == PrivateMessageKind::ReceiptAccess.as_str() {
-            let access =
-                paykit_lib::parse_receipt_access_json(&record.raw_json).map_err(|err| {
-                    PaykitSdkError::Protocol {
-                        context: err.to_string(),
-                        source: None,
-                    }
-                })?;
+            // SECURITY / REDACTION: name only the local outbound id, never
+            // the parse error text (it could echo the outbound payload).
+            let access = paykit_lib::parse_receipt_access_json(&record.raw_json).map_err(|_| {
+                PaykitSdkError::Protocol {
+                    context: format!(
+                        "outbound Receipt Access message {} payload is unparseable",
+                        record.outbound_message_id
+                    ),
+                    source: None,
+                }
+            })?;
             if !access.has_location_for_receiver(local_receiver_path) {
                 return Err(PaykitSdkError::Protocol {
                     context: format!(
@@ -1304,9 +1313,14 @@ pub(super) fn validate_receipt_issuance_records(
             PaymentEndpointIdentifier::new(identifier)?;
         }
 
-        let access = paykit_lib::parse_receipt_access_json(&record.access_json).map_err(|err| {
+        // SECURITY / REDACTION: name only the local receipt id, never the
+        // parse error text (it could echo the stored access payload).
+        let access = paykit_lib::parse_receipt_access_json(&record.access_json).map_err(|_| {
             PaykitSdkError::Protocol {
-                context: err.to_string(),
+                context: format!(
+                    "Receipt issuance record '{}' outbound payload is unparseable",
+                    record.receipt_id
+                ),
                 source: None,
             }
         })?;

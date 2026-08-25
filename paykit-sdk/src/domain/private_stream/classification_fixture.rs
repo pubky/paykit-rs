@@ -24,6 +24,16 @@ use paykit_lib::PrivateApplicationMessage;
 pub(crate) const CLASSIFICATION_MATRIX_EXPECTED_JSON: &str =
     include_str!("fixtures/classification_matrix_expected.json");
 
+/// Frozen decision set of the PREVIOUS classifier generation: the pre-redaction
+/// classifier whose parse errors embedded serde detail and interpolated values.
+/// It is kept byte-identical as historical input: normalization proofs replay
+/// its `parse_error` strings as stale persisted state, and the envelope
+/// generation work uses it as the generation-1 fixture. The change detector
+/// compares against `CLASSIFICATION_MATRIX_EXPECTED_JSON` only; this file must
+/// never be re-frozen.
+pub(crate) const CLASSIFICATION_MATRIX_EXPECTED_LEGACY_JSON: &str =
+    include_str!("fixtures/classification_matrix_expected_legacy.json");
+
 const CLASSIFICATION_MATRIX_MESSAGES_JSON: &str =
     include_str!("fixtures/classification_matrix_messages.json");
 
@@ -46,7 +56,7 @@ pub(crate) fn classification_fixture_receiver_path() -> PaykitReceiverPath {
 // Every production decode derives the envelope header from the decrypted
 // body; the replay reuses the SDK reconstruction of that derivation so header
 // changes there also move the fixture, never a private copy of the logic.
-fn fixture_private_message(raw_json: &str) -> PrivateApplicationMessage {
+pub(crate) fn fixture_private_message(raw_json: &str) -> PrivateApplicationMessage {
     let (parsed_version, parsed_kind, _) =
         private_message_header(raw_json).expect("header derivation is infallible today");
     private_application_message_from_raw(raw_json.to_owned(), parsed_version, parsed_kind)

@@ -768,6 +768,42 @@ mod tests {
     }
 
     #[test]
+    fn test_private_operation_error_from_sdk_parse_error_is_clean_in_debug_details() {
+        // The report mappers above pass persisted SDK error strings (receive
+        // errors, outbound `last_error`) into `debug_details` VERBATIM, and
+        // `export_debug_details()` returns them unredacted by design. So a
+        // clean export here proves the redaction happened upstream, at SDK
+        // error construction, for decrypted-plaintext parse failures - not
+        // that this type hid the leak. The sentinel stands in for private
+        // message plaintext and travels the real parse pipeline.
+        const SENTINEL: &str = "SENTINEL-9f4c-DO-NOT-PRINT";
+        let payload = format!(
+            r#"{{"version":"{SENTINEL}","kind":"paykit.private_payment_list","payment_endpoints":{{}}}}"#
+        );
+        let sdk_err = paykit_sdk::PaykitSdkError::from(
+            paykit_lib::parse_private_payment_list_json(&payload).unwrap_err(),
+        );
+
+        let error = private_receive_error_opt(Some(sdk_err.to_string())).unwrap();
+
+        assert!(
+            !error.redacted_context().contains(SENTINEL),
+            "sentinel leaked into redacted_context: {}",
+            error.redacted_context()
+        );
+        assert!(
+            !error.export_debug_details().contains(SENTINEL),
+            "sentinel leaked into export_debug_details, so it was persisted \
+             unredacted upstream: {}",
+            error.export_debug_details()
+        );
+        assert!(
+            !format!("{error:?}").contains(SENTINEL),
+            "sentinel leaked into Debug"
+        );
+    }
+
+    #[test]
     fn test_linked_peer_record_maps_timestamps_and_errors() {
         let record = LinkedPeerRecord {
             counterparty: parse_public_key(
