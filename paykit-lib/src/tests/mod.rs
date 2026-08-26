@@ -5,6 +5,7 @@ use pubky::{ClientId, Pubky, PubkySession, PublicKey};
 use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
+mod allowance;
 mod encrypted_link;
 mod event_id;
 mod payment_endpoint;

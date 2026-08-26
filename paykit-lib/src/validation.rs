@@ -12,6 +12,42 @@ pub(crate) fn validate_uuid_v4(value: String, label: &'static str) -> Result<Str
     Ok(uuid.hyphenated().to_string())
 }
 
+pub(crate) fn validate_decimal_text(value: &str, label: &str) -> Result<()> {
+    let mut seen_dot = false;
+    let mut seen_digit = false;
+    for byte in value.bytes() {
+        match byte {
+            b'.' if !seen_dot => seen_dot = true,
+            b'0'..=b'9' => seen_digit = true,
+            _ => {
+                return Err(PaykitError::Validation(format!(
+                    "{label} must be a decimal string"
+                )))
+            }
+        }
+    }
+    if !seen_digit {
+        return Err(PaykitError::Validation(format!(
+            "{label} must contain at least one digit"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_asset_text(value: &str, label: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(PaykitError::Validation(format!(
+            "{label} must not be empty"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(PaykitError::Validation(format!(
+            "{label} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn invalid_data(
     context: impl Into<String>,
     source: Option<anyhow::Error>,
