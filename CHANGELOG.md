@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc47] - 2026-08-26
+
 ### Fixed
 - The Android AAR now also ships targeted R8 consumer keep rules for the UniFFI/JNA FFI surface, in addition to the existing rustls platformverifier keep.
 
@@ -413,7 +415,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc46...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc47...HEAD
+[0.1.0-rc47]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc46...v0.1.0-rc47
 [0.1.0-rc46]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc45...v0.1.0-rc46
 [0.1.0-rc45]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc44...v0.1.0-rc45
 [0.1.0-rc44]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc43...v0.1.0-rc44
