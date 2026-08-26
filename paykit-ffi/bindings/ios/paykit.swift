@@ -3494,6 +3494,11 @@ public protocol PubkyAuthRequestProtocol: AnyObject, Sendable {
      */
     func complete(localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
+    /**
+     * Export the sensitive state required to resume this pending request.
+     */
+    func saveState() async throws  -> PubkyAuthRequestState
+
 }
 /**
  * Pending Pubky auth request.
@@ -3590,6 +3595,26 @@ open func complete(localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey:
         )
 }
 
+    /**
+     * Export the sensitive state required to resume this pending request.
+     */
+open func saveState()async throws  -> PubkyAuthRequestState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkyauthrequest_save_state(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_pointer,
+            completeFunc: ffi_paykit_rust_future_complete_pointer,
+            freeFunc: ffi_paykit_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePubkyAuthRequestState_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
 
 }
 
@@ -3641,6 +3666,173 @@ public func FfiConverterTypePubkyAuthRequest_lift(_ pointer: UnsafeMutableRawPoi
 #endif
 public func FfiConverterTypePubkyAuthRequest_lower(_ value: PubkyAuthRequest) -> UnsafeMutableRawPointer {
     return FfiConverterTypePubkyAuthRequest.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Sensitive state required to resume a pending Pubky grant auth request.
+ *
+ * Persist this only in secure, temporary platform storage. Delete it after
+ * the request completes, expires, or is abandoned.
+ */
+public protocol PubkyAuthRequestStateProtocol: AnyObject, Sendable {
+
+    /**
+     * Export the secret-bearing authorization URL for secure persistence.
+     */
+    func authorizationUrl()  -> String
+
+    /**
+     * Export the proof-of-possession key for secure persistence.
+     */
+    func exportClientKeySecret()  -> Data
+
+}
+/**
+ * Sensitive state required to resume a pending Pubky grant auth request.
+ *
+ * Persist this only in secure, temporary platform storage. Delete it after
+ * the request completes, expires, or is abandoned.
+ */
+open class PubkyAuthRequestState: PubkyAuthRequestStateProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffipubkyauthrequeststate(self.pointer, $0) }
+    }
+    /**
+     * Reconstruct state loaded from secure, temporary platform storage.
+     */
+public convenience init(authorizationUrl: String, clientKeySecret: Data)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffipubkyauthrequeststate_new(
+        FfiConverterString.lower(authorizationUrl),
+        FfiConverterData.lower(clientKeySecret),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffipubkyauthrequeststate(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Export the secret-bearing authorization URL for secure persistence.
+     */
+open func authorizationUrl() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkyauthrequeststate_authorization_url(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Export the proof-of-possession key for secure persistence.
+     */
+open func exportClientKeySecret() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkyauthrequeststate_export_client_key_secret(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyAuthRequestState: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PubkyAuthRequestState
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyAuthRequestState {
+        return PubkyAuthRequestState(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PubkyAuthRequestState) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyAuthRequestState {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PubkyAuthRequestState, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyAuthRequestState_lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyAuthRequestState {
+    return try FfiConverterTypePubkyAuthRequestState.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyAuthRequestState_lower(_ value: PubkyAuthRequestState) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePubkyAuthRequestState.lower(value)
 }
 
 
@@ -3799,6 +3991,11 @@ public func FfiConverterTypePubkyLocalSecretKey_lower(_ value: PubkyLocalSecretK
 public protocol PubkySessionAccessProtocol: AnyObject, Sendable {
 
     /**
+     * Return the application identifier recorded in the Pubky grant.
+     */
+    func clientId()  -> String
+
+    /**
      * Export the local Pubky secret key, when available.
      */
     func exportLocalSecretKey()  -> PubkyLocalSecretKey?
@@ -3809,7 +4006,7 @@ public protocol PubkySessionAccessProtocol: AnyObject, Sendable {
     func exportReceiverNoiseSecretKey()  -> ReceiverNoiseSecretKey
 
     /**
-     * Export the Pubky session bearer secret for platform secure storage.
+     * Export the Pubky grant and proof-of-possession secret for secure storage.
      */
     func exportSessionSecret()  -> String
 
@@ -3859,10 +4056,11 @@ open class PubkySessionAccess: PubkySessionAccessProtocol, @unchecked Sendable {
     /**
      * Create session access material from platform secure storage.
      */
-public convenience init(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey) {
+public convenience init(clientId: String, sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey)throws  {
     let pointer =
-        try! rustCall() {
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
     uniffi_paykit_fn_constructor_ffipubkysessionaccess_new(
+        FfiConverterString.lower(clientId),
         FfiConverterString.lower(sessionSecret),
         FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),
         FfiConverterTypeReceiverNoiseSecretKey_lower(receiverNoiseSecretKey),$0
@@ -3881,6 +4079,16 @@ public convenience init(sessionSecret: String, localSecretKey: PubkyLocalSecretK
 
 
 
+
+    /**
+     * Return the application identifier recorded in the Pubky grant.
+     */
+open func clientId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkysessionaccess_client_id(self.uniffiClonePointer(),$0
+    )
+})
+}
 
     /**
      * Export the local Pubky secret key, when available.
@@ -3903,7 +4111,7 @@ open func exportReceiverNoiseSecretKey() -> ReceiverNoiseSecretKey  {
 }
 
     /**
-     * Export the Pubky session bearer secret for platform secure storage.
+     * Export the Pubky grant and proof-of-possession secret for secure storage.
      */
 open func exportSessionSecret() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
@@ -3994,9 +4202,9 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
-     * Resume a short-lived auth flow from its authorization URL.
+     * Resume a short-lived grant auth flow from securely persisted state.
      */
-    func resumeAuth(authorizationUrl: String, expectedCapabilities: String) async throws  -> PubkyAuthRequest
+    func resumeAuth(state: PubkyAuthRequestState, expectedCapabilities: String) async throws  -> PubkyAuthRequest
 
     /**
      * Sign in with the receiver's persisted Noise key.
@@ -4064,10 +4272,11 @@ open class PubkySessionBootstrap: PubkySessionBootstrapProtocol, @unchecked Send
     /**
      * Create a Pubky session bootstrap helper.
      */
-public convenience init()throws  {
+public convenience init(clientId: String)throws  {
     let pointer =
         try rustCallWithError(FfiConverterTypePaykitError_lift) {
-    uniffi_paykit_fn_constructor_ffipubkysessionbootstrap_new($0
+    uniffi_paykit_fn_constructor_ffipubkysessionbootstrap_new(
+        FfiConverterString.lower(clientId),$0
     )
 }
     self.init(unsafeFromRawPointer: pointer)
@@ -4085,9 +4294,10 @@ public convenience init()throws  {
     /**
      * Create a Pubky session bootstrap helper with explicit Pubky client configuration.
      */
-public static func withPubkyClientConfig(pubkyClient: PubkyClientConfig)throws  -> PubkySessionBootstrap  {
+public static func withPubkyClientConfig(clientId: String, pubkyClient: PubkyClientConfig)throws  -> PubkySessionBootstrap  {
     return try  FfiConverterTypePubkySessionBootstrap_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
     uniffi_paykit_fn_constructor_ffipubkysessionbootstrap_with_pubky_client_config(
+        FfiConverterString.lower(clientId),
         FfiConverterTypePubkyClientConfig_lower(pubkyClient),$0
     )
 })
@@ -4159,15 +4369,15 @@ open func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretK
 }
 
     /**
-     * Resume a short-lived auth flow from its authorization URL.
+     * Resume a short-lived grant auth flow from securely persisted state.
      */
-open func resumeAuth(authorizationUrl: String, expectedCapabilities: String)async throws  -> PubkyAuthRequest  {
+open func resumeAuth(state: PubkyAuthRequestState, expectedCapabilities: String)async throws  -> PubkyAuthRequest  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipubkysessionbootstrap_resume_auth(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(authorizationUrl),FfiConverterString.lower(expectedCapabilities)
+                    FfiConverterTypePubkyAuthRequestState_lower(state),FfiConverterString.lower(expectedCapabilities)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_pointer,
@@ -11157,7 +11367,7 @@ public func FfiConverterTypePrivateStreamIntakeReport_lower(_ value: PrivateStre
  *
  * The application serializes its protocol-specific unsigned payload. Paykit
  * validates the identifiers, creates the request-bound identity signature,
- * encrypts the signed payload, and delivers it before normal Pubky Auth.
+ * encrypts the signed payload, and delivers it before grant approval.
  *
  * Generated platform record descriptions may include the raw payload. Apps
  * must not log, interpolate, or otherwise stringify this record.
@@ -11271,11 +11481,15 @@ public struct PubkyAuthDetails {
     /**
      * Requested capabilities as canonical Pubky capability text.
      */
-    public var capabilities: String?
+    public var capabilities: String
     /**
      * Relay URL used by the auth flow.
      */
-    public var relayUrl: String?
+    public var relayUrl: String
+    /**
+     * Application identifier that will own the grant.
+     */
+    public var clientId: String
     /**
      * Homeserver requested by a signup flow.
      */
@@ -11289,16 +11503,20 @@ public struct PubkyAuthDetails {
          */kind: PubkyAuthRequestKind,
         /**
          * Requested capabilities as canonical Pubky capability text.
-         */capabilities: String?,
+         */capabilities: String,
         /**
          * Relay URL used by the auth flow.
-         */relayUrl: String?,
+         */relayUrl: String,
+        /**
+         * Application identifier that will own the grant.
+         */clientId: String,
         /**
          * Homeserver requested by a signup flow.
          */homeserverPublicKey: String?) {
         self.kind = kind
         self.capabilities = capabilities
         self.relayUrl = relayUrl
+        self.clientId = clientId
         self.homeserverPublicKey = homeserverPublicKey
     }
 }
@@ -11319,6 +11537,9 @@ extension PubkyAuthDetails: Equatable, Hashable {
         if lhs.relayUrl != rhs.relayUrl {
             return false
         }
+        if lhs.clientId != rhs.clientId {
+            return false
+        }
         if lhs.homeserverPublicKey != rhs.homeserverPublicKey {
             return false
         }
@@ -11329,6 +11550,7 @@ extension PubkyAuthDetails: Equatable, Hashable {
         hasher.combine(kind)
         hasher.combine(capabilities)
         hasher.combine(relayUrl)
+        hasher.combine(clientId)
         hasher.combine(homeserverPublicKey)
     }
 }
@@ -11345,16 +11567,18 @@ public struct FfiConverterTypePubkyAuthDetails: FfiConverterRustBuffer {
         return
             try PubkyAuthDetails(
                 kind: FfiConverterTypePubkyAuthRequestKind.read(from: &buf),
-                capabilities: FfiConverterOptionString.read(from: &buf),
-                relayUrl: FfiConverterOptionString.read(from: &buf),
+                capabilities: FfiConverterString.read(from: &buf),
+                relayUrl: FfiConverterString.read(from: &buf),
+                clientId: FfiConverterString.read(from: &buf),
                 homeserverPublicKey: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: PubkyAuthDetails, into buf: inout [UInt8]) {
         FfiConverterTypePubkyAuthRequestKind.write(value.kind, into: &buf)
-        FfiConverterOptionString.write(value.capabilities, into: &buf)
-        FfiConverterOptionString.write(value.relayUrl, into: &buf)
+        FfiConverterString.write(value.capabilities, into: &buf)
+        FfiConverterString.write(value.relayUrl, into: &buf)
+        FfiConverterString.write(value.clientId, into: &buf)
         FfiConverterOptionString.write(value.homeserverPublicKey, into: &buf)
     }
 }
@@ -15112,7 +15336,7 @@ public enum PubkyAuthCompanionClaimApprovalError: Swift.Error {
     case RelayDeliveryFailure(reason: String
     )
     /**
-     * Normal Pubky Auth approval failed after companion delivery succeeded.
+     * Pubky grant approval failed after companion delivery succeeded.
      */
     case AuthorizationFailure(reason: String
     )
@@ -15257,10 +15481,6 @@ public enum PubkyAuthRequestKind {
      */
     case signUp
     /**
-     * Export a secret from a signer.
-     */
-    case secretExport
-    /**
      * SDK returned a value this binding version does not understand.
      */
     case unknown
@@ -15285,9 +15505,7 @@ public struct FfiConverterTypePubkyAuthRequestKind: FfiConverterRustBuffer {
 
         case 2: return .signUp
 
-        case 3: return .secretExport
-
-        case 4: return .unknown
+        case 3: return .unknown
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -15305,12 +15523,8 @@ public struct FfiConverterTypePubkyAuthRequestKind: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
 
 
-        case .secretExport:
-            writeInt(&buf, Int32(3))
-
-
         case .unknown:
-            writeInt(&buf, Int32(4))
+            writeInt(&buf, Int32(3))
 
         }
     }
@@ -18141,7 +18355,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 51216) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipubkyauthrequest_save_state() != 65530) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkyauthrequeststate_authorization_url() != 6211) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkyauthrequeststate_export_client_key_secret() != 60838) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_export_bytes() != 58726) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkysessionaccess_client_id() != 32656) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_local_secret_key() != 61849) {
@@ -18150,7 +18376,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_receiver_noise_secret_key() != 4431) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 4660) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 34434) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 21644) {
@@ -18162,7 +18388,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 27640) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 45596) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 52728) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 60739) {
@@ -18249,16 +18475,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffiprivatejsonobject_new() != 62907) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_constructor_ffipubkyauthrequeststate_new() != 10811) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 5869) {
+    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 59094) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 44998) {
+    if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 38321) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_with_pubky_client_config() != 35417) {
+    if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_with_pubky_client_config() != 30807) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffireceivernoisesecretkey_new() != 34247) {
