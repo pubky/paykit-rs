@@ -23,8 +23,14 @@
     native <methods>;
 }
 
-# @Structure.FieldOrder is read at runtime.
+# JNA reads Structure.FieldOrder at runtime. R8 full mode strips that
+# annotation unless the annotation type and annotated classes are kept.
 -keepattributes RuntimeVisibleAnnotations
+-keep,allowshrinking,allowoptimization class com.sun.jna.Structure$FieldOrder
+-keep,allowshrinking,allowoptimization,allowobfuscation @com.sun.jna.Structure$FieldOrder class com.synonym.paykit.** {
+    <fields>;
+    <init>(...);
+}
 
 # JNA's AAR references desktop AWT types that are absent on Android.
 -dontwarn java.awt.Component
