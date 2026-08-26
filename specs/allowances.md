@@ -6,25 +6,38 @@ Date: 2026-08-26
 ## Purpose and scope
 
 An Allowance is private, scoped authority from an Allower to an Allowee. It
-allows the Allowee to submit qualifying Payment Instructions without a new
-Allowance consent exchange for each instruction. The Allower remains the Payer
-and its wallet retains custody and the final decision to pay. A Payment
-Instruction may name the Allowee or a third party as Payee.
+allows the Allower's wallet to handle qualifying Payment Requests from the
+Allowee automatically, without fresh user approval for each payment. The
+Allower remains the Payer, retains custody, and controls whether automatic
+handling is enabled.
+
+Allowances do not replace or modify the Payment Request protocol. A Payment
+Request remains valid and usable without an Allowance, and a wallet may always
+require its ordinary manual flow. A Subscription remains an accepted Recurring
+Payment Request; an Allowance neither schedules payments nor creates a separate
+subscription object.
 
 This specification defines the V1 Allowance lifecycle, immutable Allowance
-Terms, Payment Instructions, public destination references and observations,
-wire compatibility, and component boundaries. It does not define private wallet
-safeguards, storage or concurrency mechanisms, signing, execution, settlement,
-results, proofs, acknowledgements, or user interfaces.
+Terms, compatibility with Payment Requests, usage boundaries, wire
+compatibility, and component responsibilities. It does not define wallet-local
+enablement, storage or concurrency mechanisms, recurring scheduling, payment
+execution, settlement, payment-method-specific validation, or user interfaces.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are normative.
 
 ## Roles and consent
 
-- The **Allower** controls the funds and is the Payer for an executed
-  instruction.
-- The **Allowee** may submit Payment Instructions under an accepted Allowance.
-- The **Payee** receives one payment and need not be the Allowee.
+- The **Allower** controls the funds and is the Payer for a payment authorized
+  through an Allowance.
+- The **Allowee** is the authenticated Payment Request sender whose requests the
+  Allower's wallet may consider for automatic handling.
+- For Allowance matching, the authenticated Allowee is also the Payment Request
+  protocol's **Payee**.
+
+The Payment Endpoint details selected for a request may contain an invoice,
+address, or other destination that economically benefits another party. Paykit
+authenticates who sent the request and shared the endpoint details; it does not
+determine the ultimate economic beneficiary of those details.
 
 An Allowance is bound to the exact two Paykit Receiver References that own its
 Encrypted Link. One is the Allower and the other is the Allowee. Moving a
@@ -34,18 +47,18 @@ Either party MAY propose exact terms. The proposal is authenticated consent by
 its sender. The recipient MAY accept or reject it, but authority exists only
 after explicit acceptance. Consequently, the Allower consents either by
 proposing as Allower or by accepting an Allowee-authored proposal. An Allowance
-ID is a correlation identifier, not a bearer credential.
+ID is a correlation identifier, not a bearer credential, and is not added to a
+Payment Request.
 
 ## Transport and common rules
 
-All five V1 message kinds are Private Application Messages sent over the
+All four V1 message kinds are Private Application Messages sent over the
 Allower-Allowee Encrypted Link:
 
 - `paykit.allowance_proposal`
 - `paykit.allowance_acceptance`
 - `paykit.allowance_rejection`
 - `paykit.allowance_end`
-- `paykit.payment_instruction`
 
 Every kind is a FIFO Event Message. Receivers MUST preserve every valid event
 in send order. Event order is FIFO within each sending direction; V1 defines no
@@ -57,9 +70,8 @@ Every message is one UTF-8 JSON object and has these rules:
 
 - `version` MUST be the JSON integer `1`.
 - `kind` MUST be exactly one kind above.
-- `event_id`, `allowance_id`, `payment_instruction_id`, and all causal event
-  references MUST be canonical lowercase, hyphenated UUID-v4 strings where
-  present.
+- `event_id`, `allowance_id`, and all causal event references MUST be canonical
+  lowercase, hyphenated UUID-v4 strings where present.
 - Every JSON object is closed: unknown fields are invalid.
 - Duplicate object member names are invalid.
 - Missing required fields and explicit `null` for non-nullable fields are
@@ -71,8 +83,6 @@ A transport retry from the same authenticated sender MUST reuse the same Event
 ID and exact payload bytes. Within one authenticated Encrypted Link scope,
 Event ID dedupe applies across all Event Message kinds: reuse by the other
 sender or with different payload bytes is a conflict and MUST fail closed.
-Distinct Event IDs do not imply distinct Payment Instructions; semantic replay
-is specified below.
 
 ## Allowance Terms
 
@@ -81,14 +91,14 @@ is specified below.
 ```json
 {
   "asset": "btc",
-  "per_instruction_amount": {
+  "per_payment_amount": {
     "minimum": "0.0001",
     "maximum": "0.01"
   },
   "period_limits": [
     {
       "amount_limit": "0.03",
-      "instruction_count_limit": 5,
+      "payment_count_limit": 5,
       "period": {
         "kind": "anchored",
         "every": 1,
@@ -100,12 +110,6 @@ is specified below.
   "lifetime_amount_limit": "0.10",
   "active_from": "2026-06-01T00:00:00Z",
   "expires_at": null,
-  "allowed_payees": [
-    {
-      "pubky_public_key": "8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io",
-      "receiver_path": "merchant/server"
-    }
-  ],
   "allowed_payment_endpoint_identifiers": ["btc-lightning-bolt12"]
 }
 ```
@@ -116,12 +120,11 @@ follows:
 | Field | V1 rule |
 | --- | --- |
 | `asset` | Non-empty and contains no control characters. Matching is exact and case-sensitive. |
-| `per_instruction_amount` | `null`, or an inclusive range whose `minimum` is numerically no greater than `maximum`. |
+| `per_payment_amount` | `null`, or an inclusive range whose `minimum` is numerically no greater than `maximum`. |
 | `period_limits` | Array of zero or more limits. Each limit has at least one non-null limit. |
-| `lifetime_amount_limit` | `null`, or an amount ceiling for all admitted instructions. |
+| `lifetime_amount_limit` | `null`, or an amount ceiling across committed automatic payments and unresolved automatic reservations. |
 | `active_from` | `null`, or the first eligible instant, inclusive. |
 | `expires_at` | `null`, or the first ineligible instant, exclusive. It MUST be later than `active_from` when both exist. |
-| `allowed_payees` | `null`, or a non-empty array of unique Paykit Receiver References. |
 | `allowed_payment_endpoint_identifiers` | `null`, or a non-empty array of unique, valid Payment Endpoint Identifiers. Matching is exact. |
 
 `minimum`, `maximum`, `amount_limit`, and `lifetime_amount_limit` use the exact
@@ -129,22 +132,22 @@ follows:
 digit. Signs, exponent notation, and grouping separators are invalid. `.5`,
 `10.`, and leading or trailing zeros are valid. Implementations MUST compare
 values with exact decimal arithmetic, not floating point. Original spelling is
-preserved and is significant for semantic replay even when two spellings are
-numerically equal. Paykit defines no asset precision, normalization, registry,
-FX, or cross-asset comparison.
+preserved and remains significant when comparing retried proposal bytes, even
+when two spellings are numerically equal. Paykit defines no asset precision,
+normalization, registry, FX, or cross-asset comparison.
 
 A `period_limits` entry has required `amount_limit` and
-`instruction_count_limit` fields; either MAY be `null`, but not both.
-`instruction_count_limit` is an unsigned 64-bit JSON integer. All configured
-period entries apply independently and MUST be unique. Period and allowlist
-array order has no eligibility meaning. V1 sets no separate array cardinality
-limit beyond the complete-message byte limit.
+`payment_count_limit` fields; either MAY be `null`, but not both.
+`payment_count_limit` is an unsigned 64-bit JSON integer. All configured period
+entries apply independently and MUST be unique. Period and allowlist array
+order has no eligibility meaning. V1 sets no separate array cardinality limit
+beyond the complete-message byte limit.
 
-Every rule is conjunctive: an instruction qualifies only if all configured
-rules pass. V1 has no OR groups, deny rules, precedence, conversion, or implied
+Every rule is conjunctive: a payment qualifies only if all configured rules
+pass. V1 has no OR groups, deny rules, precedence, conversion, or implied
 defaults. At least one field other than `asset` MUST constrain the authority;
-terms with null amount, lifetime, time, and allowlist fields and no period
-limits are invalid.
+terms with null amount, lifetime, time, and endpoint-identifier fields and no
+period limits are invalid.
 
 Allowance Terms are immutable. Changed accepted terms require a proposal with
 a new Allowance ID and a separate End for the old Allowance. V1 defines no
@@ -183,74 +186,28 @@ is `[boundary(k), boundary(k+1))`. Thus a January 31 monthly anchor clamps in
 February and returns to day 31 when possible; a February 29 yearly anchor does
 the same across non-leap years.
 
-For either anchored style, include the candidate and prior admitted
-instructions whose wallet admission time `s` satisfies
+For either anchored style, include the candidate, committed automatic
+payments, and unresolved automatic reservations whose original wallet
+admission time `s` satisfies
 `boundary(k) <= s < boundary(k+1)` for the interval containing evaluation time
 `t`.
 
 For a rolling period, `L` is the same fixed-second conversion. When evaluating
-a candidate at `t`, include that candidate and prior admitted instructions with
-wallet admission time `s` satisfying `t - L < s <= t`. An instruction exactly
-on the lower boundary has left the window.
+a candidate at `t`, include that candidate, committed automatic payments, and
+unresolved automatic reservations with original wallet admission time `s`
+satisfying `t - L < s <= t`. A payment exactly on the lower boundary has left
+the window.
 
 For every applicable period, adding the candidate amount and count MUST leave
 the amount total numerically at or below `amount_limit` and the count at or
-below `instruction_count_limit` where those limits are non-null.
-Implementations MUST use checked duration, calendar, count, and boundary
-arithmetic. An overflow or unrepresentable boundary makes the evaluation
-ineligible; it MUST NOT wrap, saturate, or omit the affected rule.
+below `payment_count_limit` where those limits are non-null. Implementations
+MUST use checked duration, calendar, count, and boundary arithmetic. An overflow
+or unrepresentable boundary makes the evaluation ineligible; it MUST NOT wrap,
+saturate, or omit the affected rule.
 
-## Payees and destinations
-
-A Paykit Receiver Reference has this closed wire shape:
-
-```json
-{
-  "pubky_public_key": "8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io",
-  "receiver_path": "merchant/server"
-}
-```
-
-`pubky_public_key` MUST be canonical 52-character z-base-32 Pubky public-key
-text. `receiver_path` MUST be a valid Paykit Receiver Path. References compare
-by both exact validated fields.
-
-A Destination Reference has this closed wire shape:
-
-```json
-{
-  "payee": {
-    "pubky_public_key": "8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io",
-    "receiver_path": "merchant/server"
-  },
-  "payment_endpoint_identifier": "btc-lightning-bolt12",
-  "payment_endpoint_payload_sha256": "0228e06e9aff38b11f633089b8fab5c797ba907bde12440f1bbcd5464ce2e1ac"
-}
-```
-
-The digest is 64 lowercase hexadecimal characters computed from the complete
-reference and exact payload bytes as:
-
-```text
-SHA-256(
-  ASCII("paykit.allowance.destination.v1") || 0x00 ||
-  ASCII(payee_pubky_public_key) || 0x00 ||
-  ASCII(payee_receiver_path) || 0x00 ||
-  ASCII(payment_endpoint_identifier) || 0x00 ||
-  UTF8(exact_payload)
-)
-```
-
-The example digest is for the displayed reference and exact payload
-`{"value":"lno1example"}`. No Unicode normalization, JSON parsing, whitespace
-change, newline change, or other transformation occurs before hashing.
-
-When `allowed_payees` is non-null, the Payee MUST appear in it. When
-`allowed_payment_endpoint_identifiers` is non-null, the identifier MUST appear
-in it. The selected public endpoint is the exact file owned by that Payee's
-Pubky key under that receiver path and identifier. The terms asset and endpoint
-identifier are independent exact values; V1 MUST NOT infer an asset from
-identifier segments. There is no fallback endpoint selection in V1.
+When `lifetime_amount_limit` is non-null, the candidate amount plus all
+committed automatic payments and unresolved automatic reservations MUST be
+numerically at or below that limit.
 
 ## Lifecycle messages
 
@@ -265,14 +222,14 @@ identifier segments. There is no fallback endpoint selection in V1.
   "proposer_role": "allower",
   "terms": {
     "asset": "btc",
-    "per_instruction_amount": {
+    "per_payment_amount": {
       "minimum": "0.0001",
       "maximum": "0.01"
     },
     "period_limits": [
       {
         "amount_limit": "0.03",
-        "instruction_count_limit": 5,
+        "payment_count_limit": 5,
         "period": {
           "kind": "anchored",
           "every": 1,
@@ -284,12 +241,6 @@ identifier segments. There is no fallback endpoint selection in V1.
     "lifetime_amount_limit": "0.10",
     "active_from": "2026-06-01T00:00:00Z",
     "expires_at": null,
-    "allowed_payees": [
-      {
-        "pubky_public_key": "8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io",
-        "receiver_path": "merchant/server"
-      }
-    ],
     "allowed_payment_endpoint_identifiers": ["btc-lightning-bolt12"]
   }
 }
@@ -350,7 +301,7 @@ and outbound history.
 
 Lifecycle derivation is closed by this table:
 
-| Valid causally linked events | Derived state | May qualify instructions? |
+| Valid causally linked events | Derived state | May authorize automatic handling? |
 | --- | --- | --- |
 | Proposal only | `proposed` | No |
 | Proposal + Acceptance | `accepted` | Yes, while terms and wallet checks pass |
@@ -364,166 +315,181 @@ Lifecycle derivation is closed by this table:
 Rejection and End are terminal. Expiry is a trusted-time eligibility result,
 not an Event Message or another lifecycle state.
 
-## Payment Instruction
+## Payment Request integration
 
-Only the Allowee may send a Payment Instruction, and only after the referenced
-acceptance is known to it.
+An ordinary `paykit.payment_request` is the only V1 request that may exercise
+an Allowance. V1 defines no Allowance-specific payment message. Payment Request
+messages do not carry an Allowance ID and their existing lifecycle, validation,
+endpoint lookup, and proof rules remain unchanged.
 
-```json
-{
-  "version": 1,
-  "kind": "paykit.payment_instruction",
-  "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204",
-  "allowance_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44",
-  "proposal_event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d201",
-  "acceptance_event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202",
-  "payment_instruction_id": "ca30e14b-4d41-4c79-a5a0-9681a7bf3051",
-  "amount": {
-    "value": "0.0050",
-    "asset": "btc"
-  },
-  "destination": {
-    "payee": {
-      "pubky_public_key": "8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io",
-      "receiver_path": "merchant/server"
-    },
-    "payment_endpoint_identifier": "btc-lightning-bolt12",
-    "payment_endpoint_payload_sha256": "0228e06e9aff38b11f633089b8fab5c797ba907bde12440f1bbcd5464ce2e1ac"
-  }
-}
-```
+The request sender MUST be the Allowee on the Allowance's exact Encrypted Link.
+The immutable request terms statically match an Allowance only when the request
+asset exactly equals the Allowance asset, the request amount is within
+`per_payment_amount` when configured, and the eligible endpoint-identifier set
+is non-empty.
 
-The causal IDs MUST name the Allowance's bound proposal and acceptance. The
-Payment Amount MUST follow the syntax above, and its asset MUST exactly equal
-the terms asset. The amount and Destination Reference are exact; Paykit and the
-wallet MUST NOT substitute another amount, asset, Payee, receiver path,
-identifier, or payload. This does not constrain wallet-internal funding or
-routing through another asset; such conversion is outside Paykit and cannot
-change the instructed Payment Amount.
+The eligible endpoint-identifier set is the request's complete
+`accepted_payment_endpoint_identifiers` set when the Allowance allowlist is
+null. Otherwise it is the exact intersection of the request set and the
+Allowance allowlist. An automatic payment authorized by that Allowance MUST use
+only an identifier in that eligible set.
 
-The semantic replay key is the exact Allower Receiver Reference, Allowee
-Receiver Reference, Allowance ID, and Payment Instruction ID. The first valid
-event for that key binds its semantic content: causal IDs, exact amount strings,
-and exact destination fields. A later event with the same key is a semantic
-replay if all those fields are exactly equal, even when its Event ID differs. A
-difference in any field, including `1.0` versus `1.00`, is a semantic conflict
-and MUST fail closed. Event ID dedupe occurs independently before this
-classification.
+At the request's first automatic-handling decision, an Allowance is a candidate
+only when its immutable terms statically match, its lifecycle is accepted and
+not ended, and its active time window includes the wallet's trusted time. The
+request MUST be a known, valid proposal that remains proposed, unexpired, and
+neither rejected nor cancelled.
 
-Replay handling is deterministic:
+Because the request carries no Allowance ID, initial automatic handling
+requires exactly one candidate. On this first decision, the wallet MUST durably
+persist either the selected Allowance or a manual-only disposition; the
+disposition MUST be stored before any automatic side effect. The wallet MUST
+NOT automatically select among multiple candidates or later rematch a
+manual-only request because Allowances, local enablement, capacity, or endpoint
+availability changed.
 
-| Observation | Classification and effect |
-| --- | --- |
-| Same Event ID, sender, and bytes | Transport duplicate; no new logical instruction. |
-| Same semantic key and fields, never admitted | Semantic replay; the wallet MAY reevaluate the same logical instruction. Its first admission consumes usage once. |
-| Same semantic key and fields, already admitted | Semantic replay; no new execution or usage. |
-| Same semantic key with any changed field | Conflict; fail closed. |
-| Different Payment Instruction ID | Distinct protocol instruction, still subject to wallet replay and policy checks. |
+The wallet resolves current Payment Endpoint details using the normal Payment
+Request rules. Private/current details SHOULD be preferred, and a wallet MAY
+permit reusable public details by local policy. A stale, expired, consumed,
+missing, invalid, or uncertain endpoint MUST NOT be used for automatic payment.
+Allowances add no destination digest, public-endpoint requirement, or fallback
+selection rule.
 
-A local decline does not change protocol lifecycle or burn the Payment
-Instruction ID. The wallet MAY retain a stricter terminal local decision, but
-V1 does not communicate it to the Allowee.
+Zero or multiple candidates, disabled local automatic handling, failed
+endpoint resolution, unsupported payment methods, or any stricter wallet check
+preserve the request's ordinary manual flow; they do not cause an automatic
+rejection or cancellation. Durable local processing order, not a claimed sender
+timestamp, determines this boundary.
 
-V1 defines no Payment Instruction result, acknowledgement, acceptance,
-rejection, proof, or cancellation message. Receipts remain separate objects;
-the existing Payment Proof is specific to Payment Requests and is not reused.
+If a selected request becomes ineligible before an irreversible payment side
+effect, the wallet records the one-time request or current Billing Period as
+manual-only. For a Recurring Payment Request, this does not remove the pinned
+Allowance from later Billing Periods. Once an attempt crosses that boundary,
+its outcome follows the reservation and wallet-owned retry rules below.
 
-## Destination Observation
+An accepted Allowance permits automatic handling but never requires it. A
+wallet-local enablement setting, consent presentation, risk controls, and the
+final decision to pay are outside Paykit. A wallet MAY decline or require fresh
+approval even when all shared terms pass, but it MUST NOT expand the shared
+authority.
 
-The Allower side compares the exact current public Payment Endpoint with the
-instruction's Destination Reference:
+### One-time and recurring requests
 
-| Observation | Exact result |
-| --- | --- |
-| `Match` | Fetch succeeded with a valid UTF-8 payload whose domain-separated digest equals the reference. |
-| `Missing` | The exact public endpoint read returned `404`, `GONE`, or an empty file. |
-| `Mismatch` | Fetch succeeded with valid UTF-8, but its digest differs. |
-| `Unverifiable` | Transport, server, parsing, non-UTF-8, or other failure prevents an exact conclusion. |
+The same Allowance Terms apply to one-time and Recurring Payment Requests. V1
+has no separate recurrence permission.
 
-An observation is point-in-time evidence, not authorization, guaranteed
-freshness, or proof of later availability. Replacement yields Mismatch and
-deletion yields Missing. A wallet MUST require Match and re-fetch the exact
-endpoint near its irreversible execution step; a cached or earlier Match alone
-is insufficient. If End, expiry, Mismatch, Missing, or Unverifiable is observed
-before that step, the wallet MUST NOT start a new payment for the instruction.
+For a one-time request with a selected Allowance, a wallet MAY send the ordinary
+Payment Request Acceptance automatically. Any Payment Proof remains optional
+and follows the unchanged Payment Request rules. The semantic payment key is
+the exact Allower and Allowee Receiver References plus the Payment Request ID.
+That key may consume Allowance usage at most once for a successful or unresolved
+payment.
 
-Authenticated overwrite or deletion in the Payee's Pubky storage is V1's
-replacement or withdrawal mechanism. The public read provides no revision
-history, tombstone, endpoint expiry, or global freshness proof. Private Payment
-Lists and private or embedded destination descriptors are outside V1.
+A wallet MAY automatically accept a Recurring Payment Request with a selected
+Allowance. At acceptance it pins that Allowance but does not reserve or consume
+usage. Static terms and current lifecycle eligibility are checked at
+acceptance; current period and lifetime capacity are checked when each payment
+becomes due.
+
+For every Billing Period, the wallet scheduler supplies the eligible period and
+the wallet rechecks the pinned Allowance before automatic payment. The semantic
+payment key is the exact Allower and Allowee Receiver References, Payment
+Request ID, and the validated `starts_at` and `ends_at` Billing Period instants.
+Equivalent timestamp spellings for the same instants MUST NOT create distinct
+keys. The Allowance does not calculate the schedule or prove that a Billing
+Period belongs to the request.
+
+Ending or expiring the pinned Allowance prevents new automatic payments.
+Unavailable period or lifetime capacity blocks the current Billing Period;
+later Billing Periods are evaluated independently against then-current
+capacity. None of these conditions rebinds the request to another Allowance,
+rejects or cancels the Payment Request, or ends an accepted Subscription.
+Subsequent handling is a wallet decision under the existing Payment Request
+lifecycle.
 
 ## Eligibility, usage, and execution boundary
 
-The wallet evaluates at trusted time `t`. Shared eligibility requires all of:
+Immediately before each automatic payment, the wallet evaluates at trusted
+time `t`. Shared eligibility requires all of:
 
-- authenticated Allowee sender and matching causal lifecycle;
-- accepted and not ended authority;
-- active and unexpired terms;
+- the persisted Request-to-Allowance association and exact authenticated party
+  scope;
+- accepted, active, unexpired, and not-ended Allowance authority;
+- an accepted and not-cancelled Payment Request;
 - exact asset, inclusive amount range, all period limits, lifetime limit, and
-  any configured Payee or endpoint-identifier allowlist;
-- no semantic conflict, and no prior admission for the semantic replay key; and
-- a current `Match` Destination Observation.
+  any configured endpoint-identifier allowlist;
+- no conflicting or unresolved lifecycle history;
+- no successful or unresolved payment, including an in-flight, pending, or
+  unknown payment, for the semantic payment key through any automatic or manual
+  path, and no unresolved Allowance reservation for it; and
+- a current, usable Payment Endpoint allowed by the request and Allowance.
 
-These are maximum shared terms, not a promise. The wallet MAY apply stricter
-private safeguards or decline any instruction, but MUST NOT expand the shared
-authority.
+Usage is wallet-owned durable state. Payment Request Acceptance consumes no
+capacity. A manual payment consumes no Allowance capacity, but its successful
+or unresolved occurrence blocks automatic execution for the same semantic
+payment key. Counted usage consists only of committed automatic payments and
+unresolved automatic reservations; released reservations are excluded. An
+automatic payment reserves one count and the exact requested Payment Amount
+before an irreversible payment side effect, using concurrency control. Fees do
+not add usage and refunds do not restore committed usage.
 
-Usage is wallet-owned durable state. An instruction consumes one count and its
-exact Payment Amount once the wallet admits it for execution. The wallet is
-responsible for recording admission with concurrency control before an
-irreversible side effect. Declined instructions consume nothing. Once admitted,
-failed or unknown attempts remain counted; fees do not add usage and refunds do
-not restore it. Replays never create more than one usage entry for the same
-semantic key. V1 does not communicate usage or payment outcome to the Allowee.
+A verified successful payment commits the reservation. A confirmed terminal
+failure before settlement releases it. A pending, unknown, or recovery-incomplete
+outcome remains reserved until reconciled. Retry policy is wallet-owned, but a
+retry MUST NOT create two successful payments or two committed usage entries
+for one semantic payment key.
+
+The wallet MUST recheck both the Allowance and Payment Request lifecycle near
+the irreversible execution step. If an End or cancellation is observed before
+any irreversible payment side effect, the wallet MUST abort and release the
+reservation. Once the payment is irreversible, later lifecycle events affect
+only future payments and the in-flight outcome remains reserved until
+reconciled. V1 does not communicate Allowance usage or selection to the
+Allowee; the existing Payment Request messages communicate acceptance and
+proof.
 
 ## Durability and recovery
 
-Receivers SHOULD durably persist received stream items, their authenticated
-link scope, raw bytes, and validation result before wallet side effects.
-Replayed events after a checkpoint loss are expected and use the dedupe rules
-above.
+Receivers SHOULD durably persist received stream items, authenticated link
+scope, raw bytes, and validation results before wallet side effects. Replayed
+events after a checkpoint loss are expected and use Event ID and Payment
+Request dedupe rules.
 
+The wallet/runtime MUST durably retain Request-to-Allowance associations,
+semantic payment keys, and usage reservations before automatic execution.
 Validated Encrypted Link recovery for the same Receiver References does not
-require fresh Allowance consent when the complete durable event history is
-retained. While link recovery is required, or when lifecycle or dedupe history
-is incomplete, the SDK MUST NOT qualify Payment Instructions for automatic
-wallet handling. A new link does not reconstruct missing Allowance history.
+require fresh Allowance consent when the complete durable event history and
+wallet-owned state are retained.
+
+While link recovery is required, or when lifecycle, request, association,
+dedupe, or usage history is incomplete, the wallet MUST NOT perform automatic
+payment under an Allowance. The underlying Payment Request remains available to
+the ordinary manual flow. A new link does not reconstruct missing history.
 
 ## Compatibility and size
 
-V1 is closed-world. Unknown fields, enum values, digest encodings, or period
-shapes inside a recognized V1 kind are invalid. Unsupported versions and
-unknown kinds MUST NOT be interpreted as V1 or cause side effects. Durable
-private-stream implementations MUST retain their raw bytes for audit and future
-upgrade. Any recoverably Allowance-correlated unknown kind or unsupported
-version, including a lifecycle or Payment Instruction message, MUST block
+V1 is closed-world. Unknown fields, enum values, or period shapes inside a
+recognized V1 kind are invalid. Unsupported versions and unknown kinds MUST
+NOT be interpreted as V1 or cause side effects. Durable private-stream
+implementations MUST retain their raw bytes for audit and future upgrade. Any
+recoverably Allowance-correlated unknown kind or unsupported version MUST block
 automatic handling for that Allowance until a compatible implementation or
 explicit review resolves it. Unrelated unknown kinds do not change V1
 Allowance state. Extensions require a new version or message kind.
 
-Representative compact encodings fit the 1000-byte cap:
-
-| Message | Representative content | Compact UTF-8 bytes |
-| --- | --- | ---: |
-| Proposal | Complete terms example above | 700 |
-| Acceptance / rejection | Common IDs and proposal reference | 213 / 212 |
-| End | Common IDs and both causal references | 267 |
-| Payment Instruction | Complete example above | 667 |
-
-The values are planning examples, not alternate limits. Implementations MUST
-measure the actual complete serialized message. Large arrays or long decimal
-spellings may exceed 1000 bytes and MUST be rejected as a whole; V1 has no
+Every complete message must fit the 1000-byte limit. Large arrays or long
+decimal spellings may exceed it and MUST be rejected as a whole; V1 has no
 fragmentation or indirection.
 
 ## Component responsibilities
 
 | Component | V1 responsibility |
 | --- | --- |
-| Paykit Protocol / Paykit Library | Closed wire types, parsing, serialization, structural validation, causal correlation helpers, digest calculation, and stateless destination observation helpers. |
-| Paykit SDK | Durable ordered inbound and outbound events, Event ID dedupe, semantic replay classification, lifecycle derivation, correlation, recovery, and wallet-facing evidence. |
-| Wallet | Consent UI, trusted time, private safeguards, usage and concurrency, freshness recheck, capacity, payment-method validation, signing, execution, and settlement. |
+| Paykit Protocol / Paykit Library | Closed Allowance lifecycle wire types, parsing, serialization, structural validation, and stateless lifecycle correlation helpers. |
+| Paykit SDK/runtime | Durable ordered events, Event ID dedupe, Allowance and Payment Request lifecycle derivation, recovery, and wallet-facing views. |
+| Wallet | Local auto-payment enablement, Allowance matching and pinning, trusted time, private safeguards, usage and concurrency, endpoint and payment-method validation, scheduling, capacity, signing, execution, and settlement. |
 
-The Library MUST remain stateless and does not authorize payment. The SDK
-coordinates evidence and MUST NOT turn eligibility into a payment decision.
-Session creation, Pubky capabilities, key rotation, request timeout, and
-payment execution remain caller or wallet responsibilities.
+The Library MUST remain stateless and does not authorize payment. The
+SDK/runtime coordinates evidence and MUST NOT turn eligibility into a payment
+decision. Session creation, Pubky capabilities, key rotation, request timeout,
+and payment execution remain caller or wallet responsibilities.
