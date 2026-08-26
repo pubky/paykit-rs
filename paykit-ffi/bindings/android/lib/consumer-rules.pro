@@ -32,6 +32,13 @@
     <init>(...);
 }
 
+# libjnidispatch looks up Native/Structure/CallbackReference members by JNI name.
+# Subclasses such as com.sun.jna.ptr.IntByReference are kept by the extends rules.
+# See https://github.com/java-native-access/jna/blob/master/www/FrequentlyAskedQuestions.md#jna-on-android
+-keep class com.sun.jna.* { *; }
+-keep class * extends com.sun.jna.* { *; }
+-keepclassmembers class * extends com.sun.jna.* { public *; }
+
 # JNA's AAR references desktop AWT types that are absent on Android.
 -dontwarn java.awt.Component
 -dontwarn java.awt.GraphicsEnvironment
