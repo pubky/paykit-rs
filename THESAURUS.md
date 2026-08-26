@@ -265,7 +265,7 @@
 - **Related terms**: Payee, Counterparty, Allower, Allowance
 
 ### Payee
-- **Definition**: The party receiving value in a payment flow. In an Allowance payment, the Payee need not be the Allowee or the party that supplied the payment destination.
+- **Definition**: The party receiving value in a payment flow and publishing or sharing Payment Endpoints. For Allowance matching, the authenticated Request sender is both Allowee and protocol Payee; Paykit does not determine who ultimately benefits from the selected endpoint payload.
 - **NOT**: Always a Linked Peer.
 - **Synonyms to AVOID**: receiver when it obscures payment role
 - **Related terms**: Payer, Payment List, Payment Endpoint, Allowee, Allowance
@@ -275,10 +275,10 @@
 > Proposed vocabulary for Paykit Allowances. These terms are canonical for the proposal; wire formats and public APIs remain to be specified.
 
 ### Allowance
-- **Definition**: Shared, scoped permission granted through Paykit by an Allower to an Allowee to request qualifying payments from the Allower's wallet without fresh approval each time. The Payee for each payment may be the Allowee or another party.
-- **NOT**: A balance, transfer of custody, Payment Request, Subscription, wallet-local auto-approval rule, bearer credential, or guarantee of payment.
+- **Definition**: Shared, scoped permission granted through Paykit by an Allower to an Allowee so the Allower's wallet may automatically handle qualifying ordinary Payment Requests from that Allowee without fresh approval each time.
+- **NOT**: A balance, transfer of custody, Payment Request, Subscription, wallet-local auto-payment setting, bearer credential, or guarantee of payment.
 - **Synonyms to AVOID**: subscription, standing order, spending account
-- **Related terms**: Allower, Allowee, Allowance ID, Payer, Payee, Payment Amount
+- **Related terms**: Allower, Allowee, Allowance ID, Payer, Payee, Payment Request, Payment Amount
 
 ### Allower
 - **Definition**: The party that grants an Allowance and whose wallet controls the funds. The Allower is the Payer when an Allowance payment is executed.
@@ -287,14 +287,14 @@
 - **Related terms**: Allowance, Allowee, Payer, Payee
 
 ### Allowee
-- **Definition**: The party authorized to use an Allowance by requesting qualifying payments under its terms.
-- **NOT**: Necessarily the Payee. Holding an Allowance does not grant custody of the Allower's funds or access to the Allower's payment credentials.
-- **Synonyms to AVOID**: beneficiary, payee when only the Allowance role is meant
-- **Related terms**: Allowance, Allower, Payee, Allowance ID
+- **Definition**: The exact authenticated Linked Peer whose ordinary Payment Requests the Allower's wallet may handle automatically under an Allowance. For that flow, the Allowee is also the protocol Payee.
+- **NOT**: The inferred ultimate beneficiary of an opaque Payment Endpoint Payload. Holding an Allowance does not grant custody of the Allower's funds or access to the Allower's payment credentials.
+- **Synonyms to AVOID**: beneficiary, payment recipient when the authenticated Allowance role is meant
+- **Related terms**: Allowance, Allower, Payee, Allowance ID, Linked Peer, Payment Request
 
 ### Allowance ID
-- **Definition**: A stable identifier for the lifetime of one Allowance, used to correlate its shared terms, lifecycle, and payment instructions.
-- **NOT**: A bearer credential, secret, Payment Request ID, Event ID, or Payment Reference. Possession of an Allowance ID alone grants no authority.
+- **Definition**: A stable identifier for the lifetime of one Allowance, used to correlate its shared terms and lifecycle and to record wallet-local automatic-payment usage.
+- **NOT**: A bearer credential, secret, Payment Request ID, Event ID, or Payment Reference. Payment Requests do not carry an Allowance ID, and possession of one alone grants no authority.
 - **Synonyms to AVOID**: allowance token, spending key
 - **Related terms**: Allowance, Allower, Allowee, Payment Request ID, Event ID
 
@@ -372,7 +372,7 @@ These terms must not be used for new Paykit domain/protocol/component names:
 - **SubscriptionAgreement** → use **Payment Request** or **Recurring Payment Request**, depending on whether recurrence is present.
 - **subscription_id** → use **Payment Request ID** for the long-lived request identifier.
 - **push subscription** → avoid for Paykit protocol concepts. Payer-initiated recurring payments are wallet/runtime scheduling outside Payment Request v0.2.
-- **pull subscription** → use **Recurring Payment Request** for payee-initiated recurring requests. Future payee-pull authorization should be named separately.
+- **pull subscription** → use **Recurring Payment Request** for the recurring request and **Allowance** for optional prior authority to handle its payments automatically; neither gives a counterparty custody or withdrawal capability.
 - **payment_receipt** / **PaymentReceipt** for method-specific proof → use **Payment Proof**.
 - **accepted_methods** → use **accepted Payment Endpoint Identifiers** or the concrete field `accepted_payment_endpoint_identifiers`.
 - **payment_attempt** as a protocol message → use local payment execution state; do not model it as a Paykit Event Message in Payment Request v0.2.
