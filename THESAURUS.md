@@ -13,7 +13,7 @@
 - **Related terms**: Paykit Protocol, Paykit Library, Paykit SDK, Payment Request
 
 ### Paykit Protocol
-- **Definition**: The domain rules, data model, and flows for payment discovery and exchange through Pubky Routing, including Payment Lists, Private Payment Lists, Payment Requests, Allowances, Payment Instructions, Receipts, and their related identifiers and events.
+- **Definition**: The domain rules, data model, and flows for payment discovery and exchange through Pubky Routing, including Payment Lists, Private Payment Lists, Payment Requests, Allowances, Receipts, and their related identifiers and events.
 - **NOT**: A specific Rust implementation or runtime.
 - **Synonyms to AVOID**: routing network protocol, Paykit SDK protocol
 - **Related terms**: Payment List, Private Payment List, Payment Endpoint Identifier, Payment Request, Pubky Routing
@@ -40,7 +40,7 @@
 - **Definition**: The combination of a Pubky public key and Paykit Receiver Path that identifies one concrete Paykit app/runtime folder.
 - **NOT**: Only the Pubky public key, a human contact, or a Payment Endpoint.
 - **Synonyms to AVOID**: receiver id, receiver when the identity plus path distinction matters
-- **Related terms**: Paykit Receiver Path, Pubky Routing, Payment Endpoint, Destination Reference
+- **Related terms**: Paykit Receiver Path, Pubky Routing, Payment Endpoint
 
 ### Language Bindings
 - **Definition**: Distribution/integration surfaces for Paykit Library or Paykit SDK in languages or platforms such as Swift and Kotlin.
@@ -134,7 +134,7 @@
 - **Definition**: A concrete amount of value in a payment flow, represented as decimal `value` text plus an `asset` string. Paykit does not define a global asset registry. A protocol must define any asset matching it requires and must not assume every Payment Endpoint Identifier follows the recommended segmented convention.
 - **NOT**: A Payment Reference, Payment Endpoint Payload, or payment execution state.
 - **Synonyms to AVOID**: currency when naming the asset field, amount string when both value and asset are meant
-- **Related terms**: Asset, Payment Request, Allowance Terms, Payment Instruction, Receipt, Payment Proof
+- **Related terms**: Asset, Payment Request, Allowance Terms, Receipt, Payment Proof
 
 ### Rail
 - **Definition**: The settlement system carrying the asset, such as Lightning, Bitcoin, SEPA, ACH, or Revolut; in Payment Endpoint Identifiers that follow the recommended segmented convention, this appears as the second segment.
@@ -157,7 +157,7 @@
 - **Related terms**: Encrypted Link, Private Message Kind, Private Payment List, Receipt Access
 
 ### Private Message Kind
-- **Definition**: The kind discriminator for private Paykit messages, e.g. `paykit.private_payment_list`, `paykit.receipt_access`, `paykit.payment_request`, or `paykit.payment_instruction`.
+- **Definition**: The kind discriminator for private Paykit messages, e.g. `paykit.private_payment_list`, `paykit.receipt_access`, `paykit.payment_request`, or `paykit.allowance_proposal`.
 - **NOT**: The Private Application Message body or the Rust enum/type that may represent it in an implementation.
 - **Synonyms to AVOID**: private message type when naming the protocol concept
 - **Related terms**: Private Application Message, Private Payment List, Receipt Access
@@ -169,16 +169,16 @@
 - **Related terms**: Private Application Message, Private Message Kind, Event Message, Private Payment List
 
 ### Event Message
-- **Definition**: One FIFO private Paykit message where every valid message matters and receivers must process messages in send order, such as Receipt Access, Payment Request lifecycle messages, Allowance lifecycle messages, and Payment Instructions. An Event Message uses the Private Application Message base shape and adds an Event ID.
+- **Definition**: One FIFO private Paykit message where every valid message matters and receivers must process messages in send order, such as Receipt Access, Payment Request lifecycle messages, and Allowance lifecycle messages. An Event Message uses the Private Application Message base shape and adds an Event ID.
 - **NOT**: A Latest-State Message where newer messages supersede older messages of the same kind.
 - **Synonyms to AVOID**: event-like message when naming the protocol concept
 - **Related terms**: Private Application Message, Private Message Kind, Latest-State Message, Receipt Access, Event ID
 
 ### Event ID
 - **Definition**: A stable UUID-v4 identifier carried by an Event Message, used for idempotent storage, replay dedupe, local indexing, and recovery.
-- **NOT**: An Allowance ID, Payment Instruction ID, Payment Request ID, Payment Reference, relationship identifier, or a hash of the Event Message payload.
+- **NOT**: An Allowance ID, Payment Request ID, Payment Reference, relationship identifier, or a hash of the Event Message payload.
 - **Synonyms to AVOID**: event reference, message reference when naming the protocol identifier
-- **Related terms**: Event Message, Allowance ID, Payment Instruction ID, Payment Request ID
+- **Related terms**: Event Message, Allowance ID, Payment Request ID
 
 ### Encrypted Link Recovery Marker
 - **Definition**: A minimal public Pubky marker that one peer publishes to signal that a counterparty should relink an Encrypted Link. Marker paths are pairwise-derived; marker payloads carry only version, kind, recovery attempt ID, and creation time.
@@ -265,7 +265,7 @@
 - **Related terms**: Payee, Counterparty, Allower, Allowance
 
 ### Payee
-- **Definition**: The party receiving value in a payment flow and publishing or sharing Payment Endpoints. In Allowances V1, the Payee is identified by the exact Paykit Receiver Reference that owns the public Payment Endpoint and need not be the Allowee.
+- **Definition**: The party receiving value in a payment flow and publishing or sharing Payment Endpoints. For Allowance matching, the authenticated Request sender is both Allowee and protocol Payee; Paykit does not determine who ultimately benefits from the selected endpoint payload.
 - **NOT**: Always a Linked Peer.
 - **Synonyms to AVOID**: receiver when it obscures payment role
 - **Related terms**: Payer, Payment List, Payment Endpoint, Allowee, Allowance
@@ -273,10 +273,10 @@
 ## Allowances
 
 ### Allowance
-- **Definition**: Shared, scoped permission granted through Paykit by an Allower to an Allowee to submit qualifying Payment Instructions without a new Allowance consent exchange for each one. The Allower's wallet still decides whether to pay, and the Payee may be the Allowee or another party.
-- **NOT**: A balance, transfer of custody, Payment Request, Subscription, wallet-local auto-approval rule, bearer credential, or guarantee of payment.
+- **Definition**: Shared, scoped permission granted through Paykit by an Allower to an Allowee that the Allower's wallet may use to handle qualifying Payment Requests automatically without fresh approval for each payment.
+- **NOT**: A balance, transfer of custody, Payment Request, Subscription, wallet-local auto-payment setting, bearer credential, or guarantee of payment.
 - **Synonyms to AVOID**: subscription, standing order, spending account
-- **Related terms**: Allower, Allowee, Allowance ID, Allowance Terms, Payment Instruction
+- **Related terms**: Allower, Allowee, Allowance ID, Allowance Terms, Payment Request
 
 ### Allower
 - **Definition**: The party that grants an Allowance and whose wallet controls the funds. The Allower is the Payer when an Allowance payment is executed.
@@ -285,46 +285,22 @@
 - **Related terms**: Allowance, Allowee, Payer, Payee
 
 ### Allowee
-- **Definition**: The party authorized to use an accepted Allowance by submitting qualifying Payment Instructions.
-- **NOT**: Necessarily the Payee. Holding an Allowance does not grant custody or access to the Allower's payment credentials.
-- **Synonyms to AVOID**: beneficiary, payee when only the Allowance role is meant
-- **Related terms**: Allowance, Allower, Payee, Payment Instruction
+- **Definition**: The party whose qualifying Payment Requests may be handled automatically under an accepted Allowance. For Allowance matching, the Allowee is the authenticated Request sender and protocol Payee on the exact Encrypted Link.
+- **NOT**: Necessarily the ultimate economic beneficiary of the selected Payment Endpoint Payload. Holding an Allowance does not grant custody or access to the Allower's payment credentials.
+- **Synonyms to AVOID**: beneficiary, payment recipient when the authenticated Allowance role is meant
+- **Related terms**: Allowance, Allower, Payee, Payment Request
 
 ### Allowance ID
 - **Definition**: A stable UUID-v4 identifier for one immutable Allowance proposal and its lifecycle, scoped to its exact Allower and Allowee Receiver References.
-- **NOT**: A bearer credential, secret, Payment Instruction ID, Payment Request ID, Event ID, or Payment Reference.
+- **NOT**: A bearer credential, secret, Payment Request field, Payment Request ID, Event ID, or Payment Reference.
 - **Synonyms to AVOID**: allowance token, spending key
-- **Related terms**: Allowance, Allowance Terms, Event ID, Payment Instruction
+- **Related terms**: Allowance, Allowance Terms, Event ID, Payment Request
 
 ### Allowance Terms
-- **Definition**: The immutable, shared maximum authority of one Allowance: its asset, amount and count limits, time bounds, allowed Payee Receiver References, and allowed Payment Endpoint Identifiers.
+- **Definition**: The immutable, shared maximum authority of one Allowance: its asset, per-payment and usage limits, time bounds, and allowed Payment Endpoint Identifiers.
 - **NOT**: Private wallet safeguards, usage state, reserved funds, or a payment schedule.
 - **Synonyms to AVOID**: allowance policy when the shared wire object is meant
-- **Related terms**: Allowance, Payment Amount, Paykit Receiver Reference, Payment Endpoint Identifier
-
-### Payment Instruction
-- **Definition**: An Allowee-authored Event Message that asks the Allower's wallet to consider one exact Payment Amount and Destination Reference under an accepted Allowance.
-- **NOT**: A Payment Request, authorization decision, payment execution, result, Payment Proof, or Receipt.
-- **Synonyms to AVOID**: allowance charge, pull request, payment attempt
-- **Related terms**: Allowance, Payment Instruction ID, Payment Amount, Destination Reference
-
-### Payment Instruction ID
-- **Definition**: A stable UUID-v4 identifier for the semantic identity of one Payment Instruction within an Allowance and its exact party scope, across transport retries or replays.
-- **NOT**: An Event ID, Allowance ID, Payment Request ID, or proof that an instruction was executed.
-- **Synonyms to AVOID**: charge id, instruction event id
-- **Related terms**: Payment Instruction, Event ID, Allowance ID
-
-### Destination Reference
-- **Definition**: The exact Payee Receiver Reference, Payment Endpoint Identifier, and digest of the expected public Payment Endpoint Payload named by a Payment Instruction.
-- **NOT**: The Payment Endpoint Payload itself, a private Payment List entry, an authorization decision, or proof that the destination remains current.
-- **Synonyms to AVOID**: destination address, endpoint snapshot
-- **Related terms**: Payment Instruction, Paykit Receiver Reference, Payment Endpoint Identifier, Payment Endpoint Payload, Destination Observation
-
-### Destination Observation
-- **Definition**: Point-in-time evidence comparing a Destination Reference with the exact Payee-scoped public Payment Endpoint currently observable through Pubky Routing, classified as Match, Missing, Mismatch, or Unverifiable.
-- **NOT**: Authorization, guaranteed freshness, settlement evidence, or proof that the endpoint will remain unchanged.
-- **Synonyms to AVOID**: destination validation, destination approval
-- **Related terms**: Destination Reference, Payment Endpoint, Pubky Routing
+- **Related terms**: Allowance, Payment Amount, Payment Request, Payment Endpoint Identifier
 
 ## Payment Requests
 
@@ -400,7 +376,7 @@ These terms must not be used for new Paykit domain/protocol/component names:
 - **SubscriptionAgreement** → use **Payment Request** or **Recurring Payment Request**, depending on whether recurrence is present.
 - **subscription_id** → use **Payment Request ID** for the long-lived request identifier.
 - **push subscription** → avoid for Paykit protocol concepts. Payer-initiated recurring payments are wallet/runtime scheduling outside Payment Request v0.2.
-- **pull subscription** -> use **Recurring Payment Request** for recurring requests or **Allowance** for prior authority to submit Payment Instructions; neither gives a counterparty custody or withdrawal capability.
+- **pull subscription** -> use **Recurring Payment Request** for the recurring request and **Allowance** for optional prior authority to handle its payments automatically; neither gives a counterparty custody or withdrawal capability.
 - **payment_receipt** / **PaymentReceipt** for method-specific proof → use **Payment Proof**.
 - **accepted_methods** → use **accepted Payment Endpoint Identifiers** or the concrete field `accepted_payment_endpoint_identifiers`.
 - **payment_attempt** as a protocol message → use local payment execution state; do not model it as a Paykit Event Message in Payment Request v0.2.
@@ -442,10 +418,6 @@ Protocol concepts:
 - Allowance Terms
 - Allower
 - Allowee
-- Payment Instruction
-- Payment Instruction ID
-- Destination Reference
-- Destination Observation
 - Receipt
 - Encrypted Receipt
 - Receipt ID
