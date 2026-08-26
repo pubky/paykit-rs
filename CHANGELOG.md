@@ -7,6 +7,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Fixed
+- The Android AAR now also ships targeted R8 consumer keep rules for the UniFFI/JNA FFI surface, in addition to the existing rustls platformverifier keep.
+
 ## [0.1.0-rc46] - 2026-08-20
 
 ### Fixed
