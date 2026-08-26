@@ -18,8 +18,9 @@ Allowance-specific payment execution phase.
   and Event ID dedupe records. Allowance lifecycle views can initially be
   derived from those records, as Payment Request views are today.
 - Ordinary Payment Requests are the only way to exercise an Allowance. Their
-  messages, lifecycle, endpoint resolution, and Payment Proof behavior remain
-  unchanged.
+  wire messages and endpoint resolution remain unchanged. Cancellation stops
+  new execution but still permits proof for a payment that was already past its
+  irreversible boundary.
 - `paykit-ffi` already exposes SDK features through feature-local UniFFI
   modules. Swift and Kotlin should remain thin bindings over settled Rust
   behavior.
@@ -50,6 +51,14 @@ Rough scope:
 - Define the one-time and recurring integration boundary: automatic acceptance
   may use an Allowance, acceptance consumes no capacity, and the wallet pins and
   rechecks the selected Allowance for each Billing Period payment.
+- Define manual recovery after automatic handling stops: proposed requests keep
+  their ordinary response flow only while still actionable, while a
+  non-cancelled accepted-but-unpaid one-time request or Billing Period needs a
+  wallet-local explicit-payment path guarded by durable execution and
+  reservation state.
+- Resolve crossing cancellation: a qualifying proof may report an execution
+  that was already irreversible, and a crossing Acceptance may be recorded,
+  while cancellation remains the terminal authorization state.
 - Record the boundary between Paykit coordination and wallet-owned enablement,
   policy, usage, reservation, and execution.
 
@@ -100,6 +109,15 @@ Rough scope:
 - Add only the transaction logic needed to check those preconditions and append
   outbound intent atomically. Do not create a generic lifecycle framework or
   migrate unrelated features.
+- Align Payment Request proof submission and derivation with crossing
+  cancellation: a proof for a previously accepted request may be recorded after
+  cancellation while the lifecycle remains cancelled. The wallet remains
+  responsible for establishing that execution crossed its irreversible boundary
+  first.
+- Cover both event orders in SDK derivation tests: Acceptance then Cancellation
+  then Proof, and a payee's Cancellation crossing the payer's Acceptance and
+  Proof. In both cases, retain the recorded Acceptance and Proof while the
+  lifecycle remains cancelled.
 - Verify that an application can combine an ordinary Payment Request record
   with active Allowance views without changing or annotating the Request.
 
@@ -146,10 +164,18 @@ Rough scope:
   durable first-processing disposition, non-retroactive handling, pinned
   recurring association, per-Billing-Period rechecks, duplicate prevention
   across manual and automatic paths, automatic-payment-only capacity,
-  terminal-failure release, and unknown-outcome reservation.
+  terminal-failure release, unknown-outcome reservation, and a wallet-local
+  accepted-but-unpaid explicit-payment path. That path must not treat every
+  accepted request as payable or widen the existing payer-response query. It is
+  available only for a non-terminal occurrence with no unresolved automatic
+  attempt or reservation and no successful or unresolved automatic or manual
+  payment.
 - Document that Payment Endpoint selection, Acceptance, cancellation, payment,
-  and Payment Proof follow the existing Payment Request behavior. Uncertain
-  automatic handling falls back to the manual flow.
+  and Payment Proof follow Payment Request behavior. A failure before Acceptance
+  keeps the proposed manual flow only while the request remains actionable; a
+  safe failure after Acceptance on a non-cancelled request uses the
+  explicit-payment path without another Acceptance. Proof remains valid for an
+  execution that crossed the irreversible boundary before cancellation.
 - Check that derived views remain reasonable for representative message
   histories; add an index only through a separately reviewed re-plan if the
   measured result requires one.
