@@ -266,9 +266,10 @@ example, a subscription-gated service may create the Recurring Payment Request,
 while the payer's wallet schedules each payment and submits its proof. The
 service validates each period's payment and applies its own access policy.
 
-A Recurring Payment Request is payer-controlled coordination, not a payee-pull
-allowance. Any future mechanism that authorizes a payee to initiate or withdraw
-payments would be a separate payment-execution feature.
+A Recurring Payment Request is payer-controlled coordination, not an
+[Allowance](allowances.md). The separate Allowances V1 protocol gives an
+Allowee prior authority to submit qualifying Payment Instructions, but it does
+not give the Allowee custody, withdrawal capability, or control of execution.
 
 ## paykit.payment_request
 
