@@ -319,8 +319,8 @@ not an Event Message or another lifecycle state.
 
 An ordinary `paykit.payment_request` is the only V1 request that may exercise
 an Allowance. V1 defines no Allowance-specific payment message. Payment Request
-messages do not carry an Allowance ID and their existing lifecycle, validation,
-endpoint lookup, and proof rules remain unchanged.
+messages do not carry an Allowance ID or use an alternate lifecycle. They follow
+the Payment Request validation, endpoint lookup, cancellation, and proof rules.
 
 The request sender MUST be the Allowee on the Allowance's exact Encrypted Link.
 The immutable request terms statically match an Allowance only when the request
@@ -355,17 +355,40 @@ missing, invalid, or uncertain endpoint MUST NOT be used for automatic payment.
 Allowances add no destination digest, public-endpoint requirement, or fallback
 selection rule.
 
-Zero or multiple candidates, disabled local automatic handling, failed
-endpoint resolution, unsupported payment methods, or any stricter wallet check
-preserve the request's ordinary manual flow; they do not cause an automatic
-rejection or cancellation. Durable local processing order, not a claimed sender
+Before automatic Acceptance, zero or multiple candidates, disabled local
+automatic handling, failed endpoint resolution, unsupported payment methods,
+or any stricter wallet check preserve the proposed request's ordinary manual
+response flow; they do not cause an automatic rejection or cancellation. A
+wallet SHOULD complete every current eligibility, capacity, endpoint, and
+private-safeguard preflight check that does not require prior Acceptance before
+queuing Acceptance. Durable local processing order, not a claimed sender
 timestamp, determines this boundary.
 
-If a selected request becomes ineligible before an irreversible payment side
-effect, the wallet records the one-time request or current Billing Period as
-manual-only. For a Recurring Payment Request, this does not remove the pinned
-Allowance from later Billing Periods. Once an attempt crosses that boundary,
-its outcome follows the reservation and wallet-owned retry rules below.
+If automatic handling stops before Acceptance is recorded while the request
+remains a valid, actionable proposal, the wallet records the whole request as
+manual-only and leaves it proposed. Proposal expiry or a terminal lifecycle
+event takes precedence and MUST NOT be presented as payable.
+
+If automatic handling stops after Acceptance is recorded and the request is not
+cancelled, the Payment Request remains accepted. The wallet MUST first establish
+that no automatic attempt or Allowance reservation is unresolved and that no
+successful or unresolved payment, including an in-flight, pending, unknown, or
+recovery-incomplete payment through any automatic or manual path, exists for the
+semantic payment key. It then durably marks that one-time request or affected
+Billing Period manual-only and makes it available for explicit payment without
+sending another Acceptance. Once marked manual-only, that occurrence MUST NOT be
+retried automatically. Cancellation or a successful or unresolved payment makes
+the occurrence unavailable for manual execution.
+
+This accepted-but-unpaid action state is wallet-local and cannot be inferred
+from the Payment Request's `accepted` state alone. It is separate from an
+existing query or queue whose purpose is to find proposals needing a payer
+response; implementations MUST NOT make every accepted request payable without
+also consulting durable execution and reservation state. For a Recurring
+Payment Request, this rule applies to the affected Billing Period and does not
+remove the pinned Allowance from later Billing Periods. Once an attempt crosses
+the irreversible boundary, its outcome follows the reservation and wallet-owned
+retry rules below.
 
 An accepted Allowance permits automatic handling but never requires it. A
 wallet-local enablement setting, consent presentation, risk controls, and the
@@ -379,11 +402,11 @@ The same Allowance Terms apply to one-time and Recurring Payment Requests. V1
 has no separate recurrence permission.
 
 For a one-time request with a selected Allowance, a wallet MAY send the ordinary
-Payment Request Acceptance automatically. Any Payment Proof remains optional
-and follows the unchanged Payment Request rules. The semantic payment key is
-the exact Allower and Allowee Receiver References plus the Payment Request ID.
-That key may consume Allowance usage at most once for a successful or unresolved
-payment.
+Payment Request Acceptance automatically after the applicable preflight checks.
+Any Payment Proof remains optional and follows the Payment Request rules. The
+semantic payment key is the exact Allower and Allowee Receiver References plus
+the Payment Request ID. That key may consume Allowance usage at most once for a
+successful or unresolved payment.
 
 A wallet MAY automatically accept a Recurring Payment Request with a selected
 Allowance. At acceptance it pins that Allowance but does not reserve or consume
@@ -400,12 +423,12 @@ keys. The Allowance does not calculate the schedule or prove that a Billing
 Period belongs to the request.
 
 Ending or expiring the pinned Allowance prevents new automatic payments.
-Unavailable period or lifetime capacity blocks the current Billing Period;
-later Billing Periods are evaluated independently against then-current
-capacity. None of these conditions rebinds the request to another Allowance,
-rejects or cancels the Payment Request, or ends an accepted Subscription.
-Subsequent handling is a wallet decision under the existing Payment Request
-lifecycle.
+Unavailable period or lifetime capacity blocks the affected Billing Period;
+the wallet makes that period available for explicit payment when the
+accepted-but-unpaid safety conditions above pass. Later Billing Periods are
+evaluated independently against then-current capacity. None of these conditions
+rebinds the request to another Allowance, rejects or cancels the Payment Request,
+or ends an accepted Subscription.
 
 ## Eligibility, usage, and execution boundary
 
@@ -437,16 +460,22 @@ A verified successful payment commits the reservation. A confirmed terminal
 failure before settlement releases it. A pending, unknown, or recovery-incomplete
 outcome remains reserved until reconciled. Retry policy is wallet-owned, but a
 retry MUST NOT create two successful payments or two committed usage entries
-for one semantic payment key.
+for one semantic payment key. When the wallet stops automatic retries after a
+confirmed terminal failure, an accepted occurrence follows the manual-only
+action rules above.
 
 The wallet MUST recheck both the Allowance and Payment Request lifecycle near
 the irreversible execution step. If an End or cancellation is observed before
 any irreversible payment side effect, the wallet MUST abort and release the
 reservation. Once the payment is irreversible, later lifecycle events affect
 only future payments and the in-flight outcome remains reserved until
-reconciled. V1 does not communicate Allowance usage or selection to the
-Allowee; the existing Payment Request messages communicate acceptance and
-proof.
+reconciled. If cancellation is observed before proof is queued, the wallet MAY
+later send the ordinary Payment Proof for that earlier execution under the
+Payment Request crossing-cancellation rules; this includes recording a crossing
+Acceptance without reopening the request when the payee records its own
+Cancellation before receiving the payer's already-sent Acceptance. The request
+remains cancelled. V1 does not communicate Allowance usage or selection to the
+Allowee; the existing Payment Request messages communicate acceptance and proof.
 
 ## Durability and recovery
 
@@ -463,8 +492,11 @@ wallet-owned state are retained.
 
 While link recovery is required, or when lifecycle, request, association,
 dedupe, or usage history is incomplete, the wallet MUST NOT perform automatic
-payment under an Allowance. The underlying Payment Request remains available to
-the ordinary manual flow. A new link does not reconstruct missing history.
+payment under an Allowance. A proposed Payment Request remains available to its
+ordinary manual response flow. An accepted request or Billing Period becomes
+available for explicit payment only after the wallet can establish the
+accepted-but-unpaid safety conditions above. A new link does not reconstruct
+missing history.
 
 ## Compatibility and size
 
