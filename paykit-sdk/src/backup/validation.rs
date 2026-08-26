@@ -1548,6 +1548,27 @@ fn validate_valid_private_stream_body(
                 });
             }
         }
+        PrivateMessageKind::AllowanceProposal
+        | PrivateMessageKind::AllowanceAcceptance
+        | PrivateMessageKind::AllowanceRejection
+        | PrivateMessageKind::AllowanceEnd => {
+            let event = paykit_lib::parse_allowance_event_message(&private_application_message(
+                record, kind,
+            ))
+            .ok_or_else(|| PaykitSdkError::Protocol {
+                context: format!(
+                    "private stream item {} Allowance payload does not match its kind",
+                    record.stream_item_id
+                ),
+                source: None,
+            })?;
+            if let Some(error) = event.validation_error() {
+                return Err(PaykitSdkError::Protocol {
+                    context: error.to_owned(),
+                    source: None,
+                });
+            }
+        }
     }
     Ok(())
 }

@@ -10,6 +10,8 @@ mod pubky_session;
 mod runtime;
 /// Durable storage traits and in-memory test storage.
 pub mod storage;
+#[cfg(test)]
+mod test_utils;
 
 #[doc(inline)]
 pub use backup::{export_backup_state, RestoreReport, SdkBackupState, SDK_BACKUP_VERSION};

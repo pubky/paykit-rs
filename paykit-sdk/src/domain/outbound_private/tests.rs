@@ -1,7 +1,10 @@
 use chrono::{TimeZone, Utc};
 
 use super::*;
-use crate::storage::InMemoryStorage;
+use crate::{
+    storage::InMemoryStorage,
+    test_utils::{allowance_event_json, ALLOWANCE_EVENT_FIXTURES},
+};
 
 fn timestamp() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
@@ -98,6 +101,23 @@ async fn test_enqueue_private_message_rejects_malformed_known_body() {
         timestamp(),
     )
     .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
+}
+
+#[test]
+fn test_validate_outbound_private_message_accepts_allowance_events() {
+    for (kind, event_id) in ALLOWANCE_EVENT_FIXTURES {
+        let raw_json = allowance_event_json(kind, event_id);
+        assert_eq!(validate_outbound_private_message(&raw_json).unwrap(), kind);
+    }
+}
+
+#[test]
+fn test_validate_outbound_private_message_rejects_malformed_allowance() {
+    let raw_json = r#"{"version":1,"kind":"paykit.allowance_acceptance","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202","allowance_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44"}"#;
+
+    let result = validate_outbound_private_message(raw_json);
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }
