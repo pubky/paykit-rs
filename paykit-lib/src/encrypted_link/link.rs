@@ -200,6 +200,11 @@ impl EncryptedLink {
             .await
     }
 
+    pub(crate) async fn send_allowance_message(&mut self, plaintext: &[u8]) -> Result<()> {
+        self.send_private_application_message_with_context(plaintext, "Allowance Event Message")
+            .await
+    }
+
     /// Send one raw JSON Private Application Message.
     ///
     /// This is the low-level send counterpart to

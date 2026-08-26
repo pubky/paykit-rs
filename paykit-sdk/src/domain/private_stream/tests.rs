@@ -4,6 +4,7 @@ use super::*;
 use crate::{
     domain::linked_peers::LinkedPeerState,
     storage::{EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord},
+    test_utils::{allowance_event_json, ALLOWANCE_EVENT_FIXTURES},
     PaykitSdkError, PrivateStreamParseStatus,
 };
 
@@ -399,6 +400,80 @@ async fn test_persist_private_stream_batch_marks_event_id_conflicts() {
     assert_eq!(report.event_conflicts.len(), 1);
     assert_eq!(record.first_stream_item_id, 0);
     assert_eq!(record.conflicting_stream_item_ids, vec![1]);
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_routes_allowance_events() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let mut raw_events = ALLOWANCE_EVENT_FIXTURES
+        .map(|(kind, event_id)| allowance_event_json(kind, event_id))
+        .to_vec();
+    raw_events.push(
+        r#"{"version":1,"kind":"paykit.allowance_acceptance","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205","allowance_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44"}"#
+            .into(),
+    );
+
+    persist_private_stream_batch(
+        &storage,
+        counterparty,
+        receiver_path(),
+        raw_events
+            .iter()
+            .map(|raw_json| private_message(raw_json))
+            .collect(),
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let snapshot = storage.snapshot().unwrap();
+    assert_eq!(snapshot.private_stream_items.len(), raw_events.len());
+    for (item, raw_json) in snapshot.private_stream_items.iter().zip(&raw_events) {
+        assert_eq!(&item.raw_json, raw_json);
+        assert!(item
+            .known_paykit_kind
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("paykit.allowance_")));
+    }
+    assert!(snapshot.private_stream_items[..4]
+        .iter()
+        .all(|item| item.parse_status == PrivateStreamParseStatus::Valid));
+    assert_eq!(
+        snapshot.private_stream_items[4].parse_status,
+        PrivateStreamParseStatus::MalformedRecognized
+    );
+    assert_eq!(snapshot.event_dedup_records.len(), raw_events.len());
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_dedupes_allowance_across_event_kinds() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let event_id = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101";
+    let proposal = allowance_event_json("paykit.allowance_proposal", event_id);
+    let request = payment_request_raw("invoice-2026-0001");
+
+    let report = persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        vec![private_message(&proposal), private_message(&request)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let snapshot = storage.snapshot().unwrap();
+    let dedupe = snapshot
+        .event_dedup_records
+        .get(&(counterparty, receiver_path(), event_id.into()))
+        .unwrap();
+    assert_eq!(dedupe.event_kind, "paykit.allowance_proposal");
+    assert_eq!(dedupe.conflicting_stream_item_ids, vec![1]);
+    assert_eq!(report.event_conflicts.len(), 1);
 }
 
 #[tokio::test]

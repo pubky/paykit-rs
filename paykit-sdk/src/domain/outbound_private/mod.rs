@@ -403,6 +403,24 @@ fn validate_outbound_private_message_body(kind: PrivateMessageKind, raw_json: &s
                 });
             }
         }
+        PrivateMessageKind::AllowanceProposal
+        | PrivateMessageKind::AllowanceAcceptance
+        | PrivateMessageKind::AllowanceRejection
+        | PrivateMessageKind::AllowanceEnd => {
+            let message = private_application_message(kind, raw_json);
+            let event = paykit_lib::parse_allowance_event_message(&message).ok_or_else(|| {
+                PaykitSdkError::Protocol {
+                    context: "Allowance event payload does not match private message kind".into(),
+                    source: None,
+                }
+            })?;
+            if let Some(error) = event.validation_error() {
+                return Err(PaykitSdkError::Protocol {
+                    context: error.to_owned(),
+                    source: None,
+                });
+            }
+        }
     }
 
     Ok(())

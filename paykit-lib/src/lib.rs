@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod allowance;
 mod encrypted_link;
 mod encrypted_link_recovery;
 mod error;
@@ -17,6 +18,14 @@ mod receiver_marker;
 mod shared_wire;
 mod validation;
 
+#[doc(inline)]
+pub use allowance::{
+    parse_allowance_event_message, send_allowance_acceptance, send_allowance_end,
+    send_allowance_proposal, send_allowance_rejection, serialize_allowance_event,
+    AllowanceAcceptance, AllowanceAmountRange, AllowanceEnd, AllowanceEvent, AllowanceEventMessage,
+    AllowanceId, AllowancePeriod, AllowancePeriodKind, AllowancePeriodLimit, AllowancePeriodUnit,
+    AllowanceProposal, AllowanceRejection, AllowanceRole, AllowanceTerms, AllowanceTermsBuilder,
+};
 #[doc(inline)]
 pub use encrypted_link::{
     accept_encrypted_link, advance_handshake, clear_encrypted_link_outbox, close_encrypted_link,

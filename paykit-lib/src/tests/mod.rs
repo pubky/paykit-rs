@@ -5,6 +5,7 @@ use pubky::PubkySession;
 use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
+mod allowance;
 mod encrypted_link;
 mod event_id;
 mod payment_endpoint;

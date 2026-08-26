@@ -14,9 +14,9 @@ use crate::{
 };
 
 use paykit_lib::{
-    parse_payment_request_event_message, parse_private_payment_list_json,
-    parse_receipt_access_event_message, PrivateApplicationMessage, PrivateMessageKind,
-    ReceiptAccess,
+    parse_allowance_event_message, parse_payment_request_event_message,
+    parse_private_payment_list_json, parse_receipt_access_event_message, PrivateApplicationMessage,
+    PrivateMessageKind, ReceiptAccess,
 };
 
 /// Parse status for one received Private Application Message.
@@ -287,6 +287,30 @@ pub(crate) fn classify_private_application_message(
         | PrivateMessageKind::PaymentRequestCancellation
         | PrivateMessageKind::PaymentProof => {
             let parsed = parse_payment_request_event_message(message);
+            let event = parsed
+                .as_ref()
+                .and_then(|parsed| parsed.event_id())
+                .map(|event_id| PrivateStreamEventHeader {
+                    event_id: event_id.as_str().to_owned(),
+                    event_kind: kind.as_str().to_owned(),
+                });
+            PrivateStreamMessageClassification {
+                status: status_from_event_validity(
+                    parsed.as_ref().is_some_and(|parsed| parsed.is_valid()),
+                ),
+                parse_error: parsed
+                    .as_ref()
+                    .and_then(|parsed| parsed.validation_error())
+                    .map(str::to_owned),
+                event,
+                receipt_access: None,
+            }
+        }
+        PrivateMessageKind::AllowanceProposal
+        | PrivateMessageKind::AllowanceAcceptance
+        | PrivateMessageKind::AllowanceRejection
+        | PrivateMessageKind::AllowanceEnd => {
+            let parsed = parse_allowance_event_message(message);
             let event = parsed
                 .as_ref()
                 .and_then(|parsed| parsed.event_id())
