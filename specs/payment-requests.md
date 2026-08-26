@@ -69,6 +69,7 @@ Paykit message kinds use logical lanes over the same Encrypted Link:
 
 - Private Payment Lists use Latest-State Message semantics.
 - Payment Request protocol messages use Event Message semantics.
+- Allowance lifecycle messages use Event Message semantics.
 - Receipt Access uses Event Message semantics.
 
 Recognized Event Messages carry an `event_id` for idempotent local storage and
@@ -266,10 +267,19 @@ example, a subscription-gated service may create the Recurring Payment Request,
 while the payer's wallet schedules each payment and submits its proof. The
 service validates each period's payment and applies its own access policy.
 
-A Recurring Payment Request is payer-controlled coordination, not an
-[Allowance](allowances.md). The separate Allowances V1 protocol gives an
-Allowee prior authority to submit qualifying Payment Instructions, but it does
-not give the Allowee custody, withdrawal capability, or control of execution.
+Payment Requests and Subscriptions do not require an
+[Allowance](allowances.md), and their wire messages and ordinary manual flow do
+not change when Allowances are implemented. A wallet may use one matching,
+accepted Allowance as prior permission to send the ordinary Acceptance and pay
+automatically. This is optional wallet behavior, not a Payment Request
+requirement or a guarantee of payment.
+
+The same matching applies to one-time and Recurring Payment Requests. Recurring
+Acceptance consumes no Allowance capacity; the wallet rechecks and meters the
+pinned Allowance for each Billing Period. Ending or expiring that Allowance
+stops future automatic payments. Insufficient capacity blocks the current
+payment and is re-evaluated for later Billing Periods. None of these conditions
+rejects or cancels the Payment Request.
 
 ## paykit.payment_request
 
