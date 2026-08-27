@@ -19,7 +19,7 @@ base64 = "0.22"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 pubky = "0.11.0"
-pubky-noise = { git = "https://github.com/pubky/pubky-noise.git", rev = "a2de636d30e6b88fe79f2d15d1aa884b26f014c3" }
+pubky-noise = "0.1.0-rc7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0.18"

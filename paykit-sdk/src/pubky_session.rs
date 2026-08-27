@@ -127,9 +127,11 @@ impl fmt::Debug for PubkySessionBootstrapResult {
 impl PubkySessionBootstrapResult {
     /// Export the secret token used to restore this grant session later.
     pub async fn export_session_secret(&self) -> Result<PubkySessionSecret> {
-        let grant = self.access.session.as_grant().ok_or_else(|| {
-            unsupported_session_error("cannot export a legacy Pubky cookie session")
-        })?;
+        let grant = self
+            .access
+            .session
+            .as_grant()
+            .ok_or_else(|| unsupported_session_error("Pubky session must be grant-backed"))?;
         let secret = grant.export_local_secret().await.ok_or_else(|| {
             unsupported_session_error("cannot export a delegated Pubky grant session")
         })?;
@@ -226,6 +228,9 @@ impl PubkyAuthRequest {
     /// Reuse the receiver's persisted Noise key when reauthenticating. Passing
     /// a new key rotates its public marker key and invalidates existing private
     /// path and Encrypted Link state.
+    ///
+    /// This consumes the request even when approval is cancelled or fails. Call
+    /// [`Self::save_state`] first when the request must be resumable.
     pub async fn complete(
         self,
         local_secret_key: Option<PubkyLocalSecretKey>,
@@ -271,7 +276,9 @@ impl PubkySessionBootstrap {
     /// Create a bootstrap helper with a default Pubky client.
     ///
     /// `client_id` is the stable application identifier recorded in every
-    /// grant, typically a domain name controlled by the integrating app.
+    /// grant, typically a domain name controlled by the integrating app. Reuse
+    /// the same value across auth start, resume, and session import; a grant
+    /// issued to another client ID is rejected.
     pub fn new(client_id: &str) -> Result<Self> {
         let client_id = parse_client_id(client_id)?;
         let pubky =
@@ -353,11 +360,13 @@ impl PubkySessionBootstrap {
         .await
     }
 
-    /// Restore an exported Pubky grant-session secret and validate its capabilities.
+    /// Restore an exported Pubky grant-session secret and validate its access.
     ///
     /// Pass the same persisted receiver Noise key returned with the original
     /// session access. Generating a replacement rotates the public key and
     /// invalidates existing private path and Encrypted Link state.
+    /// The grant must belong to this bootstrap's client ID and cover every
+    /// capability in `required_capabilities`.
     pub async fn import_session(
         &self,
         session_secret: &str,
@@ -422,6 +431,8 @@ impl PubkySessionBootstrap {
     /// Approve a Pubky auth URL with this local secret key.
     ///
     /// The requested capabilities must exactly match `expected_capabilities`.
+    /// A signup request creates the identity on its requested homeserver before
+    /// approving the application grant.
     pub async fn approve_auth(
         &self,
         auth_url: &str,
@@ -430,8 +441,19 @@ impl PubkySessionBootstrap {
     ) -> Result<()> {
         validate_grant_auth_url(auth_url)?;
         validate_auth_url_capabilities(auth_url, expected_capabilities)?;
-        self.pubky
-            .signer(secret_key.keypair())
+        let deep_link = DeepLink::from_str(auth_url).map_err(|err| PaykitSdkError::Protocol {
+            context: format!("invalid Pubky auth URL: {err}"),
+            source: None,
+        })?;
+        let signer = self.pubky.signer(secret_key.keypair());
+        if let DeepLink::SignupGrant(link) = deep_link {
+            let params = link.params();
+            signer
+                .signup(&params.homeserver, params.signup_token.as_deref())
+                .await
+                .map_err(|err| map_pubky_identity_error("sign up Pubky identity", err))?;
+        }
+        signer
             .approve_auth(auth_url)
             .await
             .map_err(|err| map_pubky_identity_error("approve Pubky auth flow", err))
@@ -485,14 +507,11 @@ pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
                 homeserver_public_key: Some(PubkyPublicKey::from_public_key(&params.homeserver)),
             })
         }
-        DeepLink::Signin(_) | DeepLink::Signup(_) => Err(unsupported_auth_url_error(
-            "legacy Pubky cookie auth URLs are not supported",
-        )),
-        DeepLink::DirectSignup(_) => Err(unsupported_auth_url_error(
-            "direct-signup URLs do not create grant sessions",
-        )),
-        DeepLink::SeedExport(_) => Err(unsupported_auth_url_error(
-            "secret-export URLs do not create grant sessions",
+        DeepLink::Signin(_)
+        | DeepLink::Signup(_)
+        | DeepLink::DirectSignup(_)
+        | DeepLink::SeedExport(_) => Err(unsupported_auth_url_error(
+            "only Pubky grant auth URLs are supported",
         )),
     }
 }
@@ -625,9 +644,9 @@ async fn validate_grant_session(
     session: &PubkySession,
     expected_client_id: &ClientId,
 ) -> Result<()> {
-    let grant = session.as_grant().ok_or_else(|| {
-        unsupported_session_error("legacy Pubky cookie sessions are not supported")
-    })?;
+    let grant = session
+        .as_grant()
+        .ok_or_else(|| unsupported_session_error("Pubky session must be grant-backed"))?;
     let actual_client_id = grant.session_info().await.client_id;
     if actual_client_id != *expected_client_id {
         return Err(PaykitSdkError::Identity {

@@ -142,7 +142,9 @@ impl PubkySessionBootstrap {
     /// The claim is delivered before the Pubky grant. A claim
     /// validation, encryption, or relay delivery failure therefore leaves the
     /// requesting server unauthorized. Pubky client timeout configuration
-    /// remains the caller's responsibility.
+    /// remains the caller's responsibility. For a signup request, approval
+    /// creates the identity on its requested homeserver after claim delivery
+    /// and before issuing the application grant.
     pub async fn approve_auth_with_companion_claim(
         &self,
         auth_url: &str,

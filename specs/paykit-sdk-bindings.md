@@ -179,8 +179,7 @@ imported session secrets, or an auth handoff result into the Rust Pubky access
 needed by the SDK. SDK bindings use `PubkySessionBootstrap` for signup, signin,
 session import, capability-checked auth handoff, and `pubky://` normalization.
 Every bootstrap requires a stable, app-owned Pubky client ID, and all resulting
-sessions are grant sessions. Legacy cookie sessions and legacy cookie-auth URLs
-are rejected.
+sessions and accepted auth URLs use Pubky grants.
 Binding helpers should request the capability scope returned by the active
 `PaykitSdkConfig` and validate completed/imported sessions against that same
 scope.
@@ -192,8 +191,9 @@ and relay posting remain inside Rust. Binding errors should preserve distinct
 invalid-request, invalid-claim, encryption, relay-delivery, and grant-auth
 failure cases. Pending grant auth requests must expose securely persistable
 state containing both the secret-bearing authorization URL and the client
-proof-of-possession key; URL-only resume is insufficient. Apps must delete
-that pending state after completion, expiry, or abandonment.
+proof-of-possession key; URL-only resume is insufficient. Completion is
+one-shot, so apps that need cancellation or failure recovery must save that
+state first. Apps must delete it after completion, expiry, or abandonment.
 When bindings create the Pubky client internally, they should expose FFI-safe
 client configuration for platform-owned network policy such as request
 timeouts. The default configuration uses the public network; setting a local

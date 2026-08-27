@@ -736,6 +736,10 @@ public interface PubkyAuthRequestInterface {
 
     /**
      * Wait for auth approval using the receiver's persisted Noise key.
+     *
+     * Completion is one-shot, including when the async operation is cancelled
+     * or returns an error. Call `save_state` first when the request must be
+     * resumable.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
@@ -830,6 +834,9 @@ public interface PubkySessionBootstrapInterface {
 
     /**
      * Approve a Pubky auth URL with this local secret key.
+     *
+     * A signup request creates the identity on its requested homeserver before
+     * approving the application grant.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `approveAuth`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey)
@@ -845,6 +852,9 @@ public interface PubkySessionBootstrapInterface {
 
     /**
      * Import an exported Pubky session secret and its persisted receiver Noise key.
+     *
+     * The grant must belong to this bootstrap's client ID and cover every
+     * required capability.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult

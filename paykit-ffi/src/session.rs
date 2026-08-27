@@ -10,7 +10,7 @@ use paykit_sdk::{
 };
 use pubky::{ClientId, Pubky, PubkyHttpClient};
 use tokio::sync::Mutex as AsyncMutex;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::{default_pubky_client_config, FfiPubkyClientConfig};
 use crate::errors::{ffi_error_to_sdk, identity_error, validation_error, PaykitFfiError};
@@ -53,6 +53,12 @@ pub struct FfiPubkySessionAccess {
     pub(crate) live_access: Option<PubkySessionAccess>,
 }
 
+impl Drop for FfiPubkySessionAccess {
+    fn drop(&mut self) {
+        self.session_secret.zeroize();
+    }
+}
+
 impl fmt::Debug for FfiPubkySessionAccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FfiPubkySessionAccess")
@@ -80,6 +86,9 @@ impl fmt::Debug for FfiPubkySessionAccess {
 #[uniffi::export]
 impl FfiPubkySessionAccess {
     /// Create session access material from platform secure storage.
+    ///
+    /// `client_id` must be the stable app identifier recorded in the exported
+    /// grant.
     #[uniffi::constructor]
     pub fn new(
         client_id: String,
@@ -306,9 +315,10 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
             return Ok(Some(live_access));
         }
 
+        let session_secret = Zeroizing::new(access.session_secret.clone());
         let session = self
             .pubky
-            .restore_session(&access.session_secret)
+            .restore_session(&session_secret)
             .await
             .map_err(|err| PaykitSdkError::Identity {
                 context: "restore Pubky grant session from platform provider".into(),
@@ -344,7 +354,7 @@ async fn validate_grant_session_client_id(
     expected_client_id: &str,
 ) -> paykit_sdk::Result<()> {
     let grant = session.as_grant().ok_or_else(|| PaykitSdkError::Identity {
-        context: "legacy Pubky cookie sessions are not supported".into(),
+        context: "Pubky session must be grant-backed".into(),
         source: None,
     })?;
     let actual_client_id = grant.session_info().await.client_id;
@@ -368,6 +378,9 @@ pub struct FfiPubkySessionBootstrap {
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPubkySessionBootstrap {
     /// Create a Pubky session bootstrap helper.
+    ///
+    /// Reuse `client_id` across auth start, resume, and session import. Grants
+    /// issued to another client ID are rejected.
     #[uniffi::constructor]
     pub fn new(client_id: String) -> Result<Self, PaykitFfiError> {
         Self::with_pubky_client_config(client_id, default_pubky_client_config())
@@ -431,6 +444,9 @@ impl FfiPubkySessionBootstrap {
     }
 
     /// Import an exported Pubky session secret and its persisted receiver Noise key.
+    ///
+    /// The grant must belong to this bootstrap's client ID and cover every
+    /// required capability.
     pub async fn import_session(
         &self,
         session_secret: String,
@@ -438,6 +454,7 @@ impl FfiPubkySessionBootstrap {
         receiver_noise_secret_key: Arc<FfiReceiverNoiseSecretKey>,
         required_capabilities: String,
     ) -> Result<FfiPubkySessionBootstrapResult, PaykitFfiError> {
+        let session_secret = Zeroizing::new(session_secret);
         let secret = local_secret_key
             .map(|key| local_secret_from_bytes(key.export_bytes()))
             .transpose()?;
@@ -498,6 +515,9 @@ impl FfiPubkySessionBootstrap {
     }
 
     /// Approve a Pubky auth URL with this local secret key.
+    ///
+    /// A signup request creates the identity on its requested homeserver before
+    /// approving the application grant.
     pub async fn approve_auth(
         &self,
         auth_url: String,
@@ -568,6 +588,10 @@ impl FfiPubkyAuthRequest {
     }
 
     /// Wait for auth approval using the receiver's persisted Noise key.
+    ///
+    /// Completion is one-shot, including when the async operation is cancelled
+    /// or returns an error. Call `save_state` first when the request must be
+    /// resumable.
     pub async fn complete(
         &self,
         local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
@@ -699,7 +723,8 @@ fn validate_local_testnet_host(host: &str) -> Result<(), PaykitFfiError> {
 pub(crate) fn local_secret_from_bytes(
     bytes: Vec<u8>,
 ) -> Result<PubkyLocalSecretKey, PaykitFfiError> {
-    let bytes: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+    let bytes = Zeroizing::new(bytes);
+    let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
         validation_error(format!(
             "Pubky local secret key must be 32 bytes, got {}",
             bytes.len()

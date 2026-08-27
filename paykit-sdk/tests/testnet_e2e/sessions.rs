@@ -9,6 +9,41 @@ use crate::harness::build_testnet;
 const TEST_CLIENT_ID: &str = "paykit-sdk.test";
 
 #[tokio::test]
+async fn test_external_grant_signup_completes() {
+    let testnet = build_testnet().await;
+    let pubky = testnet.sdk().expect("testnet Pubky client");
+    let identity_secret = PubkyLocalSecretKey::new(Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let bootstrap = PubkySessionBootstrap::with_pubky(pubky, TEST_CLIENT_ID)
+        .expect("test client ID should be valid");
+    let capabilities = PaykitSdkConfig::new(
+        PaykitReceiverPath::new("bitkit/wallet").expect("test receiver path should be valid"),
+    )
+    .required_session_capabilities();
+    let receiver_noise_secret = ReceiverNoiseSecretKey::random();
+
+    let request = bootstrap
+        .start_sign_up_auth(&capabilities, &homeserver, None)
+        .await
+        .expect("grant signup request should start");
+    let authorization_url = request.authorization_url().to_owned();
+    let (completed, approved) = tokio::join!(
+        request.complete(
+            Some(identity_secret.clone()),
+            receiver_noise_secret,
+            &capabilities,
+        ),
+        bootstrap.approve_auth(&authorization_url, &capabilities, &identity_secret),
+    );
+    approved.expect("grant signup request should be approved");
+    let completed = completed.expect("grant signup request should complete");
+
+    assert!(completed.access.session.as_grant().is_some());
+    assert_eq!(completed.public_key, identity_secret.public_key());
+    assert_eq!(completed.client_id, TEST_CLIENT_ID);
+}
+
+#[tokio::test]
 async fn test_pending_grant_auth_survives_secure_state_restore() {
     let testnet = build_testnet().await;
     let pubky = testnet.sdk().expect("testnet Pubky client");
@@ -64,7 +99,7 @@ async fn test_pending_grant_auth_survives_secure_state_restore() {
 }
 
 #[tokio::test]
-async fn test_grant_session_exports_restores_and_rejects_cookie_secret() {
+async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
     let testnet = build_testnet().await;
     let pubky = testnet.sdk().expect("testnet Pubky client");
     let identity_keypair = Keypair::random();
@@ -124,11 +159,11 @@ async fn test_grant_session_exports_restores_and_rejects_cookie_secret() {
         .signer(identity_keypair)
         .signin_cookie()
         .await
-        .expect("legacy cookie signin should succeed for the rejection test");
+        .expect("non-grant signin should succeed for the rejection test");
     let cookie_secret = cookie_session
         .as_cookie()
         .and_then(|cookie| cookie.export_secret())
-        .expect("native cookie session should be exportable");
+        .expect("non-grant session should be exportable");
     let error = bootstrap
         .import_session(
             &cookie_secret,
@@ -137,7 +172,7 @@ async fn test_grant_session_exports_restores_and_rejects_cookie_secret() {
             &capabilities,
         )
         .await
-        .expect_err("legacy cookie sessions must be rejected");
+        .expect_err("non-grant sessions must be rejected");
 
-    assert!(error.to_string().contains("legacy Pubky cookie sessions"));
+    assert!(error.to_string().contains("grant-backed"));
 }

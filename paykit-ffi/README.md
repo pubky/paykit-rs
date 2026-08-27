@@ -167,7 +167,8 @@ object.
 - `PubkySessionBootstrap(clientId)` — create/import grant sessions and grant
   auth flows for a stable app-owned Pubky client ID.
 - `PubkyAuthRequest` — pending external auth-flow handle; call `saveState()` to
-  persist its complete proof-of-possession state securely before process loss.
+  persist its complete proof-of-possession state securely before process loss,
+  cancellation, or a retry after the one-shot `complete()` operation fails.
 - `PubkyAuthRequestState` — secret-bearing URL plus client key used by
   `resumeAuth`; delete it after completion, expiry, or abandonment.
 - `pubkySecretKeyFromBip39Seed(seed)` — derive a Pubky secret key from a

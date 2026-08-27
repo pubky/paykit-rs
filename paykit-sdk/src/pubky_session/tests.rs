@@ -57,7 +57,7 @@ fn test_parse_pubky_auth_url_rejects_invalid_url() {
 }
 
 #[test]
-fn test_parse_pubky_auth_url_rejects_legacy_cookie_auth() {
+fn test_parse_pubky_auth_url_requires_grant_auth() {
     assert!(parse_pubky_auth_url(&format!(
         "pubkyauth://signin?caps=/:rw&relay=https://httprelay.pubky.app/inbox/&secret={TEST_AUTH_SECRET}"
     ))

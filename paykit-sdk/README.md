@@ -141,7 +141,8 @@ Common workflows:
   and proof-of-possession key, while pending auth state contains the
   secret-bearing URL and client key, so both belong in secure storage
 - call `PubkyAuthRequest::save_state` before a pending external auth request
-  must survive process loss, then pass that complete state to
+  must survive process loss, cancellation, or a retry after completion fails,
+  then pass that complete state to
   `PubkySessionBootstrap::resume_auth`; the authorization URL alone cannot
   restore the proof-of-possession key
 - use `PubkySessionBootstrap::approve_auth_with_companion_claim` for a

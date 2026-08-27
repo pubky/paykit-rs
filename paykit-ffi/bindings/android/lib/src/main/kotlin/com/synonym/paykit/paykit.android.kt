@@ -1876,7 +1876,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url() != 7484.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 51216.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 61979.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkyauthrequest_save_state() != 65530.toShort()) {
@@ -1903,13 +1903,13 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 34434.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 21644.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 56451.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 6650.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 27640.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 26538.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 52728.toShort()) {
@@ -2005,10 +2005,10 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 59094.toShort()) {
+        if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 15501.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 38321.toShort()) {
+        if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 23385.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_with_pubky_client_config() != 30807.toShort()) {
@@ -7139,6 +7139,10 @@ public open class PubkyAuthRequest: Disposable, PubkyAuthRequestInterface {
 
     /**
      * Wait for auth approval using the receiver's persisted Noise key.
+     *
+     * Completion is one-shot, including when the async operation is cancelled
+     * or returns an error. Call `save_state` first when the request must be
+     * resumable.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
@@ -7582,6 +7586,9 @@ public open class PubkySessionAccess: Disposable, PubkySessionAccessInterface {
     }
     /**
      * Create session access material from platform secure storage.
+     *
+     * `client_id` must be the stable app identifier recorded in the exported
+     * grant.
      */
     public constructor(`clientId`: kotlin.String, `sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey) : this(
         uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
@@ -7786,6 +7793,9 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     }
     /**
      * Create a Pubky session bootstrap helper.
+     *
+     * Reuse `client_id` across auth start, resume, and session import. Grants
+     * issued to another client ID are rejected.
      */
     public constructor(`clientId`: kotlin.String) : this(
         uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
@@ -7871,6 +7881,9 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
 
     /**
      * Approve a Pubky auth URL with this local secret key.
+     *
+     * A signup request creates the identity on its requested homeserver before
+     * approving the application grant.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `approveAuth`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey) {
@@ -7927,6 +7940,9 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
 
     /**
      * Import an exported Pubky session secret and its persisted receiver Noise key.
+     *
+     * The grant must belong to this bootstrap's client ID and cover every
+     * required capability.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {

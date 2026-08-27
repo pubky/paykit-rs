@@ -13,6 +13,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Upgraded Pubky to `0.11.0` and moved session bootstrap and external auth to
   revocable grant sessions with proof-of-possession credentials.
 - Added secure save and resume support for pending Pubky grant auth requests.
+- Session bootstrap now requires a stable app-owned Pubky client ID and accepts
+  only grant-backed sessions and grant auth URLs.
+- Grant signup approval now creates the identity on the requested homeserver
+  before issuing the application grant.
 
 ## [0.1.0-rc47] - 2026-08-26
 

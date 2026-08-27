@@ -313,10 +313,10 @@ Rust integrations can use `PubkySessionBootstrap` to create or import the live
 grant-session access consumed by the provider. Each bootstrap is constructed
 with a stable, app-owned Pubky client ID. It covers common Pubky account/session
 workflows: signup, signin, grant-secret import, auth handoff start/resume/approve
-helpers, and `pubky://` resource normalization. Legacy cookie sessions and
-legacy cookie-auth URLs are rejected. Full SDK
-runtime auth should use `config.required_session_capabilities()` as the expected
-scope for auth start/resume/approve, completion, and session import. The
+helpers, and `pubky://` resource normalization. All session and auth operations
+require Pubky grants. Full SDK runtime auth should use
+`config.required_session_capabilities()` as the expected scope for auth
+start/resume/approve, completion, and session import. The
 required scope covers this runtime's receiver-scoped public and private Paykit
 paths; it adds the configured profile/contact namespace only when that namespace
 is outside the receiver-scoped Paykit default. The app generates one
@@ -325,9 +325,10 @@ signup, signin, auth completion, and session import. The key is required;
 reauthentication must not silently rotate it.
 Pending external grant auth also owns a client proof-of-possession key that is
 not recoverable from its authorization URL. Apps that need the request to
-survive process loss must securely persist the complete state returned by
-`PubkyAuthRequest::save_state` and resume with that state. They must delete it
-after completion, expiry, or abandonment.
+survive process loss, cancellation, or a failed one-shot completion must
+securely persist the complete state returned by `PubkyAuthRequest::save_state`
+and resume with that state. They must delete it after completion, expiry, or
+abandonment.
 `PubkyLocalSecretKey` also provides Pubky Core-compatible BIP39 seed and
 mnemonic helpers plus public-key-from-secret helpers. Apps that intentionally
 share the same Pubky identity material should derive the same Pubky key; app

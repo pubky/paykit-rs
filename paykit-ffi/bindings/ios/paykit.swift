@@ -3491,6 +3491,10 @@ public protocol PubkyAuthRequestProtocol: AnyObject, Sendable {
 
     /**
      * Wait for auth approval using the receiver's persisted Noise key.
+     *
+     * Completion is one-shot, including when the async operation is cancelled
+     * or returns an error. Call `save_state` first when the request must be
+     * resumable.
      */
     func complete(localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
@@ -3577,6 +3581,10 @@ open func authorizationUrl()async throws  -> String  {
 
     /**
      * Wait for auth approval using the receiver's persisted Noise key.
+     *
+     * Completion is one-shot, including when the async operation is cancelled
+     * or returns an error. Call `save_state` first when the request must be
+     * resumable.
      */
 open func complete(localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
@@ -4055,6 +4063,9 @@ open class PubkySessionAccess: PubkySessionAccessProtocol, @unchecked Sendable {
     }
     /**
      * Create session access material from platform secure storage.
+     *
+     * `client_id` must be the stable app identifier recorded in the exported
+     * grant.
      */
 public convenience init(clientId: String, sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey)throws  {
     let pointer =
@@ -4185,6 +4196,9 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
 
     /**
      * Approve a Pubky auth URL with this local secret key.
+     *
+     * A signup request creates the identity on its requested homeserver before
+     * approving the application grant.
      */
     func approveAuth(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey) async throws
 
@@ -4198,6 +4212,9 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
 
     /**
      * Import an exported Pubky session secret and its persisted receiver Noise key.
+     *
+     * The grant must belong to this bootstrap's client ID and cover every
+     * required capability.
      */
     func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
@@ -4271,6 +4288,9 @@ open class PubkySessionBootstrap: PubkySessionBootstrapProtocol, @unchecked Send
     }
     /**
      * Create a Pubky session bootstrap helper.
+     *
+     * Reuse `client_id` across auth start, resume, and session import. Grants
+     * issued to another client ID are rejected.
      */
 public convenience init(clientId: String)throws  {
     let pointer =
@@ -4307,6 +4327,9 @@ public static func withPubkyClientConfig(clientId: String, pubkyClient: PubkyCli
 
     /**
      * Approve a Pubky auth URL with this local secret key.
+     *
+     * A signup request creates the identity on its requested homeserver before
+     * approving the application grant.
      */
 open func approveAuth(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey)async throws   {
     return
@@ -4350,6 +4373,9 @@ open func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: S
 
     /**
      * Import an exported Pubky session secret and its persisted receiver Noise key.
+     *
+     * The grant must belong to this bootstrap's client ID and cover every
+     * required capability.
      */
 open func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
@@ -18352,7 +18378,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url() != 7484) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 51216) {
+    if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 61979) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkyauthrequest_save_state() != 65530) {
@@ -18379,13 +18405,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 34434) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 21644) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 56451) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 6650) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 27640) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 26538) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 52728) {
@@ -18481,10 +18507,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 59094) {
+    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 15501) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 38321) {
+    if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 23385) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_with_pubky_client_config() != 30807) {
