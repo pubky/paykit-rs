@@ -734,7 +734,7 @@ mod tests {
         assert!(serialize_allowance_json(&too_large).is_err());
         assert!(parse_allowance_json(PrivateMessageKind::AllowanceProposal, &raw).is_err());
 
-        let multibyte_terms = AllowanceTerms::builder("é".repeat(450))
+        let multibyte_terms = AllowanceTerms::builder("\u{e9}".repeat(450))
             .lifetime_amount_limit("1")
             .build()
             .unwrap();
