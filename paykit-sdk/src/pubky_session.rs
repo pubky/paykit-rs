@@ -343,9 +343,12 @@ impl PubkySessionBootstrap {
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         let request = self.start_sign_in_auth(required_capabilities).await?;
-        let authorization_url = request.authorization_url().to_owned();
-        self.approve_auth(&authorization_url, required_capabilities, secret_key)
-            .await?;
+        self.approve_auth(
+            request.authorization_url(),
+            required_capabilities,
+            secret_key,
+        )
+        .await?;
         request
             .complete(
                 Some(secret_key.clone()),
