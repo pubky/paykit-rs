@@ -1495,6 +1495,18 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1864,10 +1876,22 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url() != 7484.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 51216.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 24500.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipubkyauthrequest_save_state() != 65530.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipubkyauthrequeststate_authorization_url() != 6211.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipubkyauthrequeststate_export_client_key_secret() != 60838.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_export_bytes() != 58726.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipubkysessionaccess_client_id() != 32656.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_local_secret_key() != 61849.toShort()) {
@@ -1876,19 +1900,19 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_receiver_noise_secret_key() != 4431.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 4660.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 34434.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 21644.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 56539.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 6650.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 38549.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 27640.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 26538.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 45596.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 52728.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 60739.toShort()) {
@@ -1975,16 +1999,19 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_constructor_ffiprivatejsonobject_new() != 62907.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_constructor_ffipubkyauthrequeststate_new() != 10811.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 5869.toShort()) {
+        if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 15501.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 44998.toShort()) {
+        if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 23385.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_with_pubky_client_config() != 35417.toShort()) {
+        if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_with_pubky_client_config() != 30807.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_constructor_ffireceivernoisesecretkey_new() != 34247.toShort()) {
@@ -2339,7 +2366,19 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipubkyauthrequest_complete(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipubkyauthrequest_save_state(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipubkyauthrequeststate_authorization_url(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipubkyauthrequeststate_export_client_key_secret(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipubkylocalsecretkey_export_bytes(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipubkysessionaccess_client_id(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipubkysessionaccess_export_local_secret_key(
@@ -2445,6 +2484,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_constructor_ffiprivatejsonobject_new(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffipubkyauthrequeststate_new(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new(
@@ -3133,6 +3175,36 @@ internal object UniffiLib : Library {
         `requiredCapabilities`: RustBufferByValue,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipubkyauthrequest_save_state(
+        `ptr`: Pointer?,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_clone_ffipubkyauthrequeststate(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_free_ffipubkyauthrequeststate(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffipubkyauthrequeststate_new(
+        `authorizationUrl`: RustBufferByValue,
+        `clientKeySecret`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipubkyauthrequeststate_authorization_url(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipubkyauthrequeststate_export_client_key_secret(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
     external fun uniffi_paykit_fn_clone_ffipubkylocalsecretkey(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
@@ -3164,11 +3236,17 @@ internal object UniffiLib : Library {
     ): Unit
     @JvmStatic
     external fun uniffi_paykit_fn_constructor_ffipubkysessionaccess_new(
+        `clientId`: RustBufferByValue,
         `sessionSecret`: RustBufferByValue,
         `localSecretKey`: RustBufferByValue,
         `receiverNoiseSecretKey`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipubkysessionaccess_client_id(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipubkysessionaccess_export_local_secret_key(
         `ptr`: Pointer?,
@@ -3196,10 +3274,12 @@ internal object UniffiLib : Library {
     ): Unit
     @JvmStatic
     external fun uniffi_paykit_fn_constructor_ffipubkysessionbootstrap_new(
+        `clientId`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Pointer?
     @JvmStatic
     external fun uniffi_paykit_fn_constructor_ffipubkysessionbootstrap_with_pubky_client_config(
+        `clientId`: RustBufferByValue,
         `pubkyClient`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Pointer?
@@ -3229,7 +3309,7 @@ internal object UniffiLib : Library {
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipubkysessionbootstrap_resume_auth(
         `ptr`: Pointer?,
-        `authorizationUrl`: RustBufferByValue,
+        `state`: Pointer?,
         `expectedCapabilities`: RustBufferByValue,
     ): Long
     @JvmStatic
@@ -7059,6 +7139,12 @@ public open class PubkyAuthRequest: Disposable, PubkyAuthRequestInterface {
 
     /**
      * Wait for auth approval using the receiver's persisted Noise key.
+     *
+     * Completion is one-shot, including when the async operation is cancelled
+     * or returns an error. `save_state` can restore an unapproved request
+     * while its relay inbox remains valid. Once completion fetches the
+     * approval, cancellation or a later exchange failure requires a new auth
+     * request.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
@@ -7077,6 +7163,28 @@ public open class PubkyAuthRequest: Disposable, PubkyAuthRequestInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterTypePubkySessionBootstrapResult.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Export the sensitive state required to resume this pending request.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `saveState`(): PubkyAuthRequestState {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipubkyauthrequest_save_state(
+                    thisPtr,
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_pointer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_pointer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_pointer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_pointer(future) },
+            // lift function
+            { FfiConverterTypePubkyAuthRequestState.lift(it!!) },
             // Error FFI converter
             PaykitExceptionErrorHandler,
         )
@@ -7115,6 +7223,183 @@ public object FfiConverterTypePubkyAuthRequest: FfiConverter<PubkyAuthRequest, P
     override fun allocationSize(value: PubkyAuthRequest): ULong = 8UL
 
     override fun write(value: PubkyAuthRequest, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(lower(value).toLong())
+    }
+}
+
+
+
+/**
+ * Sensitive state required to resume a pending Pubky grant auth request.
+ *
+ * Persist this only in secure, temporary platform storage. Delete it after
+ * the request completes, expires, or is abandoned.
+ */
+public open class PubkyAuthRequestState: Disposable, PubkyAuthRequestStateInterface {
+
+    public constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    public constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(null))
+    }
+    /**
+     * Reconstruct state loaded from secure, temporary platform storage.
+     */
+    public constructor(`authorizationUrl`: kotlin.String, `clientKeySecret`: kotlin.ByteArray) : this(
+        uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+            UniffiLib.uniffi_paykit_fn_constructor_ffipubkyauthrequeststate_new(
+                FfiConverterString.lower(`authorizationUrl`),
+                FfiConverterByteArray.lower(`clientKeySecret`),
+                uniffiRustCallStatus,
+            )
+        }!!
+    )
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed: kotlinx.atomicfu.AtomicBoolean = kotlinx.atomicfu.atomic(false)
+    private val callCounter: kotlinx.atomicfu.AtomicLong = kotlinx.atomicfu.atomic(1L)
+
+    private val lock = kotlinx.atomicfu.locks.ReentrantLock()
+
+    private fun <T> synchronized(block: () -> T): T {
+        lock.lock()
+        try {
+            return block()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    override fun close() {
+        synchronized { this.destroy() }
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.value
+            if (c == 0L) {
+                throw IllegalStateException("${this::class::simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this::class::simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiPointerDestroyer(private val pointer: Pointer?) : Disposable {
+        override fun destroy() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.uniffi_paykit_fn_free_ffipubkyauthrequeststate(ptr, status)
+                }
+            }
+        }
+    }
+
+    public fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall { status ->
+            UniffiLib.uniffi_paykit_fn_clone_ffipubkyauthrequeststate(pointer!!, status)
+        }!!
+    }
+
+
+    /**
+     * Export the secret-bearing authorization URL for secure persistence.
+     */
+    public override fun `authorizationUrl`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffipubkyauthrequeststate_authorization_url(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Export the proof-of-possession key for secure persistence.
+     */
+    public override fun `exportClientKeySecret`(): kotlin.ByteArray {
+        return FfiConverterByteArray.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffipubkyauthrequeststate_export_client_key_secret(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+
+
+
+
+
+
+    public companion object
+
+}
+
+
+
+
+
+public object FfiConverterTypePubkyAuthRequestState: FfiConverter<PubkyAuthRequestState, Pointer> {
+
+    override fun lower(value: PubkyAuthRequestState): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): PubkyAuthRequestState {
+        return PubkyAuthRequestState(value)
+    }
+
+    override fun read(buf: ByteBuffer): PubkyAuthRequestState {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(buf.getLong().toPointer())
+    }
+
+    override fun allocationSize(value: PubkyAuthRequestState): ULong = 8UL
+
+    override fun write(value: PubkyAuthRequestState, buf: ByteBuffer) {
         // The Rust code always expects pointers written as 8 bytes,
         // and will fail to compile if they don't fit.
         buf.putLong(lower(value).toLong())
@@ -7303,10 +7588,14 @@ public open class PubkySessionAccess: Disposable, PubkySessionAccessInterface {
     }
     /**
      * Create session access material from platform secure storage.
+     *
+     * `client_id` must be the stable app identifier recorded in the exported
+     * grant.
      */
-    public constructor(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey) : this(
-        uniffiRustCall { uniffiRustCallStatus ->
+    public constructor(`clientId`: kotlin.String, `sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey) : this(
+        uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
             UniffiLib.uniffi_paykit_fn_constructor_ffipubkysessionaccess_new(
+                FfiConverterString.lower(`clientId`),
                 FfiConverterString.lower(`sessionSecret`),
                 FfiConverterOptionalTypeFfiPubkyLocalSecretKey.lower(`localSecretKey`),
                 FfiConverterTypeReceiverNoiseSecretKey.lower(`receiverNoiseSecretKey`),
@@ -7389,6 +7678,20 @@ public open class PubkySessionAccess: Disposable, PubkySessionAccessInterface {
 
 
     /**
+     * Return the application identifier recorded in the Pubky grant.
+     */
+    public override fun `clientId`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffipubkysessionaccess_client_id(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
      * Export the local Pubky secret key, when available.
      */
     public override fun `exportLocalSecretKey`(): PubkyLocalSecretKey? {
@@ -7417,7 +7720,7 @@ public open class PubkySessionAccess: Disposable, PubkySessionAccessInterface {
     }
 
     /**
-     * Export the Pubky session bearer secret for platform secure storage.
+     * Export the Pubky grant and proof-of-possession secret for secure storage.
      */
     public override fun `exportSessionSecret`(): kotlin.String {
         return FfiConverterString.lift(callWithPointer {
@@ -7492,10 +7795,14 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     }
     /**
      * Create a Pubky session bootstrap helper.
+     *
+     * Reuse `client_id` across auth start, resume, and session import. Grants
+     * issued to another client ID are rejected.
      */
-    public constructor() : this(
+    public constructor(`clientId`: kotlin.String) : this(
         uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
             UniffiLib.uniffi_paykit_fn_constructor_ffipubkysessionbootstrap_new(
+                FfiConverterString.lower(`clientId`),
                 uniffiRustCallStatus,
             )
         }!!
@@ -7576,6 +7883,10 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
 
     /**
      * Approve a Pubky auth URL with this local secret key.
+     *
+     * The request client ID must match this bootstrap's client ID.
+     * A signup request creates the identity on its requested homeserver before
+     * approving the application grant.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `approveAuth`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey) {
@@ -7605,6 +7916,7 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
      *
      * This high-level operation owns validation, request-bound signing,
      * channel derivation, encryption, relay delivery, and approval ordering.
+     * The request client ID must match this bootstrap's client ID.
      */
     @Throws(PubkyAuthCompanionClaimApprovalException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: PubkyAuthCompanionClaim) {
@@ -7632,6 +7944,9 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
 
     /**
      * Import an exported Pubky session secret and its persisted receiver Noise key.
+     *
+     * The grant must belong to this bootstrap's client ID and cover every
+     * required capability.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
@@ -7657,15 +7972,15 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     }
 
     /**
-     * Resume a short-lived auth flow from its authorization URL.
+     * Resume a short-lived grant auth flow from securely persisted state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public override suspend fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): PubkyAuthRequest {
+    public override suspend fun `resumeAuth`(`state`: PubkyAuthRequestState, `expectedCapabilities`: kotlin.String): PubkyAuthRequest {
         return uniffiRustCallAsync(
             callWithPointer { thisPtr ->
                 UniffiLib.uniffi_paykit_fn_method_ffipubkysessionbootstrap_resume_auth(
                     thisPtr,
-                    FfiConverterString.lower(`authorizationUrl`),
+                    FfiConverterTypePubkyAuthRequestState.lower(`state`),
                     FfiConverterString.lower(`expectedCapabilities`),
                 )
             },
@@ -7791,9 +8106,10 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
          * Create a Pubky session bootstrap helper with explicit Pubky client configuration.
          */
         @Throws(PaykitException::class)
-        public fun `withPubkyClientConfig`(`pubkyClient`: PubkyClientConfig): PubkySessionBootstrap {
+        public fun `withPubkyClientConfig`(`clientId`: kotlin.String, `pubkyClient`: PubkyClientConfig): PubkySessionBootstrap {
             return FfiConverterTypePubkySessionBootstrap.lift(uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
                 UniffiLib.uniffi_paykit_fn_constructor_ffipubkysessionbootstrap_with_pubky_client_config(
+                    FfiConverterString.lower(`clientId`),
                     FfiConverterTypePubkyClientConfig.lower(`pubkyClient`),
                     uniffiRustCallStatus,
                 )
@@ -10954,23 +11270,26 @@ public object FfiConverterTypePubkyAuthDetails: FfiConverterRustBuffer<PubkyAuth
     override fun read(buf: ByteBuffer): PubkyAuthDetails {
         return PubkyAuthDetails(
             FfiConverterTypePubkyAuthRequestKind.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: PubkyAuthDetails): ULong = (
             FfiConverterTypePubkyAuthRequestKind.allocationSize(value.`kind`) +
-            FfiConverterOptionalString.allocationSize(value.`capabilities`) +
-            FfiConverterOptionalString.allocationSize(value.`relayUrl`) +
+            FfiConverterString.allocationSize(value.`capabilities`) +
+            FfiConverterString.allocationSize(value.`relayUrl`) +
+            FfiConverterString.allocationSize(value.`clientId`) +
             FfiConverterOptionalString.allocationSize(value.`homeserverPublicKey`)
     )
 
     override fun write(value: PubkyAuthDetails, buf: ByteBuffer) {
         FfiConverterTypePubkyAuthRequestKind.write(value.`kind`, buf)
-        FfiConverterOptionalString.write(value.`capabilities`, buf)
-        FfiConverterOptionalString.write(value.`relayUrl`, buf)
+        FfiConverterString.write(value.`capabilities`, buf)
+        FfiConverterString.write(value.`relayUrl`, buf)
+        FfiConverterString.write(value.`clientId`, buf)
         FfiConverterOptionalString.write(value.`homeserverPublicKey`, buf)
     }
 }
@@ -10983,17 +11302,20 @@ public object FfiConverterTypePubkyClientConfig: FfiConverterRustBuffer<PubkyCli
         return PubkyClientConfig(
             FfiConverterULong.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: PubkyClientConfig): ULong = (
             FfiConverterULong.allocationSize(value.`requestTimeoutSecs`) +
-            FfiConverterOptionalString.allocationSize(value.`localTestnetHost`)
+            FfiConverterOptionalString.allocationSize(value.`localTestnetHost`) +
+            FfiConverterOptionalString.allocationSize(value.`authRelayUrl`)
     )
 
     override fun write(value: PubkyClientConfig, buf: ByteBuffer) {
         FfiConverterULong.write(value.`requestTimeoutSecs`, buf)
         FfiConverterOptionalString.write(value.`localTestnetHost`, buf)
+        FfiConverterOptionalString.write(value.`authRelayUrl`, buf)
     }
 }
 

@@ -134,17 +134,24 @@ Common workflows:
   profile and follows data
 - use `resolve_contact_profile` when contact display should prefer Paykit
   Profile and fall back to Pubky Profile
-- use `PubkySessionBootstrap` for common Pubky signup, signin, session import,
-  capability-checked auth handoff, and `pubky://` normalization flows before
-  exposing live access through a `PubkySessionProvider`; exported session
-  secrets and auth URLs must be treated as secret material, and session export
-  is an explicit call on the bootstrap result
+- construct `PubkySessionBootstrap` with a stable, app-owned client ID and use
+  it for grant-only Pubky signup, signin, session import, capability-checked
+  auth handoff, and `pubky://` normalization flows before exposing live access
+  through a `PubkySessionProvider`; exported session secrets contain the grant
+  and proof-of-possession key, while pending auth state contains the
+  secret-bearing URL and client key, so both belong in secure storage
+- call `PubkyAuthRequest::save_state` when an unapproved external auth request
+  must survive process loss, then pass that complete state to
+  `PubkySessionBootstrap::resume_auth`; the authorization URL alone cannot
+  restore the proof-of-possession key. Once completion fetches an approval,
+  cancellation or a later credential-exchange failure requires a new auth
+  request because Pubky relay approvals are consumed when read
 - use `PubkySessionBootstrap::approve_auth_with_companion_claim` for a
   `pubkyauth://` request carrying an application-defined companion claim; the
   integrator supplies the query parameter, claim type, exact expected
   capabilities, and serialized unsigned payload, while the helper signs and
   encrypts that payload, delivers it to the derived relay channel, and only
-  then approves normal Pubky Auth
+  then approves the Pubky grant
 - when deriving a Pubky key from identity seed material, use the Pubky
   Core/Ring-compatible BIP39 seed or mnemonic helpers; app/runtime separation
   should come from receiver folders, Noise keys, and SDK state, not a different

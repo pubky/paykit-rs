@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc48] - 2026-08-26
+
+### Changed
+- Upgraded Pubky to `0.11.0` and moved session bootstrap and external auth to
+  revocable grant sessions with proof-of-possession credentials.
+- Added secure save and resume support for pending Pubky grant auth requests.
+- Session bootstrap now requires a stable app-owned Pubky client ID and accepts
+  only grant-backed sessions and grant auth URLs.
+- Grant signup approval now creates the identity on the requested homeserver
+  before issuing the application grant.
+
 ## [0.1.0-rc47] - 2026-08-26
 
 ### Fixed
@@ -29,7 +40,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ### Fixed
 - Kept locally accepted or rejected incoming Payment Requests out of the
   actionable queue after their private response was queued locally.
-
 ## [0.1.0-rc43] - 2026-08-05
 
 ### Fixed
@@ -415,7 +425,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc47...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc48...HEAD
+[0.1.0-rc48]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc47...v0.1.0-rc48
 [0.1.0-rc47]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc46...v0.1.0-rc47
 [0.1.0-rc46]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc45...v0.1.0-rc46
 [0.1.0-rc45]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc44...v0.1.0-rc45
