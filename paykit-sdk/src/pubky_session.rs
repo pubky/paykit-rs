@@ -1,5 +1,9 @@
 //! Pubky account, session, and auth-flow helpers.
 
+// Paykit preserves Pubky's legacy cookie-session semantics until callers adopt
+// grant sessions with an explicit ClientId.
+#![allow(deprecated)]
+
 mod companion_claim;
 
 pub use companion_claim::{PubkyAuthCompanionClaim, PubkyAuthCompanionClaimApprovalError};
@@ -7,7 +11,7 @@ pub use companion_claim::{PubkyAuthCompanionClaim, PubkyAuthCompanionClaimApprov
 use std::{fmt, str::FromStr};
 
 use pubky::{
-    deep_links::DeepLink, AuthFlowKind, Capabilities, Capability, Pubky, PubkyAuthFlow,
+    deep_links::DeepLink, AuthFlowKind, Capabilities, Capability, Pubky, PubkyCookieAuthFlow,
     PubkyResource, PubkySession,
 };
 use serde::{Deserialize, Serialize};
@@ -119,14 +123,21 @@ impl fmt::Debug for PubkySessionBootstrapResult {
 impl PubkySessionBootstrapResult {
     /// Export the bearer secret token used to restore this Pubky session later.
     pub fn export_session_secret(&self) -> PubkySessionSecret {
-        PubkySessionSecret::new(self.access.session.export_secret())
+        let secret = self
+            .access
+            .session
+            .as_cookie()
+            .expect("Paykit bootstrap creates cookie-backed Pubky sessions")
+            .export_secret()
+            .expect("native Pubky cookie sessions expose their bearer secret");
+        PubkySessionSecret::new(secret)
     }
 }
 
 /// Handle for a pending Pubky auth flow.
 pub struct PubkyAuthRequest {
     pubky: Pubky,
-    flow: PubkyAuthFlow,
+    flow: PubkyCookieAuthFlow,
     authorization_url: String,
 }
 
@@ -208,7 +219,7 @@ impl PubkySessionBootstrap {
         let session = self
             .pubky
             .signer(secret_key.keypair())
-            .signup(&homeserver, signup_code)
+            .signup_cookie(&homeserver, signup_code)
             .await
             .map_err(|err| map_pubky_identity_error("sign up Pubky session", err))?;
         session_result(
@@ -234,7 +245,7 @@ impl PubkySessionBootstrap {
         let session = self
             .pubky
             .signer(secret_key.keypair())
-            .signin()
+            .signin_cookie()
             .await
             .map_err(|err| map_pubky_identity_error("sign in Pubky session", err))?;
         session_result(
@@ -302,7 +313,7 @@ impl PubkySessionBootstrap {
         validate_auth_url_capabilities(authorization_url, expected_capabilities)?;
         let flow = self
             .pubky
-            .resume_auth_flow(authorization_url)
+            .resume_cookie_auth_flow(authorization_url)
             .map_err(|err| map_pubky_identity_error("resume Pubky auth flow", err))?;
         Ok(PubkyAuthRequest {
             pubky: self.pubky.clone(),
@@ -333,7 +344,7 @@ impl PubkySessionBootstrap {
         let capabilities = parse_capabilities(capabilities)?;
         let flow = self
             .pubky
-            .start_auth_flow(&capabilities, kind)
+            .start_cookie_auth_flow(&capabilities, kind)
             .map_err(|err| map_pubky_identity_error("start Pubky auth flow", err))?;
         let authorization_url = flow.authorization_url().to_string();
         Ok(PubkyAuthRequest {
@@ -355,14 +366,14 @@ pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
         DeepLink::Signin(link) => Ok(PubkyAuthDetails {
             kind: PubkyAuthRequestKind::SignIn,
             capabilities: Some(parse_auth_url_capabilities(auth_url)?.to_string()),
-            relay_url: Some(link.relay().to_string()),
+            relay_url: Some(link.params().relay.to_string()),
             homeserver_public_key: None,
         }),
         DeepLink::Signup(link) => Ok(PubkyAuthDetails {
             kind: PubkyAuthRequestKind::SignUp,
             capabilities: Some(parse_auth_url_capabilities(auth_url)?.to_string()),
-            relay_url: Some(link.relay().to_string()),
-            homeserver_public_key: Some(PubkyPublicKey::from_public_key(link.homeserver())),
+            relay_url: Some(link.params().relay.to_string()),
+            homeserver_public_key: Some(PubkyPublicKey::from_public_key(&link.params().homeserver)),
         }),
         DeepLink::SeedExport(_) => Ok(PubkyAuthDetails {
             kind: PubkyAuthRequestKind::SecretExport,
@@ -370,6 +381,12 @@ pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
             relay_url: None,
             homeserver_public_key: None,
         }),
+        DeepLink::DirectSignup(_) | DeepLink::SigninGrant(_) | DeepLink::SignupGrant(_) => {
+            Err(PaykitSdkError::Protocol {
+                context: "unsupported Pubky auth URL kind; expected legacy cookie auth".into(),
+                source: None,
+            })
+        }
     }
 }
 

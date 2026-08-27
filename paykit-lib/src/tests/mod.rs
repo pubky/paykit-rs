@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::*;
 use pubky::PubkySession;
-use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
+use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
 mod encrypted_link;
@@ -13,13 +13,13 @@ mod payment_request_properties;
 mod private_payment_list;
 mod receipt_access;
 
-static SHARED_POSTGRES: OnceCell<EmbeddedPostgres> = OnceCell::const_new();
+static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
-async fn shared_postgres() -> &'static EmbeddedPostgres {
+async fn shared_postgres() -> &'static DockerPostgres {
     SHARED_POSTGRES
         .get_or_init(|| async {
-            EmbeddedPostgres::start()
+            DockerPostgres::start()
                 .await
                 .expect("failed to start embedded postgres")
         })
@@ -63,7 +63,10 @@ impl TestSetup {
 
         let pair = Keypair::random();
         let signer = sdk.signer(pair.clone());
-        let session = signer.signup(&homeserver.public_key(), None).await.unwrap();
+        let session = signer
+            .signup_cookie(&homeserver.public_key(), None)
+            .await
+            .unwrap();
 
         let public_storage = sdk.public_storage();
 
@@ -98,26 +101,26 @@ impl InProgressHandshakeSetup {
         let initiator_keypair = Keypair::random();
         let initiator_signer = initiator_sdk.signer(initiator_keypair.clone());
         let initiator_session = initiator_signer
-            .signup(&homeserver.public_key(), None)
+            .signup_cookie(&homeserver.public_key(), None)
             .await
             .unwrap();
 
         let responder_keypair = Keypair::random();
         let responder_signer = responder_sdk.signer(responder_keypair.clone());
         let responder_session = responder_signer
-            .signup(&homeserver.public_key(), None)
+            .signup_cookie(&homeserver.public_key(), None)
             .await
             .unwrap();
 
-        let initiator_public_key = initiator_session.info().public_key();
-        let responder_public_key = responder_session.info().public_key();
+        let initiator_public_key = initiator_session.info().public_key().clone();
+        let responder_public_key = responder_session.info().public_key().clone();
         let initiator_noise_keypair = Keypair::random();
         let responder_noise_keypair = Keypair::random();
 
         let initiator_handshake = initiate_encrypted_link(
             initiator_session.clone(),
             initiator_noise_keypair.secret_key(),
-            responder_public_key,
+            &responder_public_key,
             &responder_noise_keypair.public_key(),
             &receiver_path(),
             &receiver_path(),
@@ -128,7 +131,7 @@ impl InProgressHandshakeSetup {
         let responder_handshake = accept_encrypted_link(
             responder_session.clone(),
             responder_noise_keypair.secret_key(),
-            initiator_public_key,
+            &initiator_public_key,
             &initiator_noise_keypair.public_key(),
             &receiver_path(),
             &receiver_path(),
@@ -201,19 +204,19 @@ impl PrivateTestSetup {
         let sender_keypair = Keypair::random();
         let sender_signer = sender_sdk.signer(sender_keypair.clone());
         let sender_session = sender_signer
-            .signup(&homeserver.public_key(), None)
+            .signup_cookie(&homeserver.public_key(), None)
             .await
             .unwrap();
 
         let receiver_keypair = Keypair::random();
         let receiver_signer = receiver_sdk.signer(receiver_keypair.clone());
         let receiver_session = receiver_signer
-            .signup(&homeserver.public_key(), None)
+            .signup_cookie(&homeserver.public_key(), None)
             .await
             .unwrap();
 
-        let sender_public_key = sender_session.info().public_key();
-        let receiver_public_key = receiver_session.info().public_key();
+        let sender_public_key = sender_session.info().public_key().clone();
+        let receiver_public_key = receiver_session.info().public_key().clone();
         let sender_noise_keypair = Keypair::random();
         let receiver_noise_keypair = Keypair::random();
 
@@ -221,7 +224,7 @@ impl PrivateTestSetup {
         let sender_handshake = initiate_encrypted_link(
             sender_session.clone(),
             sender_noise_keypair.secret_key(),
-            receiver_public_key,
+            &receiver_public_key,
             &receiver_noise_keypair.public_key(),
             &receiver_path(),
             &receiver_path(),
@@ -233,7 +236,7 @@ impl PrivateTestSetup {
         let receiver_handshake = accept_encrypted_link(
             receiver_session.clone(),
             receiver_noise_keypair.secret_key(),
-            sender_public_key,
+            &sender_public_key,
             &sender_noise_keypair.public_key(),
             &receiver_path(),
             &receiver_path(),

@@ -213,11 +213,16 @@ fn parse_pubky_auth_request(
 ) -> Result<CompanionAuthRequest, PubkyAuthCompanionClaimApprovalError> {
     let deep_link: DeepLink = auth_url.parse().map_err(invalid_auth_url)?;
     let (relay, secret) = match deep_link {
-        DeepLink::Signin(link) => (link.relay().clone(), *link.secret()),
-        DeepLink::Signup(link) => (link.relay().clone(), *link.secret()),
+        DeepLink::Signin(link) => (link.params().relay.clone(), link.params().secret),
+        DeepLink::Signup(link) => (link.params().relay.clone(), link.params().secret),
         DeepLink::SeedExport(_) => {
             return Err(invalid_auth_url(
                 "Pubky secret-export URLs cannot carry companion claims",
+            ));
+        }
+        DeepLink::DirectSignup(_) | DeepLink::SigninGrant(_) | DeepLink::SignupGrant(_) => {
+            return Err(invalid_auth_url(
+                "only legacy Pubky cookie auth URLs can carry companion claims",
             ));
         }
     };

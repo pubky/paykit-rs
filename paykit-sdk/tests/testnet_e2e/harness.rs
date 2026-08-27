@@ -17,16 +17,16 @@ use paykit_sdk::{
     PublicPaymentEndpointCandidate, PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
     ReceiverNoiseSecretKey, Result,
 };
-use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
+use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
-static SHARED_POSTGRES: OnceCell<EmbeddedPostgres> = OnceCell::const_new();
+static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
-async fn shared_postgres() -> &'static EmbeddedPostgres {
+async fn shared_postgres() -> &'static DockerPostgres {
     SHARED_POSTGRES
         .get_or_init(|| async {
-            EmbeddedPostgres::start()
+            DockerPostgres::start()
                 .await
                 .expect("failed to start embedded postgres")
         })

@@ -207,7 +207,7 @@ async fn test_parallel_writer_reader_happy_path() {
     let writer_keypair = Keypair::random();
     let writer_session = writer_sdk
         .signer(writer_keypair.clone())
-        .signup(&homeserver.public_key(), None)
+        .signup_cookie(&homeserver.public_key(), None)
         .await
         .unwrap();
     let writer_pubkey = writer_session.info().public_key().clone();
@@ -216,7 +216,7 @@ async fn test_parallel_writer_reader_happy_path() {
     let reader_keypair = Keypair::random();
     let reader_session = reader_sdk
         .signer(reader_keypair.clone())
-        .signup(&homeserver.public_key(), None)
+        .signup_cookie(&homeserver.public_key(), None)
         .await
         .unwrap();
     let reader_pubkey = reader_session.info().public_key().clone();

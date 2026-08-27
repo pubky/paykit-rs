@@ -2,5 +2,10 @@
 resolver = "2"
 members = ["paykit-lib", "paykit-ffi", "paykit-sdk"]
 
+[workspace.dependencies]
+pubky = "0.11.0"
+pubky-noise = { version = "0.1.0-rc7", git = "https://github.com/pubky/pubky-noise.git", branch = "master" }
+pubky-testnet = { version = "0.11.0", features = ["embedded-postgres"] }
+
 [patch.crates-io]
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }
