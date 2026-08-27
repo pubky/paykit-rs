@@ -192,8 +192,10 @@ invalid-request, invalid-claim, encryption, relay-delivery, and grant-auth
 failure cases. Pending grant auth requests must expose securely persistable
 state containing both the secret-bearing authorization URL and the client
 proof-of-possession key; URL-only resume is insufficient. Completion is
-one-shot, so apps that need cancellation or failure recovery must save that
-state first. Apps must delete it after completion, expiry, or abandonment.
+one-shot. Saved state can restore an unapproved request after process loss, but
+once completion retrieves the approval, cancellation or credential-exchange
+failure requires a new auth request. Apps must delete saved state after
+completion, expiry, or abandonment.
 When bindings create the Pubky client internally, they should expose FFI-safe
 client configuration for platform-owned network policy such as request
 timeouts. The default configuration uses the public network; setting a local

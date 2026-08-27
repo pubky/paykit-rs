@@ -398,12 +398,12 @@ impl FfiPubkySessionBootstrap {
         client_id: String,
         pubky_client: FfiPubkyClientConfig,
     ) -> Result<Self, PaykitFfiError> {
-        Ok(Self {
-            inner: PubkySessionBootstrap::with_pubky(
-                pubky_from_config(&pubky_client)?,
-                &client_id,
-            )?,
-        })
+        let mut bootstrap =
+            PubkySessionBootstrap::with_pubky(pubky_from_config(&pubky_client)?, &client_id)?;
+        if let Some(auth_relay_url) = auth_relay_url(&pubky_client) {
+            bootstrap = bootstrap.with_auth_relay(&auth_relay_url)?;
+        }
+        Ok(Self { inner: bootstrap })
     }
 
     /// Sign up on a homeserver with the receiver-owned Noise key.
@@ -522,6 +522,7 @@ impl FfiPubkySessionBootstrap {
 
     /// Approve a Pubky auth URL with this local secret key.
     ///
+    /// The request client ID must match this bootstrap's client ID.
     /// A signup request creates the identity on its requested homeserver before
     /// approving the application grant.
     pub async fn approve_auth(
@@ -541,6 +542,7 @@ impl FfiPubkySessionBootstrap {
     ///
     /// This high-level operation owns validation, request-bound signing,
     /// channel derivation, encryption, relay delivery, and approval ordering.
+    /// The request client ID must match this bootstrap's client ID.
     pub async fn approve_auth_with_companion_claim(
         &self,
         auth_url: String,
@@ -596,8 +598,10 @@ impl FfiPubkyAuthRequest {
     /// Wait for auth approval using the receiver's persisted Noise key.
     ///
     /// Completion is one-shot, including when the async operation is cancelled
-    /// or returns an error. Call `save_state` first when the request must be
-    /// resumable.
+    /// or returns an error. `save_state` can restore an unapproved request
+    /// while its relay inbox remains valid. Once completion fetches the
+    /// approval, cancellation or a later exchange failure requires a new auth
+    /// request.
     pub async fn complete(
         &self,
         local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
@@ -713,6 +717,15 @@ pub(crate) fn pubky_from_config(config: &FfiPubkyClientConfig) -> Result<Pubky, 
         .build()
         .map(Pubky::with_client)
         .map_err(|err| identity_error("pubky_client", format!("create Pubky client failed: {err}")))
+}
+
+fn auth_relay_url(config: &FfiPubkyClientConfig) -> Option<String> {
+    config.auth_relay_url.clone().or_else(|| {
+        config
+            .local_testnet_host
+            .as_ref()
+            .map(|host| format!("http://{host}:15412/inbox/"))
+    })
 }
 
 fn validate_local_testnet_host(host: &str) -> Result<(), PaykitFfiError> {

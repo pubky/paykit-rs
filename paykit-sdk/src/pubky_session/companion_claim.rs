@@ -14,7 +14,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
-use super::{validate_auth_url_capabilities, validate_grant_auth_url, PubkySessionBootstrap};
+use super::{
+    validate_auth_url_capabilities, validate_auth_url_client_id, validate_grant_auth_url,
+    PubkySessionBootstrap,
+};
 use crate::PubkyLocalSecretKey;
 
 const ED25519_SIGNATURE_LEN: usize = 64;
@@ -137,7 +140,8 @@ impl PubkySessionBootstrap {
     ///
     /// The URL must contain exactly one query parameter matching the claim's
     /// `query_parameter` and `claim_type`. Its requested capabilities must
-    /// exactly match `expected_capabilities`.
+    /// exactly match `expected_capabilities`, and its client ID must match this
+    /// bootstrap's client ID.
     ///
     /// The claim is delivered before the Pubky grant. A claim
     /// validation, encryption, or relay delivery failure therefore leaves the
@@ -152,6 +156,7 @@ impl PubkySessionBootstrap {
         secret_key: &PubkyLocalSecretKey,
         claim: &PubkyAuthCompanionClaim,
     ) -> Result<(), PubkyAuthCompanionClaimApprovalError> {
+        validate_auth_url_client_id(auth_url, &self.client_id).map_err(invalid_auth_url)?;
         let request = parse_companion_auth_request(auth_url, expected_capabilities, claim)?;
         let signed_claim = encode_signed_claim(claim, &request.secret, secret_key);
         let encrypted_claim = encrypt_claim(&signed_claim, &request.secret)?;

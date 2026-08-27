@@ -32,9 +32,18 @@ fn test_companion_claim_debug_redacts_unsigned_payload() {
 }
 
 fn auth_url(relay: &Url, secret: &[u8; 32], claim_type: &str) -> String {
+    auth_url_for_client_id(relay, secret, claim_type, CLIENT_ID)
+}
+
+fn auth_url_for_client_id(
+    relay: &Url,
+    secret: &[u8; 32],
+    claim_type: &str,
+    client_id: &str,
+) -> String {
     let client_public_key = Keypair::from_secret(&CLIENT_KEY_SECRET).public_key();
     format!(
-        "pubkyauth://signin_grant?caps={CAPABILITY}&relay={relay}&secret={}&cid={CLIENT_ID}&cpk={}&{QUERY_PARAMETER}={claim_type}",
+        "pubkyauth://signin_grant?caps={CAPABILITY}&relay={relay}&secret={}&cid={client_id}&cpk={}&{QUERY_PARAMETER}={claim_type}",
         URL_SAFE_NO_PAD.encode(secret),
         client_public_key.z32(),
     )
@@ -203,6 +212,54 @@ async fn test_approve_auth_with_companion_claim_delivers_both_envelopes() {
         grant.cnf,
         Keypair::from_secret(&CLIENT_KEY_SECRET).public_key()
     );
+}
+
+#[tokio::test]
+async fn test_approve_auth_with_companion_claim_rejects_mismatched_client_before_delivery() {
+    let relay = http_relay::HttpRelay::builder()
+        .http_port(0)
+        .run()
+        .await
+        .unwrap();
+    let inbox = relay.local_url().join("inbox").unwrap();
+    let client = PubkyHttpClient::new().unwrap();
+    let bootstrap =
+        PubkySessionBootstrap::with_pubky(Pubky::with_client(client.clone()), CLIENT_ID).unwrap();
+    let auth_secret = [9; 32];
+    let auth_url = auth_url_for_client_id(&inbox, &auth_secret, CLAIM_TYPE, "attacker.test");
+
+    let error = bootstrap
+        .approve_auth_with_companion_claim(
+            &auth_url,
+            CAPABILITY,
+            &PubkyLocalSecretKey::new([7; 32]),
+            &test_claim(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        PubkyAuthCompanionClaimApprovalError::InvalidAuthUrl { .. }
+    ));
+
+    let claim_channel = HttpRelayInboxChannel::new(
+        inbox.clone(),
+        derive_companion_channel_id(CLAIM_TYPE, &auth_secret),
+    )
+    .unwrap();
+    assert!(claim_channel
+        .poll(&client, Some(Duration::from_millis(50)))
+        .await
+        .unwrap()
+        .is_none());
+
+    let auth_channel = EncryptedHttpRelayInboxChannel::new(inbox, auth_secret).unwrap();
+    assert!(auth_channel
+        .poll(&client, Some(Duration::from_millis(50)))
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]

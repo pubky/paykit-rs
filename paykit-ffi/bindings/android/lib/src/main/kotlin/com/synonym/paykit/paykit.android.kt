@@ -1876,7 +1876,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url() != 7484.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 61979.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 24500.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkyauthrequest_save_state() != 65530.toShort()) {
@@ -1903,10 +1903,10 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 34434.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 56451.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 56539.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 6650.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 38549.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 26538.toShort()) {
@@ -7141,8 +7141,10 @@ public open class PubkyAuthRequest: Disposable, PubkyAuthRequestInterface {
      * Wait for auth approval using the receiver's persisted Noise key.
      *
      * Completion is one-shot, including when the async operation is cancelled
-     * or returns an error. Call `save_state` first when the request must be
-     * resumable.
+     * or returns an error. `save_state` can restore an unapproved request
+     * while its relay inbox remains valid. Once completion fetches the
+     * approval, cancellation or a later exchange failure requires a new auth
+     * request.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult {
@@ -7882,6 +7884,7 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
     /**
      * Approve a Pubky auth URL with this local secret key.
      *
+     * The request client ID must match this bootstrap's client ID.
      * A signup request creates the identity on its requested homeserver before
      * approving the application grant.
      */
@@ -7913,6 +7916,7 @@ public open class PubkySessionBootstrap: Disposable, PubkySessionBootstrapInterf
      *
      * This high-level operation owns validation, request-bound signing,
      * channel derivation, encryption, relay delivery, and approval ordering.
+     * The request client ID must match this bootstrap's client ID.
      */
     @Throws(PubkyAuthCompanionClaimApprovalException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: PubkyAuthCompanionClaim) {
@@ -11298,17 +11302,20 @@ public object FfiConverterTypePubkyClientConfig: FfiConverterRustBuffer<PubkyCli
         return PubkyClientConfig(
             FfiConverterULong.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: PubkyClientConfig): ULong = (
             FfiConverterULong.allocationSize(value.`requestTimeoutSecs`) +
-            FfiConverterOptionalString.allocationSize(value.`localTestnetHost`)
+            FfiConverterOptionalString.allocationSize(value.`localTestnetHost`) +
+            FfiConverterOptionalString.allocationSize(value.`authRelayUrl`)
     )
 
     override fun write(value: PubkyClientConfig, buf: ByteBuffer) {
         FfiConverterULong.write(value.`requestTimeoutSecs`, buf)
         FfiConverterOptionalString.write(value.`localTestnetHost`, buf)
+        FfiConverterOptionalString.write(value.`authRelayUrl`, buf)
     }
 }
 

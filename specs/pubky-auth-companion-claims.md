@@ -34,10 +34,11 @@ for example:
 x-example-claim=account-export-v1
 ```
 
-The request capabilities must exactly match `expected_capabilities`. The URL
-must also contain one valid 32-byte base64url-no-pad `secret` and one absolute
-HTTP(S) `relay` URL. Duplicate, missing, empty, or mismatched values are
-invalid.
+The request capabilities must exactly match `expected_capabilities`, and its
+client ID must match the stable app-owned client ID of the session bootstrap.
+The URL must also contain one valid 32-byte base64url-no-pad `secret` and one
+absolute HTTP(S) `relay` URL. Duplicate, missing, empty, or mismatched values
+are invalid.
 
 ## Request-Bound Signature
 

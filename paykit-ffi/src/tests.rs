@@ -47,7 +47,26 @@ fn test_default_pubky_client_config_uses_production() {
     let config = default_pubky_client_config();
 
     assert!(config.local_testnet_host.is_none());
+    assert!(config.auth_relay_url.is_none());
     assert!(pubky_from_config(&config).is_ok());
+}
+
+#[test]
+fn test_pubky_client_config_validates_auth_relay_url() {
+    let mut config = default_pubky_client_config();
+    config.auth_relay_url = Some("http://127.0.0.1:15412/inbox".into());
+
+    assert!(FfiPubkySessionBootstrap::with_pubky_client_config(
+        TEST_CLIENT_ID.into(),
+        config.clone(),
+    )
+    .is_ok());
+
+    config.auth_relay_url = Some("file:///tmp/relay".into());
+    let error = FfiPubkySessionBootstrap::with_pubky_client_config(TEST_CLIENT_ID.into(), config)
+        .err()
+        .expect("non-HTTP auth relay must be rejected");
+    assert!(error.to_string().contains("auth relay"));
 }
 
 #[test]
@@ -60,6 +79,33 @@ fn test_pubky_client_config_accepts_local_testnet() {
         result.is_ok(),
         "expected local testnet client, got: {result:?}"
     );
+}
+
+#[tokio::test]
+async fn test_pubky_client_config_routes_auth_to_local_testnet_relay() {
+    let mut config = default_pubky_client_config();
+    config.local_testnet_host = Some("10.0.2.2".into());
+    let bootstrap =
+        FfiPubkySessionBootstrap::with_pubky_client_config(TEST_CLIENT_ID.into(), config).unwrap();
+
+    let request = bootstrap.start_sign_in_auth("/:rw".into()).await.unwrap();
+    let details = parse_pubky_auth_url(request.authorization_url().await.unwrap()).unwrap();
+
+    assert_eq!(details.relay_url, "http://10.0.2.2:15412/inbox/");
+}
+
+#[tokio::test]
+async fn test_pubky_client_config_explicit_auth_relay_overrides_local_testnet() {
+    let mut config = default_pubky_client_config();
+    config.local_testnet_host = Some("10.0.2.2".into());
+    config.auth_relay_url = Some("http://relay.example:19000/inbox/".into());
+    let bootstrap =
+        FfiPubkySessionBootstrap::with_pubky_client_config(TEST_CLIENT_ID.into(), config).unwrap();
+
+    let request = bootstrap.start_sign_in_auth("/:rw".into()).await.unwrap();
+    let details = parse_pubky_auth_url(request.authorization_url().await.unwrap()).unwrap();
+
+    assert_eq!(details.relay_url, "http://relay.example:19000/inbox/");
 }
 
 #[test]

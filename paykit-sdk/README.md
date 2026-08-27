@@ -140,11 +140,12 @@ Common workflows:
   through a `PubkySessionProvider`; exported session secrets contain the grant
   and proof-of-possession key, while pending auth state contains the
   secret-bearing URL and client key, so both belong in secure storage
-- call `PubkyAuthRequest::save_state` before a pending external auth request
-  must survive process loss, cancellation, or a retry after completion fails,
-  then pass that complete state to
+- call `PubkyAuthRequest::save_state` when an unapproved external auth request
+  must survive process loss, then pass that complete state to
   `PubkySessionBootstrap::resume_auth`; the authorization URL alone cannot
-  restore the proof-of-possession key
+  restore the proof-of-possession key. Once completion fetches an approval,
+  cancellation or a later credential-exchange failure requires a new auth
+  request because Pubky relay approvals are consumed when read
 - use `PubkySessionBootstrap::approve_auth_with_companion_claim` for a
   `pubkyauth://` request carrying an application-defined companion claim; the
   integrator supplies the query parameter, claim type, exact expected

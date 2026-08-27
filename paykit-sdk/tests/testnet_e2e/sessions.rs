@@ -1,21 +1,26 @@
 use paykit_sdk::{
-    PaykitReceiverPath, PaykitSdkConfig, PubkyLocalSecretKey, PubkyPublicKey,
-    PubkySessionBootstrap, ReceiverNoiseSecretKey,
+    PaykitReceiverPath, PaykitSdkConfig, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
+    ReceiverNoiseSecretKey,
 };
 use pubky_testnet::pubky::Keypair;
 
-use crate::harness::build_testnet;
+use crate::harness::{build_testnet, session_bootstrap};
 
 const TEST_CLIENT_ID: &str = "paykit-sdk.test";
 
 #[tokio::test]
-async fn test_external_grant_signup_completes() {
+async fn test_external_grant_signup_retries_after_account_creation() {
     let testnet = build_testnet().await;
     let pubky = testnet.sdk().expect("testnet Pubky client");
-    let identity_secret = PubkyLocalSecretKey::new(Keypair::random().secret_key());
+    let identity_keypair = Keypair::random();
+    let identity_secret = PubkyLocalSecretKey::new(identity_keypair.secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let bootstrap = PubkySessionBootstrap::with_pubky(pubky, TEST_CLIENT_ID)
-        .expect("test client ID should be valid");
+    pubky
+        .signer(identity_keypair)
+        .signup(&homeserver.to_public_key().unwrap(), None)
+        .await
+        .expect("account setup should succeed before the retried grant flow");
+    let bootstrap = session_bootstrap(&testnet, TEST_CLIENT_ID);
     let capabilities = PaykitSdkConfig::new(
         PaykitReceiverPath::new("bitkit/wallet").expect("test receiver path should be valid"),
     )
@@ -46,11 +51,9 @@ async fn test_external_grant_signup_completes() {
 #[tokio::test]
 async fn test_pending_grant_auth_survives_secure_state_restore() {
     let testnet = build_testnet().await;
-    let pubky = testnet.sdk().expect("testnet Pubky client");
     let identity_secret = PubkyLocalSecretKey::new(Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let bootstrap = PubkySessionBootstrap::with_pubky(pubky, TEST_CLIENT_ID)
-        .expect("test client ID should be valid");
+    let bootstrap = session_bootstrap(&testnet, TEST_CLIENT_ID);
     let capabilities = PaykitSdkConfig::new(
         PaykitReceiverPath::new("bitkit/wallet").expect("test receiver path should be valid"),
     )
@@ -105,8 +108,7 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
     let identity_keypair = Keypair::random();
     let identity_secret = PubkyLocalSecretKey::new(identity_keypair.secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let bootstrap = PubkySessionBootstrap::with_pubky(pubky.clone(), TEST_CLIENT_ID)
-        .expect("test client ID should be valid");
+    let bootstrap = session_bootstrap(&testnet, TEST_CLIENT_ID);
     let capabilities = PaykitSdkConfig::new(
         PaykitReceiverPath::new("bitkit/wallet").expect("test receiver path should be valid"),
     )
@@ -159,8 +161,7 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
     assert_eq!(restored.public_key, signed_up.public_key);
     assert_eq!(restored.client_id, TEST_CLIENT_ID);
 
-    let other_bootstrap = PubkySessionBootstrap::with_pubky(pubky.clone(), "other.test")
-        .expect("alternate test client ID should be valid");
+    let other_bootstrap = session_bootstrap(&testnet, "other.test");
     let wrong_client_error = other_bootstrap
         .import_session(
             exported.as_str(),
@@ -181,6 +182,17 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
         .as_cookie()
         .and_then(|cookie| cookie.export_secret())
         .expect("non-grant session should be exportable");
+    let cookie_access = PubkySessionAccess {
+        session: cookie_session,
+        outbox_client: pubky,
+        local_secret_key: Some(identity_secret.clone()),
+        receiver_noise_secret_key: receiver_noise_secret.clone(),
+    };
+    let validation_error = cookie_access
+        .validate()
+        .expect_err("runtime access must reject non-grant sessions");
+    assert!(validation_error.to_string().contains("grant-backed"));
+
     let error = bootstrap
         .import_session(
             &cookie_secret,

@@ -48,7 +48,19 @@ pub async fn build_testnet() -> EphemeralTestnet {
         EphemeralTestnet::builder().postgres(postgres)
     };
 
-    builder.build().await.unwrap()
+    builder.with_http_relay().build().await.unwrap()
+}
+
+pub fn session_bootstrap(testnet: &EphemeralTestnet, client_id: &str) -> PubkySessionBootstrap {
+    let auth_relay_url = testnet
+        .http_relay()
+        .local_url()
+        .join("inbox")
+        .expect("test auth relay inbox URL should be valid");
+    PubkySessionBootstrap::with_pubky(testnet.sdk().expect("testnet Pubky client"), client_id)
+        .expect("test client ID should be valid")
+        .with_auth_relay(auth_relay_url.as_str())
+        .expect("test auth relay URL should be valid")
 }
 
 /// Session provider backed by a real testnet session.
@@ -208,11 +220,7 @@ impl TestUser {
         let secret_key = PubkyLocalSecretKey::new(keypair.secret_key());
         let homeserver_public_key =
             PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-        let bootstrap = PubkySessionBootstrap::with_pubky(
-            testnet.sdk().expect("testnet Pubky client"),
-            TEST_CLIENT_ID,
-        )
-        .expect("test client ID should be valid");
+        let bootstrap = session_bootstrap(testnet, TEST_CLIENT_ID);
         let config = PaykitSdkConfig::new(receiver_path.clone());
         let receiver_noise_secret_key = ReceiverNoiseSecretKey::random();
         let receiver_noise_public_key = receiver_noise_secret_key.public_key();

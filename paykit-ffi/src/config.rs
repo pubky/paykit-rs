@@ -68,7 +68,12 @@ pub struct FfiPubkyClientConfig {
     /// Request timeout for Pubky HTTP operations in seconds.
     pub request_timeout_secs: u64,
     /// Host running local testnet services, or `None` to use the public Pubky network.
+    ///
+    /// Unless an explicit grant-auth relay overrides it, grant auth uses the
+    /// standard local testnet relay at `http://<host>:15412/inbox/`.
     pub local_testnet_host: Option<String>,
+    /// Explicit grant-auth relay inbox URL, or `None` to use Pubky's default.
+    pub auth_relay_url: Option<String>,
 }
 
 /// Return the default SDK policy for an explicit Paykit receiver path.
@@ -86,6 +91,7 @@ pub fn default_pubky_client_config() -> FfiPubkyClientConfig {
     FfiPubkyClientConfig {
         request_timeout_secs: DEFAULT_PUBKY_REQUEST_TIMEOUT_SECS,
         local_testnet_host: None,
+        auth_relay_url: None,
     }
 }
 

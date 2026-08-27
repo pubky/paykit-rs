@@ -208,13 +208,13 @@ impl Drop for PubkyAuthRequestState {
 pub struct PubkyAuthRequest {
     pubky: Pubky,
     flow: PubkyGrantAuthFlow,
-    authorization_url: String,
+    authorization_url: Zeroizing<String>,
 }
 
 impl PubkyAuthRequest {
     /// Short-lived secret-bearing auth URL to show as a deeplink or QR code.
     pub fn authorization_url(&self) -> &str {
-        &self.authorization_url
+        self.authorization_url.as_str()
     }
 
     /// Export the sensitive state required to resume this pending request.
@@ -231,8 +231,10 @@ impl PubkyAuthRequest {
     /// a new key rotates its public marker key and invalidates existing private
     /// path and Encrypted Link state.
     ///
-    /// This consumes the request even when approval is cancelled or fails. Call
-    /// [`Self::save_state`] first when the request must be resumable.
+    /// This consumes the request even when approval is cancelled or fails.
+    /// [`Self::save_state`] can restore an unapproved request while its relay
+    /// inbox remains valid. Once a completion attempt fetches the approval,
+    /// cancellation or a later exchange failure requires a new auth request.
     pub async fn complete(
         self,
         local_secret_key: Option<PubkyLocalSecretKey>,
@@ -272,6 +274,7 @@ impl fmt::Debug for PubkyAuthRequest {
 pub struct PubkySessionBootstrap {
     pubky: Pubky,
     client_id: ClientId,
+    auth_relay_url: Option<Url>,
 }
 
 impl PubkySessionBootstrap {
@@ -285,7 +288,11 @@ impl PubkySessionBootstrap {
         let client_id = parse_client_id(client_id)?;
         let pubky =
             Pubky::new().map_err(|err| map_pubky_identity_error("create Pubky client", err))?;
-        Ok(Self { pubky, client_id })
+        Ok(Self {
+            pubky,
+            client_id,
+            auth_relay_url: None,
+        })
     }
 
     /// Create a bootstrap helper from an existing Pubky client.
@@ -293,7 +300,30 @@ impl PubkySessionBootstrap {
         Ok(Self {
             pubky,
             client_id: parse_client_id(client_id)?,
+            auth_relay_url: None,
         })
+    }
+
+    /// Use an explicit HTTP(S) inbox URL for new Pubky grant auth flows.
+    ///
+    /// Production integrations normally use Pubky's default relay. This is
+    /// useful for local testnets and deployments with a private auth relay.
+    pub fn with_auth_relay(mut self, auth_relay_url: &str) -> Result<Self> {
+        let auth_relay_url =
+            Url::parse(auth_relay_url).map_err(|err| PaykitSdkError::Protocol {
+                context: format!("invalid Pubky auth relay URL: {err}"),
+                source: None,
+            })?;
+        if !matches!(auth_relay_url.scheme(), "http" | "https")
+            || auth_relay_url.host_str().is_none()
+        {
+            return Err(PaykitSdkError::Protocol {
+                context: "Pubky auth relay must be an absolute HTTP(S) URL".into(),
+                source: None,
+            });
+        }
+        self.auth_relay_url = Some(auth_relay_url);
+        Ok(self)
     }
 
     /// Return the stable application identifier used for new grants.
@@ -319,10 +349,7 @@ impl PubkySessionBootstrap {
     ) -> Result<PubkySessionBootstrapResult> {
         let homeserver = homeserver_public_key.to_public_key()?;
         let signer = self.pubky.signer(secret_key.keypair());
-        signer
-            .signup(&homeserver, signup_code)
-            .await
-            .map_err(|err| map_pubky_identity_error("sign up Pubky session", err))?;
+        ensure_pubky_account(&signer, &homeserver, signup_code).await?;
         self.sign_in(secret_key, receiver_noise_secret_key, required_capabilities)
             .await
     }
@@ -422,13 +449,14 @@ impl PubkySessionBootstrap {
         Ok(PubkyAuthRequest {
             pubky: self.pubky.clone(),
             flow,
-            authorization_url: state.authorization_url().to_string(),
+            authorization_url: Zeroizing::new(state.authorization_url().to_string()),
         })
     }
 
     /// Approve a Pubky auth URL with this local secret key.
     ///
     /// The requested capabilities must exactly match `expected_capabilities`.
+    /// The request client ID must match this bootstrap's client ID.
     /// A signup request creates the identity on its requested homeserver before
     /// approving the application grant.
     pub async fn approve_auth(
@@ -439,6 +467,7 @@ impl PubkySessionBootstrap {
     ) -> Result<()> {
         validate_grant_auth_url(auth_url)?;
         validate_auth_url_capabilities(auth_url, expected_capabilities)?;
+        validate_auth_url_client_id(auth_url, &self.client_id)?;
         let deep_link = DeepLink::from_str(auth_url).map_err(|err| PaykitSdkError::Protocol {
             context: format!("invalid Pubky auth URL: {err}"),
             source: None,
@@ -446,10 +475,8 @@ impl PubkySessionBootstrap {
         let signer = self.pubky.signer(secret_key.keypair());
         if let DeepLink::SignupGrant(link) = deep_link {
             let params = link.params();
-            signer
-                .signup(&params.homeserver, params.signup_token.as_deref())
-                .await
-                .map_err(|err| map_pubky_identity_error("sign up Pubky identity", err))?;
+            ensure_pubky_account(&signer, &params.homeserver, params.signup_token.as_deref())
+                .await?;
         }
         signer
             .approve_auth(auth_url)
@@ -459,16 +486,40 @@ impl PubkySessionBootstrap {
 
     async fn start_auth(&self, capabilities: &str, kind: AuthFlowKind) -> Result<PubkyAuthRequest> {
         let capabilities = parse_capabilities(capabilities)?;
-        let flow = self
-            .pubky
-            .start_grant_auth_flow(&capabilities, kind, self.client_id.clone())
+        let mut builder = PubkyGrantAuthFlow::builder(&capabilities, kind, self.client_id.clone())
+            .client(self.pubky.client().clone());
+        if let Some(auth_relay_url) = &self.auth_relay_url {
+            builder = builder.relay(auth_relay_url.clone());
+        }
+        let flow = builder
+            .start()
             .map_err(|err| map_pubky_identity_error("start Pubky auth flow", err))?;
-        let authorization_url = flow.authorization_url().to_string();
+        let authorization_url = Zeroizing::new(flow.authorization_url().to_string());
         Ok(PubkyAuthRequest {
             pubky: self.pubky.clone(),
             flow,
             authorization_url,
         })
+    }
+}
+
+async fn ensure_pubky_account(
+    signer: &pubky::PubkySigner,
+    homeserver: &paykit_lib::PublicKey,
+    signup_code: Option<&str>,
+) -> Result<()> {
+    match signer.signup(homeserver, signup_code).await {
+        Ok(()) => Ok(()),
+        Err(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+            if status.as_u16() == 409 =>
+        {
+            signer
+                .pkdns()
+                .publish_homeserver_force(Some(homeserver))
+                .await
+                .map_err(|err| map_pubky_identity_error("restore Pubky homeserver record", err))
+        }
+        Err(err) => Err(map_pubky_identity_error("sign up Pubky identity", err)),
     }
 }
 

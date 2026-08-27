@@ -10,8 +10,18 @@ fn scoped_capabilities() -> String {
 }
 
 fn sign_in_auth_url(capabilities: &str) -> String {
+    sign_in_auth_url_for_client_id(capabilities, TEST_CLIENT_ID)
+}
+
+fn sign_in_auth_url_for_client_id(capabilities: &str, client_id: &str) -> String {
     format!(
-        "pubkyauth://signin_grant?caps={capabilities}&relay=https://httprelay.pubky.app/inbox/&secret={TEST_AUTH_SECRET}&cid={TEST_CLIENT_ID}&cpk={TEST_PUBLIC_KEY}"
+        "pubkyauth://signin_grant?caps={capabilities}&relay=https://httprelay.pubky.app/inbox/&secret={TEST_AUTH_SECRET}&cid={client_id}&cpk={TEST_PUBLIC_KEY}"
+    )
+}
+
+fn sign_up_auth_url_for_client_id(capabilities: &str, client_id: &str) -> String {
+    format!(
+        "pubkyauth://signup_grant?caps={capabilities}&relay=https://httprelay.pubky.app/inbox/&secret={TEST_AUTH_SECRET}&hs={TEST_PUBLIC_KEY}&cid={client_id}&cpk={TEST_PUBLIC_KEY}"
     )
 }
 
@@ -137,6 +147,19 @@ fn test_validate_auth_url_capabilities_rejects_broad_capabilities() {
     let auth_url = sign_in_auth_url("/:rw");
 
     assert!(validate_auth_url_capabilities(&auth_url, &capabilities).is_err());
+}
+
+#[tokio::test]
+async fn test_approve_auth_rejects_mismatched_client_id_before_signup() {
+    let bootstrap = PubkySessionBootstrap::new(TEST_CLIENT_ID).unwrap();
+    let auth_url = sign_up_auth_url_for_client_id("/:rw", "attacker.test");
+
+    let error = bootstrap
+        .approve_auth(&auth_url, "/:rw", &PubkyLocalSecretKey::new([7; 32]))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, PaykitSdkError::Policy { .. }));
 }
 
 #[test]

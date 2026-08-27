@@ -166,9 +166,12 @@ object.
 
 - `PubkySessionBootstrap(clientId)` — create/import grant sessions and grant
   auth flows for a stable app-owned Pubky client ID.
+- `PubkyClientConfig.authRelayUrl` — select a local or private grant-auth
+  relay; leave unset for Pubky's production default.
 - `PubkyAuthRequest` — pending external auth-flow handle; call `saveState()` to
-  persist its complete proof-of-possession state securely before process loss,
-  cancellation, or a retry after the one-shot `complete()` operation fails.
+  persist its complete proof-of-possession state securely when an unapproved
+  request must survive process loss. Once `complete()` fetches an approval,
+  cancellation or a later exchange failure requires a new auth request.
 - `PubkyAuthRequestState` — secret-bearing URL plus client key used by
   `resumeAuth`; delete it after completion, expiry, or abandonment.
 - `pubkySecretKeyFromBip39Seed(seed)` — derive a Pubky secret key from a

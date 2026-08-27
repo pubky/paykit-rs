@@ -3493,8 +3493,10 @@ public protocol PubkyAuthRequestProtocol: AnyObject, Sendable {
      * Wait for auth approval using the receiver's persisted Noise key.
      *
      * Completion is one-shot, including when the async operation is cancelled
-     * or returns an error. Call `save_state` first when the request must be
-     * resumable.
+     * or returns an error. `save_state` can restore an unapproved request
+     * while its relay inbox remains valid. Once completion fetches the
+     * approval, cancellation or a later exchange failure requires a new auth
+     * request.
      */
     func complete(localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
@@ -3583,8 +3585,10 @@ open func authorizationUrl()async throws  -> String  {
      * Wait for auth approval using the receiver's persisted Noise key.
      *
      * Completion is one-shot, including when the async operation is cancelled
-     * or returns an error. Call `save_state` first when the request must be
-     * resumable.
+     * or returns an error. `save_state` can restore an unapproved request
+     * while its relay inbox remains valid. Once completion fetches the
+     * approval, cancellation or a later exchange failure requires a new auth
+     * request.
      */
 open func complete(localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
@@ -4197,6 +4201,7 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     /**
      * Approve a Pubky auth URL with this local secret key.
      *
+     * The request client ID must match this bootstrap's client ID.
      * A signup request creates the identity on its requested homeserver before
      * approving the application grant.
      */
@@ -4207,6 +4212,7 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
      *
      * This high-level operation owns validation, request-bound signing,
      * channel derivation, encryption, relay delivery, and approval ordering.
+     * The request client ID must match this bootstrap's client ID.
      */
     func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey, claim: PubkyAuthCompanionClaim) async throws
 
@@ -4328,6 +4334,7 @@ public static func withPubkyClientConfig(clientId: String, pubkyClient: PubkyCli
     /**
      * Approve a Pubky auth URL with this local secret key.
      *
+     * The request client ID must match this bootstrap's client ID.
      * A signup request creates the identity on its requested homeserver before
      * approving the application grant.
      */
@@ -4353,6 +4360,7 @@ open func approveAuth(authUrl: String, expectedCapabilities: String, localSecret
      *
      * This high-level operation owns validation, request-bound signing,
      * channel derivation, encryption, relay delivery, and approval ordering.
+     * The request client ID must match this bootstrap's client ID.
      */
 open func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey, claim: PubkyAuthCompanionClaim)async throws   {
     return
@@ -11635,8 +11643,15 @@ public struct PubkyClientConfig {
     public var requestTimeoutSecs: UInt64
     /**
      * Host running local testnet services, or `None` to use the public Pubky network.
+     *
+     * Unless an explicit grant-auth relay overrides it, grant auth uses the
+     * standard local testnet relay at `http://<host>:15412/inbox/`.
      */
     public var localTestnetHost: String?
+    /**
+     * Explicit grant-auth relay inbox URL, or `None` to use Pubky's default.
+     */
+    public var authRelayUrl: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -11646,9 +11661,16 @@ public struct PubkyClientConfig {
          */requestTimeoutSecs: UInt64,
         /**
          * Host running local testnet services, or `None` to use the public Pubky network.
-         */localTestnetHost: String?) {
+         *
+         * Unless an explicit grant-auth relay overrides it, grant auth uses the
+         * standard local testnet relay at `http://<host>:15412/inbox/`.
+         */localTestnetHost: String?,
+        /**
+         * Explicit grant-auth relay inbox URL, or `None` to use Pubky's default.
+         */authRelayUrl: String?) {
         self.requestTimeoutSecs = requestTimeoutSecs
         self.localTestnetHost = localTestnetHost
+        self.authRelayUrl = authRelayUrl
     }
 }
 
@@ -11665,12 +11687,16 @@ extension PubkyClientConfig: Equatable, Hashable {
         if lhs.localTestnetHost != rhs.localTestnetHost {
             return false
         }
+        if lhs.authRelayUrl != rhs.authRelayUrl {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(requestTimeoutSecs)
         hasher.combine(localTestnetHost)
+        hasher.combine(authRelayUrl)
     }
 }
 
@@ -11686,13 +11712,15 @@ public struct FfiConverterTypePubkyClientConfig: FfiConverterRustBuffer {
         return
             try PubkyClientConfig(
                 requestTimeoutSecs: FfiConverterUInt64.read(from: &buf),
-                localTestnetHost: FfiConverterOptionString.read(from: &buf)
+                localTestnetHost: FfiConverterOptionString.read(from: &buf),
+                authRelayUrl: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: PubkyClientConfig, into buf: inout [UInt8]) {
         FfiConverterUInt64.write(value.requestTimeoutSecs, into: &buf)
         FfiConverterOptionString.write(value.localTestnetHost, into: &buf)
+        FfiConverterOptionString.write(value.authRelayUrl, into: &buf)
     }
 }
 
@@ -18378,7 +18406,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkyauthrequest_authorization_url() != 7484) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 61979) {
+    if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 24500) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkyauthrequest_save_state() != 65530) {
@@ -18405,10 +18433,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 34434) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 56451) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 56539) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 6650) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 38549) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 26538) {
