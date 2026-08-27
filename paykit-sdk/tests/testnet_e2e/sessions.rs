@@ -124,6 +124,23 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
         .await
         .expect("grant signup should succeed");
     assert!(signed_up.access.session.as_grant().is_some());
+    assert_eq!(
+        session_capabilities(&signed_up.access.session),
+        capabilities
+    );
+
+    let signed_in = bootstrap
+        .sign_in(
+            &identity_secret,
+            receiver_noise_secret.clone(),
+            &capabilities,
+        )
+        .await
+        .expect("scoped local grant signin should succeed");
+    assert_eq!(
+        session_capabilities(&signed_in.access.session),
+        capabilities
+    );
 
     let exported = signed_up
         .export_session_secret()
@@ -175,4 +192,14 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
         .expect_err("non-grant sessions must be rejected");
 
     assert!(error.to_string().contains("grant-backed"));
+}
+
+fn session_capabilities(session: &pubky::PubkySession) -> String {
+    session
+        .info()
+        .capabilities()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }

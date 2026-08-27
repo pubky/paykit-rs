@@ -183,6 +183,22 @@ fn test_pubky_auth_request_state_rejects_invalid_or_mismatched_secrets() {
     assert!(FfiPubkyAuthRequestState::new(authorization_url, vec![43; 32]).is_err());
 }
 
+#[tokio::test]
+async fn test_pubky_auth_request_complete_consumes_request_before_key_validation() {
+    let bootstrap = FfiPubkySessionBootstrap::new(TEST_CLIENT_ID.into()).unwrap();
+    let request = bootstrap.start_sign_in_auth("/:rw".into()).await.unwrap();
+
+    assert!(request
+        .complete(
+            Some(Arc::new(FfiPubkyLocalSecretKey::new(vec![7; 31]))),
+            Arc::new(FfiReceiverNoiseSecretKey::random()),
+            "/:rw".into(),
+        )
+        .await
+        .is_err());
+    assert!(request.authorization_url().await.is_err());
+}
+
 #[test]
 fn test_pubky_auth_companion_claim_unexpected_error_is_delivery_neutral() {
     let error = FfiPubkyAuthCompanionClaimApprovalError::Unexpected {

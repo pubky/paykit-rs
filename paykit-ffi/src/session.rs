@@ -96,11 +96,12 @@ impl FfiPubkySessionAccess {
         local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
         receiver_noise_secret_key: Arc<FfiReceiverNoiseSecretKey>,
     ) -> Result<Self, PaykitFfiError> {
+        let mut session_secret = Zeroizing::new(session_secret);
         ClientId::new(&client_id)
             .map_err(|err| validation_error(format!("invalid Pubky client ID: {err}")))?;
         Ok(Self {
             client_id,
-            session_secret,
+            session_secret: std::mem::take(&mut *session_secret),
             local_secret_key,
             receiver_noise_secret_key,
             live_access: None,
@@ -175,16 +176,21 @@ impl FfiPubkyAuthRequestState {
         authorization_url: String,
         client_key_secret: Vec<u8>,
     ) -> Result<Self, PaykitFfiError> {
+        let mut authorization_url = Zeroizing::new(authorization_url);
         let client_key_secret = Zeroizing::new(client_key_secret);
-        let client_key_secret: [u8; 32] =
-            client_key_secret.as_slice().try_into().map_err(|_| {
+        let client_key_secret = Zeroizing::new(
+            <[u8; 32]>::try_from(client_key_secret.as_slice()).map_err(|_| {
                 validation_error(format!(
                     "Pubky auth client key secret must be 32 bytes, got {}",
                     client_key_secret.len()
                 ))
-            })?;
+            })?,
+        );
         Ok(Self {
-            inner: PubkyAuthRequestState::new(authorization_url, client_key_secret)?,
+            inner: PubkyAuthRequestState::new(
+                std::mem::take(&mut *authorization_url),
+                *client_key_secret,
+            )?,
         })
     }
 
@@ -598,17 +604,17 @@ impl FfiPubkyAuthRequest {
         receiver_noise_secret_key: Arc<FfiReceiverNoiseSecretKey>,
         required_capabilities: String,
     ) -> Result<FfiPubkySessionBootstrapResult, PaykitFfiError> {
-        let secret = local_secret_key
-            .map(|key| local_secret_from_bytes(key.export_bytes()))
-            .transpose()?;
-        let receiver_noise_secret_key =
-            receiver_noise_secret_from_bytes(receiver_noise_secret_key.export_bytes())?;
         let request = self
             .inner
             .lock()
             .await
             .take()
             .ok_or_else(|| validation_error("Pubky auth request already completed"))?;
+        let secret = local_secret_key
+            .map(|key| local_secret_from_bytes(key.export_bytes()))
+            .transpose()?;
+        let receiver_noise_secret_key =
+            receiver_noise_secret_from_bytes(receiver_noise_secret_key.export_bytes())?;
         let result = request
             .complete(
                 secret.clone(),

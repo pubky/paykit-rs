@@ -12,7 +12,7 @@ use pubky::{
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     identity::{PubkyLocalSecretKey, PubkyPublicKey},
@@ -153,11 +153,13 @@ pub struct PubkyAuthRequestState {
 impl PubkyAuthRequestState {
     /// Reconstruct persisted pending-request state.
     pub fn new(authorization_url: String, client_key_secret: [u8; 32]) -> Result<Self> {
+        let mut authorization_url = Zeroizing::new(authorization_url);
+        let mut client_key_secret = Zeroizing::new(client_key_secret);
         validate_grant_auth_url(&authorization_url)?;
         validate_auth_state_client_key(&authorization_url, &client_key_secret)?;
         Ok(Self {
-            authorization_url,
-            client_key_secret,
+            authorization_url: std::mem::take(&mut *authorization_url),
+            client_key_secret: std::mem::take(&mut *client_key_secret),
         })
     }
 
@@ -301,6 +303,10 @@ impl PubkySessionBootstrap {
 
     /// Sign up on a homeserver and return validated session access.
     ///
+    /// After creating the account, this uses Pubky grant auth to issue a
+    /// session with exactly `required_capabilities`. The auth relay must be
+    /// reachable.
+    ///
     /// Generate the receiver Noise key once for this receiver and persist it
     /// with the returned session access.
     pub async fn sign_up(
@@ -317,22 +323,15 @@ impl PubkySessionBootstrap {
             .signup(&homeserver, signup_code)
             .await
             .map_err(|err| map_pubky_identity_error("sign up Pubky session", err))?;
-        let session = signer
-            .signin(self.client_id.clone())
+        self.sign_in(secret_key, receiver_noise_secret_key, required_capabilities)
             .await
-            .map_err(|err| map_pubky_identity_error("create Pubky grant session", err))?;
-        session_result(
-            session,
-            self.pubky.clone(),
-            Some(secret_key.clone()),
-            receiver_noise_secret_key,
-            required_capabilities,
-            &self.client_id,
-        )
-        .await
     }
 
     /// Sign in with a local Pubky secret key and return validated session access.
+    ///
+    /// This self-approves a standard Pubky grant-auth request so the returned
+    /// session has exactly `required_capabilities`. The auth relay must be
+    /// reachable.
     ///
     /// Reuse the receiver's persisted Noise key when reauthenticating. Passing
     /// a new key rotates its public marker key and invalidates existing private
@@ -343,21 +342,17 @@ impl PubkySessionBootstrap {
         receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
-        let session = self
-            .pubky
-            .signer(secret_key.keypair())
-            .signin(self.client_id.clone())
+        let request = self.start_sign_in_auth(required_capabilities).await?;
+        let authorization_url = request.authorization_url().to_owned();
+        self.approve_auth(&authorization_url, required_capabilities, secret_key)
+            .await?;
+        request
+            .complete(
+                Some(secret_key.clone()),
+                receiver_noise_secret_key,
+                required_capabilities,
+            )
             .await
-            .map_err(|err| map_pubky_identity_error("sign in Pubky session", err))?;
-        session_result(
-            session,
-            self.pubky.clone(),
-            Some(secret_key.clone()),
-            receiver_noise_secret_key,
-            required_capabilities,
-            &self.client_id,
-        )
-        .await
     }
 
     /// Restore an exported Pubky grant-session secret and validate its access.
