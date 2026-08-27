@@ -102,6 +102,10 @@ Paykit Library remains stateless and payment-method-neutral: it does not evaluat
 
 An Allowance ID is a correlation identifier, not a bearer credential.
 
+## Implementation sequencing
+
+Allowance support may be developed across stacked PRs, but the complete stack must be release-ready before Allowance sending is enabled. The lifecycle-message work does not by itself migrate backups created by pre-Allowance SDK versions. A later SDK/runtime PR in the same unreleased stack must migrate retained Private Application Messages whose raw payloads use a newly recognized Allowance kind but whose stored metadata still classifies them as unknown. That migration must reclassify the records and deterministically rebuild their Event Message deduplication state before any Paykit release or Bitkit rollout enables Allowance sending, so backups created during a mixed-version rollout remain restorable.
+
 ## Decision log (dont worry about manually reviewing this)
 
 This is the audit trail for the product discussion, not required reading for the main concept. Later decisions take precedence where noted.
