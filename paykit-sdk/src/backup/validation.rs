@@ -1491,7 +1491,7 @@ fn validate_receipt_issuance_status(record: &ReceiptIssuanceRecord) -> Result<()
     Ok(())
 }
 
-fn private_message_header(
+pub(super) fn private_message_header(
     raw_json: &str,
 ) -> Result<(Option<u32>, Option<String>, Option<PrivateMessageKind>)> {
     let value = match serde_json::from_str::<serde_json::Value>(raw_json) {
@@ -1589,7 +1589,7 @@ fn private_application_message(
     }
 }
 
-fn private_application_message_from_raw(
+pub(super) fn private_application_message_from_raw(
     raw_json: String,
     parsed_version: Option<u32>,
     parsed_kind: Option<String>,

@@ -21,7 +21,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::{
     domain::outbound_private::enqueue_private_message,
     domain::outbound_private::OutboundPrivateMessageStatus,
-    domain::private_stream::{canonical_event_id, is_event_message_kind, payload_hash},
+    domain::private_stream::{outbound_event_carriers, payload_hash, OutboundEventCarriers},
     domain::records::{AmountRecord, BillingPeriodRecord},
     storage::{
         EventDedupRecord, OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageAdapter,
@@ -33,7 +33,8 @@ mod derivation;
 
 use derivation::recurrence_unit_to_str;
 pub(crate) use derivation::{
-    payment_request_records, received_payment_request_records, request_from_record,
+    payment_proof_allowed_states, payment_request_records, received_payment_request_records,
+    request_from_record,
 };
 
 /// Local role for one Payment Request.

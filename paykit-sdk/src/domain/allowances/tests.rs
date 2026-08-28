@@ -85,6 +85,98 @@ fn proposal(event_id_value: &str, role: AllowanceRole) -> AllowanceEvent {
     ))
 }
 
+fn acceptance(proposal_event_id: &str) -> AllowanceEvent {
+    AllowanceEvent::Acceptance(AllowanceAcceptance::new(
+        event_id(ACCEPTANCE_ID),
+        allowance_id(),
+        event_id(proposal_event_id),
+    ))
+}
+
+fn withdrawal() -> AllowanceEvent {
+    AllowanceEvent::End(AllowanceEnd::withdrawal(
+        event_id(END_ID),
+        allowance_id(),
+        event_id(PROPOSAL_ID),
+    ))
+}
+
+fn accepted_end(end_event_id: &str, acceptance_event_id: &str) -> AllowanceEvent {
+    AllowanceEvent::End(AllowanceEnd::accepted(
+        event_id(end_event_id),
+        allowance_id(),
+        event_id(PROPOSAL_ID),
+        event_id(acceptance_event_id),
+    ))
+}
+
+fn linked_peer(
+    peer: PubkyPublicKey,
+    path: PaykitReceiverPath,
+    state: LinkedPeerState,
+) -> LinkedPeerRecord {
+    LinkedPeerRecord {
+        counterparty: peer,
+        counterparty_receiver_path: path,
+        state,
+        last_sync_at: Some(timestamp()),
+        last_private_receive_at: None,
+        failure_count: 0,
+        local_recovery_attempt_id: None,
+        local_recovery_marker_created_at: None,
+        local_recovery_marker_last_error: None,
+        remote_recovery_attempt_id: None,
+        remote_recovery_marker_observed_at: None,
+    }
+}
+
+async fn derived(
+    storage: &InMemoryStorage,
+    peer: &PubkyPublicKey,
+    path: &PaykitReceiverPath,
+) -> AllowanceRecord {
+    allowance_record(storage, peer, path, &allowance_id())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn enqueue_allowance_acceptance(
+    storage: &InMemoryStorage,
+    peer: PubkyPublicKey,
+    path: PaykitReceiverPath,
+    allowance_id: AllowanceId,
+    now: DateTime<Utc>,
+) -> crate::Result<AllowanceRecord> {
+    enqueue_allowance_response(
+        storage,
+        peer,
+        path,
+        allowance_id,
+        AllowanceResponse::Acceptance,
+        now,
+    )
+    .await
+}
+
+async fn enqueue_allowance_rejection(
+    storage: &InMemoryStorage,
+    peer: PubkyPublicKey,
+    path: PaykitReceiverPath,
+    allowance_id: AllowanceId,
+    now: DateTime<Utc>,
+) -> crate::Result<AllowanceRecord> {
+    enqueue_allowance_response(
+        storage,
+        peer,
+        path,
+        allowance_id,
+        AllowanceResponse::Rejection,
+        now,
+    )
+    .await
+}
+
 fn message(event: &AllowanceEvent) -> PrivateApplicationMessage {
     let raw_json = serialize_allowance_event(event).unwrap();
     PrivateApplicationMessage {
@@ -138,19 +230,11 @@ async fn seed_active_link(
 ) {
     storage
         .transaction(move |tx| {
-            tx.save_linked_peer(LinkedPeerRecord {
-                counterparty: peer.clone(),
-                counterparty_receiver_path: path.clone(),
-                state: LinkedPeerState::Linked,
-                last_sync_at: Some(timestamp()),
-                last_private_receive_at: None,
-                failure_count: 0,
-                local_recovery_attempt_id: None,
-                local_recovery_marker_created_at: None,
-                local_recovery_marker_last_error: None,
-                remote_recovery_attempt_id: None,
-                remote_recovery_marker_observed_at: None,
-            });
+            tx.save_linked_peer(linked_peer(
+                peer.clone(),
+                path.clone(),
+                LinkedPeerState::Linked,
+            ));
             tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                 counterparty: peer,
                 counterparty_receiver_path: path,
@@ -194,8 +278,9 @@ async fn test_allowance_records_derive_local_roles_from_authenticated_source() {
     )
     .await;
 
-    let records =
-        allowance_records_from_state(&storage.snapshot().unwrap(), &peer, &receiver_path());
+    let records = allowance_records(&storage, &peer, &receiver_path())
+        .await
+        .unwrap();
 
     assert_eq!(records.len(), 2);
     assert_eq!(
@@ -232,11 +317,7 @@ async fn test_allowance_derivation_end_wins_over_crossing_acceptance_without_clo
         &storage,
         peer.clone(),
         receiver_path(),
-        vec![AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-            event_id(ACCEPTANCE_ID),
-            allowance_id(),
-            event_id(PROPOSAL_ID),
-        ))],
+        vec![acceptance(PROPOSAL_ID)],
         timestamp(),
     )
     .await;
@@ -244,22 +325,12 @@ async fn test_allowance_derivation_end_wins_over_crossing_acceptance_without_clo
         &storage,
         peer.clone(),
         receiver_path(),
-        AllowanceEvent::End(AllowanceEnd::withdrawal(
-            event_id(END_ID),
-            allowance_id(),
-            event_id(PROPOSAL_ID),
-        )),
+        withdrawal(),
         timestamp() - ChronoDuration::hours(2),
     )
     .await;
 
-    let record = allowance_record_from_state(
-        &storage.snapshot().unwrap(),
-        &peer,
-        &receiver_path(),
-        &allowance_id(),
-    )
-    .unwrap();
+    let record = derived(&storage, &peer, &receiver_path()).await;
 
     assert_eq!(record.state, AllowanceLifecycleState::Ended);
     assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
@@ -285,17 +356,8 @@ async fn test_allowance_derivation_retains_end_by_source_fifo_not_uuid() {
         peer.clone(),
         receiver_path(),
         vec![
-            AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-                event_id(ACCEPTANCE_ID),
-                allowance_id(),
-                event_id(PROPOSAL_ID),
-            )),
-            AllowanceEvent::End(AllowanceEnd::accepted(
-                event_id(inbound_end_id),
-                allowance_id(),
-                event_id(PROPOSAL_ID),
-                event_id(ACCEPTANCE_ID),
-            )),
+            acceptance(PROPOSAL_ID),
+            accepted_end(inbound_end_id, ACCEPTANCE_ID),
         ],
         timestamp(),
     )
@@ -304,27 +366,16 @@ async fn test_allowance_derivation_retains_end_by_source_fifo_not_uuid() {
         &storage,
         peer.clone(),
         receiver_path(),
-        AllowanceEvent::End(AllowanceEnd::withdrawal(
-            event_id(END_ID),
-            allowance_id(),
-            event_id(PROPOSAL_ID),
-        )),
+        withdrawal(),
         timestamp() - ChronoDuration::hours(2),
     )
     .await;
 
-    let record = allowance_record_from_state(
-        &storage.snapshot().unwrap(),
-        &peer,
-        &receiver_path(),
-        &allowance_id(),
-    )
-    .unwrap();
+    let record = derived(&storage, &peer, &receiver_path()).await;
 
     assert_eq!(record.state, AllowanceLifecycleState::Ended);
     assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
     assert_eq!(record.end_event_id.as_deref(), Some(inbound_end_id));
-    assert_eq!(record.end_stream_item_id, Some(1));
 }
 
 #[tokio::test]
@@ -344,23 +395,12 @@ async fn test_allowance_derivation_separates_unresolved_history_from_lifecycle()
         &storage,
         peer.clone(),
         receiver_path(),
-        vec![AllowanceEvent::End(AllowanceEnd::accepted(
-            event_id(END_ID),
-            allowance_id(),
-            event_id(PROPOSAL_ID),
-            event_id(missing_acceptance_id),
-        ))],
+        vec![accepted_end(END_ID, missing_acceptance_id)],
         timestamp(),
     )
     .await;
 
-    let record = allowance_record_from_state(
-        &storage.snapshot().unwrap(),
-        &peer,
-        &receiver_path(),
-        &allowance_id(),
-    )
-    .unwrap();
+    let record = derived(&storage, &peer, &receiver_path()).await;
 
     assert_eq!(record.state, AllowanceLifecycleState::Proposed);
     assert_eq!(
@@ -394,13 +434,7 @@ async fn test_allowance_derivation_detects_proposal_and_cross_kind_event_conflic
     )
     .await;
 
-    let conflicted = allowance_record_from_state(
-        &storage.snapshot().unwrap(),
-        &peer,
-        &receiver_path(),
-        &allowance_id(),
-    )
-    .unwrap();
+    let conflicted = derived(&storage, &peer, &receiver_path()).await;
     assert_eq!(conflicted.state, AllowanceLifecycleState::Conflicted);
 
     let second_peer = counterparty();
@@ -431,13 +465,7 @@ async fn test_allowance_derivation_detects_proposal_and_cross_kind_event_conflic
         timestamp(),
     )
     .await;
-    let cross_kind = allowance_record_from_state(
-        &storage.snapshot().unwrap(),
-        &second_peer,
-        &receiver_path(),
-        &allowance_id(),
-    )
-    .unwrap();
+    let cross_kind = derived(&storage, &second_peer, &receiver_path()).await;
     assert_eq!(cross_kind.state, AllowanceLifecycleState::Proposed);
     assert_eq!(cross_kind.history_status, AllowanceHistoryStatus::Invalid);
     assert_eq!(cross_kind.conflict_event_ids, [PROPOSAL_ID]);
@@ -472,11 +500,7 @@ async fn test_allowance_derivation_distinguishes_known_wrong_and_missing_causal_
         &storage,
         known_wrong_peer.clone(),
         receiver_path(),
-        AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-            event_id(ACCEPTANCE_ID),
-            allowance_id(),
-            event_id(END_ID),
-        )),
+        acceptance(END_ID),
         timestamp(),
     )
     .await;
@@ -495,22 +519,13 @@ async fn test_allowance_derivation_distinguishes_known_wrong_and_missing_causal_
         &storage,
         missing_peer.clone(),
         receiver_path(),
-        AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-            event_id(ACCEPTANCE_ID),
-            allowance_id(),
-            event_id(missing_id),
-        )),
+        acceptance(missing_id),
         timestamp(),
     )
     .await;
-    let state = storage.snapshot().unwrap();
 
-    let known_wrong =
-        allowance_record_from_state(&state, &known_wrong_peer, &receiver_path(), &allowance_id())
-            .unwrap();
-    let missing =
-        allowance_record_from_state(&state, &missing_peer, &receiver_path(), &allowance_id())
-            .unwrap();
+    let known_wrong = derived(&storage, &known_wrong_peer, &receiver_path()).await;
+    let missing = derived(&storage, &missing_peer, &receiver_path()).await;
 
     assert_eq!(known_wrong.history_status, AllowanceHistoryStatus::Invalid);
     assert!(known_wrong.pending_causal_event_ids.is_empty());
@@ -537,13 +552,7 @@ async fn test_allowance_derivation_conflicts_proposals_reusing_one_event_id() {
     )
     .await;
 
-    let record = allowance_record_from_state(
-        &storage.snapshot().unwrap(),
-        &peer,
-        &receiver_path(),
-        &allowance_id(),
-    )
-    .unwrap();
+    let record = derived(&storage, &peer, &receiver_path()).await;
 
     assert_eq!(record.state, AllowanceLifecycleState::Conflicted);
     assert_eq!(record.history_status, AllowanceHistoryStatus::Invalid);
@@ -574,31 +583,19 @@ async fn test_allowance_derivation_scopes_ids_to_exact_link_and_marks_recovery()
         .transaction({
             let peer = peer.clone();
             move |tx| {
-                tx.save_linked_peer(LinkedPeerRecord {
-                    counterparty: peer,
-                    counterparty_receiver_path: receiver_path(),
-                    state: LinkedPeerState::RecoveryRequired,
-                    last_sync_at: None,
-                    last_private_receive_at: None,
-                    failure_count: 1,
-                    local_recovery_attempt_id: None,
-                    local_recovery_marker_created_at: None,
-                    local_recovery_marker_last_error: None,
-                    remote_recovery_attempt_id: None,
-                    remote_recovery_marker_observed_at: None,
-                });
+                tx.save_linked_peer(linked_peer(
+                    peer,
+                    receiver_path(),
+                    LinkedPeerState::RecoveryRequired,
+                ));
                 Ok(())
             }
         })
         .await
         .unwrap();
-    let state = storage.snapshot().unwrap();
 
-    let wallet =
-        allowance_record_from_state(&state, &peer, &receiver_path(), &allowance_id()).unwrap();
-    let server =
-        allowance_record_from_state(&state, &peer, &other_receiver_path(), &allowance_id())
-            .unwrap();
+    let wallet = derived(&storage, &peer, &receiver_path()).await;
+    let server = derived(&storage, &peer, &other_receiver_path()).await;
 
     assert_eq!(
         wallet.history_status,
@@ -793,11 +790,7 @@ async fn test_allowance_first_response_fifo_controls_and_later_response_invalida
         &storage,
         peer.clone(),
         receiver_path(),
-        AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-            event_id(ACCEPTANCE_ID),
-            allowance_id(),
-            event_id(PROPOSAL_ID),
-        )),
+        acceptance(PROPOSAL_ID),
         timestamp(),
     )
     .await;
@@ -814,13 +807,7 @@ async fn test_allowance_first_response_fifo_controls_and_later_response_invalida
     )
     .await;
 
-    let record = allowance_record_from_state(
-        &storage.snapshot().unwrap(),
-        &peer,
-        &receiver_path(),
-        &allowance_id(),
-    )
-    .unwrap();
+    let record = derived(&storage, &peer, &receiver_path()).await;
 
     assert_eq!(record.state, AllowanceLifecycleState::Accepted);
     assert_eq!(record.acceptance_event_id.as_deref(), Some(ACCEPTANCE_ID));
@@ -867,15 +854,12 @@ async fn test_accepted_allowance_view_coexists_with_ordinary_payment_request() {
     .await
     .unwrap();
 
-    let state = storage.snapshot().unwrap();
-    let allowance =
-        allowance_record_from_state(&state, &peer, &receiver_path(), &allowance_id()).unwrap();
+    let allowance = derived(&storage, &peer, &receiver_path()).await;
     let filter = AllowanceFilter {
         counterparty: Some(peer.clone()),
         counterparty_receiver_path: Some(receiver_path()),
         local_role: Some(AllowanceLocalRole::Allower),
         states: vec![AllowanceLifecycleState::Accepted],
-        history_statuses: vec![AllowanceHistoryStatus::Consistent],
     };
     let requests = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
         .await
@@ -958,13 +942,7 @@ async fn test_allowance_derivation_deduplicates_exact_same_sender_retry() {
     )
     .await;
 
-    let record = allowance_record_from_state(
-        &storage.snapshot().unwrap(),
-        &peer,
-        &receiver_path(),
-        &allowance_id(),
-    )
-    .unwrap();
+    let record = derived(&storage, &peer, &receiver_path()).await;
 
     assert_eq!(record.state, AllowanceLifecycleState::Proposed);
     assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
@@ -983,11 +961,7 @@ async fn test_allowance_derivation_preserves_state_when_recognized_event_is_malf
         timestamp(),
     )
     .await;
-    let acceptance = AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-        event_id(ACCEPTANCE_ID),
-        allowance_id(),
-        event_id(PROPOSAL_ID),
-    ));
+    let acceptance = acceptance(PROPOSAL_ID);
     let malformed = serialize_allowance_event(&acceptance).unwrap().replacen(
         '}',
         r#", "private_sentinel": true}"#,
@@ -1008,13 +982,7 @@ async fn test_allowance_derivation_preserves_state_when_recognized_event_is_malf
     .await
     .unwrap();
 
-    let record = allowance_record_from_state(
-        &storage.snapshot().unwrap(),
-        &peer,
-        &receiver_path(),
-        &allowance_id(),
-    )
-    .unwrap();
+    let record = derived(&storage, &peer, &receiver_path()).await;
 
     assert_eq!(record.state, AllowanceLifecycleState::Proposed);
     assert_eq!(record.history_status, AllowanceHistoryStatus::Invalid);
@@ -1056,7 +1024,7 @@ async fn test_allowance_end_command_rejects_later_end_without_queue_mutation() {
 }
 
 #[test]
-fn test_allowance_record_debug_redacts_terms_and_invalid_reason() {
+fn test_allowance_record_debug_redacts_terms() {
     let mut record = AllowanceRecord::new(counterparty(), receiver_path(), ALLOWANCE_ID.into());
     record.terms = Some(AllowanceTermsRecord {
         asset: "private-asset-sentinel".into(),
@@ -1067,11 +1035,9 @@ fn test_allowance_record_debug_redacts_terms_and_invalid_reason() {
         expires_at: None,
         allowed_payment_endpoint_identifiers: None,
     });
-    record.invalid_reason = Some("private-error-sentinel".into());
 
     let debug = format!("{record:?}");
 
     assert!(!debug.contains("private-asset-sentinel"));
     assert!(!debug.contains("private-limit-sentinel"));
-    assert!(!debug.contains("private-error-sentinel"));
 }

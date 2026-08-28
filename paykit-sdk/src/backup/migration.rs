@@ -2,13 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use paykit_lib::{PaykitReceiverPath, PrivateApplicationMessage, PrivateMessageKind};
+use paykit_lib::{PaykitReceiverPath, PrivateMessageKind, ReceiptAccess};
 
 use crate::{
     domain::{
         private_stream::{
             classify_private_application_message, enforce_receipt_access_receiver_scope,
-            payload_hash, PrivateStreamMessageClassification, PrivateStreamParseStatus,
+            is_allowance_kind, payload_hash, PrivateStreamEventHeader,
+            PrivateStreamMessageClassification, PrivateStreamParseStatus,
         },
         receipts::{ReceiptAccessRecord, ReceiptRecord},
     },
@@ -16,20 +17,68 @@ use crate::{
     PubkyPublicKey,
 };
 
-type EventKey = (PubkyPublicKey, PaykitReceiverPath, String);
-type ReceiptKey = (PubkyPublicKey, PaykitReceiverPath, String);
+use super::validation::{private_application_message_from_raw, private_message_header};
 
+type EventKey = (PubkyPublicKey, PaykitReceiverPath, String);
+
+/// One classified inbound carrier of an Event ID.
+struct EventCarrier<'a> {
+    item: &'a PrivateStreamItemRecord,
+    header: PrivateStreamEventHeader,
+    receipt_access: Option<ReceiptAccess>,
+}
+
+/// Recognize Allowance items that an older SDK stored as unknown kinds, then
+/// rebuild the Event indexes for every Event ID those items carry.
+///
+/// `stream_items` must already be sorted by `stream_item_id`, so the first
+/// carrier of each Event ID is the authoritative one.
 pub(super) fn migrate_legacy_allowance_stream_state(
     stream_items: &mut [PrivateStreamItemRecord],
     event_dedup_records: &mut HashMap<EventKey, EventDedupRecord>,
     receipt_access_records: &mut HashMap<EventKey, ReceiptAccessRecord>,
-    receipt_records: &mut HashMap<ReceiptKey, ReceiptRecord>,
+    receipt_records: &mut HashMap<EventKey, ReceiptRecord>,
 ) {
     let affected_event_keys = migrate_legacy_allowance_items(stream_items);
-    for key in sorted_event_keys(affected_event_keys) {
+    if affected_event_keys.is_empty() {
+        return;
+    }
+    let affected_links = affected_event_keys
+        .iter()
+        .map(|(counterparty, receiver_path, _)| (counterparty, receiver_path))
+        .collect::<HashSet<_>>();
+
+    // Classify each item on an affected link exactly once.
+    let mut carriers_by_key = HashMap::<EventKey, Vec<EventCarrier<'_>>>::new();
+    for item in stream_items.iter() {
+        if !affected_links.contains(&(&item.counterparty, &item.counterparty_receiver_path)) {
+            continue;
+        }
+        let Some(classification) = classify_stream_item(item) else {
+            continue;
+        };
+        let Some(header) = classification.event else {
+            continue;
+        };
+        let key = (
+            item.counterparty.clone(),
+            item.counterparty_receiver_path.clone(),
+            header.event_id.clone(),
+        );
+        if !affected_event_keys.contains(&key) {
+            continue;
+        }
+        carriers_by_key.entry(key).or_default().push(EventCarrier {
+            item,
+            header,
+            receipt_access: classification.receipt_access,
+        });
+    }
+
+    for (key, carriers) in carriers_by_key {
         rebuild_event_indexes(
             &key,
-            stream_items,
+            &carriers,
             event_dedup_records,
             receipt_access_records,
             receipt_records,
@@ -59,6 +108,8 @@ fn migrate_legacy_allowance_items(
     affected_event_keys
 }
 
+/// Recognize an item stored as an unknown kind whose exact header the current
+/// classifier now knows as an Allowance kind.
 fn legacy_allowance_classification(
     item: &PrivateStreamItemRecord,
 ) -> Option<(PrivateMessageKind, PrivateStreamMessageClassification)> {
@@ -68,148 +119,91 @@ fn legacy_allowance_classification(
     {
         return None;
     }
-    let message = private_application_message(&item.raw_json)?;
-    if message.version.is_none()
-        || item.parsed_version != message.version.map(u32::from)
-        || item.parsed_kind.as_deref() != message.kind.as_deref()
+    let (parsed_version, parsed_kind, known_kind) = private_message_header(&item.raw_json).ok()?;
+    if parsed_version.is_none()
+        || item.parsed_version != parsed_version
+        || item.parsed_kind != parsed_kind
     {
         return None;
     }
-    let kind = message.known_kind()?;
-    if !is_allowance_kind(kind) {
-        return None;
-    }
-    Some((kind, classify_private_application_message(&message)))
+    let kind = known_kind.filter(|kind| is_allowance_kind(kind.as_str()))?;
+    let classification = classify_private_application_message(
+        &private_application_message_from_raw(item.raw_json.clone(), parsed_version, parsed_kind),
+    );
+    Some((kind, classification))
 }
 
-fn private_application_message(raw_json: &str) -> Option<PrivateApplicationMessage> {
-    let value = serde_json::from_str::<serde_json::Value>(raw_json).ok()?;
-    let version = value
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|version| u8::try_from(version).ok());
-    let kind = value
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    Some(PrivateApplicationMessage {
-        version,
-        kind,
-        raw_json: raw_json.to_owned(),
-    })
-}
-
-fn is_allowance_kind(kind: PrivateMessageKind) -> bool {
-    matches!(
-        kind,
-        PrivateMessageKind::AllowanceProposal
-            | PrivateMessageKind::AllowanceAcceptance
-            | PrivateMessageKind::AllowanceRejection
-            | PrivateMessageKind::AllowanceEnd
-    )
-}
-
-fn sorted_event_keys(keys: HashSet<EventKey>) -> Vec<EventKey> {
-    let mut keys = keys.into_iter().collect::<Vec<_>>();
-    keys.sort_by(|left, right| {
-        left.0
-            .as_str()
-            .cmp(right.0.as_str())
-            .then(left.1.as_str().cmp(right.1.as_str()))
-            .then(left.2.cmp(&right.2))
-    });
-    keys
-}
-
-fn rebuild_event_indexes(
-    key: &EventKey,
-    stream_items: &[PrivateStreamItemRecord],
-    event_dedup_records: &mut HashMap<EventKey, EventDedupRecord>,
-    receipt_access_records: &mut HashMap<EventKey, ReceiptAccessRecord>,
-    receipt_records: &mut HashMap<ReceiptKey, ReceiptRecord>,
-) {
-    let previous_first_stream_item_id = event_dedup_records
-        .get(key)
-        .map(|record| record.first_stream_item_id);
-    let Some(record) = rebuilt_event_dedup_record(key, stream_items) else {
-        return;
-    };
-    let first_stream_item_id = record.first_stream_item_id;
-    event_dedup_records.insert(key.clone(), record);
-    if previous_first_stream_item_id != Some(first_stream_item_id) {
-        reconcile_receipt_indexes(
-            key,
-            first_stream_item_id,
-            stream_items,
-            receipt_access_records,
-            receipt_records,
-        );
-    }
-}
-
-fn rebuilt_event_dedup_record(
-    key: &EventKey,
-    stream_items: &[PrivateStreamItemRecord],
-) -> Option<EventDedupRecord> {
-    let mut matching_events = stream_items
-        .iter()
-        .filter_map(|item| event_for_key(item, key).map(|event| (item, event)))
-        .collect::<Vec<_>>();
-    matching_events.sort_by_key(|(item, _)| item.stream_item_id);
-    let (first_item, first_event) = matching_events.first()?;
-    let first_payload_hash = payload_hash(&first_item.raw_json);
-    let mut duplicates = Vec::new();
-    let mut conflicts = Vec::new();
-    for (item, event) in matching_events.iter().skip(1) {
-        if event.event_kind == first_event.event_kind
-            && payload_hash(&item.raw_json) == first_payload_hash
-        {
-            duplicates.push(item.stream_item_id);
-        } else {
-            conflicts.push(item.stream_item_id);
-        }
-    }
-    Some(EventDedupRecord {
-        counterparty: key.0.clone(),
-        counterparty_receiver_path: key.1.clone(),
-        event_id: key.2.clone(),
-        event_kind: first_event.event_kind.clone(),
-        payload_hash: first_payload_hash,
-        first_stream_item_id: first_item.stream_item_id,
-        duplicate_stream_item_ids: duplicates,
-        conflicting_stream_item_ids: conflicts,
-    })
-}
-
-fn event_for_key(
-    item: &PrivateStreamItemRecord,
-    key: &EventKey,
-) -> Option<crate::domain::private_stream::PrivateStreamEventHeader> {
-    if item.counterparty != key.0 || item.counterparty_receiver_path != key.1 {
-        return None;
-    }
-    let classification = classify_stream_item(item)?;
-    classification.event.filter(|event| event.event_id == key.2)
-}
-
+/// Classify one stored item from its raw JSON header rather than its stored
+/// metadata, which may be stale for legacy items.
 fn classify_stream_item(
     item: &PrivateStreamItemRecord,
 ) -> Option<PrivateStreamMessageClassification> {
-    let message = private_application_message(&item.raw_json)?;
-    let mut classification = classify_private_application_message(&message);
+    let (parsed_version, parsed_kind, _) = private_message_header(&item.raw_json).ok()?;
+    let mut classification = classify_private_application_message(
+        &private_application_message_from_raw(item.raw_json.clone(), parsed_version, parsed_kind),
+    );
     enforce_receipt_access_receiver_scope(&mut classification, &item.counterparty_receiver_path);
     Some(classification)
 }
 
+fn rebuild_event_indexes(
+    key: &EventKey,
+    carriers: &[EventCarrier<'_>],
+    event_dedup_records: &mut HashMap<EventKey, EventDedupRecord>,
+    receipt_access_records: &mut HashMap<EventKey, ReceiptAccessRecord>,
+    receipt_records: &mut HashMap<EventKey, ReceiptRecord>,
+) {
+    let Some(first) = carriers.first() else {
+        return;
+    };
+    let previous_first_stream_item_id = event_dedup_records
+        .get(key)
+        .map(|record| record.first_stream_item_id);
+    let first_payload_hash = payload_hash(&first.item.raw_json);
+    let mut duplicates = Vec::new();
+    let mut conflicts = Vec::new();
+    for carrier in &carriers[1..] {
+        if payload_hash(&carrier.item.raw_json) == first_payload_hash {
+            duplicates.push(carrier.item.stream_item_id);
+        } else {
+            conflicts.push(carrier.item.stream_item_id);
+        }
+    }
+    event_dedup_records.insert(
+        key.clone(),
+        EventDedupRecord {
+            counterparty: key.0.clone(),
+            counterparty_receiver_path: key.1.clone(),
+            event_id: key.2.clone(),
+            event_kind: first.header.event_kind.clone(),
+            payload_hash: first_payload_hash,
+            first_stream_item_id: first.item.stream_item_id,
+            duplicate_stream_item_ids: duplicates,
+            conflicting_stream_item_ids: conflicts,
+        },
+    );
+    if previous_first_stream_item_id != Some(first.item.stream_item_id) {
+        reconcile_receipt_indexes(key, first, receipt_access_records, receipt_records);
+    }
+}
+
 fn reconcile_receipt_indexes(
     key: &EventKey,
-    first_stream_item_id: u64,
-    stream_items: &[PrivateStreamItemRecord],
+    first: &EventCarrier<'_>,
     receipt_access_records: &mut HashMap<EventKey, ReceiptAccessRecord>,
-    receipt_records: &mut HashMap<ReceiptKey, ReceiptRecord>,
+    receipt_records: &mut HashMap<EventKey, ReceiptRecord>,
 ) {
     let previous_access = receipt_access_records.remove(key);
-    let new_access = first_receipt_access(key, first_stream_item_id, stream_items);
+    let new_access = first.receipt_access.as_ref().map(|access| {
+        ReceiptAccessRecord::from_access(
+            key.0.clone(),
+            key.1.clone(),
+            first.item.stream_item_id,
+            first.item.receive_batch_id,
+            first.item.received_at,
+            access,
+        )
+    });
     let descriptor_unchanged = previous_access
         .as_ref()
         .zip(new_access.as_ref())
@@ -223,26 +217,6 @@ fn reconcile_receipt_indexes(
         }
         receipt_access_records.insert(key.clone(), access);
     }
-}
-
-fn first_receipt_access(
-    key: &EventKey,
-    first_stream_item_id: u64,
-    stream_items: &[PrivateStreamItemRecord],
-) -> Option<ReceiptAccessRecord> {
-    let item = stream_items
-        .iter()
-        .find(|item| item.stream_item_id == first_stream_item_id)?;
-    let classification = classify_stream_item(item)?;
-    let access = classification.receipt_access?;
-    Some(ReceiptAccessRecord::from_access(
-        key.0.clone(),
-        key.1.clone(),
-        item.stream_item_id,
-        item.receive_batch_id,
-        item.received_at,
-        &access,
-    ))
 }
 
 fn receipt_access_descriptor_matches(
@@ -268,10 +242,7 @@ fn preserve_receipt_retrieval_state(
     current.last_retrieval_error = previous.last_retrieval_error.clone();
 }
 
-fn remove_cached_receipts(
-    key: &EventKey,
-    receipt_records: &mut HashMap<ReceiptKey, ReceiptRecord>,
-) {
+fn remove_cached_receipts(key: &EventKey, receipt_records: &mut HashMap<EventKey, ReceiptRecord>) {
     receipt_records.retain(|_, record| {
         record.issuer != key.0
             || record.issuer_receiver_path != key.1
