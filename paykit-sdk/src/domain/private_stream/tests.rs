@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     domain::linked_peers::LinkedPeerState,
     storage::{EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord},
-    test_utils::{allowance_event_json, ALLOWANCE_EVENT_FIXTURES},
+    test_utils::{allowance_event_json, malformed_allowance_event_json, ALLOWANCE_EVENT_FIXTURES},
     PaykitSdkError, PrivateStreamParseStatus,
 };
 
@@ -409,10 +409,7 @@ async fn test_persist_private_stream_batch_routes_allowance_events() {
     let mut raw_events = ALLOWANCE_EVENT_FIXTURES
         .map(|(kind, event_id)| allowance_event_json(kind, event_id))
         .to_vec();
-    raw_events.push(
-        r#"{"version":1,"kind":"paykit.allowance_acceptance","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205","allowance_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44"}"#
-            .into(),
-    );
+    raw_events.push(malformed_allowance_event_json());
 
     persist_private_stream_batch(
         &storage,
