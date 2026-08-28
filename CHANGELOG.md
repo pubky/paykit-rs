@@ -7,6 +7,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc49] - 2026-08-28
+
+### Added
+- Add keep consumer rules for JNA types UniFFI needs under R8.
+
 ## [0.1.0-rc48] - 2026-08-26
 
 ### Changed
@@ -425,7 +430,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc48...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc49...HEAD
+[0.1.0-rc49]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc48...v0.1.0-rc49
 [0.1.0-rc48]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc47...v0.1.0-rc48
 [0.1.0-rc47]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc46...v0.1.0-rc47
 [0.1.0-rc46]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc45...v0.1.0-rc46

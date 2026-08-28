@@ -1,6 +1,6 @@
 [package]
 name = "paykit-sdk"
-version = "0.1.0-rc48"
+version = "0.1.0-rc49"
 authors = ["ben@synonym.to", "denys@synonym.to"]
 description = "Stateful Paykit SDK runtime"
 license = "MIT"
@@ -22,7 +22,7 @@ blake3 = "1"
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "serde", "std"] }
 crypto_secretbox = "0.1"
 hex = "0.4"
-paykit-lib = { path = "../paykit-lib", version = "0.1.0-rc48" }
+paykit-lib = { path = "../paykit-lib", version = "0.1.0-rc49" }
 pubky = "0.11.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
