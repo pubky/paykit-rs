@@ -12,7 +12,7 @@ pub(crate) fn validate_uuid_v4(value: String, label: &'static str) -> Result<Str
     Ok(uuid.hyphenated().to_string())
 }
 
-pub(crate) fn validate_decimal_text(value: &str, label: &str) -> Result<()> {
+pub(crate) fn validate_decimal_text(value: &str, label: impl std::fmt::Display) -> Result<()> {
     let mut seen_dot = false;
     let mut seen_digit = false;
     for byte in value.bytes() {
@@ -137,4 +137,19 @@ pub(crate) fn validate_outgoing_version_kind(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_decimal_text_accepts_digits_with_one_optional_dot() {
+        for accepted in [".5", "10.", "0001.2300", "0"] {
+            assert!(validate_decimal_text(accepted, "test amount").is_ok());
+        }
+        for rejected in ["", ".", "-1", "+1", "1e2", "1,000", "1.2.3", " 1"] {
+            assert!(validate_decimal_text(rejected, "test amount").is_err());
+        }
+    }
 }

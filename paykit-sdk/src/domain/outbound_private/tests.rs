@@ -3,7 +3,7 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     storage::InMemoryStorage,
-    test_utils::{allowance_event_json, ALLOWANCE_EVENT_FIXTURES},
+    test_utils::{allowance_event_json, malformed_allowance_event_json, ALLOWANCE_EVENT_FIXTURES},
 };
 
 fn timestamp() -> DateTime<Utc> {
@@ -115,9 +115,7 @@ fn test_validate_outbound_private_message_accepts_allowance_events() {
 
 #[test]
 fn test_validate_outbound_private_message_rejects_malformed_allowance() {
-    let raw_json = r#"{"version":1,"kind":"paykit.allowance_acceptance","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202","allowance_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44"}"#;
-
-    let result = validate_outbound_private_message(raw_json);
+    let result = validate_outbound_private_message(&malformed_allowance_event_json());
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
 }

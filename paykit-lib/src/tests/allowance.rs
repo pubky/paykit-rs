@@ -1,27 +1,12 @@
 use super::*;
-
-fn allowance_id() -> AllowanceId {
-    AllowanceId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44").unwrap()
-}
-
-fn event_id(value: &str) -> EventId {
-    EventId::new(value).unwrap()
-}
+use crate::allowance::test_fixtures::{allowance_id, event_id, minimal_proposal};
 
 #[tokio::test]
 async fn test_allowance_send_helpers_preserve_fifo_event_order() {
     let mut setup = PrivateTestSetup::new().await;
-    let proposal_event_id = event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d201");
+    let proposal = minimal_proposal();
+    let proposal_event_id = proposal.event_id().clone();
     let acceptance_event_id = event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202");
-    let proposal = AllowanceProposal::new(
-        proposal_event_id.clone(),
-        allowance_id(),
-        AllowanceRole::Allower,
-        AllowanceTerms::builder("btc")
-            .lifetime_amount_limit("1")
-            .build()
-            .unwrap(),
-    );
     let acceptance = AllowanceAcceptance::new(
         acceptance_event_id.clone(),
         allowance_id(),

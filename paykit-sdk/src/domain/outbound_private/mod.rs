@@ -7,6 +7,7 @@ use paykit_lib::PrivateMessageKind;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    domain::private_stream::require_valid_event_message,
     storage::{
         require_peer_link_operation_lease, NewOutboundPrivateMessage, OutboundPrivateMessageRecord,
         PeerLinkOperationLease, StorageAdapter,
@@ -366,20 +367,10 @@ fn validate_outbound_private_message_body(kind: PrivateMessageKind, raw_json: &s
         }
         PrivateMessageKind::ReceiptAccess => {
             let message = private_application_message(kind, raw_json);
-            let event =
-                paykit_lib::parse_receipt_access_event_message(&message).ok_or_else(|| {
-                    PaykitSdkError::Protocol {
-                        context: "Receipt Access payload does not match private message kind"
-                            .into(),
-                        source: None,
-                    }
-                })?;
-            if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol {
-                    context: error.to_owned(),
-                    source: None,
-                });
-            }
+            require_valid_event_message(
+                paykit_lib::parse_receipt_access_event_message(&message),
+                || "Receipt Access payload does not match private message kind".into(),
+            )?;
         }
         PrivateMessageKind::PaymentRequest
         | PrivateMessageKind::PaymentRequestAcceptance
@@ -387,39 +378,20 @@ fn validate_outbound_private_message_body(kind: PrivateMessageKind, raw_json: &s
         | PrivateMessageKind::PaymentRequestCancellation
         | PrivateMessageKind::PaymentProof => {
             let message = private_application_message(kind, raw_json);
-            let event =
-                paykit_lib::parse_payment_request_event_message(&message).ok_or_else(|| {
-                    PaykitSdkError::Protocol {
-                        context:
-                            "Payment Request event payload does not match private message kind"
-                                .into(),
-                        source: None,
-                    }
-                })?;
-            if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol {
-                    context: error.to_owned(),
-                    source: None,
-                });
-            }
+            require_valid_event_message(
+                paykit_lib::parse_payment_request_event_message(&message),
+                || "Payment Request event payload does not match private message kind".into(),
+            )?;
         }
         PrivateMessageKind::AllowanceProposal
         | PrivateMessageKind::AllowanceAcceptance
         | PrivateMessageKind::AllowanceRejection
         | PrivateMessageKind::AllowanceEnd => {
             let message = private_application_message(kind, raw_json);
-            let event = paykit_lib::parse_allowance_event_message(&message).ok_or_else(|| {
-                PaykitSdkError::Protocol {
-                    context: "Allowance event payload does not match private message kind".into(),
-                    source: None,
-                }
-            })?;
-            if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol {
-                    context: error.to_owned(),
-                    source: None,
-                });
-            }
+            require_valid_event_message(
+                paykit_lib::parse_allowance_event_message(&message),
+                || "Allowance event payload does not match private message kind".into(),
+            )?;
         }
     }
 

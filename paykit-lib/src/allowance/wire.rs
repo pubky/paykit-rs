@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::{
     shared_wire::{deserialize_optional_no_null, RequiredNullable},
-    validation::invalid_plaintext_json,
+    validation::{invalid_plaintext_json, validate_wire_version_kind},
     EventId, PaykitError, PaymentEndpointIdentifier, PrivateMessageKind, Result,
 };
 
@@ -18,6 +18,9 @@ const _: () = assert!(
     pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN >= ALLOWANCE_V1_MESSAGE_MAX_LEN,
     "pubky-noise must fit one complete Allowance V1 message",
 );
+
+/// Static label used in redacted version/kind errors.
+const WIRE_LABEL: &str = "Allowance Event Message";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -241,14 +244,15 @@ impl TryFrom<ProposalWire> for AllowanceProposal {
     type Error = PaykitError;
 
     fn try_from(wire: ProposalWire) -> Result<Self> {
-        validate_version_kind(
+        validate_wire_version_kind(
             wire.version,
             &wire.kind,
             PrivateMessageKind::AllowanceProposal,
+            WIRE_LABEL,
         )?;
         Ok(Self::new(
-            parse_canonical_event_id(wire.event_id)?,
-            parse_canonical_allowance_id(wire.allowance_id)?,
+            parse_canonical(wire.event_id, EventId::new)?,
+            parse_canonical(wire.allowance_id, AllowanceId::new)?,
             AllowanceRole::parse(&wire.proposer_role)?,
             AllowanceTerms::try_from(wire.terms)?,
         ))
@@ -314,26 +318,71 @@ impl From<&AllowanceEnd> for EndWire {
     }
 }
 
-pub(super) fn parse_allowance_json(kind: PrivateMessageKind, json: &str) -> Result<AllowanceEvent> {
-    validate_received_size(json)?;
-    let event = match kind {
-        PrivateMessageKind::AllowanceProposal => parse_proposal(json),
-        PrivateMessageKind::AllowanceAcceptance => parse_acceptance(json),
-        PrivateMessageKind::AllowanceRejection => parse_rejection(json),
-        PrivateMessageKind::AllowanceEnd => parse_end(json),
+/// Parse `json` as the Allowance event selected by `kind`, or return `None`
+/// when `kind` is not an Allowance kind.
+///
+/// Routing and dispatch live in this single `match`, which deliberately has no
+/// wildcard arm: adding a `PrivateMessageKind` variant fails to compile until
+/// it is explicitly routed to a parser or ignored here.
+pub(super) fn parse_allowance_json(
+    kind: PrivateMessageKind,
+    json: &str,
+) -> Option<Result<AllowanceEvent>> {
+    let parse: fn(&str) -> Result<AllowanceEvent> = match kind {
+        PrivateMessageKind::AllowanceProposal => parse_proposal,
+        PrivateMessageKind::AllowanceAcceptance => parse_acceptance,
+        PrivateMessageKind::AllowanceRejection => parse_rejection,
+        PrivateMessageKind::AllowanceEnd => parse_end,
+        // Non-Allowance kinds are ignored, producing nothing derived from
+        // `json` (decrypted private payload), so there is no error context to
+        // leak.
         PrivateMessageKind::PrivatePaymentList
         | PrivateMessageKind::ReceiptAccess
         | PrivateMessageKind::PaymentRequest
         | PrivateMessageKind::PaymentRequestAcceptance
         | PrivateMessageKind::PaymentRequestRejection
         | PrivateMessageKind::PaymentRequestCancellation
-        | PrivateMessageKind::PaymentProof => return Err(invalid_allowance_message()),
+        | PrivateMessageKind::PaymentProof => return None,
     };
-    event.map_err(|_| invalid_allowance_message())
+    // SECURITY / REDACTION: `json` is decrypted plaintext. Every structural or
+    // validation failure collapses to one fixed error so no field value can
+    // leak through error text.
+    Some(
+        validate_received_size(json)
+            .and_then(|()| parse(json))
+            .map_err(|_| invalid_allowance_message()),
+    )
 }
 
 pub(super) fn serialize_allowance_json(event: &AllowanceEvent) -> Result<String> {
-    let json = serialize_allowance_json_unbounded(event)?;
+    match event {
+        AllowanceEvent::Proposal(event) => serialize_proposal_json(event),
+        AllowanceEvent::Acceptance(event) => serialize_acceptance_json(event),
+        AllowanceEvent::Rejection(event) => serialize_rejection_json(event),
+        AllowanceEvent::End(event) => serialize_end_json(event),
+    }
+}
+
+pub(super) fn serialize_proposal_json(event: &AllowanceProposal) -> Result<String> {
+    serialize_wire_json(&ProposalWire::from(event))
+}
+
+pub(super) fn serialize_acceptance_json(event: &AllowanceAcceptance) -> Result<String> {
+    serialize_wire_json(&ResponseWire::from(event))
+}
+
+pub(super) fn serialize_rejection_json(event: &AllowanceRejection) -> Result<String> {
+    serialize_wire_json(&ResponseWire::from(event))
+}
+
+pub(super) fn serialize_end_json(event: &AllowanceEnd) -> Result<String> {
+    serialize_wire_json(&EndWire::from(event))
+}
+
+/// Serialize a wire shape to compact JSON, rejecting a message larger than the
+/// single-message `pubky-noise` plaintext limit.
+fn serialize_wire_json<W: Serialize>(wire: &W) -> Result<String> {
+    let json = serialize_wire_json_unbounded(wire)?;
     if json.len() > ALLOWANCE_V1_MESSAGE_MAX_LEN {
         return Err(PaykitError::Validation(format!(
             "Allowance Event Message exceeds {ALLOWANCE_V1_MESSAGE_MAX_LEN} bytes"
@@ -342,17 +391,13 @@ pub(super) fn serialize_allowance_json(event: &AllowanceEvent) -> Result<String>
     Ok(json)
 }
 
-fn serialize_allowance_json_unbounded(event: &AllowanceEvent) -> Result<String> {
-    let result = match event {
-        AllowanceEvent::Proposal(event) => serde_json::to_string(&ProposalWire::from(event)),
-        AllowanceEvent::Acceptance(event) => serde_json::to_string(&ResponseWire::from(event)),
-        AllowanceEvent::Rejection(event) => serde_json::to_string(&ResponseWire::from(event)),
-        AllowanceEvent::End(event) => serde_json::to_string(&EndWire::from(event)),
-    };
-    result
+fn serialize_wire_json_unbounded<W: Serialize>(wire: &W) -> Result<String> {
+    serde_json::to_string(wire)
         .map_err(|_| PaykitError::Validation("failed to serialize Allowance Event Message".into()))
 }
 
+/// Best-effort top-level ID extraction for a message that failed typed parsing,
+/// so malformed recognized messages can still be correlated and deduped.
 pub(super) fn parse_event_header_ids(json: &str) -> (Option<EventId>, Option<AllowanceId>) {
     let Ok(value) = serde_json::from_str::<JsonValue>(json) else {
         return (None, None);
@@ -360,85 +405,83 @@ pub(super) fn parse_event_header_ids(json: &str) -> (Option<EventId>, Option<All
     let event_id = value
         .get("event_id")
         .and_then(JsonValue::as_str)
-        .and_then(|value| parse_canonical_event_id(value.to_string()).ok());
+        .and_then(|value| parse_canonical(value.to_string(), EventId::new).ok());
     let allowance_id = value
         .get("allowance_id")
         .and_then(JsonValue::as_str)
-        .and_then(|value| parse_canonical_allowance_id(value.to_string()).ok());
+        .and_then(|value| parse_canonical(value.to_string(), AllowanceId::new).ok());
     (event_id, allowance_id)
 }
 
 fn parse_proposal(json: &str) -> Result<AllowanceEvent> {
-    let wire: ProposalWire = serde_json::from_str(json).map_err(|_| invalid_allowance_message())?;
-    AllowanceProposal::try_from(wire).map(AllowanceEvent::Proposal)
+    AllowanceProposal::try_from(parse_wire::<ProposalWire>(json)?).map(AllowanceEvent::Proposal)
 }
 
 fn parse_acceptance(json: &str) -> Result<AllowanceEvent> {
-    let wire: ResponseWire = serde_json::from_str(json).map_err(|_| invalid_allowance_message())?;
-    validate_version_kind(
-        wire.version,
-        &wire.kind,
+    parse_response(
+        json,
         PrivateMessageKind::AllowanceAcceptance,
-    )?;
-    Ok(AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-        parse_canonical_event_id(wire.event_id)?,
-        parse_canonical_allowance_id(wire.allowance_id)?,
-        parse_canonical_event_id(wire.proposal_event_id)?,
-    )))
+        AllowanceAcceptance::new,
+    )
+    .map(AllowanceEvent::Acceptance)
 }
 
 fn parse_rejection(json: &str) -> Result<AllowanceEvent> {
-    let wire: ResponseWire = serde_json::from_str(json).map_err(|_| invalid_allowance_message())?;
-    validate_version_kind(
-        wire.version,
-        &wire.kind,
+    parse_response(
+        json,
         PrivateMessageKind::AllowanceRejection,
-    )?;
-    Ok(AllowanceEvent::Rejection(AllowanceRejection::new(
-        parse_canonical_event_id(wire.event_id)?,
-        parse_canonical_allowance_id(wire.allowance_id)?,
-        parse_canonical_event_id(wire.proposal_event_id)?,
-    )))
+        AllowanceRejection::new,
+    )
+    .map(AllowanceEvent::Rejection)
 }
 
 fn parse_end(json: &str) -> Result<AllowanceEvent> {
-    let wire: EndWire = serde_json::from_str(json).map_err(|_| invalid_allowance_message())?;
-    validate_version_kind(wire.version, &wire.kind, PrivateMessageKind::AllowanceEnd)?;
+    let wire: EndWire = parse_wire(json)?;
+    validate_wire_version_kind(
+        wire.version,
+        &wire.kind,
+        PrivateMessageKind::AllowanceEnd,
+        WIRE_LABEL,
+    )?;
     Ok(AllowanceEvent::End(AllowanceEnd::new(
-        parse_canonical_event_id(wire.event_id)?,
-        parse_canonical_allowance_id(wire.allowance_id)?,
-        parse_canonical_event_id(wire.proposal_event_id)?,
+        parse_canonical(wire.event_id, EventId::new)?,
+        parse_canonical(wire.allowance_id, AllowanceId::new)?,
+        parse_canonical(wire.proposal_event_id, EventId::new)?,
         wire.acceptance_event_id
             .into_inner()
-            .map(parse_canonical_event_id)
+            .map(|id| parse_canonical(id, EventId::new))
             .transpose()?,
     )))
 }
 
-fn validate_version_kind(version: u8, kind: &str, expected: PrivateMessageKind) -> Result<()> {
-    if version != 1 || kind != expected.as_str() {
-        return Err(PaykitError::Validation(
-            "unsupported Allowance Event Message version or kind".into(),
-        ));
-    }
-    Ok(())
+/// Parse the shared Acceptance/Rejection wire shape into `build`'s event type.
+fn parse_response<T>(
+    json: &str,
+    expected: PrivateMessageKind,
+    build: fn(EventId, AllowanceId, EventId) -> T,
+) -> Result<T> {
+    let wire: ResponseWire = parse_wire(json)?;
+    validate_wire_version_kind(wire.version, &wire.kind, expected, WIRE_LABEL)?;
+    Ok(build(
+        parse_canonical(wire.event_id, EventId::new)?,
+        parse_canonical(wire.allowance_id, AllowanceId::new)?,
+        parse_canonical(wire.proposal_event_id, EventId::new)?,
+    ))
 }
 
-fn parse_canonical_event_id(value: String) -> Result<EventId> {
-    let id = EventId::new(value.clone())?;
-    if id.as_str() != value {
-        return Err(PaykitError::Validation(
-            "Allowance Event ID must use canonical UUID-v4 spelling".into(),
-        ));
-    }
-    Ok(id)
+fn parse_wire<W: DeserializeOwned>(json: &str) -> Result<W> {
+    serde_json::from_str(json).map_err(|_| invalid_allowance_message())
 }
 
-fn parse_canonical_allowance_id(value: String) -> Result<AllowanceId> {
-    let id = AllowanceId::new(value.clone())?;
-    if id.as_str() != value {
+/// Construct an ID with `new` and reject any spelling `new` had to canonicalize.
+fn parse_canonical<T: AsRef<str>>(
+    value: String,
+    new: impl FnOnce(String) -> Result<T>,
+) -> Result<T> {
+    let id = new(value.clone())?;
+    if id.as_ref() != value {
         return Err(PaykitError::Validation(
-            "Allowance ID must use canonical UUID-v4 spelling".into(),
+            "Allowance IDs must use canonical UUID-v4 spelling".into(),
         ));
     }
     Ok(id)
@@ -458,10 +501,19 @@ fn invalid_allowance_message() -> PaykitError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::allowance::types::{AllowancePeriodUnit, AllowanceTermsBuilder};
+    use crate::allowance::{
+        test_fixtures::{event_id, proposal_with_terms, ALLOWANCE_ID, EVENT_ID},
+        types::AllowanceTermsBuilder,
+    };
 
-    const EVENT_ID: &str = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d201";
-    const ALLOWANCE_ID: &str = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44";
+    /// Parse with a kind this module is known to route.
+    fn parse_json(kind: PrivateMessageKind, json: &str) -> Result<AllowanceEvent> {
+        parse_allowance_json(kind, json).expect("Allowance kind is routed")
+    }
+
+    fn parse_proposal_json(json: &str) -> Result<AllowanceEvent> {
+        parse_json(PrivateMessageKind::AllowanceProposal, json)
+    }
 
     fn full_proposal() -> AllowanceEvent {
         let period =
@@ -484,46 +536,46 @@ mod tests {
             .unwrap()])
             .build()
             .unwrap();
-        AllowanceEvent::Proposal(AllowanceProposal::new(
-            EventId::new(EVENT_ID).unwrap(),
-            AllowanceId::new(ALLOWANCE_ID).unwrap(),
-            AllowanceRole::Allower,
-            terms,
-        ))
+        AllowanceEvent::Proposal(proposal_with_terms(terms))
+    }
+
+    #[test]
+    fn test_non_allowance_kinds_are_not_routed() {
+        assert!(parse_allowance_json(PrivateMessageKind::PaymentRequest, "{}").is_none());
     }
 
     #[test]
     fn test_all_event_shapes_round_trip() {
         let proposal = full_proposal();
-        let acceptance_id = EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202").unwrap();
+        let acceptance_id = event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202");
         let events = vec![
             proposal,
             AllowanceEvent::Acceptance(AllowanceAcceptance::new(
                 acceptance_id.clone(),
                 AllowanceId::new(ALLOWANCE_ID).unwrap(),
-                EventId::new(EVENT_ID).unwrap(),
+                event_id(EVENT_ID),
             )),
             AllowanceEvent::Rejection(AllowanceRejection::new(
-                EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d203").unwrap(),
+                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d203"),
                 AllowanceId::new(ALLOWANCE_ID).unwrap(),
-                EventId::new(EVENT_ID).unwrap(),
+                event_id(EVENT_ID),
             )),
             AllowanceEvent::End(AllowanceEnd::withdrawal(
-                EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204").unwrap(),
+                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
                 AllowanceId::new(ALLOWANCE_ID).unwrap(),
-                EventId::new(EVENT_ID).unwrap(),
+                event_id(EVENT_ID),
             )),
             AllowanceEvent::End(AllowanceEnd::accepted(
-                EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205").unwrap(),
+                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205"),
                 AllowanceId::new(ALLOWANCE_ID).unwrap(),
-                EventId::new(EVENT_ID).unwrap(),
+                event_id(EVENT_ID),
                 acceptance_id,
             )),
         ];
 
         for event in events {
             let json = serialize_allowance_json(&event).unwrap();
-            let parsed = parse_allowance_json(event.kind(), &json).unwrap();
+            let parsed = parse_json(event.kind(), &json).unwrap();
             assert_eq!(parsed, event);
         }
     }
@@ -533,10 +585,7 @@ mod tests {
         let compact = serialize_allowance_json(&full_proposal()).unwrap();
         let value: JsonValue = serde_json::from_str(&compact).unwrap();
         let pretty = serde_json::to_string_pretty(&value).unwrap();
-        assert_eq!(
-            parse_allowance_json(PrivateMessageKind::AllowanceProposal, &pretty).unwrap(),
-            full_proposal()
-        );
+        assert_eq!(parse_proposal_json(&pretty).unwrap(), full_proposal());
 
         let mut missing_value = value.clone();
         missing_value
@@ -545,11 +594,11 @@ mod tests {
             .unwrap()
             .remove("expires_at");
         let missing = serde_json::to_string(&missing_value).unwrap();
-        assert!(parse_allowance_json(PrivateMessageKind::AllowanceProposal, &missing).is_err());
+        assert!(parse_proposal_json(&missing).is_err());
         let unknown = compact.replacen("{", "{\"unknown\":true,", 1);
-        assert!(parse_allowance_json(PrivateMessageKind::AllowanceProposal, &unknown).is_err());
+        assert!(parse_proposal_json(&unknown).is_err());
         let duplicate = compact.replacen("{", "{\"version\":1,", 1);
-        assert!(parse_allowance_json(PrivateMessageKind::AllowanceProposal, &duplicate).is_err());
+        assert!(parse_proposal_json(&duplicate).is_err());
 
         let mut nested_unknowns = Vec::new();
         for pointer in [
@@ -586,17 +635,13 @@ mod tests {
         nested_unknowns.push(unsupported_version);
 
         for invalid in nested_unknowns {
-            assert!(parse_allowance_json(
-                PrivateMessageKind::AllowanceProposal,
-                &serde_json::to_string(&invalid).unwrap(),
-            )
-            .is_err());
+            assert!(parse_proposal_json(&serde_json::to_string(&invalid).unwrap()).is_err());
         }
 
         let end = AllowanceEvent::End(AllowanceEnd::withdrawal(
-            EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204").unwrap(),
+            event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
             AllowanceId::new(ALLOWANCE_ID).unwrap(),
-            EventId::new(EVENT_ID).unwrap(),
+            event_id(EVENT_ID),
         ));
         let mut end_value: JsonValue =
             serde_json::from_str(&serialize_allowance_json(&end).unwrap()).unwrap();
@@ -604,7 +649,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("acceptance_event_id");
-        assert!(parse_allowance_json(
+        assert!(parse_json(
             PrivateMessageKind::AllowanceEnd,
             &serde_json::to_string(&end_value).unwrap(),
         )
@@ -615,15 +660,11 @@ mod tests {
     fn test_wire_rejects_noncanonical_uuid_spelling() {
         let json = serialize_allowance_json(&full_proposal()).unwrap();
         let uppercase = json.replace(EVENT_ID, &EVENT_ID.to_uppercase());
-        assert!(parse_allowance_json(PrivateMessageKind::AllowanceProposal, &uppercase).is_err());
+        assert!(parse_proposal_json(&uppercase).is_err());
         let simple = json.replace(EVENT_ID, &EVENT_ID.replace('-', ""));
-        assert!(parse_allowance_json(PrivateMessageKind::AllowanceProposal, &simple).is_err());
+        assert!(parse_proposal_json(&simple).is_err());
         let uppercase_allowance_id = json.replace(ALLOWANCE_ID, &ALLOWANCE_ID.to_uppercase());
-        assert!(parse_allowance_json(
-            PrivateMessageKind::AllowanceProposal,
-            &uppercase_allowance_id,
-        )
-        .is_err());
+        assert!(parse_proposal_json(&uppercase_allowance_id).is_err());
     }
 
     #[test]
@@ -664,7 +705,7 @@ mod tests {
         ] {
             let raw = serde_json::to_string(&invalid).unwrap();
             assert!(matches!(
-                parse_allowance_json(PrivateMessageKind::AllowanceProposal, &raw),
+                parse_proposal_json(&raw),
                 Err(PaykitError::InvalidData { .. })
             ));
         }
@@ -683,17 +724,9 @@ mod tests {
                 .unwrap()])
                 .build()
                 .unwrap();
-            let event = AllowanceEvent::Proposal(AllowanceProposal::new(
-                EventId::new(EVENT_ID).unwrap(),
-                AllowanceId::new(ALLOWANCE_ID).unwrap(),
-                AllowanceRole::Allower,
-                terms,
-            ));
+            let event = AllowanceEvent::Proposal(proposal_with_terms(terms));
             let raw = serialize_allowance_json(&event).unwrap();
-            assert_eq!(
-                parse_allowance_json(PrivateMessageKind::AllowanceProposal, &raw).unwrap(),
-                event
-            );
+            assert_eq!(parse_proposal_json(&raw).unwrap(), event);
         }
 
         let terms = AllowanceTerms::builder("btc")
@@ -708,49 +741,42 @@ mod tests {
 
     #[test]
     fn test_message_size_accepts_1000_bytes_and_rejects_1001() {
-        fn proposal_with_lifetime_digits(digits: usize) -> AllowanceEvent {
-            let terms = AllowanceTerms::builder("btc")
-                .lifetime_amount_limit("1".repeat(digits))
-                .build()
-                .unwrap();
-            AllowanceEvent::Proposal(AllowanceProposal::new(
-                EventId::new(EVENT_ID).unwrap(),
-                AllowanceId::new(ALLOWANCE_ID).unwrap(),
-                AllowanceRole::Allower,
-                terms,
-            ))
+        fn proposal_with_lifetime_digits(digits: usize) -> AllowanceProposal {
+            proposal_with_terms(
+                AllowanceTerms::builder("btc")
+                    .lifetime_amount_limit("1".repeat(digits))
+                    .build()
+                    .unwrap(),
+            )
+        }
+        fn unbounded_json(proposal: &AllowanceProposal) -> String {
+            serialize_wire_json_unbounded(&ProposalWire::from(proposal)).unwrap()
         }
 
-        let base = serialize_allowance_json_unbounded(&proposal_with_lifetime_digits(1)).unwrap();
+        let base = unbounded_json(&proposal_with_lifetime_digits(1));
         let exact = proposal_with_lifetime_digits(1 + ALLOWANCE_V1_MESSAGE_MAX_LEN - base.len());
-        let exact_json = serialize_allowance_json(&exact).unwrap();
+        let exact_json = serialize_proposal_json(&exact).unwrap();
         assert_eq!(exact_json.len(), ALLOWANCE_V1_MESSAGE_MAX_LEN);
-        assert!(parse_allowance_json(PrivateMessageKind::AllowanceProposal, &exact_json).is_ok());
+        assert!(parse_proposal_json(&exact_json).is_ok());
 
         let too_large =
             proposal_with_lifetime_digits(2 + ALLOWANCE_V1_MESSAGE_MAX_LEN - base.len());
-        let raw = serialize_allowance_json_unbounded(&too_large).unwrap();
+        let raw = unbounded_json(&too_large);
         assert_eq!(raw.len(), ALLOWANCE_V1_MESSAGE_MAX_LEN + 1);
-        assert!(serialize_allowance_json(&too_large).is_err());
-        assert!(parse_allowance_json(PrivateMessageKind::AllowanceProposal, &raw).is_err());
+        assert!(serialize_proposal_json(&too_large).is_err());
+        assert!(parse_proposal_json(&raw).is_err());
 
-        let multibyte_terms = AllowanceTerms::builder("\u{e9}".repeat(450))
-            .lifetime_amount_limit("1")
-            .build()
-            .unwrap();
-        let multibyte = AllowanceEvent::Proposal(AllowanceProposal::new(
-            EventId::new(EVENT_ID).unwrap(),
-            AllowanceId::new(ALLOWANCE_ID).unwrap(),
-            AllowanceRole::Allower,
-            multibyte_terms,
-        ));
-        let multibyte_raw = serialize_allowance_json_unbounded(&multibyte).unwrap();
+        let multibyte = proposal_with_terms(
+            AllowanceTerms::builder("\u{e9}".repeat(450))
+                .lifetime_amount_limit("1")
+                .build()
+                .unwrap(),
+        );
+        let multibyte_raw = unbounded_json(&multibyte);
         assert!(multibyte_raw.chars().count() <= ALLOWANCE_V1_MESSAGE_MAX_LEN);
         assert!(multibyte_raw.len() > ALLOWANCE_V1_MESSAGE_MAX_LEN);
-        assert!(serialize_allowance_json(&multibyte).is_err());
-        assert!(
-            parse_allowance_json(PrivateMessageKind::AllowanceProposal, &multibyte_raw,).is_err()
-        );
+        assert!(serialize_proposal_json(&multibyte).is_err());
+        assert!(parse_proposal_json(&multibyte_raw).is_err());
     }
 
     #[test]
@@ -759,7 +785,7 @@ mod tests {
         let raw = format!(
             "{{\"version\":1,\"kind\":\"paykit.allowance_proposal\",\"event_id\":\"{EVENT_ID}\",\"allowance_id\":\"{ALLOWANCE_ID}\",\"proposer_role\":\"allower\",\"terms\":\"{sentinel}\"}}"
         );
-        let error = parse_allowance_json(PrivateMessageKind::AllowanceProposal, &raw).unwrap_err();
+        let error = parse_proposal_json(&raw).unwrap_err();
         assert!(!error.to_string().contains(sentinel));
         assert!(!format!("{error:?}").contains(sentinel));
     }
