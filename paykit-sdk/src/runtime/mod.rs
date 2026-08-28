@@ -6,9 +6,9 @@ use std::{
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use paykit_lib::{
-    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaykitReceiverCapabilities,
-    PaykitReceiverMarker, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
-    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestId,
+    AllowanceId, AllowanceTerms, BillingPeriod, EncryptedLinkRecoveryMarker, EventId,
+    PaykitReceiverCapabilities, PaykitReceiverMarker, PaymentEndpointIdentifier, PaymentProof,
+    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestId,
     PaymentRequestRejection, PaymentRequestTerms, PrivateMessageKind, ReceiptDraft,
 };
 use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
@@ -27,6 +27,11 @@ use crate::{
     config::{
         EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
         PublicContactSharingPolicy,
+    },
+    domain::allowances::{
+        allowance_record_from_state, allowance_records_from_state, allowance_scopes,
+        enqueue_allowance_acceptance, enqueue_allowance_end, enqueue_allowance_proposal,
+        enqueue_allowance_rejection, AllowanceFilter, AllowanceLocalRole, AllowanceRecord,
     },
     domain::contacts::{
         parse_profile_json, parse_pubky_profile_json, paykit_blob_path,
@@ -114,6 +119,7 @@ use crate::{
     PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
 };
 
+mod allowances;
 mod backup;
 mod contacts;
 mod encrypted_links;

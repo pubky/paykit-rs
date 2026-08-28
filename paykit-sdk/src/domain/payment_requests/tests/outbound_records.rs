@@ -477,7 +477,7 @@ async fn test_payment_request_records_apply_proposal_before_cross_source_accepta
 }
 
 #[tokio::test]
-async fn test_payment_request_records_flag_later_acceptance_after_local_cancellation() {
+async fn test_payment_request_records_retain_crossing_acceptance_after_payee_cancellation() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
@@ -514,14 +514,19 @@ async fn test_payment_request_records_flag_later_acceptance_after_local_cancella
     )
     .await
     .unwrap();
+    let payer_events_recorded_at = timestamp() - ChronoDuration::minutes(1);
     persist_messages_at(
         &storage,
         counterparty.clone(),
-        vec![acceptance_raw(
-            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
-            request_id,
-        )],
-        timestamp() + ChronoDuration::minutes(2),
+        vec![
+            acceptance_raw("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102", request_id),
+            proof_raw(
+                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
+                request_id,
+                "invoice-2026-0001",
+            ),
+        ],
+        payer_events_recorded_at,
     )
     .await;
 
@@ -529,61 +534,80 @@ async fn test_payment_request_records_flag_later_acceptance_after_local_cancella
         .await
         .unwrap();
 
+    assert_eq!(records[0].local_role, Some(PaymentRequestLocalRole::Payee));
+    assert_eq!(records[0].state, PaymentRequestLifecycleState::Canceled);
     assert_eq!(
-        records[0].state,
-        PaymentRequestLifecycleState::InvalidConflict
+        records[0].accepted_event_id.as_deref(),
+        Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102")
     );
-    assert!(records[0]
-        .invalid_reason
-        .as_ref()
-        .is_some_and(|reason| reason.contains("acceptance arrived after transition")));
+    assert_eq!(
+        records[0].canceled_event_id.as_deref(),
+        Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103")
+    );
+    assert_eq!(records[0].payment_proofs.len(), 1);
+    assert_eq!(
+        records[0].payment_proofs[0].event_id,
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104"
+    );
+    assert!(records[0].payment_proofs[0].stream_item_id.is_some());
+    assert!(records[0].invalid_reason.is_none());
 }
 
 #[tokio::test]
-async fn test_payment_request_records_apply_later_cancellation_after_acceptance() {
+async fn test_payment_request_records_retain_proof_after_crossing_cancellation() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
-    let PaymentRequestEvent::Request(request) = parsed_event(request_raw(
-        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![request_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            request_id,
+            "invoice-2026-0001",
+            None,
+            None,
+        )],
+    )
+    .await;
+    let PaymentRequestEvent::Acceptance(acceptance) = parsed_event(acceptance_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
         request_id,
-        "invoice-2026-0001",
-        None,
-        None,
     )) else {
-        panic!("expected request event");
+        panic!("expected acceptance event");
     };
-    enqueue_payment_request(
+    enqueue_payment_request_acceptance(
         &storage,
         counterparty.clone(),
         receiver_path(),
-        &request,
-        timestamp(),
+        &acceptance,
+        timestamp() + ChronoDuration::minutes(1),
     )
     .await
     .unwrap();
     persist_messages_at(
         &storage,
         counterparty.clone(),
-        vec![acceptance_raw(
-            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+        vec![cancellation_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
             request_id,
         )],
-        timestamp() + ChronoDuration::minutes(1),
+        timestamp() + ChronoDuration::minutes(2),
     )
     .await;
-    let PaymentRequestEvent::Cancellation(cancellation) = parsed_event(cancellation_raw(
-        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+    let PaymentRequestEvent::Proof(proof) = parsed_event(proof_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
         request_id,
+        "invoice-2026-0001",
     )) else {
-        panic!("expected cancellation event");
+        panic!("expected proof event");
     };
-    enqueue_payment_request_cancellation(
+    enqueue_payment_proof(
         &storage,
         counterparty.clone(),
         receiver_path(),
-        &cancellation,
-        timestamp() + ChronoDuration::minutes(2),
+        &proof,
+        timestamp() + ChronoDuration::minutes(3),
     )
     .await
     .unwrap();
@@ -601,6 +625,74 @@ async fn test_payment_request_records_apply_later_cancellation_after_acceptance(
         records[0].canceled_event_id.as_deref(),
         Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103")
     );
+    assert_eq!(records[0].payment_proofs.len(), 1);
+    assert_eq!(
+        records[0].payment_proofs[0].event_id,
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104"
+    );
+    assert!(records[0].invalid_reason.is_none());
+}
+
+#[tokio::test]
+async fn test_payment_request_records_reject_acceptance_after_payer_cancellation() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![request_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            request_id,
+            "invoice-2026-0001",
+            None,
+            None,
+        )],
+    )
+    .await;
+    let PaymentRequestEvent::Cancellation(cancellation) = parsed_event(cancellation_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+        request_id,
+    )) else {
+        panic!("expected cancellation event");
+    };
+    enqueue_payment_request_cancellation(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        &cancellation,
+        timestamp() + ChronoDuration::minutes(1),
+    )
+    .await
+    .unwrap();
+    let PaymentRequestEvent::Acceptance(acceptance) = parsed_event(acceptance_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+        request_id,
+    )) else {
+        panic!("expected acceptance event");
+    };
+    enqueue_payment_request_acceptance(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        &acceptance,
+        timestamp() + ChronoDuration::minutes(2),
+    )
+    .await
+    .unwrap();
+
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        records[0].state,
+        PaymentRequestLifecycleState::InvalidConflict
+    );
+    assert!(records[0]
+        .invalid_reason
+        .as_ref()
+        .is_some_and(|reason| reason.contains("acceptance arrived after transition")));
 }
 
 #[tokio::test]
@@ -923,6 +1015,93 @@ async fn test_payment_request_records_flag_cross_direction_duplicate_event_id() 
     .await
     .unwrap();
     persist_messages(&storage, counterparty.clone(), vec![raw]).await;
+
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        records[0].state,
+        PaymentRequestLifecycleState::InvalidConflict
+    );
+    assert!(records[0]
+        .invalid_reason
+        .as_ref()
+        .is_some_and(|reason| reason.contains("Event ID")));
+}
+
+#[tokio::test]
+async fn test_payment_request_records_flag_inbound_proposal_reused_by_outbound_allowance() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    let event_id = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101";
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![request_raw(
+            event_id,
+            request_id,
+            "invoice-2026-0001",
+            None,
+            None,
+        )],
+    )
+    .await;
+    enqueue_untyped_private_message(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        allowance_proposal_raw(event_id),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        records[0].state,
+        PaymentRequestLifecycleState::InvalidConflict
+    );
+    assert!(records[0]
+        .invalid_reason
+        .as_ref()
+        .is_some_and(|reason| reason.contains("Event ID")));
+}
+
+#[tokio::test]
+async fn test_payment_request_records_flag_outbound_proposal_reused_by_inbound_allowance() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    let event_id = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101";
+    let PaymentRequestEvent::Request(request) = parsed_event(request_raw(
+        event_id,
+        request_id,
+        "invoice-2026-0001",
+        None,
+        None,
+    )) else {
+        panic!("expected request event");
+    };
+    enqueue_payment_request(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        &request,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![allowance_proposal_raw(event_id)],
+    )
+    .await;
 
     let records = payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
         .await

@@ -21,7 +21,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::{
     domain::outbound_private::enqueue_private_message,
     domain::outbound_private::OutboundPrivateMessageStatus,
-    domain::private_stream::payload_hash,
+    domain::private_stream::{canonical_event_id, is_event_message_kind, payload_hash},
     domain::records::{AmountRecord, BillingPeriodRecord},
     storage::{
         EventDedupRecord, OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageAdapter,

@@ -1194,6 +1194,31 @@ pub(super) fn validate_required_private_stream_indexes(
             });
         }
     }
+    validate_receipt_access_authority(event_dedup_records, receipt_access_records)?;
+    Ok(())
+}
+
+fn validate_receipt_access_authority(
+    event_dedup_records: &HashMap<(PubkyPublicKey, PaykitReceiverPath, String), EventDedupRecord>,
+    receipt_access_records: &HashMap<
+        (PubkyPublicKey, PaykitReceiverPath, String),
+        ReceiptAccessRecord,
+    >,
+) -> Result<()> {
+    for (key, access) in receipt_access_records {
+        let is_authoritative = event_dedup_records
+            .get(key)
+            .is_some_and(|dedupe| dedupe.first_stream_item_id == access.stream_item_id);
+        if !is_authoritative {
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access record '{}' is not the authoritative first Event carrier",
+                    access.event_id
+                ),
+                source: None,
+            });
+        }
+    }
     Ok(())
 }
 
