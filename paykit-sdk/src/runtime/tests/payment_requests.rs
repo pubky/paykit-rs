@@ -641,6 +641,102 @@ async fn test_accept_payment_request_does_not_queue_without_private_send_readine
         .is_empty());
 }
 
+#[tokio::test]
+async fn test_submit_payment_proof_canceled_with_acceptance_passes_state_gate() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
+    persist_received_canceled_payment_request(&storage, counterparty.clone(), &request_id).await;
+    let acceptance = parsed_payment_request_event(payment_request_acceptance_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+        request_id.as_str(),
+    ));
+    crate::domain::payment_requests::enqueue_payment_request_event(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        &acceptance,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .submit_payment_proof(
+            counterparty,
+            receiver_path(),
+            &request_id,
+            None,
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            JsonMap::new(),
+        )
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+}
+
+#[tokio::test]
+async fn test_submit_payment_proof_rejects_canceled_request_without_acceptance() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
+    persist_received_canceled_payment_request(&storage, counterparty.clone(), &request_id).await;
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .submit_payment_proof(
+            counterparty,
+            receiver_path(),
+            &request_id,
+            None,
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            JsonMap::new(),
+        )
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+}
+
+async fn persist_received_canceled_payment_request(
+    storage: &InMemoryStorage,
+    counterparty: PubkyPublicKey,
+    request_id: &PaymentRequestId,
+) {
+    persist_private_stream_batch(
+        storage,
+        counterparty,
+        receiver_path(),
+        vec![
+            payment_request_message(
+                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+                request_id.as_str(),
+                None,
+            ),
+            private_application_message(payment_request_cancellation_raw(
+                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+                request_id.as_str(),
+            )),
+        ],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+}
+
 async fn queue_recurring_request_with_inbound_acceptance(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,
@@ -764,5 +860,11 @@ fn payment_request_acceptance_raw(event_id: &str, request_id: &str) -> String {
 fn payment_request_rejection_raw(event_id: &str, request_id: &str) -> String {
     format!(
         r#"{{"version":1,"kind":"paykit.payment_request_rejection","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
+    )
+}
+
+fn payment_request_cancellation_raw(event_id: &str, request_id: &str) -> String {
+    format!(
+        r#"{{"version":1,"kind":"paykit.payment_request_cancellation","event_id":"{event_id}","payment_request_id":"{request_id}"}}"#
     )
 }

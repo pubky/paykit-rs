@@ -28,6 +28,12 @@ pub use domain::adapters::{
     PublicPaymentEndpointCandidate, PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
 };
 #[doc(inline)]
+pub use domain::allowances::{
+    AllowanceAmountRangeRecord, AllowanceFilter, AllowanceHistoryStatus, AllowanceLifecycleState,
+    AllowanceLocalRole, AllowancePeriodLimitRecord, AllowancePeriodRecord, AllowanceRecord,
+    AllowanceTermsRecord,
+};
+#[doc(inline)]
 pub use domain::contacts::{
     ContactProfileResolution, ContactProfileSource, ContactRecord, ContactUpdate, PaykitBlobRecord,
     PaykitProfile, PaykitProfileRecord, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,

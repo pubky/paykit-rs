@@ -430,5 +430,36 @@ pub(crate) fn payload_hash(raw_json: &str) -> String {
     format!("sha256:{digest:x}")
 }
 
+/// Return a canonical Event ID from a JSON carrier when one is present.
+pub(crate) fn canonical_event_id(raw_json: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw_json).ok()?;
+    let value = value.get("event_id")?.as_str()?;
+    EventId::new(value)
+        .ok()
+        .map(|event_id| event_id.as_str().to_owned())
+}
+
+/// Whether a recognized Private Message Kind uses Event Message semantics.
+///
+/// Keep this match exhaustive so adding a new recognized kind requires an
+/// explicit Event ID policy decision at compile time.
+pub(crate) fn is_event_message_kind(kind: &str) -> bool {
+    match PrivateMessageKind::parse(kind) {
+        None | Some(PrivateMessageKind::PrivatePaymentList) => false,
+        Some(
+            PrivateMessageKind::ReceiptAccess
+            | PrivateMessageKind::PaymentRequest
+            | PrivateMessageKind::PaymentRequestAcceptance
+            | PrivateMessageKind::PaymentRequestRejection
+            | PrivateMessageKind::PaymentRequestCancellation
+            | PrivateMessageKind::PaymentProof
+            | PrivateMessageKind::AllowanceProposal
+            | PrivateMessageKind::AllowanceAcceptance
+            | PrivateMessageKind::AllowanceRejection
+            | PrivateMessageKind::AllowanceEnd,
+        ) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests;
