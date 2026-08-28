@@ -454,6 +454,11 @@ where
 
     /// Queue a Payment Proof for an accepted Payment Request and return local derived state.
     ///
+    /// A canceled request remains eligible only when its record retains a valid
+    /// Acceptance. In that case, the caller is responsible for establishing
+    /// that payment execution passed its irreversible boundary before the
+    /// cancellation was observed; Paykit cannot derive that fact from events.
+    ///
     /// The returned record reflects the local outbound queue, not delivery or
     /// counterparty processing.
     pub async fn submit_payment_proof(
@@ -475,10 +480,7 @@ where
         require_payer_role(&record, "submit Payment Proof")?;
         require_state(
             &record,
-            &[
-                PaymentRequestLifecycleState::Accepted,
-                PaymentRequestLifecycleState::ActiveRecurring,
-            ],
+            payment_proof_allowed_states(&record),
             "submit Payment Proof",
         )?;
         let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
@@ -670,6 +672,23 @@ fn require_payer_role(record: &PaymentRequestRecord, action: &str) -> Result<()>
             context: format!("cannot {action}: local identity is not the payer"),
             source: None,
         })
+    }
+}
+
+fn payment_proof_allowed_states(
+    record: &PaymentRequestRecord,
+) -> &'static [PaymentRequestLifecycleState] {
+    if record.accepted_event_id.is_some() {
+        &[
+            PaymentRequestLifecycleState::Accepted,
+            PaymentRequestLifecycleState::ActiveRecurring,
+            PaymentRequestLifecycleState::Canceled,
+        ]
+    } else {
+        &[
+            PaymentRequestLifecycleState::Accepted,
+            PaymentRequestLifecycleState::ActiveRecurring,
+        ]
     }
 }
 
