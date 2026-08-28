@@ -262,20 +262,7 @@ where
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
-        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
-            return Err(PaykitSdkError::Identity {
-                context: "local Pubky identity is not initialized".into(),
-                source: None,
-            });
-        }
-        if session_access.is_none() {
-            return Err(PaykitSdkError::Identity {
-                context: "no Pubky session available".into(),
-                source: None,
-            });
-        }
-
+        self.require_identity_and_session().await?;
         self.ensure_peer_allows_private_automation(counterparty, counterparty_receiver_path)
             .await?;
 
@@ -672,23 +659,6 @@ fn require_payer_role(record: &PaymentRequestRecord, action: &str) -> Result<()>
             context: format!("cannot {action}: local identity is not the payer"),
             source: None,
         })
-    }
-}
-
-fn payment_proof_allowed_states(
-    record: &PaymentRequestRecord,
-) -> &'static [PaymentRequestLifecycleState] {
-    if record.accepted_event_id.is_some() {
-        &[
-            PaymentRequestLifecycleState::Accepted,
-            PaymentRequestLifecycleState::ActiveRecurring,
-            PaymentRequestLifecycleState::Canceled,
-        ]
-    } else {
-        &[
-            PaymentRequestLifecycleState::Accepted,
-            PaymentRequestLifecycleState::ActiveRecurring,
-        ]
     }
 }
 

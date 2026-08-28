@@ -6,7 +6,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use paykit_lib::{AllowancePeriodKind, AllowanceRole, AllowanceTerms};
+use paykit_lib::{AllowanceRole, AllowanceTerms};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -17,11 +17,11 @@ mod commands;
 mod derivation;
 
 pub(crate) use commands::{
-    enqueue_allowance_acceptance, enqueue_allowance_end, enqueue_allowance_proposal,
-    enqueue_allowance_rejection,
+    enqueue_allowance_end, enqueue_allowance_proposal, enqueue_allowance_response,
+    AllowanceResponse,
 };
 pub(crate) use derivation::{
-    allowance_record_from_state, allowance_records_from_state, allowance_scopes,
+    allowance_record, allowance_records, allowance_scopes, sort_allowances_newest_first,
 };
 
 /// Local party role for one Allowance.
@@ -178,11 +178,7 @@ impl From<&AllowanceTerms> for AllowanceTermsRecord {
                     amount_limit: limit.amount_limit().map(str::to_owned),
                     payment_count_limit: limit.payment_count_limit(),
                     period: AllowancePeriodRecord {
-                        kind: match limit.period().kind() {
-                            AllowancePeriodKind::Anchored => "anchored",
-                            AllowancePeriodKind::Rolling => "rolling",
-                        }
-                        .to_owned(),
+                        kind: limit.period().kind().as_str().to_owned(),
                         every: limit.period().every(),
                         unit: limit.period().unit().as_str().to_owned(),
                         anchor: limit.period().anchor().map(str::to_owned),
@@ -216,8 +212,6 @@ pub struct AllowanceFilter {
     pub local_role: Option<AllowanceLocalRole>,
     /// Restrict results to lifecycle states. An empty list means all states.
     pub states: Vec<AllowanceLifecycleState>,
-    /// Restrict results to history-health states. An empty list means all.
-    pub history_statuses: Vec<AllowanceHistoryStatus>,
 }
 
 impl AllowanceFilter {
@@ -233,13 +227,13 @@ impl AllowanceFilter {
                 .local_role
                 .is_none_or(|role| record.local_role == Some(role))
             && (self.states.is_empty() || self.states.contains(&record.state))
-            && (self.history_statuses.is_empty()
-                || self.history_statuses.contains(&record.history_status))
     }
 }
 
 /// SDK-derived record for one Allowance on one exact Encrypted Link.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` output redacts the private Allowance Terms.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AllowanceRecord {
     /// Counterparty associated with the authenticated private history.
     pub counterparty: PubkyPublicKey,
@@ -265,27 +259,15 @@ pub struct AllowanceRecord {
     pub proposal_outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Controlling Acceptance Event ID.
     pub acceptance_event_id: Option<String>,
-    /// Inbound stream item carrying the controlling acceptance.
-    pub acceptance_stream_item_id: Option<u64>,
-    /// Outbound message carrying the controlling acceptance.
-    pub acceptance_outbound_message_id: Option<u64>,
     /// Local delivery status of an outbound acceptance.
     pub acceptance_outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Controlling Rejection Event ID.
     pub rejection_event_id: Option<String>,
-    /// Inbound stream item carrying the controlling rejection.
-    pub rejection_stream_item_id: Option<u64>,
-    /// Outbound message carrying the controlling rejection.
-    pub rejection_outbound_message_id: Option<u64>,
     /// Local delivery status of an outbound rejection.
     pub rejection_outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Valid End Event ID retained deterministically without implying a total
     /// order across the two sending directions.
     pub end_event_id: Option<String>,
-    /// Inbound stream item carrying the retained End.
-    pub end_stream_item_id: Option<u64>,
-    /// Outbound message carrying the retained End.
-    pub end_outbound_message_id: Option<u64>,
     /// Local delivery status of an outbound End.
     pub end_outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Causal Event IDs not yet present in durable history.
@@ -300,7 +282,8 @@ pub struct AllowanceRecord {
     pub last_outbound_status: Option<OutboundPrivateMessageStatus>,
     /// Latest local record time, used only for presentation ordering.
     pub last_event_at: Option<DateTime<Utc>>,
-    /// Redaction-safe reason for invalid history, when available.
+    /// Redaction-safe reason for invalid history, when available. Values are
+    /// fixed SDK descriptions and never copy wire data.
     pub invalid_reason: Option<String>,
 }
 
@@ -323,16 +306,10 @@ impl AllowanceRecord {
             proposal_outbound_message_id: None,
             proposal_outbound_status: None,
             acceptance_event_id: None,
-            acceptance_stream_item_id: None,
-            acceptance_outbound_message_id: None,
             acceptance_outbound_status: None,
             rejection_event_id: None,
-            rejection_stream_item_id: None,
-            rejection_outbound_message_id: None,
             rejection_outbound_status: None,
             end_event_id: None,
-            end_stream_item_id: None,
-            end_outbound_message_id: None,
             end_outbound_status: None,
             pending_causal_event_ids: Vec::new(),
             conflict_event_ids: Vec::new(),
@@ -342,40 +319,6 @@ impl AllowanceRecord {
             last_event_at: None,
             invalid_reason: None,
         }
-    }
-}
-
-impl fmt::Debug for AllowanceRecord {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AllowanceRecord")
-            .field("counterparty", &self.counterparty)
-            .field(
-                "counterparty_receiver_path",
-                &self.counterparty_receiver_path,
-            )
-            .field("allowance_id", &self.allowance_id)
-            .field("local_role", &self.local_role)
-            .field("state", &self.state)
-            .field("history_status", &self.history_status)
-            .field("proposal_event_id", &self.proposal_event_id)
-            .field("terms", &self.terms.as_ref().map(|_| "<redacted>"))
-            .field("acceptance_event_id", &self.acceptance_event_id)
-            .field("rejection_event_id", &self.rejection_event_id)
-            .field("end_event_id", &self.end_event_id)
-            .field("pending_causal_event_ids", &self.pending_causal_event_ids)
-            .field("conflict_event_ids", &self.conflict_event_ids)
-            .field("last_stream_item_id", &self.last_stream_item_id)
-            .field("last_outbound_message_id", &self.last_outbound_message_id)
-            .field("last_outbound_status", &self.last_outbound_status)
-            .field("last_event_at", &self.last_event_at)
-            .field(
-                "invalid_reason",
-                &self
-                    .invalid_reason
-                    .as_ref()
-                    .map(|reason| format!("<redacted:{} bytes>", reason.len())),
-            )
-            .finish()
     }
 }
 
