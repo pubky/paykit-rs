@@ -35,7 +35,7 @@ impl PaymentAmount {
     }
 
     pub(crate) fn validate_with_label(&self, label: &'static str) -> Result<()> {
-        validate_decimal_text(&self.value, &format!("{label}.value"))?;
+        validate_decimal_text(&self.value, format_args!("{label}.value"))?;
         validate_asset_text(&self.asset, "Payment Amount asset")
     }
 }

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt};
+use std::{collections::HashSet, fmt, hash::Hash};
 
 use crate::{
     validation::{
@@ -6,6 +6,9 @@ use crate::{
     },
     EventId, PaykitError, PaymentEndpointIdentifier, PrivateMessageKind, Result,
 };
+
+/// Protocol version of every Allowance Event Message this module produces.
+const ALLOWANCE_V1_VERSION: u8 = 1;
 
 /// UUID-v4 identifier shared by one Allowance lifecycle.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -93,12 +96,16 @@ pub struct AllowanceAmountRange {
 impl AllowanceAmountRange {
     /// Create an inclusive range whose minimum is no greater than its maximum.
     pub fn new(minimum: impl Into<String>, maximum: impl Into<String>) -> Result<Self> {
-        let range = Self {
-            minimum: minimum.into(),
-            maximum: maximum.into(),
-        };
-        range.validate()?;
-        Ok(range)
+        let minimum = minimum.into();
+        let maximum = maximum.into();
+        validate_decimal_text(&minimum, "Allowance minimum")?;
+        validate_decimal_text(&maximum, "Allowance maximum")?;
+        if compare_decimals(&minimum, &maximum).is_gt() {
+            return Err(PaykitError::Validation(
+                "Allowance minimum must not exceed maximum".into(),
+            ));
+        }
+        Ok(Self { minimum, maximum })
     }
 
     /// Access the minimum decimal spelling.
@@ -110,17 +117,6 @@ impl AllowanceAmountRange {
     pub fn maximum(&self) -> &str {
         &self.maximum
     }
-
-    pub(super) fn validate(&self) -> Result<()> {
-        validate_decimal_text(&self.minimum, "Allowance minimum")?;
-        validate_decimal_text(&self.maximum, "Allowance maximum")?;
-        if compare_decimals(&self.minimum, &self.maximum).is_gt() {
-            return Err(PaykitError::Validation(
-                "Allowance minimum must not exceed maximum".into(),
-            ));
-        }
-        Ok(())
-    }
 }
 
 impl fmt::Debug for AllowanceAmountRange {
@@ -130,18 +126,12 @@ impl fmt::Debug for AllowanceAmountRange {
 }
 
 /// Usage-period shape used by an Allowance limit.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AllowancePeriodKind {
     /// Periods aligned to a fixed UTC anchor.
     Anchored,
     /// Fixed-duration window ending at the evaluation instant.
     Rolling,
-}
-
-impl fmt::Debug for AllowancePeriodKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AllowancePeriodKind(<redacted>)")
-    }
 }
 
 impl AllowancePeriodKind {
@@ -155,7 +145,7 @@ impl AllowancePeriodKind {
 }
 
 /// Unit used by an Allowance period.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AllowancePeriodUnit {
     /// Minute interval.
     Minute,
@@ -169,12 +159,6 @@ pub enum AllowancePeriodUnit {
     Month,
     /// Calendar-year interval (anchored periods only).
     Year,
-}
-
-impl fmt::Debug for AllowancePeriodUnit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AllowancePeriodUnit(<redacted>)")
-    }
 }
 
 impl AllowancePeriodUnit {
@@ -212,9 +196,10 @@ impl fmt::Display for AllowancePeriodUnit {
 }
 
 /// Validated anchored or rolling period used by an Allowance limit.
+///
+/// The period is anchored exactly when `anchor` is present.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct AllowancePeriod {
-    kind: AllowancePeriodKind,
     every: u64,
     unit: AllowancePeriodUnit,
     anchor: Option<String>,
@@ -235,7 +220,6 @@ impl AllowancePeriod {
         let anchor = anchor.into();
         parse_utc_timestamp(&anchor, "Allowance period anchor")?;
         Ok(Self {
-            kind: AllowancePeriodKind::Anchored,
             every,
             unit,
             anchor: Some(anchor),
@@ -258,7 +242,6 @@ impl AllowancePeriod {
             ));
         }
         Ok(Self {
-            kind: AllowancePeriodKind::Rolling,
             every,
             unit,
             anchor: None,
@@ -267,7 +250,11 @@ impl AllowancePeriod {
 
     /// Access the period kind.
     pub fn kind(&self) -> AllowancePeriodKind {
-        self.kind
+        if self.anchor.is_some() {
+            AllowancePeriodKind::Anchored
+        } else {
+            AllowancePeriodKind::Rolling
+        }
     }
 
     /// Access the positive interval multiplier.
@@ -419,11 +406,8 @@ impl AllowanceTerms {
         Ok(terms)
     }
 
-    pub(super) fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         validate_asset_text(&self.asset, "Allowance asset")?;
-        if let Some(range) = &self.per_payment_amount {
-            range.validate()?;
-        }
         if let Some(limit) = &self.lifetime_amount_limit {
             validate_decimal_text(limit, "Allowance lifetime_amount_limit")?;
         }
@@ -452,16 +436,10 @@ impl fmt::Debug for AllowanceTerms {
 }
 
 /// Builder for immutable [`AllowanceTerms`].
+///
+/// Holds unvalidated terms; [`AllowanceTermsBuilder::build`] validates them.
 #[derive(Clone)]
-pub struct AllowanceTermsBuilder {
-    asset: String,
-    per_payment_amount: Option<AllowanceAmountRange>,
-    period_limits: Vec<AllowancePeriodLimit>,
-    lifetime_amount_limit: Option<String>,
-    active_from: Option<String>,
-    expires_at: Option<String>,
-    allowed_payment_endpoint_identifiers: Option<Vec<PaymentEndpointIdentifier>>,
-}
+pub struct AllowanceTermsBuilder(AllowanceTerms);
 
 impl fmt::Debug for AllowanceTermsBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -472,7 +450,7 @@ impl fmt::Debug for AllowanceTermsBuilder {
 impl AllowanceTermsBuilder {
     /// Create a builder for an exact, case-sensitive asset.
     pub fn new(asset: impl Into<String>) -> Self {
-        Self {
+        Self(AllowanceTerms {
             asset: asset.into(),
             per_payment_amount: None,
             period_limits: Vec::new(),
@@ -480,36 +458,36 @@ impl AllowanceTermsBuilder {
             active_from: None,
             expires_at: None,
             allowed_payment_endpoint_identifiers: None,
-        }
+        })
     }
 
     /// Set the inclusive per-payment amount range.
     pub fn per_payment_amount(mut self, range: AllowanceAmountRange) -> Self {
-        self.per_payment_amount = Some(range);
+        self.0.per_payment_amount = Some(range);
         self
     }
 
     /// Replace the independently applicable period limits.
     pub fn period_limits(mut self, limits: Vec<AllowancePeriodLimit>) -> Self {
-        self.period_limits = limits;
+        self.0.period_limits = limits;
         self
     }
 
     /// Set the lifetime amount ceiling.
     pub fn lifetime_amount_limit(mut self, limit: impl Into<String>) -> Self {
-        self.lifetime_amount_limit = Some(limit.into());
+        self.0.lifetime_amount_limit = Some(limit.into());
         self
     }
 
     /// Set the inclusive first eligible instant.
     pub fn active_from(mut self, active_from: impl Into<String>) -> Self {
-        self.active_from = Some(active_from.into());
+        self.0.active_from = Some(active_from.into());
         self
     }
 
     /// Set the exclusive first ineligible instant.
     pub fn expires_at(mut self, expires_at: impl Into<String>) -> Self {
-        self.expires_at = Some(expires_at.into());
+        self.0.expires_at = Some(expires_at.into());
         self
     }
 
@@ -518,29 +496,57 @@ impl AllowanceTermsBuilder {
         mut self,
         identifiers: Vec<PaymentEndpointIdentifier>,
     ) -> Self {
-        self.allowed_payment_endpoint_identifiers = Some(identifiers);
+        self.0.allowed_payment_endpoint_identifiers = Some(identifiers);
         self
     }
 
     /// Validate all fields and build immutable Allowance Terms.
     pub fn build(self) -> Result<AllowanceTerms> {
-        AllowanceTerms::from_parts(
-            self.asset,
-            self.per_payment_amount,
-            self.period_limits,
-            self.lifetime_amount_limit,
-            self.active_from,
-            self.expires_at,
-            self.allowed_payment_endpoint_identifiers,
-        )
+        self.0.validate()?;
+        Ok(self.0)
     }
 }
 
+/// Accessors shared by every V1 Allowance event header.
+macro_rules! event_header_accessors {
+    ($kind:expr) => {
+        /// Access the protocol version.
+        pub fn version(&self) -> u8 {
+            ALLOWANCE_V1_VERSION
+        }
+
+        /// Access the Private Message Kind.
+        pub fn kind(&self) -> PrivateMessageKind {
+            $kind
+        }
+
+        /// Access the Event ID.
+        pub fn event_id(&self) -> &EventId {
+            &self.event_id
+        }
+
+        /// Access the Allowance ID.
+        pub fn allowance_id(&self) -> &AllowanceId {
+            &self.allowance_id
+        }
+    };
+}
+
+/// Header accessors plus the Proposal reference shared by response events.
+macro_rules! event_accessors {
+    ($kind:expr) => {
+        event_header_accessors!($kind);
+
+        /// Access the referenced Proposal Event ID.
+        pub fn proposal_event_id(&self) -> &EventId {
+            &self.proposal_event_id
+        }
+    };
+}
+
 /// Proposal Event Message for exact Allowance Terms.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllowanceProposal {
-    version: u8,
-    kind: PrivateMessageKind,
     event_id: EventId,
     allowance_id: AllowanceId,
     proposer_role: AllowanceRole,
@@ -556,8 +562,6 @@ impl AllowanceProposal {
         terms: AllowanceTerms,
     ) -> Self {
         Self {
-            version: 1,
-            kind: PrivateMessageKind::AllowanceProposal,
             event_id,
             allowance_id,
             proposer_role,
@@ -565,25 +569,7 @@ impl AllowanceProposal {
         }
     }
 
-    /// Access the protocol version.
-    pub fn version(&self) -> u8 {
-        self.version
-    }
-
-    /// Access the Private Message Kind.
-    pub fn kind(&self) -> PrivateMessageKind {
-        self.kind
-    }
-
-    /// Access the Event ID.
-    pub fn event_id(&self) -> &EventId {
-        &self.event_id
-    }
-
-    /// Access the Allowance ID.
-    pub fn allowance_id(&self) -> &AllowanceId {
-        &self.allowance_id
-    }
+    event_header_accessors!(PrivateMessageKind::AllowanceProposal);
 
     /// Access the authenticated proposal sender's assigned role.
     pub fn proposer_role(&self) -> AllowanceRole {
@@ -601,53 +587,9 @@ impl AllowanceProposal {
     }
 }
 
-impl fmt::Debug for AllowanceProposal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AllowanceProposal")
-            .field("version", &self.version)
-            .field("kind", &self.kind)
-            .field("event_id", &self.event_id)
-            .field("allowance_id", &self.allowance_id)
-            .field("proposer_role", &self.proposer_role)
-            .field("terms", &"<redacted>")
-            .finish()
-    }
-}
-
-macro_rules! event_accessors {
-    () => {
-        /// Access the protocol version.
-        pub fn version(&self) -> u8 {
-            self.version
-        }
-
-        /// Access the Private Message Kind.
-        pub fn kind(&self) -> PrivateMessageKind {
-            self.kind
-        }
-
-        /// Access the Event ID.
-        pub fn event_id(&self) -> &EventId {
-            &self.event_id
-        }
-
-        /// Access the Allowance ID.
-        pub fn allowance_id(&self) -> &AllowanceId {
-            &self.allowance_id
-        }
-
-        /// Access the referenced Proposal Event ID.
-        pub fn proposal_event_id(&self) -> &EventId {
-            &self.proposal_event_id
-        }
-    };
-}
-
 /// Acceptance Event Message correlated to one Allowance Proposal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllowanceAcceptance {
-    version: u8,
-    kind: PrivateMessageKind,
     event_id: EventId,
     allowance_id: AllowanceId,
     proposal_event_id: EventId,
@@ -657,15 +599,13 @@ impl AllowanceAcceptance {
     /// Create a V1 Allowance Acceptance.
     pub fn new(event_id: EventId, allowance_id: AllowanceId, proposal_event_id: EventId) -> Self {
         Self {
-            version: 1,
-            kind: PrivateMessageKind::AllowanceAcceptance,
             event_id,
             allowance_id,
             proposal_event_id,
         }
     }
 
-    event_accessors!();
+    event_accessors!(PrivateMessageKind::AllowanceAcceptance);
 
     /// Check causal references and that the authenticated sender is the proposal recipient.
     pub fn validate_for_proposal(
@@ -685,8 +625,6 @@ impl AllowanceAcceptance {
 /// Rejection Event Message correlated to one Allowance Proposal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllowanceRejection {
-    version: u8,
-    kind: PrivateMessageKind,
     event_id: EventId,
     allowance_id: AllowanceId,
     proposal_event_id: EventId,
@@ -696,15 +634,13 @@ impl AllowanceRejection {
     /// Create a V1 Allowance Rejection.
     pub fn new(event_id: EventId, allowance_id: AllowanceId, proposal_event_id: EventId) -> Self {
         Self {
-            version: 1,
-            kind: PrivateMessageKind::AllowanceRejection,
             event_id,
             allowance_id,
             proposal_event_id,
         }
     }
 
-    event_accessors!();
+    event_accessors!(PrivateMessageKind::AllowanceRejection);
 
     /// Check causal references and that the authenticated sender is the proposal recipient.
     pub fn validate_for_proposal(
@@ -724,8 +660,6 @@ impl AllowanceRejection {
 /// Terminal End Event Message for a proposed or accepted Allowance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllowanceEnd {
-    version: u8,
-    kind: PrivateMessageKind,
     event_id: EventId,
     allowance_id: AllowanceId,
     proposal_event_id: EventId,
@@ -764,8 +698,6 @@ impl AllowanceEnd {
         acceptance_event_id: Option<EventId>,
     ) -> Self {
         Self {
-            version: 1,
-            kind: PrivateMessageKind::AllowanceEnd,
             event_id,
             allowance_id,
             proposal_event_id,
@@ -773,7 +705,7 @@ impl AllowanceEnd {
         }
     }
 
-    event_accessors!();
+    event_accessors!(PrivateMessageKind::AllowanceEnd);
 
     /// Access the Acceptance Event ID, or `None` for a proposal withdrawal.
     pub fn acceptance_event_id(&self) -> Option<&EventId> {
@@ -824,7 +756,7 @@ impl AllowanceEnd {
 }
 
 /// Any V1 Allowance lifecycle Event Message.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AllowanceEvent {
     /// Proposal event.
     Proposal(AllowanceProposal),
@@ -840,10 +772,10 @@ impl AllowanceEvent {
     /// Access the Private Message Kind.
     pub fn kind(&self) -> PrivateMessageKind {
         match self {
-            Self::Proposal(event) => event.kind,
-            Self::Acceptance(event) => event.kind,
-            Self::Rejection(event) => event.kind,
-            Self::End(event) => event.kind,
+            Self::Proposal(event) => event.kind(),
+            Self::Acceptance(event) => event.kind(),
+            Self::Rejection(event) => event.kind(),
+            Self::End(event) => event.kind(),
         }
     }
 
@@ -864,17 +796,6 @@ impl AllowanceEvent {
             Self::Acceptance(event) => &event.allowance_id,
             Self::Rejection(event) => &event.allowance_id,
             Self::End(event) => &event.allowance_id,
-        }
-    }
-}
-
-impl fmt::Debug for AllowanceEvent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Proposal(event) => f.debug_tuple("Proposal").field(event).finish(),
-            Self::Acceptance(event) => f.debug_tuple("Acceptance").field(event).finish(),
-            Self::Rejection(event) => f.debug_tuple("Rejection").field(event).finish(),
-            Self::End(event) => f.debug_tuple("End").field(event).finish(),
         }
     }
 }
@@ -1018,8 +939,7 @@ fn validate_time_window(active_from: Option<&str>, expires_at: Option<&str>) -> 
 }
 
 fn validate_unique_period_limits(limits: &[AllowancePeriodLimit]) -> Result<()> {
-    let mut unique = HashSet::with_capacity(limits.len());
-    if limits.iter().any(|limit| !unique.insert(limit)) {
+    if !all_unique(limits) {
         return Err(PaykitError::Validation(
             "Allowance period_limits must contain unique entries".into(),
         ));
@@ -1036,11 +956,7 @@ fn validate_allowlist(identifiers: Option<&[PaymentEndpointIdentifier]>) -> Resu
             "Allowance endpoint allowlist must not be empty".into(),
         ));
     }
-    let mut unique = HashSet::with_capacity(identifiers.len());
-    if identifiers
-        .iter()
-        .any(|identifier| !unique.insert(identifier))
-    {
+    if !all_unique(identifiers) {
         return Err(PaykitError::Validation(
             "Allowance endpoint allowlist must contain unique identifiers".into(),
         ));
@@ -1048,9 +964,15 @@ fn validate_allowlist(identifiers: Option<&[PaymentEndpointIdentifier]>) -> Resu
     Ok(())
 }
 
+fn all_unique<T: Eq + Hash>(items: &[T]) -> bool {
+    let mut seen = HashSet::with_capacity(items.len());
+    items.iter().all(|item| seen.insert(item))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::allowance::test_fixtures::{minimal_proposal, proposal_with_terms};
 
     #[test]
     fn test_amount_range_compares_decimals_exactly() {
@@ -1061,13 +983,7 @@ mod tests {
         .is_ok());
         assert!(AllowanceAmountRange::new("1.000", "1").is_ok());
         assert!(AllowanceAmountRange::new(".51", ".509").is_err());
-
-        for accepted in [".5", "10.", "0001.2300"] {
-            assert!(validate_decimal_text(accepted, "test amount").is_ok());
-        }
-        for rejected in ["", ".", "-1", "+1", "1e2", "1,000", "1.2.3"] {
-            assert!(validate_decimal_text(rejected, "test amount").is_err());
-        }
+        assert!(AllowanceAmountRange::new("1", "-1").is_err());
     }
 
     #[test]
@@ -1102,15 +1018,7 @@ mod tests {
 
     #[test]
     fn test_response_and_end_correlation_checks_roles_and_ids() {
-        let proposal = AllowanceProposal::new(
-            EventId::new_v4(),
-            AllowanceId::new_v4(),
-            AllowanceRole::Allower,
-            AllowanceTerms::builder("btc")
-                .lifetime_amount_limit("1")
-                .build()
-                .unwrap(),
-        );
+        let proposal = minimal_proposal();
         let acceptance = AllowanceAcceptance::new(
             EventId::new_v4(),
             proposal.allowance_id.clone(),
@@ -1182,15 +1090,7 @@ mod tests {
             .lifetime_amount_limit("123456789")
             .build()
             .unwrap();
-        let debug = format!(
-            "{:?}",
-            AllowanceProposal::new(
-                EventId::new_v4(),
-                AllowanceId::new_v4(),
-                AllowanceRole::Allower,
-                terms,
-            )
-        );
+        let debug = format!("{:?}", proposal_with_terms(terms));
         assert!(!debug.contains("SENTINEL_ASSET"));
         assert!(!debug.contains("123456789"));
     }

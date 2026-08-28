@@ -34,3 +34,11 @@ pub(crate) fn allowance_event_json(kind: &str, event_id: &str) -> String {
         _ => unreachable!("test fixture uses only Allowance event kinds"),
     }
 }
+
+/// Recognized Allowance acceptance missing its required `proposal_event_id`.
+///
+/// Its Event ID does not collide with [`ALLOWANCE_EVENT_FIXTURES`].
+pub(crate) fn malformed_allowance_event_json() -> String {
+    r#"{"version":1,"kind":"paykit.allowance_acceptance","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205","allowance_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44"}"#
+        .into()
+}
