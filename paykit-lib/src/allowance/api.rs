@@ -1,15 +1,17 @@
 use tracing::instrument;
 
-use crate::{
-    error::map_error, EncryptedLink, PrivateApplicationMessage, PrivateMessageKind, Result,
-};
+use crate::{error::map_error, EncryptedLink, PrivateApplicationMessage, Result};
 
 use super::{
     types::{
         AllowanceAcceptance, AllowanceEnd, AllowanceEvent, AllowanceEventMessage,
         AllowanceProposal, AllowanceRejection,
     },
-    wire::{parse_allowance_json, parse_event_header_ids, serialize_allowance_json},
+    wire::{
+        parse_allowance_json, parse_event_header_ids, serialize_acceptance_json,
+        serialize_allowance_json, serialize_end_json, serialize_proposal_json,
+        serialize_rejection_json,
+    },
 };
 
 /// Parse a raw Private Application Message as an Allowance Event Message.
@@ -21,17 +23,20 @@ pub fn parse_allowance_event_message(
     message: &PrivateApplicationMessage,
 ) -> Option<AllowanceEventMessage> {
     let kind = message.known_kind()?;
-    if !is_allowance_kind(kind) {
-        return None;
-    }
-    let event = parse_allowance_json(kind, &message.raw_json).map_err(|error| error.to_string());
-    let (event_id, allowance_id) = parse_event_header_ids(&message.raw_json);
+    let event = parse_allowance_json(kind, &message.raw_json)?;
+    let (event_id, allowance_id) = match &event {
+        Ok(event) => (
+            Some(event.event_id().clone()),
+            Some(event.allowance_id().clone()),
+        ),
+        Err(_) => parse_event_header_ids(&message.raw_json),
+    };
     Some(AllowanceEventMessage {
         kind,
         event_id,
         allowance_id,
         raw_json: message.raw_json.clone(),
-        event,
+        event: event.map_err(|error| error.to_string()),
     })
 }
 
@@ -53,9 +58,9 @@ pub async fn send_allowance_proposal(
     link: &mut EncryptedLink,
     event: &AllowanceProposal,
 ) -> Result<()> {
-    send_event(
+    send_json(
         link,
-        &AllowanceEvent::Proposal(event.clone()),
+        serialize_proposal_json(event),
         "send_allowance_proposal",
     )
     .await
@@ -70,9 +75,9 @@ pub async fn send_allowance_acceptance(
     link: &mut EncryptedLink,
     event: &AllowanceAcceptance,
 ) -> Result<()> {
-    send_event(
+    send_json(
         link,
-        &AllowanceEvent::Acceptance(event.clone()),
+        serialize_acceptance_json(event),
         "send_allowance_acceptance",
     )
     .await
@@ -87,9 +92,9 @@ pub async fn send_allowance_rejection(
     link: &mut EncryptedLink,
     event: &AllowanceRejection,
 ) -> Result<()> {
-    send_event(
+    send_json(
         link,
-        &AllowanceEvent::Rejection(event.clone()),
+        serialize_rejection_json(event),
         "send_allowance_rejection",
     )
     .await
@@ -101,56 +106,29 @@ pub async fn send_allowance_rejection(
 /// [`AllowanceEnd`] when the causal events are available.
 #[instrument(skip(link, event))]
 pub async fn send_allowance_end(link: &mut EncryptedLink, event: &AllowanceEnd) -> Result<()> {
-    send_event(
-        link,
-        &AllowanceEvent::End(event.clone()),
-        "send_allowance_end",
-    )
-    .await
+    send_json(link, serialize_end_json(event), "send_allowance_end").await
 }
 
-async fn send_event(
+async fn send_json(
     link: &mut EncryptedLink,
-    event: &AllowanceEvent,
+    json: Result<String>,
     context: &'static str,
 ) -> Result<()> {
-    let json = serialize_allowance_json(event).map_err(|error| map_error(context, error))?;
+    let json = json.map_err(|error| map_error(context, error))?;
     link.send_allowance_message(json.as_bytes())
         .await
         .map_err(|error| map_error(context, error))
 }
 
-fn is_allowance_kind(kind: PrivateMessageKind) -> bool {
-    match kind {
-        PrivateMessageKind::AllowanceProposal
-        | PrivateMessageKind::AllowanceAcceptance
-        | PrivateMessageKind::AllowanceRejection
-        | PrivateMessageKind::AllowanceEnd => true,
-        PrivateMessageKind::PrivatePaymentList
-        | PrivateMessageKind::ReceiptAccess
-        | PrivateMessageKind::PaymentRequest
-        | PrivateMessageKind::PaymentRequestAcceptance
-        | PrivateMessageKind::PaymentRequestRejection
-        | PrivateMessageKind::PaymentRequestCancellation
-        | PrivateMessageKind::PaymentProof => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AllowanceId, AllowanceRole, AllowanceTerms, EventId, PrivateApplicationMessage};
+    use crate::{
+        allowance::test_fixtures::minimal_proposal, PrivateApplicationMessage, PrivateMessageKind,
+    };
 
     fn proposal() -> AllowanceEvent {
-        AllowanceEvent::Proposal(AllowanceProposal::new(
-            EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d201").unwrap(),
-            AllowanceId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44").unwrap(),
-            AllowanceRole::Allower,
-            AllowanceTerms::builder("btc")
-                .lifetime_amount_limit("1")
-                .build()
-                .unwrap(),
-        ))
+        AllowanceEvent::Proposal(minimal_proposal())
     }
 
     #[test]
