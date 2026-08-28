@@ -1,7 +1,6 @@
 use super::*;
 use crate::domain::allowances::{
-    allowance_record_from_state, AllowanceHistoryStatus, AllowanceLifecycleState,
-    AllowanceLocalRole,
+    allowance_record, AllowanceHistoryStatus, AllowanceLifecycleState, AllowanceLocalRole,
 };
 use paykit_lib::AllowanceId;
 
@@ -99,13 +98,14 @@ async fn test_restore_migrates_legacy_allowances_idempotently() {
     restore_backup_state(&storage, backup_with_stream(public_key(), items))
         .await
         .unwrap();
-    let restored = storage.snapshot().unwrap();
-    let allowance = allowance_record_from_state(
-        &restored,
+    let allowance = allowance_record(
+        &storage,
         &counterparty,
         &other_receiver_path(),
         &AllowanceId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44").unwrap(),
     )
+    .await
+    .unwrap()
     .unwrap();
     assert_eq!(allowance.counterparty, counterparty);
     assert_eq!(allowance.counterparty_receiver_path, other_receiver_path());

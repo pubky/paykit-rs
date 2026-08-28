@@ -71,25 +71,22 @@ where
             let items = tx.private_stream_items(counterparty, counterparty_receiver_path);
             let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_path);
             let outbound_carriers = outbound_event_carriers(&outbound);
+            let received_event_ids = items
+                .iter()
+                .filter_map(payment_request_message_from_item)
+                .filter_map(|message| parse_payment_request_event_message(&message))
+                .filter_map(|parsed| parsed.event_id().map(|id| id.as_str().to_owned()))
+                .collect::<HashSet<_>>();
             let mut dedupe_records = HashMap::new();
-            let mut dedupe_event_ids = outbound_carriers.event_ids.clone();
-            for item in &items {
-                let Some(message) = payment_request_message_from_item(item) else {
-                    continue;
-                };
-                let Some(parsed) = parse_payment_request_event_message(&message) else {
-                    continue;
-                };
-                let Some(event_id) = parsed.event_id() else {
-                    continue;
-                };
-                dedupe_event_ids.insert(event_id.as_str().to_owned());
-            }
-            for event_id in dedupe_event_ids {
+            for event_id in outbound_carriers
+                .event_ids
+                .iter()
+                .chain(&received_event_ids)
+            {
                 if let Some(record) =
-                    tx.event_dedup_record(counterparty, counterparty_receiver_path, &event_id)
+                    tx.event_dedup_record(counterparty, counterparty_receiver_path, event_id)
                 {
-                    dedupe_records.insert(event_id, record);
+                    dedupe_records.insert(event_id.clone(), record);
                 }
             }
             Ok((items, outbound, dedupe_records, outbound_carriers))
@@ -104,38 +101,6 @@ where
         outbound_carriers,
         now,
     )
-}
-
-#[derive(Default)]
-struct OutboundEventCarriers {
-    event_ids: HashSet<String>,
-    conflicted_event_ids: HashSet<String>,
-}
-
-fn outbound_event_carriers(outbound: &[OutboundPrivateMessageRecord]) -> OutboundEventCarriers {
-    let mut payloads_by_event_id = HashMap::<String, HashSet<&str>>::new();
-    for message in outbound {
-        if matches!(
-            message.status,
-            OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::Superseded
-        ) || !is_event_message_kind(&message.kind)
-        {
-            continue;
-        }
-        if let Some(event_id) = canonical_event_id(&message.raw_json) {
-            payloads_by_event_id
-                .entry(event_id)
-                .or_default()
-                .insert(&message.raw_json);
-        }
-    }
-    OutboundEventCarriers {
-        event_ids: payloads_by_event_id.keys().cloned().collect(),
-        conflicted_event_ids: payloads_by_event_id
-            .into_iter()
-            .filter_map(|(event_id, payloads)| (payloads.len() > 1).then_some(event_id))
-            .collect(),
-    }
 }
 
 fn derive_received_payment_request_records(
@@ -1035,12 +1000,29 @@ fn cancellation_was_sent_by_payee(record: &PaymentRequestRecord) -> bool {
     )
 }
 
+/// Lifecycle states in which a Payment Proof may follow.
+///
+/// A canceled request stays eligible only while its record retains a valid
+/// Acceptance, so evidence of payment that crossed the cancellation is kept.
+pub(crate) fn payment_proof_allowed_states(
+    record: &PaymentRequestRecord,
+) -> &'static [PaymentRequestLifecycleState] {
+    if record.accepted_event_id.is_some() {
+        &[
+            PaymentRequestLifecycleState::Accepted,
+            PaymentRequestLifecycleState::ActiveRecurring,
+            PaymentRequestLifecycleState::Canceled,
+        ]
+    } else {
+        &[
+            PaymentRequestLifecycleState::Accepted,
+            PaymentRequestLifecycleState::ActiveRecurring,
+        ]
+    }
+}
+
 fn proof_follows_acceptance(record: &PaymentRequestRecord) -> bool {
-    matches!(
-        record.state,
-        PaymentRequestLifecycleState::Accepted | PaymentRequestLifecycleState::ActiveRecurring
-    ) || (record.state == PaymentRequestLifecycleState::Canceled
-        && record.accepted_event_id.is_some())
+    payment_proof_allowed_states(record).contains(&record.state)
 }
 
 fn accepted_state(record: &PaymentRequestRecord) -> PaymentRequestLifecycleState {

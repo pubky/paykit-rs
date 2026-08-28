@@ -96,16 +96,7 @@ fn proof_raw(event_id: &str, request_id: &str, reference: &str) -> String {
 }
 
 fn allowance_proposal_raw(event_id: &str) -> String {
-    let event = paykit_lib::AllowanceEvent::Proposal(paykit_lib::AllowanceProposal::new(
-        paykit_lib::EventId::new(event_id).unwrap(),
-        paykit_lib::AllowanceId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44").unwrap(),
-        paykit_lib::AllowanceRole::Allower,
-        paykit_lib::AllowanceTerms::builder("private-asset-sentinel")
-            .lifetime_amount_limit("10")
-            .build()
-            .unwrap(),
-    ));
-    paykit_lib::serialize_allowance_event(&event).unwrap()
+    crate::test_utils::allowance_event_json("paykit.allowance_proposal", event_id)
 }
 
 async fn persist_messages(

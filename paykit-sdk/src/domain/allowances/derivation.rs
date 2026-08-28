@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{
-    parse_allowance_event_message, AllowanceAcceptance, AllowanceEvent, AllowanceId,
-    AllowanceProposal, AllowanceRejection, EventId, PrivateApplicationMessage, PrivateMessageKind,
+    parse_allowance_event_message, AllowanceEnd, AllowanceEvent, AllowanceId, AllowanceProposal,
+    EventId, PrivateApplicationMessage,
 };
 use serde_json::Value as JsonValue;
 
@@ -11,66 +11,154 @@ use crate::{
     domain::{
         linked_peers::LinkedPeerState,
         outbound_private::OutboundPrivateMessageStatus,
-        private_stream::{canonical_event_id, is_event_message_kind, PrivateStreamParseStatus},
+        private_stream::{
+            canonical_event_id, is_allowance_kind, outbound_event_carriers, OutboundEventCarriers,
+            PrivateStreamParseStatus,
+        },
     },
-    storage::{OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageState},
-    PaykitReceiverPath, PubkyPublicKey,
+    storage::{
+        EventDedupRecord, OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageAdapter,
+        StorageState, StorageTransaction,
+    },
+    PaykitReceiverPath, PubkyPublicKey, Result,
 };
 
 use super::{
     AllowanceHistoryStatus, AllowanceLifecycleState, AllowanceRecord, AllowanceTermsRecord,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Durable history of one exact Encrypted Link.
+///
+/// Loaded inside one storage transaction so that derivation and any command
+/// append observe the same state.
+pub(super) struct AllowanceLinkHistory {
+    pub(super) counterparty: PubkyPublicKey,
+    pub(super) counterparty_receiver_path: PaykitReceiverPath,
+    /// Every inbound private stream item on the link.
+    pub(super) items: Vec<PrivateStreamItemRecord>,
+    /// Outbound messages that still carry local intent. `Invalid` and
+    /// `Superseded` records never advance the link and are excluded.
+    pub(super) outbound: Vec<OutboundPrivateMessageRecord>,
+    /// Event dedupe records keyed by Event ID for every inbound Event Message
+    /// on the link, regardless of kind.
+    dedupe_records: HashMap<String, EventDedupRecord>,
+    link_recovery_required: bool,
+}
+
+impl AllowanceLinkHistory {
+    pub(super) fn load(
+        tx: &dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Self {
+        let items = tx.private_stream_items(counterparty, counterparty_receiver_path);
+        let outbound = tx
+            .outbound_private_messages(counterparty, counterparty_receiver_path)
+            .into_iter()
+            .filter(|message| {
+                !matches!(
+                    message.status,
+                    OutboundPrivateMessageStatus::Invalid
+                        | OutboundPrivateMessageStatus::Superseded
+                )
+            })
+            .collect();
+        let dedupe_records = items
+            .iter()
+            .filter_map(|item| canonical_event_id(&item.raw_json))
+            .filter_map(|event_id| {
+                tx.event_dedup_record(counterparty, counterparty_receiver_path, &event_id)
+                    .map(|record| (event_id, record))
+            })
+            .collect();
+        let link_recovery_required = tx
+            .linked_peer(counterparty, counterparty_receiver_path)
+            .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired);
+        Self {
+            counterparty: counterparty.clone(),
+            counterparty_receiver_path: counterparty_receiver_path.clone(),
+            items,
+            outbound,
+            dedupe_records,
+            link_recovery_required,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum EventSourceKind {
     Inbound,
     Outbound,
 }
 
-#[derive(Clone)]
-enum EventSource {
-    Inbound(PrivateStreamItemRecord),
-    Outbound(OutboundPrivateMessageRecord),
+#[derive(Clone, Copy)]
+enum EventSource<'a> {
+    Inbound(&'a PrivateStreamItemRecord),
+    Outbound(&'a OutboundPrivateMessageRecord),
 }
 
-impl EventSource {
-    fn kind(&self) -> EventSourceKind {
+impl<'a> EventSource<'a> {
+    fn kind(self) -> EventSourceKind {
         match self {
             Self::Inbound(_) => EventSourceKind::Inbound,
             Self::Outbound(_) => EventSourceKind::Outbound,
         }
     }
 
-    fn order(&self) -> u64 {
+    /// FIFO position within this sender's own direction.
+    fn order(self) -> u64 {
         match self {
             Self::Inbound(item) => item.stream_item_id,
             Self::Outbound(message) => message.outbound_message_id,
         }
     }
 
-    fn recorded_at(&self) -> DateTime<Utc> {
+    fn recorded_at(self) -> DateTime<Utc> {
         match self {
             Self::Inbound(item) => item.received_at,
             Self::Outbound(message) => message.created_at,
         }
     }
 
-    fn raw_json(&self) -> &str {
+    fn raw_json(self) -> &'a str {
         match self {
             Self::Inbound(item) => &item.raw_json,
             Self::Outbound(message) => &message.raw_json,
         }
     }
+
+    fn message(self) -> PrivateApplicationMessage {
+        match self {
+            Self::Inbound(item) => PrivateApplicationMessage {
+                version: item
+                    .parsed_version
+                    .and_then(|version| u8::try_from(version).ok()),
+                kind: item.parsed_kind.clone(),
+                raw_json: item.raw_json.clone(),
+            },
+            Self::Outbound(message) => PrivateApplicationMessage {
+                version: Some(1),
+                kind: Some(message.kind.clone()),
+                raw_json: message.raw_json.clone(),
+            },
+        }
+    }
+
+    fn outbound_status(self) -> Option<OutboundPrivateMessageStatus> {
+        match self {
+            Self::Inbound(_) => None,
+            Self::Outbound(message) => Some(message.status.clone()),
+        }
+    }
 }
 
-#[derive(Clone)]
-struct StoredAllowanceEvent {
-    source: EventSource,
+struct StoredAllowanceEvent<'a> {
+    source: EventSource<'a>,
     event: AllowanceEvent,
     tainted_event_id: bool,
 }
 
-impl StoredAllowanceEvent {
+impl StoredAllowanceEvent<'_> {
     fn event_id(&self) -> &EventId {
         self.event.event_id()
     }
@@ -80,17 +168,11 @@ impl StoredAllowanceEvent {
     }
 }
 
-#[derive(Clone)]
-struct InvalidEvidence {
+struct InvalidEvidence<'a> {
     allowance_id: String,
-    source: EventSource,
+    source: EventSource<'a>,
     reason: &'static str,
     conflict_event_id: Option<String>,
-}
-
-enum ControllingResponse<'a> {
-    Acceptance(&'a StoredAllowanceEvent, &'a AllowanceAcceptance),
-    Rejection(&'a StoredAllowanceEvent, &'a AllowanceRejection),
 }
 
 /// Return exact link scopes containing recognized Allowance activity.
@@ -127,54 +209,75 @@ pub(crate) fn allowance_scopes(state: &StorageState) -> Vec<(PubkyPublicKey, Pay
 }
 
 /// Derive every Allowance for one exact authenticated Encrypted Link.
-pub(crate) fn allowance_records_from_state(
-    state: &StorageState,
+///
+/// Records are newest-first by local record time.
+pub(crate) async fn allowance_records<S>(
+    storage: &S,
     counterparty: &PubkyPublicKey,
     counterparty_receiver_path: &PaykitReceiverPath,
-) -> Vec<AllowanceRecord> {
-    let inbound = state
-        .private_stream_items
-        .iter()
-        .filter(|item| {
-            &item.counterparty == counterparty
-                && &item.counterparty_receiver_path == counterparty_receiver_path
+) -> Result<Vec<AllowanceRecord>>
+where
+    S: StorageAdapter,
+{
+    storage
+        .transaction(|tx| {
+            let history = AllowanceLinkHistory::load(tx, counterparty, counterparty_receiver_path);
+            Ok(derive_records(&history, None))
         })
-        .cloned()
-        .collect::<Vec<_>>();
-    let outbound = state
-        .outbound_private_messages
-        .iter()
-        .filter(|message| {
-            &message.counterparty == counterparty
-                && &message.counterparty_receiver_path == counterparty_receiver_path
-                && !matches!(
-                    message.status,
-                    OutboundPrivateMessageStatus::Invalid
-                        | OutboundPrivateMessageStatus::Superseded
-                )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let (events, mut invalid_evidence) = collect_allowance_events(state, inbound, outbound);
-    let link_event_ids = link_event_ids(state, counterparty, counterparty_receiver_path);
-    let allowance_ids_with_proposals = events
-        .iter()
-        .filter_map(|stored| match stored.event {
-            AllowanceEvent::Proposal(_) => Some(stored.allowance_id().as_str().to_owned()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    invalid_evidence
-        .retain(|evidence| allowance_ids_with_proposals.contains(evidence.allowance_id.as_str()));
+        .await
+}
 
-    let mut events_by_allowance = HashMap::<String, Vec<StoredAllowanceEvent>>::new();
+/// Derive one Allowance by exact link scope and Allowance ID.
+pub(crate) async fn allowance_record<S>(
+    storage: &S,
+    counterparty: &PubkyPublicKey,
+    counterparty_receiver_path: &PaykitReceiverPath,
+    allowance_id: &AllowanceId,
+) -> Result<Option<AllowanceRecord>>
+where
+    S: StorageAdapter,
+{
+    storage
+        .transaction(|tx| {
+            let history = AllowanceLinkHistory::load(tx, counterparty, counterparty_receiver_path);
+            Ok(derive_allowance_record(&history, allowance_id))
+        })
+        .await
+}
+
+/// Derive one Allowance from already-loaded link history.
+pub(super) fn derive_allowance_record(
+    history: &AllowanceLinkHistory,
+    allowance_id: &AllowanceId,
+) -> Option<AllowanceRecord> {
+    derive_records(history, Some(allowance_id.as_str())).pop()
+}
+
+fn derive_records(
+    history: &AllowanceLinkHistory,
+    only_allowance_id: Option<&str>,
+) -> Vec<AllowanceRecord> {
+    let carriers = outbound_event_carriers(&history.outbound);
+    let (events, invalid_evidence) = collect_allowance_events(history, &carriers);
+    let link_event_ids = history
+        .dedupe_records
+        .keys()
+        .chain(&carriers.event_ids)
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+
+    let mut events_by_allowance = HashMap::<String, Vec<StoredAllowanceEvent<'_>>>::new();
     for event in events {
+        let allowance_id = event.allowance_id().as_str();
+        if only_allowance_id.is_some_and(|only| only != allowance_id) {
+            continue;
+        }
         events_by_allowance
-            .entry(event.allowance_id().as_str().to_owned())
+            .entry(allowance_id.to_owned())
             .or_default()
             .push(event);
     }
-    let mut invalid_by_allowance = HashMap::<String, Vec<InvalidEvidence>>::new();
+    let mut invalid_by_allowance = HashMap::<String, Vec<InvalidEvidence<'_>>>::new();
     for evidence in invalid_evidence {
         invalid_by_allowance
             .entry(evidence.allowance_id.clone())
@@ -182,53 +285,28 @@ pub(crate) fn allowance_records_from_state(
             .push(evidence);
     }
 
-    let link_recovery_required = state
-        .linked_peers
-        .get(&(counterparty.clone(), counterparty_receiver_path.clone()))
-        .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired);
-    let mut records = Vec::new();
-    for (allowance_id, events) in events_by_allowance {
-        let evidence = invalid_by_allowance
-            .remove(&allowance_id)
-            .unwrap_or_default();
-        if let Some(record) = derive_allowance_record(
-            counterparty,
-            counterparty_receiver_path,
-            allowance_id,
-            events,
-            evidence,
-            &link_event_ids,
-            link_recovery_required,
-        ) {
-            records.push(record);
-        }
-    }
+    let mut records = events_by_allowance
+        .into_iter()
+        .filter_map(|(allowance_id, events)| {
+            let evidence = invalid_by_allowance
+                .remove(&allowance_id)
+                .unwrap_or_default();
+            derive_allowance(history, allowance_id, events, evidence, &link_event_ids)
+        })
+        .collect::<Vec<_>>();
     sort_allowances_newest_first(&mut records);
     records
 }
 
-/// Derive one Allowance by exact link scope and Allowance ID.
-pub(crate) fn allowance_record_from_state(
-    state: &StorageState,
-    counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
-    allowance_id: &AllowanceId,
-) -> Option<AllowanceRecord> {
-    allowance_records_from_state(state, counterparty, counterparty_receiver_path)
-        .into_iter()
-        .find(|record| record.allowance_id == allowance_id.as_str())
-}
-
-fn collect_allowance_events(
-    state: &StorageState,
-    inbound: Vec<PrivateStreamItemRecord>,
-    outbound: Vec<OutboundPrivateMessageRecord>,
-) -> (Vec<StoredAllowanceEvent>, Vec<InvalidEvidence>) {
+fn collect_allowance_events<'a>(
+    history: &'a AllowanceLinkHistory,
+    carriers: &OutboundEventCarriers,
+) -> (Vec<StoredAllowanceEvent<'a>>, Vec<InvalidEvidence<'a>>) {
     let mut events = Vec::new();
     let mut invalid = Vec::new();
 
-    for item in inbound {
-        let source = EventSource::Inbound(item.clone());
+    for item in &history.items {
+        let source = EventSource::Inbound(item);
         if item
             .known_paykit_kind
             .as_deref()
@@ -247,7 +325,7 @@ fn collect_allowance_events(
         }
     }
 
-    for message in outbound {
+    for message in &history.outbound {
         if is_allowance_kind(&message.kind) {
             collect_recognized_allowance_message(
                 EventSource::Outbound(message),
@@ -257,20 +335,15 @@ fn collect_allowance_events(
         }
     }
 
-    dedupe_and_taint_events(state, events, invalid)
+    dedupe_and_taint_events(history, carriers, events, invalid)
 }
 
-fn collect_recognized_allowance_message(
-    source: EventSource,
-    events: &mut Vec<StoredAllowanceEvent>,
-    invalid: &mut Vec<InvalidEvidence>,
+fn collect_recognized_allowance_message<'a>(
+    source: EventSource<'a>,
+    events: &mut Vec<StoredAllowanceEvent<'a>>,
+    invalid: &mut Vec<InvalidEvidence<'a>>,
 ) {
-    let message = PrivateApplicationMessage {
-        version: parsed_version(&source),
-        kind: parsed_kind(&source),
-        raw_json: source.raw_json().to_owned(),
-    };
-    let Some(parsed) = parse_allowance_event_message(&message) else {
+    let Some(parsed) = parse_allowance_event_message(&source.message()) else {
         return;
     };
     if let Some(event) = parsed.parsed_event() {
@@ -289,175 +362,103 @@ fn collect_recognized_allowance_message(
     }
 }
 
-fn dedupe_and_taint_events(
-    state: &StorageState,
-    events: Vec<StoredAllowanceEvent>,
-    mut invalid: Vec<InvalidEvidence>,
-) -> (Vec<StoredAllowanceEvent>, Vec<InvalidEvidence>) {
-    let mut first_by_sender_and_id =
-        HashMap::<(EventSourceKind, String), StoredAllowanceEvent>::new();
+fn dedupe_and_taint_events<'a>(
+    history: &AllowanceLinkHistory,
+    carriers: &OutboundEventCarriers,
+    events: Vec<StoredAllowanceEvent<'a>>,
+    mut invalid: Vec<InvalidEvidence<'a>>,
+) -> (Vec<StoredAllowanceEvent<'a>>, Vec<InvalidEvidence<'a>>) {
+    let mut first_index_by_sender_and_id = HashMap::<(EventSourceKind, String), usize>::new();
     let mut payloads_by_sender_and_id =
-        HashMap::<(EventSourceKind, String), HashSet<String>>::new();
+        HashMap::<(EventSourceKind, String), HashSet<&'a str>>::new();
     let mut tainted_keys = HashSet::<(EventSourceKind, String)>::new();
     let mut deduped = Vec::new();
 
     for event in events {
         let key = (event.source.kind(), event.event_id().as_str().to_owned());
-        let payload = event.source.raw_json().to_owned();
+        // An exact same-sender retry carries no new evidence.
         if !payloads_by_sender_and_id
             .entry(key.clone())
             .or_default()
-            .insert(payload)
+            .insert(event.source.raw_json())
         {
             continue;
         }
-        if let Some(first) = first_by_sender_and_id.get(&key) {
-            tainted_keys.insert(key.clone());
-            invalid.push(conflict_evidence(first));
-            invalid.push(conflict_evidence(&event));
-            deduped.push(event);
-        } else {
-            first_by_sender_and_id.insert(key, event.clone());
-            deduped.push(event);
+        match first_index_by_sender_and_id.get(&key) {
+            Some(&first) => {
+                tainted_keys.insert(key);
+                invalid.push(conflict_evidence(&deduped[first]));
+                invalid.push(conflict_evidence(&event));
+            }
+            None => {
+                first_index_by_sender_and_id.insert(key, deduped.len());
+            }
         }
+        deduped.push(event);
     }
 
-    let outbound_payloads = outbound_event_payloads(state);
-
+    // The inbound dedupe index and the outbound carriers deliberately span
+    // every Event Message kind on this link: an Allowance Event can conflict
+    // with a non-Allowance Event, and vice versa.
     for event in &deduped {
         let event_id = event.event_id().as_str();
-        let key = (event.source.kind(), event_id.to_owned());
-        let scope_key = (
-            event_counterparty(event),
-            event_receiver_path(event),
-            event_id.to_owned(),
-        );
-        let sender_conflict = match event.source.kind() {
-            EventSourceKind::Inbound => state
-                .event_dedup_records
-                .iter()
-                .find(|((key, path, id), _)| {
-                    key == &event_counterparty(event)
-                        && path == &event_receiver_path(event)
-                        && id == event_id
-                })
-                .is_some_and(|(_, record)| !record.conflicting_stream_item_ids.is_empty()),
-            EventSourceKind::Outbound => outbound_payloads
-                .get(&scope_key)
-                .is_some_and(|payloads| payloads.len() > 1),
+        let dedupe = history.dedupe_records.get(event_id);
+        let (same_sender_conflict, cross_sender_conflict) = match event.source.kind() {
+            EventSourceKind::Inbound => (
+                dedupe.is_some_and(|record| !record.conflicting_stream_item_ids.is_empty()),
+                carriers.event_ids.contains(event_id),
+            ),
+            EventSourceKind::Outbound => (
+                carriers.conflicted_event_ids.contains(event_id),
+                dedupe.is_some(),
+            ),
         };
-        let cross_sender_conflict = match event.source.kind() {
-            EventSourceKind::Inbound => outbound_payloads.contains_key(&scope_key),
-            EventSourceKind::Outbound => state.event_dedup_records.contains_key(&scope_key),
-        };
-        if sender_conflict || cross_sender_conflict {
-            tainted_keys.insert(key);
+        if same_sender_conflict || cross_sender_conflict {
+            tainted_keys.insert((event.source.kind(), event_id.to_owned()));
             invalid.push(conflict_evidence(event));
         }
     }
 
-    // An outbound Allowance Event can conflict with an inbound non-Allowance
-    // Event, and vice versa. The generic carrier sets above deliberately span
-    // every Event Message kind on this link.
     for event in &mut deduped {
-        let key = (event.source.kind(), event.event_id().as_str().to_owned());
-        event.tainted_event_id = tainted_keys.contains(&key);
+        event.tainted_event_id =
+            tainted_keys.contains(&(event.source.kind(), event.event_id().as_str().to_owned()));
     }
     (deduped, invalid)
 }
 
-fn outbound_event_payloads(
-    state: &StorageState,
-) -> HashMap<(PubkyPublicKey, PaykitReceiverPath, String), HashSet<String>> {
-    let mut payloads =
-        HashMap::<(PubkyPublicKey, PaykitReceiverPath, String), HashSet<String>>::new();
-    for message in &state.outbound_private_messages {
-        if matches!(
-            message.status,
-            OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::Superseded
-        ) || !is_event_message_kind(&message.kind)
-        {
-            continue;
-        }
-        if let Some(event_id) = canonical_event_id(&message.raw_json) {
-            payloads
-                .entry((
-                    message.counterparty.clone(),
-                    message.counterparty_receiver_path.clone(),
-                    event_id,
-                ))
-                .or_default()
-                .insert(message.raw_json.clone());
-        }
-    }
-    payloads
-}
-
-fn link_event_ids(
-    state: &StorageState,
-    counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
-) -> HashSet<String> {
-    let mut event_ids = state
-        .event_dedup_records
-        .keys()
-        .filter(|(key, path, _)| key == counterparty && path == counterparty_receiver_path)
-        .map(|(_, _, event_id)| event_id.clone())
-        .collect::<HashSet<_>>();
-    for message in &state.outbound_private_messages {
-        if &message.counterparty != counterparty
-            || &message.counterparty_receiver_path != counterparty_receiver_path
-            || !is_event_message_kind(&message.kind)
-            || matches!(
-                message.status,
-                OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::Superseded
-            )
-        {
-            continue;
-        }
-        if let Some(event_id) = canonical_event_id(&message.raw_json) {
-            event_ids.insert(event_id);
-        }
-    }
-    event_ids
-}
-
-fn derive_allowance_record(
-    counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
+fn derive_allowance(
+    history: &AllowanceLinkHistory,
     allowance_id: String,
-    mut events: Vec<StoredAllowanceEvent>,
-    invalid_evidence: Vec<InvalidEvidence>,
-    link_event_ids: &HashSet<String>,
-    link_recovery_required: bool,
+    mut events: Vec<StoredAllowanceEvent<'_>>,
+    invalid_evidence: Vec<InvalidEvidence<'_>>,
+    link_event_ids: &HashSet<&str>,
 ) -> Option<AllowanceRecord> {
-    events.sort_by(|left, right| {
-        source_rank(&left.source)
-            .cmp(&source_rank(&right.source))
-            .then_with(|| left.source.order().cmp(&right.source.order()))
-    });
+    // Order by sending direction and then by that sender's FIFO position. No
+    // timestamp or UUID order is invented across the two directions.
+    events.sort_by_key(|stored| (source_rank(stored.source), stored.source.order()));
     let proposals = events
         .iter()
-        .filter(|event| matches!(event.event, AllowanceEvent::Proposal(_)))
+        .filter_map(|stored| match &stored.event {
+            AllowanceEvent::Proposal(proposal) => Some((stored, proposal)),
+            _ => None,
+        })
         .collect::<Vec<_>>();
-    if proposals.is_empty() {
-        return None;
-    }
+    let (stored_proposal, proposal) = *proposals.first()?;
 
     let mut record = AllowanceRecord::new(
-        counterparty.clone(),
-        counterparty_receiver_path.clone(),
+        history.counterparty.clone(),
+        history.counterparty_receiver_path.clone(),
         allowance_id,
     );
-    for event in &events {
-        touch_record(&mut record, &event.source);
+    for stored in &events {
+        touch_record(&mut record, stored.source);
     }
     for evidence in &invalid_evidence {
-        touch_record(&mut record, &evidence.source);
+        touch_record(&mut record, evidence.source);
         mark_invalid(&mut record, evidence.reason);
-        if let Some(event_id) = &evidence.conflict_event_id {
-            record.conflict_event_ids.push(event_id.clone());
-        }
+        record
+            .conflict_event_ids
+            .extend(evidence.conflict_event_id.clone());
     }
 
     if proposals.len() > 1 {
@@ -469,16 +470,12 @@ fn derive_allowance_record(
         record.conflict_event_ids.extend(
             proposals
                 .iter()
-                .map(|proposal| proposal.event_id().as_str().to_owned()),
+                .map(|(stored, _)| stored.event_id().as_str().to_owned()),
         );
-        finish_record(&mut record, link_recovery_required);
+        finish_record(&mut record, history.link_recovery_required);
         return Some(record);
     }
 
-    let stored_proposal = proposals[0];
-    let AllowanceEvent::Proposal(proposal) = &stored_proposal.event else {
-        unreachable!("proposal filter preserves event variant")
-    };
     apply_proposal(&mut record, stored_proposal, proposal);
     if stored_proposal.tainted_event_id {
         mark_invalid(&mut record, "Proposal Event ID is conflicted");
@@ -487,81 +484,81 @@ fn derive_allowance_record(
             .push(stored_proposal.event_id().as_str().to_owned());
     }
 
-    let controlling_response = derive_controlling_response(
+    let proposal_source = stored_proposal.source.kind();
+    if let Some(stored) = controlling_response(
         &mut record,
         proposal,
-        stored_proposal.source.kind(),
+        proposal_source,
         &events,
         link_event_ids,
-    );
-    match controlling_response.as_ref() {
-        Some(ControllingResponse::Acceptance(stored, acceptance)) => {
-            record.state = AllowanceLifecycleState::Accepted;
-            apply_acceptance(&mut record, stored, acceptance);
+    ) {
+        match &stored.event {
+            AllowanceEvent::Acceptance(acceptance) => {
+                record.state = AllowanceLifecycleState::Accepted;
+                record.acceptance_event_id = Some(acceptance.event_id().as_str().to_owned());
+                record.acceptance_outbound_status = stored.source.outbound_status();
+            }
+            AllowanceEvent::Rejection(rejection) => {
+                record.state = AllowanceLifecycleState::Rejected;
+                record.rejection_event_id = Some(rejection.event_id().as_str().to_owned());
+                record.rejection_outbound_status = stored.source.outbound_status();
+            }
+            AllowanceEvent::Proposal(_) | AllowanceEvent::End(_) => {}
         }
-        Some(ControllingResponse::Rejection(stored, rejection)) => {
-            record.state = AllowanceLifecycleState::Rejected;
-            apply_rejection(&mut record, stored, rejection);
-        }
-        None => {}
     }
 
-    let valid_ends = events
-        .iter()
-        .filter_map(|stored| match &stored.event {
-            AllowanceEvent::End(event) => Some((stored, event)),
-            _ => None,
-        })
-        .filter(|(stored, event)| {
-            validate_end(
-                &mut record,
-                proposal,
-                stored_proposal.source.kind(),
-                controlling_response.as_ref(),
-                stored,
-                event,
-                link_event_ids,
-            )
-        })
-        .collect::<Vec<_>>();
-    // `events` is already ordered by source and then by that sender's FIFO
-    // position. Selecting from that order is deterministic without inventing
-    // a timestamp or UUID order across the two directions.
-    if let Some((stored, event)) = valid_ends.first() {
+    // Every End is validated so invalid evidence is recorded; the first valid
+    // End in the deterministic order above is retained.
+    let mut retained_end = None;
+    for stored in &events {
+        let AllowanceEvent::End(end) = &stored.event else {
+            continue;
+        };
+        let valid = validate_end(
+            &mut record,
+            proposal,
+            proposal_source,
+            stored,
+            end,
+            link_event_ids,
+        );
+        if valid && retained_end.is_none() {
+            retained_end = Some((stored, end));
+        }
+    }
+    if let Some((stored, end)) = retained_end {
         record.state = AllowanceLifecycleState::Ended;
-        apply_end(&mut record, stored, event);
+        record.end_event_id = Some(end.event_id().as_str().to_owned());
+        record.end_outbound_status = stored.source.outbound_status();
     }
 
-    finish_record(&mut record, link_recovery_required);
+    finish_record(&mut record, history.link_recovery_required);
     Some(record)
 }
 
-fn derive_controlling_response<'a>(
+fn controlling_response<'e, 'a>(
     record: &mut AllowanceRecord,
     proposal: &AllowanceProposal,
     proposal_source: EventSourceKind,
-    events: &'a [StoredAllowanceEvent],
-    link_event_ids: &HashSet<String>,
-) -> Option<ControllingResponse<'a>> {
+    events: &'e [StoredAllowanceEvent<'a>],
+    link_event_ids: &HashSet<&str>,
+) -> Option<&'e StoredAllowanceEvent<'a>> {
     let expected_source = opposite_source(proposal_source);
     let mut responses = events
         .iter()
-        .filter(|stored| {
-            matches!(
-                stored.event,
-                AllowanceEvent::Acceptance(_) | AllowanceEvent::Rejection(_)
-            )
+        .filter_map(|stored| {
+            let proposal_event_id = match &stored.event {
+                AllowanceEvent::Acceptance(event) => event.proposal_event_id(),
+                AllowanceEvent::Rejection(event) => event.proposal_event_id(),
+                AllowanceEvent::Proposal(_) | AllowanceEvent::End(_) => return None,
+            };
+            Some((stored, proposal_event_id))
         })
         .collect::<Vec<_>>();
-    responses.sort_by_key(|stored| stored.source.order());
+    responses.sort_by_key(|(stored, _)| stored.source.order());
     let mut controlling = None;
 
-    for stored in responses {
-        let proposal_event_id = match &stored.event {
-            AllowanceEvent::Acceptance(event) => event.proposal_event_id(),
-            AllowanceEvent::Rejection(event) => event.proposal_event_id(),
-            _ => unreachable!("response filter preserves event variant"),
-        };
+    for (stored, proposal_event_id) in responses {
         if proposal_event_id != proposal.event_id() {
             mark_invalid_or_unresolved(
                 record,
@@ -586,11 +583,7 @@ fn derive_controlling_response<'a>(
             mark_invalid(record, "multiple Allowance responses followed one proposal");
             continue;
         }
-        controlling = Some(match &stored.event {
-            AllowanceEvent::Acceptance(event) => ControllingResponse::Acceptance(stored, event),
-            AllowanceEvent::Rejection(event) => ControllingResponse::Rejection(stored, event),
-            _ => unreachable!("response filter preserves event variant"),
-        });
+        controlling = Some(stored);
     }
     controlling
 }
@@ -599,15 +592,14 @@ fn validate_end(
     record: &mut AllowanceRecord,
     proposal: &AllowanceProposal,
     proposal_source: EventSourceKind,
-    controlling_response: Option<&ControllingResponse<'_>>,
-    stored: &StoredAllowanceEvent,
-    event: &paykit_lib::AllowanceEnd,
-    link_event_ids: &HashSet<String>,
+    stored: &StoredAllowanceEvent<'_>,
+    end: &AllowanceEnd,
+    link_event_ids: &HashSet<&str>,
 ) -> bool {
-    if event.proposal_event_id() != proposal.event_id() {
+    if end.proposal_event_id() != proposal.event_id() {
         mark_invalid_or_unresolved(
             record,
-            event.proposal_event_id().as_str(),
+            end.proposal_event_id().as_str(),
             link_event_ids,
             "Allowance End references the wrong Proposal Event ID",
         );
@@ -620,7 +612,7 @@ fn validate_end(
             .push(stored.event_id().as_str().to_owned());
         return false;
     }
-    let Some(acceptance_event_id) = event.acceptance_event_id() else {
+    let Some(acceptance_event_id) = end.acceptance_event_id() else {
         if stored.source.kind() == proposal_source {
             return true;
         }
@@ -630,27 +622,21 @@ fn validate_end(
         );
         return false;
     };
-    match controlling_response {
-        Some(ControllingResponse::Acceptance(_, acceptance))
-            if acceptance.event_id() == acceptance_event_id =>
-        {
-            true
-        }
-        _ => {
-            mark_invalid_or_unresolved(
-                record,
-                acceptance_event_id.as_str(),
-                link_event_ids,
-                "Allowance End references the wrong Acceptance Event ID",
-            );
-            false
-        }
+    if record.acceptance_event_id.as_deref() == Some(acceptance_event_id.as_str()) {
+        return true;
     }
+    mark_invalid_or_unresolved(
+        record,
+        acceptance_event_id.as_str(),
+        link_event_ids,
+        "Allowance End references the wrong Acceptance Event ID",
+    );
+    false
 }
 
 fn apply_proposal(
     record: &mut AllowanceRecord,
-    stored: &StoredAllowanceEvent,
+    stored: &StoredAllowanceEvent<'_>,
     proposal: &AllowanceProposal,
 ) {
     record.local_role = Some(match stored.source.kind() {
@@ -659,7 +645,7 @@ fn apply_proposal(
     });
     record.proposal_event_id = Some(proposal.event_id().as_str().to_owned());
     record.terms = Some(AllowanceTermsRecord::from(proposal.terms()));
-    match &stored.source {
+    match stored.source {
         EventSource::Inbound(item) => record.proposal_stream_item_id = Some(item.stream_item_id),
         EventSource::Outbound(message) => {
             record.proposal_outbound_message_id = Some(message.outbound_message_id);
@@ -668,68 +654,11 @@ fn apply_proposal(
     }
 }
 
-fn apply_acceptance(
-    record: &mut AllowanceRecord,
-    stored: &StoredAllowanceEvent,
-    acceptance: &AllowanceAcceptance,
-) {
-    record.acceptance_event_id = Some(acceptance.event_id().as_str().to_owned());
-    match &stored.source {
-        EventSource::Inbound(item) => record.acceptance_stream_item_id = Some(item.stream_item_id),
-        EventSource::Outbound(message) => {
-            record.acceptance_outbound_message_id = Some(message.outbound_message_id);
-            record.acceptance_outbound_status = Some(message.status.clone());
-        }
-    }
-}
-
-fn apply_rejection(
-    record: &mut AllowanceRecord,
-    stored: &StoredAllowanceEvent,
-    rejection: &AllowanceRejection,
-) {
-    record.rejection_event_id = Some(rejection.event_id().as_str().to_owned());
-    match &stored.source {
-        EventSource::Inbound(item) => record.rejection_stream_item_id = Some(item.stream_item_id),
-        EventSource::Outbound(message) => {
-            record.rejection_outbound_message_id = Some(message.outbound_message_id);
-            record.rejection_outbound_status = Some(message.status.clone());
-        }
-    }
-}
-
-fn apply_end(
-    record: &mut AllowanceRecord,
-    stored: &StoredAllowanceEvent,
-    event: &paykit_lib::AllowanceEnd,
-) {
-    record.end_event_id = Some(event.event_id().as_str().to_owned());
-    match &stored.source {
-        EventSource::Inbound(item) => record.end_stream_item_id = Some(item.stream_item_id),
-        EventSource::Outbound(message) => {
-            record.end_outbound_message_id = Some(message.outbound_message_id);
-            record.end_outbound_status = Some(message.status.clone());
-        }
-    }
-}
-
-fn touch_record(record: &mut AllowanceRecord, source: &EventSource) {
-    record.last_event_at = Some(
-        record
-            .last_event_at
-            .map_or(source.recorded_at(), |current| {
-                current.max(source.recorded_at())
-            }),
-    );
+fn touch_record(record: &mut AllowanceRecord, source: EventSource<'_>) {
+    record.last_event_at = record.last_event_at.max(Some(source.recorded_at()));
     match source {
         EventSource::Inbound(item) => {
-            record.last_stream_item_id = Some(
-                record
-                    .last_stream_item_id
-                    .map_or(item.stream_item_id, |current| {
-                        current.max(item.stream_item_id)
-                    }),
-            );
+            record.last_stream_item_id = record.last_stream_item_id.max(Some(item.stream_item_id));
         }
         EventSource::Outbound(message) => {
             if record
@@ -765,7 +694,7 @@ fn mark_unresolved(record: &mut AllowanceRecord, event_id: &str) {
 fn mark_invalid_or_unresolved(
     record: &mut AllowanceRecord,
     event_id: &str,
-    link_event_ids: &HashSet<String>,
+    link_event_ids: &HashSet<&str>,
     invalid_reason: &'static str,
 ) {
     if link_event_ids.contains(event_id) {
@@ -785,42 +714,12 @@ fn finish_record(record: &mut AllowanceRecord, link_recovery_required: bool) {
     }
 }
 
-fn conflict_evidence(event: &StoredAllowanceEvent) -> InvalidEvidence {
+fn conflict_evidence<'a>(event: &StoredAllowanceEvent<'a>) -> InvalidEvidence<'a> {
     InvalidEvidence {
         allowance_id: event.allowance_id().as_str().to_owned(),
-        source: event.source.clone(),
+        source: event.source,
         reason: "Event ID reused by conflicting Event Messages",
         conflict_event_id: Some(event.event_id().as_str().to_owned()),
-    }
-}
-
-fn parsed_version(source: &EventSource) -> Option<u8> {
-    match source {
-        EventSource::Inbound(item) => item
-            .parsed_version
-            .and_then(|version| u8::try_from(version).ok()),
-        EventSource::Outbound(_) => Some(1),
-    }
-}
-
-fn parsed_kind(source: &EventSource) -> Option<String> {
-    match source {
-        EventSource::Inbound(item) => item.parsed_kind.clone(),
-        EventSource::Outbound(message) => Some(message.kind.clone()),
-    }
-}
-
-fn event_counterparty(event: &StoredAllowanceEvent) -> PubkyPublicKey {
-    match &event.source {
-        EventSource::Inbound(item) => item.counterparty.clone(),
-        EventSource::Outbound(message) => message.counterparty.clone(),
-    }
-}
-
-fn event_receiver_path(event: &StoredAllowanceEvent) -> PaykitReceiverPath {
-    match &event.source {
-        EventSource::Inbound(item) => item.counterparty_receiver_path.clone(),
-        EventSource::Outbound(message) => message.counterparty_receiver_path.clone(),
     }
 }
 
@@ -831,14 +730,15 @@ fn opposite_source(source: EventSourceKind) -> EventSourceKind {
     }
 }
 
-fn source_rank(source: &EventSource) -> u8 {
+fn source_rank(source: EventSource<'_>) -> u8 {
     match source {
         EventSource::Inbound(_) => 0,
         EventSource::Outbound(_) => 1,
     }
 }
 
-fn canonical_allowance_id(raw_json: &str) -> Option<String> {
+/// Return a canonical Allowance ID from a JSON carrier when one is present.
+pub(super) fn canonical_allowance_id(raw_json: &str) -> Option<String> {
     let value: JsonValue = serde_json::from_str(raw_json).ok()?;
     let value = value.get("allowance_id")?.as_str()?;
     AllowanceId::new(value)
@@ -846,19 +746,8 @@ fn canonical_allowance_id(raw_json: &str) -> Option<String> {
         .map(|id| id.as_str().to_owned())
 }
 
-fn is_allowance_kind(kind: &str) -> bool {
-    matches!(
-        PrivateMessageKind::parse(kind),
-        Some(
-            PrivateMessageKind::AllowanceProposal
-                | PrivateMessageKind::AllowanceAcceptance
-                | PrivateMessageKind::AllowanceRejection
-                | PrivateMessageKind::AllowanceEnd
-        )
-    )
-}
-
-fn sort_allowances_newest_first(records: &mut [AllowanceRecord]) {
+/// Presentation order: newest local record time first, then stable tiebreaks.
+pub(crate) fn sort_allowances_newest_first(records: &mut [AllowanceRecord]) {
     records.sort_by(|left, right| {
         right
             .last_event_at
@@ -869,6 +758,7 @@ fn sort_allowances_newest_first(records: &mut [AllowanceRecord]) {
                     .last_outbound_message_id
                     .cmp(&left.last_outbound_message_id)
             })
+            .then_with(|| left.counterparty.as_str().cmp(right.counterparty.as_str()))
             .then_with(|| left.allowance_id.cmp(&right.allowance_id))
     });
 }
