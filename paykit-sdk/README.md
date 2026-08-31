@@ -257,9 +257,11 @@ elsewhere.
 
 If the provider returns no live session access during ordinary startup or
 workflow calls, the SDK blocks Pubky-backed work but preserves the last
-identity-scoped state. Call `sign_out` when the app intentionally wants to clear
-that state. If the app wants to restore private Paykit state after sign-out, it
-must keep a separate SDK backup and not delete it as part of sign-out.
+identity-scoped state. Secure `sign_out` also fails without clearing that state
+until live access is restored and the grant can be revoked. Use
+`forget_session_access` only when the app intentionally accepts local-only
+cleanup. If the app wants to restore private Paykit state after sign-out, it must
+keep a separate SDK backup and not delete it as part of sign-out.
 
 Read-only private views such as cached Private Payment Lists can still be
 returned for the initialized identity when live session access is missing.

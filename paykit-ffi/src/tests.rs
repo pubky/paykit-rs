@@ -7,12 +7,16 @@ use std::{
 use chrono::{TimeZone, Utc};
 use paykit_sdk::storage::{PaymentEndpointReservationRecord, PeerLinkOperationLease};
 use paykit_sdk::storage::{StorageAdapter, StorageState};
-use paykit_sdk::PaykitSdkConfig;
 use paykit_sdk::{
     ContactRecord, EncryptedLinkHandshakeRole, IdentityState, LinkedPeerState,
     OutboundPrivateMessageStatus, PaykitProfile, PrivateStreamParseStatus, PubkyPublicKey,
     PubkySessionProvider, PublicationStatus,
 };
+use paykit_sdk::{
+    PaykitSdkConfig, PubkyLocalSecretKey, PubkySessionBootstrap, ReceiverNoiseSecretKey,
+};
+use pubky_testnet::{docker_postgres::DockerPostgres, EphemeralTestnet};
+use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
 use crate::errors::storage_error;
 use crate::storage::{decode_storage_state, encode_storage_state, FfiSdkStorage};
@@ -20,6 +24,35 @@ use crate::*;
 
 const TEST_CLIENT_ID: &str = "paykit.test";
 const TEST_AUTH_SECRET: &str = "e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3s";
+
+static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
+static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
+
+async fn shared_postgres() -> &'static DockerPostgres {
+    SHARED_POSTGRES
+        .get_or_init(|| async {
+            DockerPostgres::start()
+                .await
+                .expect("failed to start Docker Postgres")
+        })
+        .await
+}
+
+async fn build_testnet() -> EphemeralTestnet {
+    let _guard = TESTNET_BUILD_LOCK.lock().await;
+
+    let builder = if std::env::var_os("TEST_PUBKY_CONNECTION_STRING").is_some() {
+        EphemeralTestnet::builder()
+    } else {
+        let postgres = shared_postgres()
+            .await
+            .connection_string()
+            .expect("Docker Postgres connection string should be valid");
+        EphemeralTestnet::builder().postgres(postgres)
+    };
+
+    builder.with_http_relay().build().await.unwrap()
+}
 
 fn grant_auth_url(client_key_secret: &[u8; 32]) -> String {
     let client_public_key = pubky::Keypair::from_secret(client_key_secret).public_key();
@@ -657,7 +690,6 @@ fn test_pubky_secret_key_derivation_matches_pubky_core_mnemonic() {
 }
 
 #[tokio::test]
-#[ignore = "requires a live Pubky homeserver session"]
 async fn test_ffi_session_provider_caches_concurrent_restores() {
     struct RestoredSessionProvider {
         client_id: String,
@@ -687,29 +719,46 @@ async fn test_ffi_session_provider_caches_concurrent_restores() {
         }
     }
 
-    let secret = FfiPubkyLocalSecretKey::new(vec![8; 32]);
-    let receiver_noise_secret = FfiReceiverNoiseSecretKey::random();
-    let bootstrap = FfiPubkySessionBootstrap::new(TEST_CLIENT_ID.into()).unwrap();
-    let config = default_config("bitkit/wallet".into()).unwrap();
-    let capabilities = required_session_capabilities(config.clone()).unwrap();
+    let testnet = build_testnet().await;
+    let pubky = testnet.sdk().expect("testnet Pubky client");
+    let local_secret = PubkyLocalSecretKey::new([8; 32]);
+    let receiver_noise_secret = ReceiverNoiseSecretKey::random();
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let auth_relay_url = testnet
+        .http_relay()
+        .local_url()
+        .join("inbox")
+        .expect("test auth relay inbox URL should be valid");
+    let bootstrap = PubkySessionBootstrap::with_pubky(pubky.clone(), TEST_CLIENT_ID)
+        .unwrap()
+        .with_auth_relay(auth_relay_url.as_str())
+        .unwrap();
+    let capabilities =
+        PaykitSdkConfig::new(paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap())
+            .required_session_capabilities();
     let result = bootstrap
-        .sign_in(
-            Arc::new(secret),
-            Arc::new(receiver_noise_secret),
-            capabilities,
+        .sign_up(
+            &local_secret,
+            receiver_noise_secret.clone(),
+            &homeserver,
+            None,
+            &capabilities,
         )
         .await
         .unwrap();
+    let public_key = result.public_key.clone();
+    let session_secret = result.export_session_secret().await.unwrap().into_inner();
     let provider = Arc::new(RestoredSessionProvider {
-        client_id: result.session_access.client_id(),
-        session_secret: result.session_access.export_session_secret(),
-        local_secret_key: result.session_access.export_local_secret_key(),
-        receiver_noise_secret_key: result.session_access.export_receiver_noise_secret_key(),
+        client_id: TEST_CLIENT_ID.into(),
+        session_secret,
+        local_secret_key: Some(Arc::new(FfiPubkyLocalSecretKey::new(
+            local_secret.as_bytes().to_vec(),
+        ))),
+        receiver_noise_secret_key: Arc::new(FfiReceiverNoiseSecretKey::new(
+            receiver_noise_secret.as_bytes().to_vec(),
+        )),
     });
-    let adapter = FfiSdkPubkySessionProviderAdapter::new(
-        provider,
-        pubky_from_config(&default_pubky_client_config()).unwrap(),
-    );
+    let adapter = FfiSdkPubkySessionProviderAdapter::new(provider, pubky);
 
     let (first, second, third) = tokio::join!(
         adapter.load_session_access(),
@@ -720,7 +769,7 @@ async fn test_ffi_session_provider_caches_concurrent_restores() {
         let access = access.expect("restored access should be available");
         assert_eq!(
             access.session.info().public_key().z32(),
-            raw_pubky_public_key(result.public_key.clone()).unwrap()
+            public_key.as_str()
         );
         assert!(access.session.revalidate().await.unwrap().is_some());
     }

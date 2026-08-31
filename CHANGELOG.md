@@ -17,7 +17,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Cached restored Pubky grant sessions so repeated or concurrent SDK calls do
   not rotate and invalidate each other's bearer credentials after restart.
 - Normal SDK sign-out now revokes the Pubky grant before clearing local session
-  access and identity-scoped state.
+  access and identity-scoped state, and preserves local state when live access
+  is unavailable so revocation can be retried.
 
 ## [0.1.0-rc49] - 2026-08-28
 

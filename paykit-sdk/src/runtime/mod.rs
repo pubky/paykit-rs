@@ -268,10 +268,27 @@ where
     ///
     /// Missing live session access should be represented by
     /// [`PubkySessionProvider::load_session_access`] returning `None`; that
-    /// preserves stored SDK state and only blocks Pubky-backed workflows.
+    /// preserves stored SDK state and causes sign-out to fail until revocation
+    /// can be attempted. Use [`Self::forget_session_access`] only for explicit
+    /// local-only cleanup.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
-        if let Some(access) = self.pubky.load_session_access().await? {
+        let session_access = self.pubky.load_session_access().await?;
+        if session_access.is_none()
+            && self
+                .storage
+                .load_identity_state()
+                .await?
+                .and_then(|state| state.local_pubky_public_key)
+                .is_some()
+        {
+            return Err(PaykitSdkError::Identity {
+                context: "cannot revoke Pubky grant during sign-out without live session access"
+                    .into(),
+                source: None,
+            });
+        }
+        if let Some(access) = session_access {
             access
                 .session
                 .signout()
