@@ -28,6 +28,7 @@ async fn test_restore_backup_state_advances_counters() {
             last_attempt_at: None,
             sent_at: None,
             last_error: None,
+            prepared_send: None,
         }],
         private_stream_items: vec![PrivateStreamItemRecord {
             stream_item_id: 9,

@@ -99,7 +99,7 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
     }
 
     let secret = FfiPubkyLocalSecretKey::new(vec![8; 32]);
-    let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
+    let bootstrap = FfiPubkySessionBootstrap::new("paykit.test".into()).unwrap();
     let config = default_config("bitkit".into()).unwrap();
     let result = bootstrap
         .sign_in(Arc::new(secret), required_session_capabilities())

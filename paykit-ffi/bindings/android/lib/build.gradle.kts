@@ -227,8 +227,51 @@ val validateReleaseNativeLibraries by tasks.registering {
     }
 }
 
+val validateConsumerKeepRules by tasks.registering {
+    group = "verification"
+    description = "Validates Android consumer keep rules exist for R8."
+
+    val consumerRules = layout.projectDirectory.file("consumer-rules.pro")
+    inputs.file(consumerRules)
+
+    doLast {
+        val file = consumerRules.asFile
+        if (!file.isFile || file.readText().isBlank()) {
+            throw GradleException("Android consumer keep rules missing at '${file.path}'")
+        }
+    }
+}
+
 tasks.matching { it.name == "bundleReleaseAar" || it.name.startsWith("publish") }.configureEach {
-    dependsOn(validateReleaseNativeLibraries)
+    dependsOn(validateReleaseNativeLibraries, validateConsumerKeepRules)
+}
+
+tasks.matching { it.name == "bundleReleaseAar" }.configureEach {
+    doLast {
+        val aars = layout.buildDirectory.dir("outputs/aar").get().asFile
+            .listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".aar") && it.name.contains("release") }
+            .orEmpty()
+
+        if (aars.isEmpty()) {
+            throw GradleException("Release AAR missing after bundleReleaseAar")
+        }
+
+        aars.forEach { aar ->
+            ZipFile(aar).use { zip ->
+                val entry = zip.getEntry("proguard.txt")
+                    ?: throw GradleException(
+                        "Release AAR is missing consumer keep rules (proguard.txt): '${aar.path}'"
+                    )
+                val text = zip.getInputStream(entry).bufferedReader().readText()
+                if (text.isBlank()) {
+                    throw GradleException(
+                        "Release AAR consumer keep rules are empty: '${aar.path}'"
+                    )
+                }
+            }
+        }
+    }
 }
 
 afterEvaluate {

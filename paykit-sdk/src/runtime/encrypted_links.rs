@@ -604,7 +604,7 @@ where
                     &self.storage,
                     counterparty,
                     handshake_role,
-                    handshake.serialize(),
+                    handshake.serialize()?,
                     expected_generation,
                     lease.clone(),
                     self.clock.now(),
@@ -615,7 +615,7 @@ where
                 let report = save_linked_peer_link_state_if_generation_with_lease(
                     &self.storage,
                     counterparty.clone(),
-                    link.serialize(),
+                    link.serialize()?,
                     expected_generation,
                     lease.clone(),
                     self.clock.now(),
@@ -755,7 +755,7 @@ where
             &self.storage,
             counterparty,
             role,
-            handshake.serialize(),
+            handshake.serialize()?,
             lease,
             self.clock.now(),
         )

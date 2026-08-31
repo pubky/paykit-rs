@@ -1,7 +1,7 @@
 //! Shared harness for testnet-backed end-to-end tests.
 //!
-//! Mirrors the embedded-testnet pattern from paykit-lib's test suite: one
-//! embedded Postgres instance shared across the test binary, one ephemeral
+//! Mirrors the testnet pattern from paykit-lib's test suite: one Docker
+//! Postgres instance shared across the test binary, one ephemeral
 //! Pubky testnet (homeserver) per test, and real signed-up sessions wrapped in
 //! the SDK's own `PubkySessionAccess` via `PubkySessionBootstrap`.
 
@@ -18,18 +18,20 @@ use paykit_sdk::{
     PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
     PAYKIT_SESSION_CAPABILITIES,
 };
-use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
+use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
-static SHARED_POSTGRES: OnceCell<EmbeddedPostgres> = OnceCell::const_new();
+const TEST_CLIENT_ID: &str = "paykit-sdk.test";
+
+static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
-async fn shared_postgres() -> &'static EmbeddedPostgres {
+async fn shared_postgres() -> &'static DockerPostgres {
     SHARED_POSTGRES
         .get_or_init(|| async {
-            EmbeddedPostgres::start()
+            DockerPostgres::start()
                 .await
-                .expect("failed to start embedded postgres")
+                .expect("failed to start Docker Postgres")
         })
         .await
 }
@@ -43,11 +45,23 @@ pub async fn build_testnet() -> EphemeralTestnet {
         let postgres = shared_postgres()
             .await
             .connection_string()
-            .expect("embedded postgres connection string should be valid");
+            .expect("Docker Postgres connection string should be valid");
         EphemeralTestnet::builder().postgres(postgres)
     };
 
-    builder.build().await.unwrap()
+    builder.with_http_relay().build().await.unwrap()
+}
+
+pub fn session_bootstrap(testnet: &EphemeralTestnet, client_id: &str) -> PubkySessionBootstrap {
+    let auth_relay_url = testnet
+        .http_relay()
+        .local_url()
+        .join("inbox")
+        .expect("test auth relay inbox URL should be valid");
+    PubkySessionBootstrap::with_pubky(testnet.sdk().expect("testnet Pubky client"), client_id)
+        .expect("test client ID should be valid")
+        .with_auth_relay(auth_relay_url.as_str())
+        .expect("test auth relay URL should be valid")
 }
 
 /// Session provider backed by a real testnet session.
@@ -211,8 +225,7 @@ impl TestUser {
         let secret_key = PubkyLocalSecretKey::new(keypair.secret_key());
         let homeserver_public_key =
             PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-        let bootstrap =
-            PubkySessionBootstrap::with_pubky(testnet.sdk().expect("testnet Pubky client"));
+        let bootstrap = session_bootstrap(testnet, TEST_CLIENT_ID);
         let config = PaykitSdkConfig::new(app_id.clone()).unwrap();
         let result = bootstrap
             .sign_up(

@@ -234,6 +234,48 @@ Rules:
 
 Paykit defines recurrence terms for communication. Paykit does not run the scheduler.
 
+## Recurring Payment Requests And Subscriptions
+
+A Subscription is product shorthand for an accepted Recurring Payment Request.
+It is not a separate protocol object, message family, or SDK subsystem. A
+Recurring Payment Request remains active across multiple payments until it is
+cancelled or its recurrence ends.
+
+A recurring flow works as follows:
+
+1. The payee sends a Payment Request with non-null `recurrence` terms.
+2. The payer accepts or rejects the proposal.
+3. Acceptance makes the request active, but does not execute a payment or give
+   the payee authority to pull funds.
+4. For each Billing Period, the payer application determines that payment is
+   due, obtains any authorization required by its product, executes the
+   payment, and sends a Payment Proof for that period.
+5. The payee validates the payment using payment-method-specific logic and may
+   issue a Receipt and Receipt Access for that Billing Period.
+6. A Payment Proof covers one Billing Period. It does not complete the
+   Recurring Payment Request or move it out of its active recurring state.
+7. Either party may cancel the request to stop future payments.
+
+Paykit communicates the request terms and lifecycle events. Integrating
+applications remain responsible for:
+
+- calculating due Billing Periods and running any scheduler
+- deciding whether each payment requires explicit user authorization
+- retry policy and preventing duplicate payment for one Billing Period
+- executing payments and validating method-specific settlement
+- deciding grace periods and missed-payment policy
+- deciding when service remains active, is restricted, or is terminated
+- deciding whether and how a late payment restores service
+
+These service and entitlement decisions are not Paykit protocol state. For
+example, a subscription-gated service may create the Recurring Payment Request,
+while the payer's wallet schedules each payment and submits its proof. The
+service validates each period's payment and applies its own access policy.
+
+A Recurring Payment Request is payer-controlled coordination, not a payee-pull
+allowance. Any future mechanism that authorizes a payee to initiate or withdraw
+payments would be a separate payment-execution feature.
+
 ## paykit.payment_request
 
 Creates a proposed Payment Request.

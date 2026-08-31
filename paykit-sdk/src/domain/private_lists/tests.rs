@@ -48,6 +48,7 @@ fn outbound_private_list(
         last_attempt_at,
         sent_at,
         last_error: None,
+        prepared_send: None,
     }
 }
 

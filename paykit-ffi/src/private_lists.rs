@@ -528,6 +528,7 @@ mod tests {
             last_attempt_at: None,
             sent_at: None,
             last_error: Some("private send secret".into()),
+            prepared_send: None,
         };
 
         let ffi = FfiQueuedPrivateMessage::from(record);

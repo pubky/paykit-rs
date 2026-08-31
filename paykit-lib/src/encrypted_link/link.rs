@@ -8,6 +8,75 @@ use super::{
     EncryptedLinkSnapshot,
 };
 
+/// Outbound private message prepared for atomic persistence before publication.
+///
+/// Persist [`destination_path`](Self::destination_path),
+/// [`ciphertext`](Self::ciphertext), and
+/// [`resulting_snapshot`](Self::resulting_snapshot) together before
+/// acknowledging this value.
+pub struct PreparedPrivateApplicationMessageSend {
+    prepared: pubky_noise::PreparedSend,
+    resulting_snapshot: EncryptedLinkSnapshot,
+}
+
+impl PreparedPrivateApplicationMessageSend {
+    /// Pubky storage path for the exact ciphertext.
+    pub fn destination_path(&self) -> &str {
+        self.prepared.destination_path()
+    }
+
+    /// Exact ciphertext to publish or retry after a crash.
+    pub fn ciphertext(&self) -> &[u8] {
+        self.prepared.ciphertext()
+    }
+
+    /// Encrypted Link snapshot after this send.
+    pub fn resulting_snapshot(&self) -> &EncryptedLinkSnapshot {
+        &self.resulting_snapshot
+    }
+}
+
+impl std::fmt::Debug for PreparedPrivateApplicationMessageSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedPrivateApplicationMessageSend")
+            .field("destination_path", &"<redacted>")
+            .field(
+                "ciphertext",
+                &format_args!("<redacted:{} bytes>", self.ciphertext().len()),
+            )
+            .field("resulting_snapshot", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Inbound private message prepared for atomic application-state persistence.
+pub struct PreparedPrivateApplicationMessageReceive {
+    prepared: pubky_noise::PreparedReceive,
+    message: PrivateApplicationMessage,
+    resulting_snapshot: EncryptedLinkSnapshot,
+}
+
+impl PreparedPrivateApplicationMessageReceive {
+    /// Decrypted Paykit application message.
+    pub fn message(&self) -> &PrivateApplicationMessage {
+        &self.message
+    }
+
+    /// Encrypted Link snapshot after this receive.
+    pub fn resulting_snapshot(&self) -> &EncryptedLinkSnapshot {
+        &self.resulting_snapshot
+    }
+}
+
+impl std::fmt::Debug for PreparedPrivateApplicationMessageReceive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedPrivateApplicationMessageReceive")
+            .field("message", &"<redacted>")
+            .field("resulting_snapshot", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Handle to an established Encrypted Link with a counterparty.
 ///
 /// Created by [`advance_handshake`](crate::advance_handshake) (via
@@ -86,19 +155,24 @@ impl EncryptedLink {
     ///
     /// Snapshot bytes include sensitive key material and must be stored as
     /// secrets. Do not log them or include them in telemetry.
-    pub fn snapshot(&self) -> EncryptedLinkSnapshot {
-        EncryptedLinkSnapshot::from_state(
-            self.encryptor.snapshot(),
+    pub fn snapshot(&self) -> Result<EncryptedLinkSnapshot> {
+        Ok(EncryptedLinkSnapshot::from_state(
+            self.encryptor
+                .snapshot()
+                .map_err(|err| PaykitError::InvalidData {
+                    context: format!("capture Encrypted Link snapshot: {err:?}"),
+                    source: None,
+                })?,
             self.recipient.clone(),
             self.remote_noise_public_key.clone(),
-        )
+        ))
     }
 
     /// Serialize the current link state to bytes for persistence.
     ///
     /// Convenience method equivalent to `self.snapshot().serialize()`.
-    pub fn serialize(&self) -> Vec<u8> {
-        self.snapshot().serialize()
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        Ok(self.snapshot()?.serialize())
     }
 
     /// Access the shared Noise configuration for this link.
@@ -196,6 +270,175 @@ impl EncryptedLink {
             "Private Application Message",
         )
         .await
+    }
+
+    /// Prepare one raw JSON Private Application Message for durable handoff.
+    ///
+    /// Persist the returned ciphertext and resulting snapshot atomically before
+    /// calling [`acknowledge_persisted_private_send`](Self::acknowledge_persisted_private_send).
+    pub fn prepare_private_application_message_json(
+        &mut self,
+        raw_json: &str,
+    ) -> Result<PreparedPrivateApplicationMessageSend> {
+        validate_private_application_message_json(raw_json)?;
+        let prepared = self
+            .encryptor
+            .prepare_send(raw_json.as_bytes())
+            .map_err(|err| PaykitError::Transport {
+                context: format!("prepare Private Application Message send: {err:?}"),
+                source: anyhow::Error::new(crate::error::NonRetryablePrivateSendError(err)),
+            })?;
+        let resulting_snapshot = EncryptedLinkSnapshot::from_state(
+            prepared.resulting_session_state().clone(),
+            self.recipient.clone(),
+            self.remote_noise_public_key.clone(),
+        );
+        Ok(PreparedPrivateApplicationMessageSend {
+            prepared,
+            resulting_snapshot,
+        })
+    }
+
+    /// Acknowledge that a prepared send and its resulting snapshot are durable.
+    pub fn acknowledge_persisted_private_send(
+        &mut self,
+        prepared: PreparedPrivateApplicationMessageSend,
+    ) -> Result<()> {
+        self.encryptor
+            .acknowledge_persisted_send(prepared.prepared)
+            .map_err(|err| PaykitError::InvalidData {
+                context: format!("acknowledge persisted private send: {err:?}"),
+                source: None,
+            })
+    }
+
+    /// Publish an exact prepared ciphertext, retrying without re-encryption.
+    ///
+    /// This accepts values restored from durable SDK state after a crash. The
+    /// destination must belong to this link's local write stream.
+    pub async fn publish_prepared_private_application_message(
+        &self,
+        destination_path: &str,
+        ciphertext: &[u8],
+    ) -> Result<()> {
+        let expected_prefix = format!("{}/", self.config.write_path);
+        if !destination_path.starts_with(&expected_prefix)
+            || destination_path[expected_prefix.len()..]
+                .parse::<u32>()
+                .is_err()
+        {
+            return Err(PaykitError::Validation(
+                "prepared private send destination does not belong to this Encrypted Link".into(),
+            ));
+        }
+        if ciphertext.len() != pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 2 {
+            return Err(PaykitError::InvalidData {
+                context: "prepared private send ciphertext has an invalid length".into(),
+                source: None,
+            });
+        }
+
+        let max_attempts = self.max_send_retries.saturating_add(1);
+        let mut last_error = None;
+        for attempt in 1..=max_attempts {
+            match self
+                .config
+                .local_session
+                .storage()
+                .put(destination_path, ciphertext.to_vec())
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(err) => {
+                    last_error = Some(err);
+                    if attempt < max_attempts {
+                        tracing::warn!(
+                            attempt,
+                            max_retries = self.max_send_retries,
+                            "prepared private message publication failed, retrying"
+                        );
+                    }
+                }
+            }
+        }
+
+        Err(PaykitError::Transport {
+            context: format!(
+                "failed to publish prepared Private Application Message after {max_attempts} attempts"
+            ),
+            source: last_error
+                .expect("at least one prepared private send attempt must run")
+                .into(),
+        })
+    }
+
+    /// Fetch and prepare the next available inbound Private Application Message.
+    ///
+    /// Persist the application result and returned snapshot atomically before
+    /// calling [`acknowledge_persisted_private_receive`](Self::acknowledge_persisted_private_receive).
+    pub async fn prepare_next_private_application_message(
+        &mut self,
+    ) -> Result<Option<PreparedPrivateApplicationMessageReceive>> {
+        let path = self
+            .encryptor
+            .next_receive_path()
+            .map_err(|err| PaykitError::Transport {
+                context: format!("prepare Private Application Message receive path: {err:?}"),
+                source: anyhow::Error::new(crate::error::NonRetryablePrivateReceiveError(err)),
+            })?;
+        let response = match self.config.outbox_client.public_storage().get(path).await {
+            Ok(response) => response,
+            Err(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+                if status == pubky::StatusCode::NOT_FOUND || status == pubky::StatusCode::GONE =>
+            {
+                return Ok(None)
+            }
+            Err(err) => {
+                return Err(PaykitError::Transport {
+                    context: "fetch next Private Application Message ciphertext".into(),
+                    source: err.into(),
+                })
+            }
+        };
+        let ciphertext = response
+            .bytes()
+            .await
+            .map_err(|err| PaykitError::Transport {
+                context: "read next Private Application Message ciphertext".into(),
+                source: err.into(),
+            })?;
+        let prepared =
+            self.encryptor
+                .prepare_receive(&ciphertext)
+                .map_err(|err| PaykitError::Transport {
+                    context: format!("prepare Private Application Message receive: {err:?}"),
+                    source: anyhow::Error::new(crate::error::NonRetryablePrivateReceiveError(err)),
+                })?;
+        let message =
+            private_application_message::decode_private_application_message(prepared.plaintext())?;
+        let resulting_snapshot = EncryptedLinkSnapshot::from_state(
+            prepared.resulting_session_state().clone(),
+            self.recipient.clone(),
+            self.remote_noise_public_key.clone(),
+        );
+        Ok(Some(PreparedPrivateApplicationMessageReceive {
+            prepared,
+            message,
+            resulting_snapshot,
+        }))
+    }
+
+    /// Acknowledge that a prepared receive and its application result are durable.
+    pub fn acknowledge_persisted_private_receive(
+        &mut self,
+        prepared: PreparedPrivateApplicationMessageReceive,
+    ) -> Result<()> {
+        self.encryptor
+            .acknowledge_persisted_receive(prepared.prepared)
+            .map_err(|err| PaykitError::InvalidData {
+                context: format!("acknowledge persisted private receive: {err:?}"),
+                source: None,
+            })
     }
 
     #[cfg(test)]

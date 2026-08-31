@@ -270,6 +270,27 @@ impl fmt::Debug for NewOutboundPrivateMessage {
     }
 }
 
+/// Exact encrypted send prepared for crash-safe publication.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedOutboundPrivateSend {
+    /// Pubky storage path produced by pubky-noise.
+    pub destination_path: String,
+    /// Exact ciphertext that must be retried without re-encryption.
+    pub ciphertext: Vec<u8>,
+}
+
+impl fmt::Debug for PreparedOutboundPrivateSend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedOutboundPrivateSend")
+            .field("destination_path", &"<redacted>")
+            .field(
+                "ciphertext",
+                &format!("<redacted:{} bytes>", self.ciphertext.len()),
+            )
+            .finish()
+    }
+}
+
 /// Durable outbound private message.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundPrivateMessageRecord {
@@ -297,6 +318,8 @@ pub struct OutboundPrivateMessageRecord {
     pub sent_at: Option<DateTime<Utc>>,
     /// Last send error, when available.
     pub last_error: Option<String>,
+    /// Exact staged send, when Noise state advanced before publication finished.
+    pub prepared_send: Option<PreparedOutboundPrivateSend>,
 }
 
 impl fmt::Debug for OutboundPrivateMessageRecord {
@@ -321,6 +344,7 @@ impl fmt::Debug for OutboundPrivateMessageRecord {
             .field("last_attempt_at", &self.last_attempt_at)
             .field("sent_at", &self.sent_at)
             .field("last_error", &last_error)
+            .field("prepared_send", &self.prepared_send)
             .finish()
     }
 }
@@ -340,6 +364,7 @@ impl OutboundPrivateMessageRecord {
             last_attempt_at: None,
             sent_at: None,
             last_error: None,
+            prepared_send: None,
         }
     }
 }

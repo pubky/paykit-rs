@@ -11,7 +11,8 @@ pub use handshake::{
 };
 pub use link::{
     close_encrypted_link, restore_encrypted_link, restore_encrypted_link_from_config,
-    EncryptedLink, DEFAULT_MAX_SEND_RETRIES,
+    EncryptedLink, PreparedPrivateApplicationMessageReceive, PreparedPrivateApplicationMessageSend,
+    DEFAULT_MAX_SEND_RETRIES,
 };
 pub use private_application_message::{
     clear_encrypted_link_outbox, PrivateApplicationMessage, PrivateMessageKind,

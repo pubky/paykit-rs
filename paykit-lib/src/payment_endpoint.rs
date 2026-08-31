@@ -205,6 +205,7 @@ pub async fn remove_payment_endpoint(
 ///
 /// # Examples
 /// ```
+/// # #![recursion_limit = "256"]
 /// # use paykit_lib::{get_payment_list, PaykitAppId};
 /// # async fn demo(storage: &pubky::PublicStorage, pk: &paykit_lib::PublicKey) -> paykit_lib::Result<()> {
 /// let app_id = PaykitAppId::new("bitkit")?;

@@ -53,19 +53,24 @@ impl EncryptedLinkHandshake {
     ///
     /// Snapshot bytes include sensitive key material and must be stored as
     /// secrets.
-    pub fn snapshot(&self) -> EncryptedLinkHandshakeSnapshot {
-        EncryptedLinkHandshakeSnapshot::from_state(
-            self.encryptor.snapshot(),
+    pub fn snapshot(&self) -> Result<EncryptedLinkHandshakeSnapshot> {
+        Ok(EncryptedLinkHandshakeSnapshot::from_state(
+            self.encryptor
+                .snapshot()
+                .map_err(|err| PaykitError::InvalidData {
+                    context: format!("capture Encrypted Link Handshake snapshot: {err:?}"),
+                    source: None,
+                })?,
             self.remote_identity_public_key.clone(),
             self.remote_noise_public_key.clone(),
-        )
+        ))
     }
 
     /// Serialize the current handshake state to bytes for persistence.
     ///
     /// Convenience method equivalent to `self.snapshot().serialize()`.
-    pub fn serialize(&self) -> Vec<u8> {
-        self.snapshot().serialize()
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        Ok(self.snapshot()?.serialize())
     }
 
     /// Access the shared Noise configuration for this handshake.

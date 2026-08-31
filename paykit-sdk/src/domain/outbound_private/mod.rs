@@ -266,6 +266,7 @@ pub(crate) fn mark_outbound_sent(
     record.sent_at = Some(now);
     record.updated_at = now;
     record.last_error = None;
+    record.prepared_send = None;
     record
 }
 
@@ -288,6 +289,7 @@ pub(crate) fn mark_outbound_invalid(
     record.status = OutboundPrivateMessageStatus::Invalid;
     record.updated_at = now;
     record.last_error = Some(error);
+    record.prepared_send = None;
     record
 }
 
@@ -299,6 +301,7 @@ pub(crate) fn mark_outbound_recovery_required(
     record.status = OutboundPrivateMessageStatus::RecoveryRequired;
     record.updated_at = now;
     record.last_error = Some(error);
+    record.prepared_send = None;
     record
 }
 

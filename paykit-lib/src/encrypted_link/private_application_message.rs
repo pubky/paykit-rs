@@ -162,9 +162,7 @@ impl PrivateApplicationMessage {
     }
 }
 
-fn decode_private_application_message(
-    raw: &[u8; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN],
-) -> Result<PrivateApplicationMessage> {
+pub(super) fn decode_private_application_message(raw: &[u8]) -> Result<PrivateApplicationMessage> {
     // Trim trailing zero-padding added by pubky-noise's fixed-size buffers.
     // Paykit application messages are JSON, so trailing NUL bytes are not valid
     // payload content.
@@ -306,6 +304,10 @@ fn validate_private_application_message_size(
     Ok(())
 }
 
+#[allow(
+    deprecated,
+    reason = "the stateless convenience API cannot persist a prepared send"
+)]
 pub(super) async fn send_private_application_message(
     encryptor: &mut pubky_noise::PubkyNoiseEncryptor,
     max_send_retries: u32,

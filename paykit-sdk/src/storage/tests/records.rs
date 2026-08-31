@@ -63,6 +63,10 @@ fn test_sensitive_storage_debug_is_redacted() {
         outbound_private_message(stream_counterparty.clone()),
     );
     outbound.last_error = Some("outbound-secret".into());
+    outbound.prepared_send = Some(PreparedOutboundPrivateSend {
+        destination_path: "/pub/paykit/v0/private/private-path-secret/0".into(),
+        ciphertext: vec![7; 16],
+    });
     let new_stream = NewPrivateStreamItem::new(NewPrivateStreamItemDetails {
         counterparty: stream_counterparty.clone(),
         receive_batch_id: 0,
@@ -128,6 +132,7 @@ fn test_sensitive_storage_debug_is_redacted() {
     assert!(debug.contains("<redacted:"));
     assert!(!debug.contains("secret"));
     assert!(!debug.contains("outbound-secret"));
+    assert!(!debug.contains("private-path-secret"));
     assert!(!debug.contains("receipt-secret"));
     assert!(!debug.contains("alice"));
     assert!(!debug.contains(contact_public_key.as_str()));
@@ -275,6 +280,7 @@ async fn test_save_outbound_private_message_rejects_missing_record() {
                     last_attempt_at: None,
                     sent_at: None,
                     last_error: None,
+                    prepared_send: None,
                 })
             }
         })

@@ -1,4 +1,5 @@
 use super::{super::*, private_stream::private_message_header};
+use crate::storage::PreparedOutboundPrivateSend;
 use chrono::{DateTime, Utc};
 
 pub(in crate::backup) fn validate_public_endpoint_records(
@@ -375,6 +376,22 @@ pub(in crate::backup) fn validate_retired_app_receipt_issuance(
 }
 
 fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Result<()> {
+    if let Some(prepared) = &record.prepared_send {
+        if !matches!(
+            record.status,
+            OutboundPrivateMessageStatus::Sending | OutboundPrivateMessageStatus::Failed
+        ) {
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "outbound Private Application Message {} has a prepared send in {:?} status",
+                    record.outbound_message_id, record.status
+                ),
+                source: None,
+            });
+        }
+        validate_prepared_private_send(record.outbound_message_id, prepared)?;
+    }
+
     let invalid = match record.status {
         OutboundPrivateMessageStatus::Pending => {
             record.attempt_count != 0
@@ -412,6 +429,45 @@ fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Re
             context: format!(
                 "outbound Private Application Message {} has inconsistent {:?} status metadata",
                 record.outbound_message_id, record.status
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+fn validate_prepared_private_send(
+    outbound_message_id: u64,
+    prepared: &PreparedOutboundPrivateSend,
+) -> Result<()> {
+    let prefix = format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX);
+    let suffix = prepared
+        .destination_path
+        .strip_prefix(&prefix)
+        .ok_or_else(|| PaykitSdkError::Protocol {
+            context: format!(
+                "outbound Private Application Message {outbound_message_id} has an invalid prepared destination"
+            ),
+            source: None,
+        })?;
+    let mut segments = suffix.split('/');
+    let stream = segments.next().unwrap_or_default();
+    let slot = segments.next().unwrap_or_default();
+    let valid_stream = stream.len() == 64 && stream.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let valid_slot = !slot.is_empty() && slot.parse::<u32>().is_ok();
+    if !valid_stream || !valid_slot || segments.next().is_some() {
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "outbound Private Application Message {outbound_message_id} has an invalid prepared destination"
+            ),
+            source: None,
+        });
+    }
+
+    if prepared.ciphertext.len() != pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 2 {
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "outbound Private Application Message {outbound_message_id} has invalid prepared ciphertext"
             ),
             source: None,
         });

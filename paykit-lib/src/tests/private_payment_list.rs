@@ -206,20 +206,14 @@ async fn test_parallel_writer_reader_happy_path() {
 
     let writer_sdk = testnet.sdk().unwrap();
     let writer_keypair = Keypair::random();
-    let writer_session = writer_sdk
-        .signer(writer_keypair.clone())
-        .signup(&homeserver.public_key(), None)
-        .await
-        .unwrap();
+    let writer_session =
+        signup_session(&writer_sdk, &homeserver.public_key(), &writer_keypair).await;
     let writer_pubkey = writer_session.info().public_key().clone();
 
     let reader_sdk = testnet.sdk().unwrap();
     let reader_keypair = Keypair::random();
-    let reader_session = reader_sdk
-        .signer(reader_keypair.clone())
-        .signup(&homeserver.public_key(), None)
-        .await
-        .unwrap();
+    let reader_session =
+        signup_session(&reader_sdk, &homeserver.public_key(), &reader_keypair).await;
     let reader_pubkey = reader_session.info().public_key().clone();
 
     let w_session = writer_session.clone();

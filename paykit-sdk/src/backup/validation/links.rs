@@ -170,6 +170,7 @@ pub(in crate::backup) fn mark_restored_sending_outbound_recovery_required(
                 .max(record.last_attempt_at.unwrap_or(record.created_at));
             record.last_error =
                 Some("restored sending message requires Encrypted Link recovery".into());
+            record.prepared_send = None;
         }
     }
 }

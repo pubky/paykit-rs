@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::PreparedOutboundPrivateSend;
 
 #[tokio::test]
 async fn test_restore_backup_state_preserves_invalid_outbound_audit_record() {
@@ -237,6 +238,14 @@ async fn test_restore_backup_state_marks_sending_outbound_recovery_required() {
     sending.status = OutboundPrivateMessageStatus::Sending;
     sending.attempt_count = 1;
     sending.last_attempt_at = Some(timestamp());
+    sending.prepared_send = Some(PreparedOutboundPrivateSend {
+        destination_path: format!(
+            "{}/{}/0",
+            paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+            "0".repeat(64)
+        ),
+        ciphertext: vec![0; pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 2],
+    });
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty)),
@@ -268,6 +277,40 @@ async fn test_restore_backup_state_marks_sending_outbound_recovery_required() {
         .last_error
         .as_deref()
         .is_some_and(|error| error.contains("recovery")));
+    assert!(restored.outbound_private_messages[0]
+        .prepared_send
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_restore_backup_state_rejects_prepared_send_on_pending_message() {
+    let counterparty = public_key();
+    let mut pending = private_payment_list_outbound(counterparty, 7, "ln-private");
+    pending.prepared_send = Some(PreparedOutboundPrivateSend {
+        destination_path: format!(
+            "{}/{}/0",
+            paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+            "0".repeat(64)
+        ),
+        ciphertext: vec![0; pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 2],
+    });
+
+    assert_restore_rejects_outbound_record(pending).await;
+}
+
+#[tokio::test]
+async fn test_restore_backup_state_rejects_invalid_prepared_send() {
+    let counterparty = public_key();
+    let mut sending = private_payment_list_outbound(counterparty, 7, "ln-private");
+    sending.status = OutboundPrivateMessageStatus::Sending;
+    sending.attempt_count = 1;
+    sending.last_attempt_at = Some(timestamp());
+    sending.prepared_send = Some(PreparedOutboundPrivateSend {
+        destination_path: "/pub/paykit/v0/private/../0".into(),
+        ciphertext: vec![0; 8],
+    });
+
+    assert_restore_rejects_outbound_record(sending).await;
 }
 
 #[tokio::test]

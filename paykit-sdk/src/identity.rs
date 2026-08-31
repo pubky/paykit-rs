@@ -361,8 +361,15 @@ impl PubkySessionAccess {
         ))
     }
 
-    /// Validate that the local secret key, when present, belongs to the session.
+    /// Validate the grant-backed session and its optional local secret key.
     pub fn validate(&self) -> crate::Result<()> {
+        if self.session.as_grant().is_none() {
+            return Err(crate::PaykitSdkError::Identity {
+                context: "Pubky session must be grant-backed".into(),
+                source: None,
+            });
+        }
+
         let Some(local_secret_key) = &self.local_secret_key else {
             return Ok(());
         };
@@ -462,11 +469,11 @@ fn validate_session_capabilities(
 }
 
 fn capability_covers(actual: &Capability, required: &Capability) -> bool {
-    scope_covers(&actual.scope, &required.scope)
+    scope_covers(actual.scope().as_str(), required.scope().as_str())
         && required
-            .actions
+            .actions()
             .iter()
-            .all(|required_action| actual.actions.contains(required_action))
+            .all(|required_action| actual.actions().contains(required_action))
 }
 
 fn scope_covers(parent: &str, child: &str) -> bool {

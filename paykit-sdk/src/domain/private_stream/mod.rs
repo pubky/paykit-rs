@@ -66,6 +66,17 @@ pub struct EventIdConflict {
     pub conflicting_stream_item_id: u64,
 }
 
+/// Values committed by one atomic private-stream storage transaction.
+pub(crate) struct PrivateStreamBatchWrite {
+    pub(crate) counterparty: PubkyPublicKey,
+    pub(crate) messages: Vec<PrivateApplicationMessage>,
+    pub(crate) link_state: Option<EncryptedLinkStateRecord>,
+    pub(crate) authorized_receipt_apps: Option<Vec<PaykitAppId>>,
+    pub(crate) link_lease: Option<PeerLinkOperationLease>,
+    pub(crate) receive_batch_id: Option<u64>,
+    pub(crate) received_at: DateTime<Utc>,
+}
+
 /// Persist an ordered batch of Private Application Messages and a link checkpoint.
 #[cfg(test)]
 pub(crate) async fn persist_private_stream_batch<S>(
@@ -103,9 +114,44 @@ pub(crate) async fn persist_private_stream_batch_with_link_lease<S>(
 where
     S: StorageAdapter,
 {
+    persist_private_stream_batch_write(
+        storage,
+        PrivateStreamBatchWrite {
+            counterparty,
+            messages,
+            link_state,
+            authorized_receipt_apps,
+            link_lease,
+            receive_batch_id: None,
+            received_at,
+        },
+    )
+    .await
+}
+
+/// Persist stream items and their resulting Encrypted Link checkpoint.
+pub(crate) async fn persist_private_stream_batch_write<S>(
+    storage: &S,
+    write: PrivateStreamBatchWrite,
+) -> Result<PrivateStreamIntakeReport>
+where
+    S: StorageAdapter,
+{
+    let PrivateStreamBatchWrite {
+        counterparty,
+        messages,
+        link_state,
+        authorized_receipt_apps,
+        link_lease,
+        receive_batch_id,
+        received_at,
+    } = write;
     storage
         .transaction(move |tx| {
-            let receive_batch_id = tx.allocate_receive_batch_id()?;
+            let receive_batch_id = match receive_batch_id {
+                Some(receive_batch_id) => receive_batch_id,
+                None => tx.allocate_receive_batch_id()?,
+            };
             let mut report = PrivateStreamIntakeReport {
                 receive_batch_id,
                 stream_item_ids: Vec::with_capacity(messages.len()),

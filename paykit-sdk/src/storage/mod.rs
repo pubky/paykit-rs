@@ -14,7 +14,8 @@ pub use pubky_shared::PubkySharedStateStorage;
 pub use records::{
     EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, NewOutboundPrivateMessage,
     NewPrivateStreamItem, OutboundPrivateMessageRecord, PaymentEndpointReservationRecord,
-    PeerLinkOperationLease, PrivateStreamItemRecord, PublicEndpointRecord, StorageState,
+    PeerLinkOperationLease, PreparedOutboundPrivateSend, PrivateStreamItemRecord,
+    PublicEndpointRecord, StorageState,
 };
 pub use state_blob::{
     decode_storage_state_blob, encode_storage_state_blob, SDK_STATE_BLOB_VERSION,

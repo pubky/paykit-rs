@@ -44,16 +44,21 @@ struct RemoteStateSnapshot {
     revision: Option<String>,
 }
 
+struct EncryptedStateBlob {
+    bytes: Vec<u8>,
+    etag: String,
+}
+
 /// Encrypted identity-wide SDK state stored in Pubky.
 ///
 /// Each transaction reads the latest complete state, applies one SDK storage
 /// transaction, and replaces the encrypted resource when state changed. One
-/// instance serializes its own operations, but independent instances must not
-/// write concurrently until the homeserver can enforce conditional writes or
-/// a durable lock. Encryption protects state contents and integrity, but not
-/// resource existence, size, update timing, or replay by the homeserver. After
-/// a write transport error, the adapter only reports success if it can read
-/// back the exact encrypted revision it attempted to store.
+/// instance serializes its own operations, while homeserver-enforced ETag
+/// preconditions prevent independent instances from overwriting each other.
+/// Encryption protects state contents and integrity, but not resource
+/// existence, size, update timing, or replay by the homeserver. After a write
+/// transport error, the adapter only reports success if it can read back the
+/// exact encrypted revision it attempted to store.
 #[derive(Clone)]
 pub struct PubkySharedStateStorage {
     session_provider: Arc<dyn PubkySessionProvider>,
@@ -122,8 +127,8 @@ impl PubkySharedStateStorage {
                 revision: None,
             });
         };
-        let revision = Some(state_revision(&encrypted));
-        let state = decrypt_state(access, &encrypted)?;
+        let revision = Some(encrypted.etag);
+        let state = decrypt_state(access, &encrypted.bytes)?;
         Ok(RemoteStateSnapshot { state, revision })
     }
 
@@ -144,40 +149,45 @@ impl PubkySharedStateStorage {
         expected_revision: Option<String>,
         encrypted: Vec<u8>,
     ) -> Result<()> {
-        let current_revision = load_encrypted_blob(access)
-            .await?
-            .as_deref()
-            .map(state_revision);
-        if current_revision != expected_revision {
-            return Err(PaykitSdkError::Storage {
-                context: "Pubky shared state changed during transaction".into(),
-                source: None,
-            });
-        }
+        let attempted_revision = state_revision(&encrypted);
+        let storage = access.session.storage();
+        let write_result = match expected_revision.as_deref() {
+            Some(etag) => {
+                storage
+                    .put_if_match(paykit_lib::PAYKIT_SHARED_STATE_PATH, encrypted, etag)
+                    .await
+            }
+            None => {
+                storage
+                    .put_if_absent(paykit_lib::PAYKIT_SHARED_STATE_PATH, encrypted)
+                    .await
+            }
+        };
 
-        let revision = state_revision(&encrypted);
-        let write_result = access
-            .session
-            .storage()
-            .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, encrypted)
-            .await;
-        if let Err(write_error) = write_result {
-            let committed = load_encrypted_blob(access)
-                .await
-                .map(|stored| {
-                    stored
-                        .as_deref()
-                        .is_some_and(|bytes| state_revision(bytes) == revision)
-                })
-                .unwrap_or(false);
-            if !committed {
-                return Err(PaykitSdkError::Transport {
-                    context: "write encrypted Pubky shared state could not be confirmed".into(),
+        match write_result {
+            Ok(response) => self.record_revision(Some(response_etag(&response)?)),
+            Err(write_error) if is_precondition_failed(&write_error) => {
+                Err(PaykitSdkError::Storage {
+                    context: "Pubky shared state changed during transaction".into(),
                     source: Some(write_error.into()),
-                });
+                })
+            }
+            Err(write_error) => {
+                let committed_revision = load_encrypted_blob(access)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|stored| state_revision(&stored.bytes) == attempted_revision)
+                    .map(|stored| stored.etag);
+                match committed_revision {
+                    Some(revision) => self.record_revision(Some(revision)),
+                    None => Err(PaykitSdkError::Transport {
+                        context: "write encrypted Pubky shared state could not be confirmed".into(),
+                        source: Some(write_error.into()),
+                    }),
+                }
             }
         }
-        self.record_revision(Some(revision))
     }
 }
 
@@ -225,7 +235,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         let _guard = self.transaction_lock.lock().await;
         let access = self.load_session_access().await?;
         let encrypted = load_encrypted_blob(&access).await?;
-        let revision = encrypted.as_deref().map(state_revision);
+        let revision = encrypted.as_ref().map(|blob| blob.etag.clone());
         if self.last_revision()?.is_some() && revision.is_none() {
             return Err(PaykitSdkError::Storage {
                 context: "previously observed Pubky shared state is missing".into(),
@@ -234,7 +244,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         }
         self.record_revision(revision.clone())?;
 
-        let initial_state = match encrypted.as_deref() {
+        let initial_state = match encrypted.as_ref().map(|blob| blob.bytes.as_slice()) {
             None => StorageState::default(),
             Some(encrypted) => match encrypted_state_key_generation(encrypted)? {
                 generation if generation == current_key.key_generation() => {
@@ -268,7 +278,7 @@ impl StorageAdapter for PubkySharedStateStorage {
     }
 }
 
-async fn load_encrypted_blob(access: &PubkySessionAccess) -> Result<Option<Vec<u8>>> {
+async fn load_encrypted_blob(access: &PubkySessionAccess) -> Result<Option<EncryptedStateBlob>> {
     let mut response = match access
         .session
         .storage()
@@ -284,6 +294,7 @@ async fn load_encrypted_blob(access: &PubkySessionAccess) -> Result<Option<Vec<u
             });
         }
     };
+    let etag = response_etag(&response)?;
     if response
         .content_length()
         .is_some_and(|length| length > MAX_SHARED_STATE_BYTES as u64)
@@ -304,7 +315,7 @@ async fn load_encrypted_blob(access: &PubkySessionAccess) -> Result<Option<Vec<u
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok(Some(bytes))
+    Ok(Some(EncryptedStateBlob { bytes, etag }))
 }
 
 fn encrypt_state(access: &PubkySessionAccess, state: &StorageState) -> Result<Vec<u8>> {
@@ -473,6 +484,36 @@ fn is_not_found(err: &PubkyError) -> bool {
         PubkyError::Request(RequestError::Server { status, .. })
             if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
     )
+}
+
+fn is_precondition_failed(err: &PubkyError) -> bool {
+    matches!(
+        err,
+        PubkyError::Request(RequestError::Server { status, .. })
+            if *status == StatusCode::PRECONDITION_FAILED
+    )
+}
+
+fn response_etag(response: &reqwest::Response) -> Result<String> {
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| PaykitSdkError::Storage {
+            context: "Pubky shared-state response is missing an ETag".into(),
+            source: None,
+        })?;
+    if etag.starts_with("W/") {
+        return Err(PaykitSdkError::Storage {
+            context: "Pubky shared-state response returned a weak ETag".into(),
+            source: None,
+        });
+    }
+    Ok(etag
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(etag)
+        .to_owned())
 }
 
 #[cfg(test)]

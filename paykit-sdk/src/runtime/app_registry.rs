@@ -421,7 +421,8 @@ where
                         .clone()
                 });
         let public_storage = session_access.outbox_client.public_storage();
-        let owner = session_access.session.info().public_key();
+        let session_info = session_access.session.info();
+        let owner = session_info.public_key();
         let existing = paykit_lib::get_paykit_app_registry(&public_storage, owner).await?;
         let mut registry = match existing {
             Some(registry) => registry,

@@ -79,7 +79,7 @@ where
                 }
             };
 
-        let stored_link_state = self
+        let mut stored_link_state = self
             .storage
             .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
             .await?
@@ -192,48 +192,79 @@ where
                 return Err(err.into());
             }
         };
-        let messages = match link.receive_private_application_messages().await {
-            Ok(messages) => messages,
-            Err(err) if err.is_non_retryable_private_receive_error() => {
-                let now = self.clock.now();
-                let mark = mark_recovery_required_with_lease(
-                    &self.storage,
-                    counterparty.clone(),
-                    lease.clone(),
-                    now,
-                )
-                .await?;
-                let _ = self
-                    .publish_local_recovery_marker_with_session(
-                        &counterparty,
-                        &session_access,
-                        &lease,
-                        mark.new_episode,
+        let mut aggregate: Option<PrivateStreamIntakeReport> = None;
+        for _ in 0..paykit_lib::PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT {
+            let prepared = match link.prepare_next_private_application_message().await {
+                Ok(Some(prepared)) => prepared,
+                Ok(None) => break,
+                Err(err) if err.is_non_retryable_private_receive_error() => {
+                    let now = self.clock.now();
+                    let mark = mark_recovery_required_with_lease(
+                        &self.storage,
+                        counterparty.clone(),
+                        lease.clone(),
+                        now,
                     )
-                    .await;
-                return Err(err.into());
+                    .await?;
+                    let _ = self
+                        .publish_local_recovery_marker_with_session(
+                            &counterparty,
+                            &session_access,
+                            &lease,
+                            mark.new_episode,
+                        )
+                        .await;
+                    return Err(err.into());
+                }
+                Err(err) => return Err(err.into()),
+            };
+            let now = self.clock.now();
+            let next_link_state = EncryptedLinkStateRecord {
+                counterparty: counterparty.clone(),
+                link_snapshot: Some(prepared.resulting_snapshot().serialize()),
+                handshake_snapshot: None,
+                handshake_role: None,
+                generation: stored_link_state.generation.saturating_add(1),
+                checkpointed_at: now,
+            };
+            let report = persist_private_stream_batch_write(
+                &self.storage,
+                PrivateStreamBatchWrite {
+                    counterparty: counterparty.clone(),
+                    messages: vec![prepared.message().clone()],
+                    link_state: Some(next_link_state.clone()),
+                    authorized_receipt_apps: authorized_receipt_apps.clone(),
+                    link_lease: Some(lease.clone()),
+                    receive_batch_id: aggregate.as_ref().map(|report| report.receive_batch_id),
+                    received_at: now,
+                },
+            )
+            .await?;
+            link.acknowledge_persisted_private_receive(prepared)?;
+            stored_link_state = next_link_state;
+            match aggregate.as_mut() {
+                Some(aggregate) => {
+                    aggregate.stream_item_ids.extend(report.stream_item_ids);
+                    aggregate.event_conflicts.extend(report.event_conflicts);
+                }
+                None => aggregate = Some(report),
             }
-            Err(err) => return Err(err.into()),
-        };
-        let now = self.clock.now();
-        let next_link_state = EncryptedLinkStateRecord {
-            counterparty: counterparty.clone(),
-            link_snapshot: Some(link.serialize()),
-            handshake_snapshot: None,
-            handshake_role: None,
-            generation: stored_link_state.generation.saturating_add(1),
-            checkpointed_at: now,
-        };
+        }
 
-        persist_private_stream_batch_with_link_lease(
-            &self.storage,
-            counterparty,
-            messages,
-            Some(next_link_state),
-            authorized_receipt_apps,
-            Some(lease),
-            now,
-        )
-        .await
+        match aggregate {
+            Some(report) => Ok(report),
+            None => {
+                persist_private_stream_batch_with_link_lease(
+                    &self.storage,
+                    counterparty,
+                    Vec::new(),
+                    None,
+                    authorized_receipt_apps,
+                    Some(lease),
+                    self.clock.now(),
+                )
+                .await
+            }
+        }
     }
 }

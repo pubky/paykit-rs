@@ -28,6 +28,17 @@ async fn test_private_payment_list_roundtrip_between_linked_peers() {
         .expect("processing the outbound queue should succeed");
     assert_eq!(send_report.sent, vec![queued.outbound_message_id]);
     assert!(send_report.failed.is_empty());
+    let sent = pair
+        .alice
+        .storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .into_iter()
+        .find(|record| record.outbound_message_id == queued.outbound_message_id)
+        .expect("sent message should remain in the audit log");
+    assert_eq!(sent.status, OutboundPrivateMessageStatus::Sent);
+    assert!(sent.prepared_send.is_none());
 
     let intake = pair
         .bob

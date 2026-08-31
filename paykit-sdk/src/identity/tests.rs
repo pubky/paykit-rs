@@ -92,23 +92,28 @@ fn test_paykit_identity_secret_validates_generation_and_redacts_debug() {
 fn test_session_capabilities_cover_required_paykit_scopes() {
     let root = pubky::Capabilities::builder()
         .read_write("/")
+        .unwrap()
         .finish()
         .as_slice()
         .to_vec();
     let paykit_only = pubky::Capabilities::builder()
         .read_write("/pub/paykit/")
+        .unwrap()
         .finish()
         .as_slice()
         .to_vec();
     let bitkit_namespace = pubky::Capabilities::builder()
         .read_write("/pub/paykit/")
+        .unwrap()
         .read_write("/pub/bitkit.to/")
+        .unwrap()
         .finish()
         .as_slice()
         .to_vec();
     let bitkit_required = "/pub/paykit/:rw,/pub/bitkit.to/:rw";
     let read_only = pubky::Capabilities::builder()
         .read("/pub/paykit/")
+        .unwrap()
         .finish()
         .as_slice()
         .to_vec();

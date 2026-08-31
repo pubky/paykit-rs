@@ -54,7 +54,7 @@ fn test_required_capabilities_use_identity_wide_paykit_scope() {
 
 #[tokio::test]
 async fn test_pubky_auth_companion_claim_reports_invalid_auth_url() {
-    let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
+    let bootstrap = FfiPubkySessionBootstrap::new("paykit.test".into()).unwrap();
     let error = bootstrap
         .approve_auth_with_companion_claim(
             "https://example.com/not-pubky-auth".into(),
@@ -77,7 +77,7 @@ async fn test_pubky_auth_companion_claim_reports_invalid_auth_url() {
 
 #[tokio::test]
 async fn test_pubky_auth_companion_claim_reports_invalid_claim() {
-    let bootstrap = FfiPubkySessionBootstrap::new().unwrap();
+    let bootstrap = FfiPubkySessionBootstrap::new("paykit.test".into()).unwrap();
     let error = bootstrap
         .approve_auth_with_companion_claim(
             "pubkyauth://signin".into(),

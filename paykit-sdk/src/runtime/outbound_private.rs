@@ -169,19 +169,48 @@ where
                 continue;
             };
 
+            let sending = if sending.prepared_send.is_some() {
+                sending
+            } else {
+                let prepared =
+                    match link.prepare_private_application_message_json(&sending.raw_json) {
+                        Ok(prepared) => prepared,
+                        Err(err) => {
+                            self.record_private_send_error(
+                                &counterparty,
+                                sending,
+                                err,
+                                &lease,
+                                &session_access,
+                                &mut report,
+                            )
+                            .await?;
+                            break;
+                        }
+                    };
+                self.persist_prepared_private_send(
+                    sending,
+                    &mut link,
+                    &mut link_state,
+                    &lease,
+                    prepared,
+                )
+                .await?
+            };
+            let prepared = sending
+                .prepared_send
+                .as_ref()
+                .expect("prepared send must be durable before publication");
             match link
-                .send_private_application_message_json(&sending.raw_json)
+                .publish_prepared_private_application_message(
+                    &prepared.destination_path,
+                    &prepared.ciphertext,
+                )
                 .await
             {
                 Ok(()) => {
-                    self.record_private_send_success(
-                        sending,
-                        &link,
-                        &mut link_state,
-                        &lease,
-                        &mut report,
-                    )
-                    .await?;
+                    self.record_private_send_success(sending, &lease, &mut report)
+                        .await?;
                 }
                 Err(err) => {
                     self.record_private_send_error(
@@ -203,6 +232,41 @@ where
         }
 
         Ok(report)
+    }
+
+    async fn persist_prepared_private_send(
+        &self,
+        mut sending: OutboundPrivateMessageRecord,
+        link: &mut paykit_lib::EncryptedLink,
+        link_state: &mut EncryptedLinkStateRecord,
+        lease: &PeerLinkOperationLease,
+        prepared: paykit_lib::PreparedPrivateApplicationMessageSend,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        sending.prepared_send = Some(crate::storage::PreparedOutboundPrivateSend {
+            destination_path: prepared.destination_path().to_owned(),
+            ciphertext: prepared.ciphertext().to_vec(),
+        });
+        let now = self.clock.now();
+        link_state.link_snapshot = Some(prepared.resulting_snapshot().serialize());
+        link_state.handshake_snapshot = None;
+        link_state.handshake_role = None;
+        link_state.generation = link_state.generation.saturating_add(1);
+        link_state.checkpointed_at = now;
+        self.storage
+            .transaction({
+                let sending = sending.clone();
+                let link_state = link_state.clone();
+                let lease = lease.clone();
+                move |tx| {
+                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                    tx.save_outbound_private_message(sending.clone())?;
+                    tx.save_encrypted_link_state(link_state);
+                    Ok(())
+                }
+            })
+            .await?;
+        link.acknowledge_persisted_private_send(prepared)?;
+        Ok(sending)
     }
 
     async fn restore_link_for_outbound_send(
@@ -366,27 +430,18 @@ where
     async fn record_private_send_success(
         &self,
         sending: OutboundPrivateMessageRecord,
-        link: &paykit_lib::EncryptedLink,
-        link_state: &mut EncryptedLinkStateRecord,
         lease: &PeerLinkOperationLease,
         report: &mut OutboundPrivateSendReport,
     ) -> Result<()> {
         let now = self.clock.now();
         let sent = mark_outbound_sent(sending, now);
-        link_state.link_snapshot = Some(link.serialize());
-        link_state.handshake_snapshot = None;
-        link_state.handshake_role = None;
-        link_state.generation = link_state.generation.saturating_add(1);
-        link_state.checkpointed_at = now;
         self.storage
             .transaction({
                 let sent = sent.clone();
-                let link_state = link_state.clone();
                 let lease = lease.clone();
                 move |tx| {
                     crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                     tx.save_outbound_private_message(sent.clone())?;
-                    tx.save_encrypted_link_state(link_state);
                     Ok(())
                 }
             })

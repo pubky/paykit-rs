@@ -11,7 +11,7 @@ Add `paykit-lib` to your `Cargo.toml`.
 ```toml
 [dependencies]
 paykit-lib = { version = "x.x.x" }
-pubky = "0.8"
+pubky = "0.11.0"
 ```
 
 Minimal example — store and retrieve a public Payment Endpoint:
@@ -289,7 +289,7 @@ If a payment execution fails with an error suggesting the endpoint has been cons
 
 ### Private Payment Lists
 
-Private Payment Lists are end-to-end encrypted via a Noise protocol handshake managed by `pubky-noise`. `PubkyNoiseEncryptor` handles encryption, file naming, and homeserver storage via `send_message`/`receive_message`.
+Private Payment Lists are end-to-end encrypted via a Noise protocol handshake managed by `pubky-noise`. `PubkyNoiseEncryptor` handles encryption, counter-based file naming, and prepared send/receive state transitions.
 
 Storage paths for private Paykit data are derived per-counterparty pair using `pubky_noise::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-noise` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private Paykit data.
 
@@ -306,9 +306,9 @@ Storage paths for private Paykit data are derived per-counterparty pair using `p
   Advances the handshake by one step. Returns `HandshakeProgress::Pending(handle)` when waiting for the counterparty, or `HandshakeProgress::Complete(EncryptedLink)` when finished. Polling-safe — the caller controls retry timing and timeouts. If a homeserver write fails during the handshake (`HomeserverWriteError`), the function automatically recovers from a pre-mutation snapshot and returns `Pending` so the caller's polling loop retries transparently. The maximum number of consecutive recovery attempts is configurable via `EncryptedLinkHandshake::set_max_recovery_attempts` (default: `DEFAULT_MAX_RECOVERY_ATTEMPTS`, 3). The recovery-attempt counter resets to zero after every successful step.
 
 #### Handshake checkpointing / resumption
-- `EncryptedLinkHandshake::snapshot() -> EncryptedLinkHandshakeSnapshot`
+- `EncryptedLinkHandshake::snapshot() -> Result<EncryptedLinkHandshakeSnapshot>`
   Captures the current in-progress handshake state.
-- `EncryptedLinkHandshake::serialize() -> Vec<u8>`
+- `EncryptedLinkHandshake::serialize() -> Result<Vec<u8>>`
   Convenience method equivalent to `self.snapshot().serialize()`.
 - `EncryptedLinkHandshake::config() -> &Arc<PubkyNoiseConfig>`
   Access the shared Noise configuration for in-process handshake restore.
@@ -329,6 +329,15 @@ Snapshot bytes include sensitive key material and must be treated as secrets (st
 - `parse_private_payment_list_json(json: &str) -> Result<PrivatePaymentList>`
   Stateless parser for callers or SDK layers that route messages from `EncryptedLink::receive_private_application_messages`.
 
+Durable runtimes should use
+`EncryptedLink::prepare_private_application_message_json`, persist the exact
+ciphertext and resulting snapshot together, acknowledge the prepared send, and
+then call `publish_prepared_private_application_message`. On receive, use
+`prepare_next_private_application_message`, persist the plaintext application
+result and resulting snapshot together, and only then call
+`acknowledge_persisted_private_receive`. The SDK runtime implements this staged
+flow; the direct stateless send helpers remain convenience APIs.
+
 All Private Application Messages share one ordered encrypted stream and carry a
 source `app_id`. Use `EncryptedLink::receive_private_application_messages` when
 a caller or SDK must route private message kinds durably. The raw JSON is
@@ -343,6 +352,8 @@ Private Paykit wire messages are closed-world JSON objects: unknown fields are r
 #### Payment Request exchange
 
 Payment Requests are payee-initiated private protocol objects exchanged over an Encrypted Link. Their lifecycle messages (`paykit.payment_request`, acceptance, rejection, cancellation, and proof) use Event Message semantics. Paykit serializes, encrypts, sends, receives, and structurally validates these messages, but does not execute payments, schedule recurring jobs, manage wallet state, validate sender-role intent, or validate payment-method-specific proofs.
+
+An accepted Recurring Payment Request is the protocol object behind a product Subscription; Paykit does not define a separate Subscription protocol or execute its periodic payments. See [Recurring Payment Requests And Subscriptions](../specs/payment-requests.md#recurring-payment-requests-and-subscriptions) for the complete responsibility split and lifecycle.
 
 - `send_payment_request(link, app_id, event: &PaymentRequest) -> Result<()>`
   Sends a `paykit.payment_request` proposal with immutable terms. Terms include `PaymentAmount`, a payee-provided `PaymentReference`, required nullable `proposal_expires_at` (`None`/`null` means no protocol-level proposal expiry before acceptance), optional `Recurrence`, accepted Payment Endpoint Identifiers, and optional metadata.
@@ -463,9 +474,9 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
 
 **Snapshot and serialize:**
 
-- `EncryptedLink::snapshot() -> EncryptedLinkSnapshot`
+- `EncryptedLink::snapshot() -> Result<EncryptedLinkSnapshot>`
   Captures the current Encrypted Link state (transport keys, nonce counters, and counterparty identity) as a serializable snapshot.
-- `EncryptedLink::serialize() -> Vec<u8>`
+- `EncryptedLink::serialize() -> Result<Vec<u8>>`
   Convenience method equivalent to `self.snapshot().serialize()`.
 - `EncryptedLink::config() -> &Arc<PubkyNoiseConfig>`
   Access the shared Noise configuration for in-process restore via `restore_encrypted_link_from_config`.

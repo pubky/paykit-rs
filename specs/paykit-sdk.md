@@ -28,12 +28,11 @@ optional default-app preferences. Public Payment Endpoints are stored per app.
 Private Payment Lists use Latest-State Message semantics per app and their
 current views are aggregated for payment resolution.
 
-The app or binding layer provides live Pubky session access and durable SDK
-storage. Handles for apps sharing an identity must use the same logical SDK
-state and serialize updates to the shared Encrypted Link checkpoint. The SDK
-storage contract supports checked atomic replacement, but production
-concurrent apps still require a Pubky-hosted encrypted state format,
-pending-send journal, and homeserver locking/conditional writes.
+The app or binding layer provides live Pubky session access. Handles for apps
+sharing an identity use the same encrypted Pubky-hosted SDK state. Homeserver
+ETag preconditions reject stale whole-state writes, and prepared Noise sends
+couple exact ciphertext with the advanced Encrypted Link snapshot before
+publication.
 
 ## Design Principles
 
@@ -100,13 +99,14 @@ The current Rust SDK implementation covers:
 - Payment Request lifecycle state, Receipt Access indexing, receipt issuance,
   and receipt retrieval
 - Paykit-facing profile/contact helpers
-- encrypted Pubky-hosted identity-wide SDK state for serialized runtimes
+- encrypted Pubky-hosted identity-wide SDK state with conditional updates
+- crash-safe prepared Noise send and receive checkpointing
 - SDK backup/export/restore validation
 
 The workspace also exposes Swift and Kotlin SDK bindings through `paykit-ffi`.
-First-party durable mobile storage helpers, crash-safe shared Noise journaling,
-payment execution, settlement confirmation, product UI, app backup transport,
-multi-device checkpoint synchronization, and recurring payment scheduling
+First-party durable mobile storage helpers, payment execution, settlement
+confirmation, product UI, app backup transport, background synchronization,
+and recurring payment scheduling
 remain separate implementation areas unless they are explicitly listed above.
 
 ## Crate Layout
@@ -274,14 +274,13 @@ Encryption does not hide the resource's existence, size, or update timing, and
 does not by itself detect a homeserver replay of an older valid blob.
 
 Each transaction fetches and decrypts the latest blob, applies the existing
-`StorageTransaction`, validates and encrypts changed state, checks that the
-remote revision is unchanged, and replaces the whole resource. The check
-detects ordinary stale writers but is not atomic with the PUT. Independent
-writers must therefore remain serialized until the homeserver can enforce a
-conditional write or durable lock. A storage instance also fails closed if a
-resource it previously observed disappears. After a write transport error, the
-adapter reads the resource again and reports success only when the exact
-encrypted revision was committed.
+`StorageTransaction`, validates and encrypts changed state, then replaces the
+resource with `If-Match` or creates it with `If-None-Match`. A stale writer gets
+a storage conflict instead of overwriting newer state and can retry the whole
+SDK operation. A storage instance also fails closed if a resource it previously
+observed disappears. After a write transport error, the adapter reads the
+resource again and reports success only when the exact encrypted bytes it
+attempted to store were committed.
 
 ### PubkySessionProvider
 
@@ -342,20 +341,29 @@ storage and auth-session handoff, not a separate Pubky SDK or identity product
 that integrators must use.
 
 Rust integrations can use `PubkySessionBootstrap` to create or import the live
-session access consumed by the provider. It covers common Pubky account/session
-workflows: signup, signin, session-secret import, auth handoff
-start/resume/approve helpers, and `pubky://` resource normalization. Full SDK
-runtime auth should use `PAYKIT_SESSION_CAPABILITIES` as the expected
-scope for auth start/resume/approve, completion, and session import. The
-required scope covers the identity-wide Paykit public and private paths.
-Private-capable auth completion and session import also supply the matching
-`PubkyLocalSecretKey`.
+grant-session access consumed by the provider. Each bootstrap is constructed
+with a stable, app-owned Pubky client ID. It covers common Pubky account/session
+workflows: signup, signin, grant-secret import, auth handoff start/resume/approve
+helpers, and `pubky://` resource normalization. All session and auth operations
+require Pubky grants. Full SDK runtime auth should use
+`PAYKIT_SESSION_CAPABILITIES` as the expected scope for auth
+start/resume/approve, completion, and session import. The required scope covers
+the identity-wide Paykit public and private paths. Private-capable auth
+completion and session import also supply either the matching
+`PubkyLocalSecretKey` or the delegated Paykit identity secret.
+Pending external grant auth also owns a client proof-of-possession key that is
+not recoverable from its authorization URL. Apps that need an unapproved
+request to survive process loss must securely persist the complete state
+returned by `PubkyAuthRequest::save_state` and resume with that state. Pubky
+relay approvals are consumed when read, so cancellation or credential-exchange
+failure after approval retrieval requires a new auth request. Apps must delete
+saved state after completion, expiry, or abandonment.
 `PubkyLocalSecretKey` also provides Pubky Core-compatible BIP39 seed and
-mnemonic helpers plus public-key-from-secret helpers. Apps that intentionally
-share the same Pubky identity material derive the same Pubky and Paykit Noise
-keys.
-Exported session secrets and auth URLs are secret-bearing values and must be
-stored or displayed only for their intended short-lived flow.
+mnemonic helpers plus public-key-from-secret helpers. Apps intentionally using
+the same Pubky identity material derive the same initial Paykit identity key.
+Exported session secrets contain both the signed grant and proof-of-possession
+key. Those secrets, pending auth state, and auth URLs are secret-bearing values
+and must be stored or displayed only for their intended flow.
 Bindings should wrap these helpers so mobile apps do not need a second Pubky
 SDK dependency for ordinary Paykit onboarding.
 
@@ -363,8 +371,8 @@ Applications can attach an app-defined companion claim to a Pubky Auth
 approval. The integrator supplies the claim query parameter, claim type,
 expected capability, and serialized unsigned payload. The SDK owns request
 validation, request-bound identity signing, companion channel derivation,
-XSalsa20-Poly1305 transport, relay delivery, and normal authorization. The
-companion message must be accepted by the relay before normal Pubky Auth is
+XSalsa20-Poly1305 transport, relay delivery, and grant authorization. The
+companion message must be accepted by the relay before the Pubky grant is
 approved. Bitkit's watch-only account claim is one application of this generic
 operation. The shared protocol is specified in
 [`pubky-auth-companion-claims.md`](pubky-auth-companion-claims.md).
@@ -581,9 +589,12 @@ request-specific context is defined.
 
 ### Recurring Scheduling
 
-Recurring Payment Request scheduling is outside this SDK scope. The SDK should
-derive eligibility and durable state, while the integrating app/runtime may
-still own the actual timer service.
+The SDK derives durable Recurring Payment Request lifecycle state and exposes
+accepted requests through `active_recurring_payment_requests`. It does not
+calculate due Billing Periods, run timers, authorize or execute payments,
+validate payment-method-specific settlement, or decide service entitlements.
+Those responsibilities belong to the integrating application/runtime. See
+[Recurring Payment Requests And Subscriptions](payment-requests.md#recurring-payment-requests-and-subscriptions).
 
 ### Logger And Clock
 
@@ -817,16 +828,15 @@ newer latest-state messages until the stale send is checkpointed or fails.
 
 Event Message retries must reuse the same Event ID and exact payload.
 
-Sending through Pubky is not atomic with local storage. If a worker sends a
-message and crashes before storing the `Sent` status and advanced Encrypted Link
-snapshot, the SDK retries the same stale `Sending` message from the previous
-checkpoint. Replaying the same queue head keeps the local checkpoint aligned
-with the message that may already have reached the counterparty; different
-messages must not skip ahead. Non-retryable link-state failures still mark the
-peer recovery-required before automatic private sends continue. SDK records
-expose local outbound status so apps can distinguish queued intent from
-checkpointed send state. The status is not an acknowledgement from the
-counterparty.
+Sending through Pubky is not atomic with SDK storage. The SDK first prepares a
+send without mutating live Noise state, then stores the exact ciphertext and
+advanced Encrypted Link snapshot together. Only after that transaction succeeds
+does it acknowledge the local Noise transition and publish the ciphertext. A
+crash or uncertain publication retries those exact bytes before later messages
+can advance the link. Non-retryable link-state failures still mark the peer
+recovery-required before automatic private sends continue. SDK records expose
+local outbound status so apps can distinguish queued intent from checkpointed
+send state. The status is not an acknowledgement from the counterparty.
 Superseded reservation cleanup failures are reported as local cleanup failures;
 they do not change whether the current outbound message was sent or failed.
 
@@ -843,12 +853,13 @@ For each receive cycle:
 
 1. Claim the per-counterparty peer link operation lease.
 2. Restore or establish the Encrypted Link.
-3. Receive the full batch from `paykit-lib`.
-4. Persist every received Private Application Message plaintext and parse enough
+3. Prepare the next message without advancing the live Noise state.
+4. Persist the received Private Application Message plaintext and parse enough
    to identify version, kind, and source App ID when the payload is valid JSON.
 5. In one transaction, insert raw stream items, update Event Message dedupe
    records, and then save the advanced link snapshot.
-6. Release the lease.
+6. Acknowledge the prepared receive, then repeat until no message is available.
+7. Release the lease.
 
 If the app crashes after messages are stored but before the snapshot is stored,
 replay is acceptable and must be deduped. If the snapshot is stored without the
@@ -883,9 +894,9 @@ worker; durable writes still check the stored lease id so an earlier holder
 cannot commit after a newer lease has replaced it.
 
 The local lease does not make an already-started remote write safe if its
-holder is suspended past expiry. Shared multi-process operation therefore also
-requires the pending-send journal and homeserver conditional coordination
-listed under future work.
+holder is suspended past expiry. Homeserver conditional writes ensure the old
+holder cannot replace newer shared state, while prepared sends ensure a retry
+publishes the same ciphertext.
 
 The Rust SDK implementation provides storage-backed per-peer leases for
 Encrypted Link work and serializes `initialize`, `sign_out`, and public endpoint
@@ -1224,8 +1235,8 @@ Restore flow:
 Backup restore preserves private history and derived records. Valid restored
 Encrypted Link checkpoints are resumed; missing, malformed, mismatched, or
 otherwise unsafe checkpoints pause private automation until relink. Concurrent
-multi-app and multi-device updates require homeserver-enforced conditional
-writes or locking plus crash-safe shared Noise journaling.
+multi-app updates use homeserver-enforced conditional writes and crash-safe
+prepared Noise operations.
 
 ## Public SDK API Shape
 
@@ -1379,9 +1390,6 @@ Platform tests:
 
 ## Later Design Areas
 
-- Homeserver-backed locks and conditional writes for shared-state updates.
-- A pending-send journal that durably couples exact ciphertext with the
-  advanced Noise snapshot before publication.
 - Durable storage adapters, including whether Paykit should ship a
   SQLite-backed implementation.
 - Public contact marker discovery and richer contact-sharing policy.

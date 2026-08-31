@@ -94,8 +94,8 @@ pub use paykit_lib::{PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitAppReg
 pub use pubky_session::{
     parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthCompanionClaim,
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
-    PubkyResourceRef, PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionSecret,
-    PAYKIT_SESSION_CAPABILITIES,
+    PubkyAuthRequestState, PubkyResourceRef, PubkySessionBootstrap, PubkySessionBootstrapResult,
+    PubkySessionSecret, PAYKIT_SESSION_CAPABILITIES,
 };
 #[doc(inline)]
 pub use runtime::{Clock, PaykitAppRemovalBlockers, PaykitSdk, SystemClock};

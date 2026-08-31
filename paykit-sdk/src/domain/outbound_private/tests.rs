@@ -271,6 +271,7 @@ fn test_validate_queued_outbound_private_message_rejects_malformed_known_body() 
         last_attempt_at: None,
         sent_at: None,
         last_error: None,
+        prepared_send: None,
     };
 
     let result = validate_queued_outbound_private_message(&record);

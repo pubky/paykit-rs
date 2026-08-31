@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::*;
-use pubky::PubkySession;
-use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
+use pubky::{ClientId, Pubky, PubkySession, PublicKey};
+use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
 mod encrypted_link;
@@ -14,15 +14,17 @@ mod private_payment_list;
 mod receipt_access;
 mod routing_tracing;
 
-static SHARED_POSTGRES: OnceCell<EmbeddedPostgres> = OnceCell::const_new();
+const TEST_CLIENT_ID: &str = "paykit-lib.test";
+
+static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
-async fn shared_postgres() -> &'static EmbeddedPostgres {
+async fn shared_postgres() -> &'static DockerPostgres {
     SHARED_POSTGRES
         .get_or_init(|| async {
-            EmbeddedPostgres::start()
+            DockerPostgres::start()
                 .await
-                .expect("failed to start embedded postgres")
+                .expect("failed to start Docker Postgres")
         })
         .await
 }
@@ -36,11 +38,20 @@ async fn build_testnet() -> EphemeralTestnet {
         let postgres = shared_postgres()
             .await
             .connection_string()
-            .expect("embedded postgres connection string should be valid");
+            .expect("Docker Postgres connection string should be valid");
         EphemeralTestnet::builder().postgres(postgres)
     };
 
     builder.build().await.unwrap()
+}
+
+async fn signup_session(sdk: &Pubky, homeserver: &PublicKey, keypair: &Keypair) -> PubkySession {
+    let signer = sdk.signer(keypair.clone());
+    signer.signup(homeserver, None).await.unwrap();
+    signer
+        .signin(ClientId::new(TEST_CLIENT_ID).unwrap())
+        .await
+        .unwrap()
 }
 
 struct TestSetup {
@@ -59,8 +70,7 @@ impl TestSetup {
         let sdk = testnet.sdk().unwrap();
 
         let pair = Keypair::random();
-        let signer = sdk.signer(pair.clone());
-        let session = signer.signup(&homeserver.public_key(), None).await.unwrap();
+        let session = signup_session(&sdk, &homeserver.public_key(), &pair).await;
 
         let public_storage = sdk.public_storage();
 
@@ -93,21 +103,17 @@ impl InProgressHandshakeSetup {
         let responder_sdk = testnet.sdk().unwrap();
 
         let initiator_keypair = Keypair::random();
-        let initiator_signer = initiator_sdk.signer(initiator_keypair.clone());
-        let initiator_session = initiator_signer
-            .signup(&homeserver.public_key(), None)
-            .await
-            .unwrap();
+        let initiator_session =
+            signup_session(&initiator_sdk, &homeserver.public_key(), &initiator_keypair).await;
 
         let responder_keypair = Keypair::random();
-        let responder_signer = responder_sdk.signer(responder_keypair.clone());
-        let responder_session = responder_signer
-            .signup(&homeserver.public_key(), None)
-            .await
-            .unwrap();
+        let responder_session =
+            signup_session(&responder_sdk, &homeserver.public_key(), &responder_keypair).await;
 
-        let initiator_public_key = initiator_session.info().public_key();
-        let responder_public_key = responder_session.info().public_key();
+        let initiator_info = initiator_session.info();
+        let responder_info = responder_session.info();
+        let initiator_public_key = initiator_info.public_key();
+        let responder_public_key = responder_info.public_key();
         let initiator_noise_secret_key =
             derive_paykit_noise_secret_key(&initiator_keypair.secret_key());
         let responder_noise_secret_key =
@@ -198,21 +204,17 @@ impl PrivateTestSetup {
 
         // Sign up two independent users.
         let sender_keypair = Keypair::random();
-        let sender_signer = sender_sdk.signer(sender_keypair.clone());
-        let sender_session = sender_signer
-            .signup(&homeserver.public_key(), None)
-            .await
-            .unwrap();
+        let sender_session =
+            signup_session(&sender_sdk, &homeserver.public_key(), &sender_keypair).await;
 
         let receiver_keypair = Keypair::random();
-        let receiver_signer = receiver_sdk.signer(receiver_keypair.clone());
-        let receiver_session = receiver_signer
-            .signup(&homeserver.public_key(), None)
-            .await
-            .unwrap();
+        let receiver_session =
+            signup_session(&receiver_sdk, &homeserver.public_key(), &receiver_keypair).await;
 
-        let sender_public_key = sender_session.info().public_key();
-        let receiver_public_key = receiver_session.info().public_key();
+        let sender_info = sender_session.info();
+        let receiver_info = receiver_session.info();
+        let sender_public_key = sender_info.public_key();
+        let receiver_public_key = receiver_info.public_key();
         let sender_noise_secret_key = derive_paykit_noise_secret_key(&sender_keypair.secret_key());
         let receiver_noise_secret_key =
             derive_paykit_noise_secret_key(&receiver_keypair.secret_key());

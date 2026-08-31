@@ -20,7 +20,8 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap())
+    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
+        .unwrap()
         .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
         .await
         .unwrap()
@@ -84,7 +85,8 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap())
+    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
+        .unwrap()
         .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
         .await
         .unwrap()
@@ -150,7 +152,8 @@ async fn test_pubky_shared_state_rejects_a_stale_writer() {
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap())
+    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
+        .unwrap()
         .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
         .await
         .unwrap()
@@ -165,15 +168,20 @@ async fn test_pubky_shared_state_rejects_a_stale_writer() {
         PaykitSdkConfig::new("bitkit").unwrap(),
     );
     sdk.initialize().await.unwrap();
+    let initialized_at = first
+        .transaction(|tx| Ok(tx.load_identity_state().unwrap().initialized_at))
+        .await
+        .unwrap();
 
     let (loaded_tx, loaded_rx) = std::sync::mpsc::sync_channel(0);
     let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+    let stale = first.clone();
     let stale_write = std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(first.transaction(move |tx| {
+            .block_on(stale.transaction(move |tx| {
                 loaded_tx.send(()).unwrap();
                 continue_rx.recv().unwrap();
                 let mut identity = tx.load_identity_state().unwrap();
@@ -200,6 +208,24 @@ async fn test_pubky_shared_state_rejects_a_stale_writer() {
         PaykitSdkError::Storage { context, .. }
             if context.contains("changed during transaction")
     ));
+
+    first
+        .transaction(|tx| {
+            let mut identity = tx.load_identity_state().unwrap();
+            identity.initialized_at += chrono::Duration::seconds(3);
+            tx.save_identity_state(identity);
+            Ok(())
+        })
+        .await
+        .expect("the stale storage instance should succeed after reloading and retrying");
+    let final_initialized_at = second
+        .transaction(|tx| Ok(tx.load_identity_state().unwrap().initialized_at))
+        .await
+        .unwrap();
+    assert_eq!(
+        final_initialized_at,
+        initialized_at + chrono::Duration::seconds(4)
+    );
 }
 
 #[tokio::test]
@@ -207,7 +233,8 @@ async fn test_pubky_shared_state_rejects_a_missing_previously_observed_resource(
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap())
+    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
+        .unwrap()
         .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
         .await
         .unwrap()

@@ -10,7 +10,7 @@ async fn test_handshake_snapshot_serialize_roundtrip() {
         responder_handshake: _responder_handshake,
     } = InProgressHandshakeSetup::new().await;
 
-    let snapshot = initiator_handshake.snapshot();
+    let snapshot = initiator_handshake.snapshot().unwrap();
     let bytes = snapshot.serialize();
     assert_eq!(bytes.len(), 229, "snapshot should be 229 bytes");
 
@@ -67,8 +67,8 @@ async fn test_handshake_restore_and_complete() {
     let initiator_config = initiator_handshake.config().clone();
     let responder_config = responder_handshake.config().clone();
 
-    let initiator_snapshot_bytes = initiator_handshake.serialize();
-    let responder_snapshot_bytes = responder_handshake.serialize();
+    let initiator_snapshot_bytes = initiator_handshake.serialize().unwrap();
+    let responder_snapshot_bytes = responder_handshake.serialize().unwrap();
     let initiator_snapshot =
         EncryptedLinkHandshakeSnapshot::deserialize(&initiator_snapshot_bytes).unwrap();
     let responder_snapshot =
@@ -142,7 +142,7 @@ async fn test_handshake_restore_rejects_mismatched_remote_pubkey() {
         responder_handshake: _responder_handshake,
     } = InProgressHandshakeSetup::new().await;
 
-    let snapshot = initiator_handshake.snapshot();
+    let snapshot = initiator_handshake.snapshot().unwrap();
     let config = initiator_handshake.config().clone();
     let wrong_remote = initiator_session.info().public_key().clone();
 
@@ -166,7 +166,7 @@ async fn test_handshake_restore_rejects_transport_phase_snapshot() {
     let setup = PrivateTestSetup::new().await;
 
     // Build a handshake snapshot value from a transport-mode link snapshot.
-    let transport_bytes = setup.sender_link.serialize();
+    let transport_bytes = setup.sender_link.serialize().unwrap();
     let handshake_snapshot = EncryptedLinkHandshakeSnapshot::deserialize(&transport_bytes).unwrap();
     let sender_config = setup.sender_link.config().clone();
     let remote = handshake_snapshot.recipient().clone();
@@ -251,7 +251,7 @@ async fn test_encrypted_link_snapshot_serialize_roundtrip() {
     .unwrap();
 
     // Take a snapshot and serialize.
-    let snapshot = setup.sender_link.snapshot();
+    let snapshot = setup.sender_link.snapshot().unwrap();
     let bytes = snapshot.serialize();
     assert_eq!(bytes.len(), 229, "snapshot should be 229 bytes");
 
@@ -303,8 +303,8 @@ async fn test_encrypted_link_restore_and_continue() {
     assert_eq!(received_v1.payment_endpoints.len(), 1);
 
     // Snapshot both sides after the first exchange.
-    let sender_snapshot = setup.sender_link.snapshot();
-    let receiver_snapshot = setup.receiver_link.snapshot();
+    let sender_snapshot = setup.sender_link.snapshot().unwrap();
+    let receiver_snapshot = setup.receiver_link.snapshot().unwrap();
 
     // Serialize and deserialize (simulating persistence).
     let sender_bytes = sender_snapshot.serialize();
@@ -420,7 +420,7 @@ async fn test_receive_private_application_messages_returns_full_stream() {
 async fn test_encrypted_link_restore_rejects_mismatched_remote_pubkey() {
     let setup = PrivateTestSetup::new().await;
 
-    let snapshot = setup.sender_link.snapshot();
+    let snapshot = setup.sender_link.snapshot().unwrap();
     let sender_config = setup.sender_link.config().clone();
     let wrong_remote = setup.sender_session.info().public_key().clone();
 
@@ -445,13 +445,66 @@ async fn test_encrypted_link_serialize_convenience() {
     let setup = PrivateTestSetup::new().await;
 
     // The convenience method should produce the same bytes as snapshot().serialize().
-    let via_snapshot = setup.sender_link.snapshot().serialize();
-    let via_convenience = setup.sender_link.serialize();
+    let via_snapshot = setup.sender_link.snapshot().unwrap().serialize();
+    let via_convenience = setup.sender_link.serialize().unwrap();
     assert_eq!(
         via_snapshot, via_convenience,
         "serialize() should equal snapshot().serialize()"
     );
 
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_prepared_private_message_advances_only_after_persistence_acknowledgement() {
+    let mut setup = PrivateTestSetup::new().await;
+    let raw_json = r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{}}"#;
+
+    let sender_before = setup.sender_link.serialize().unwrap();
+    let prepared_send = setup
+        .sender_link
+        .prepare_private_application_message_json(raw_json)
+        .unwrap();
+    let sender_after = prepared_send.resulting_snapshot().serialize();
+    let destination_path = prepared_send.destination_path().to_owned();
+    let ciphertext = prepared_send.ciphertext().to_vec();
+    let prepared_debug = format!("{prepared_send:?}");
+
+    assert!(!prepared_debug.contains(&destination_path));
+    assert!(setup.sender_link.serialize().is_err());
+    assert_ne!(sender_after, sender_before);
+    setup
+        .sender_link
+        .acknowledge_persisted_private_send(prepared_send)
+        .unwrap();
+    assert_eq!(setup.sender_link.serialize().unwrap(), sender_after);
+    setup
+        .sender_link
+        .publish_prepared_private_application_message(&destination_path, &ciphertext)
+        .await
+        .unwrap();
+
+    let receiver_before = setup.receiver_link.serialize().unwrap();
+    let prepared_receive = setup
+        .receiver_link
+        .prepare_next_private_application_message()
+        .await
+        .unwrap()
+        .expect("prepared message should be available");
+    let receiver_after = prepared_receive.resulting_snapshot().serialize();
+
+    assert_eq!(prepared_receive.message().raw_json, raw_json);
+    assert!(setup.receiver_link.serialize().is_err());
+    assert_ne!(receiver_after, receiver_before);
+    setup
+        .receiver_link
+        .acknowledge_persisted_private_receive(prepared_receive)
+        .unwrap();
+    assert_eq!(setup.receiver_link.serialize().unwrap(), receiver_after);
+
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(setup.receiver_link).await.unwrap();
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
 }

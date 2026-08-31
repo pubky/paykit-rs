@@ -89,6 +89,7 @@ fn private_payment_list_outbound(
         last_attempt_at: None,
         sent_at: None,
         last_error: None,
+        prepared_send: None,
     }
 }
 
