@@ -265,10 +265,11 @@ remain available for app-owned durable storage.
 `PubkySharedStateStorage` stores one encrypted blob at
 `/pub/paykit/v0/shared-state.bin`. The inner state uses the SDK state-blob
 codec. The outer envelope uses XChaCha20-Poly1305 with a fresh random nonce, a
-key derived from the local Pubky secret with BLAKE3 context
-`paykit/shared-state`, and the Pubky public key as associated data. Reads reject
-invalid, undecryptable, or internally inconsistent state. Encrypted blobs are
-limited to 64 MiB; whole-state transactions require additional working memory.
+key derived from the current identity-wide Paykit secret, and the Pubky public
+key plus key generation as associated data. Reads reject invalid,
+undecryptable, wrong-generation, or internally inconsistent state. Encrypted
+blobs are limited to 64 MiB; whole-state transactions require additional
+working memory.
 Encryption does not hide the resource's existence, size, or update timing, and
 does not by itself detect a homeserver replay of an older valid blob.
 
@@ -296,12 +297,15 @@ pub trait PubkySessionProvider {
 
 `PubkySessionAccess` provides the live authenticated `PubkySession`, Pubky
 client for counterparty homeserver access, and an optional
-`PubkyLocalSecretKey`. The SDK derives the identity-wide Paykit Noise key from
-the local Pubky secret using BLAKE3 `derive_key` with context `paykit/noise`
-and the 32 Pubky secret-key bytes as key material. Public-only session access
-can use public workflows but cannot establish or advance Encrypted Links. The
-SDK derives and persists public `IdentityState` from that access during
-initialization.
+`PubkyLocalSecretKey` and `PaykitIdentitySecretKey`. When an explicit Paykit
+secret is absent, the SDK derives generation 1 from the local Pubky secret. A
+holder of that Pubky secret can derive any later generation explicitly, while
+delegated apps receive only the current generation-specific Paykit secret.
+Independent Noise and shared-state keys are derived from the Paykit secret.
+This lets delegated apps use private Paykit without receiving the Pubky root
+secret. Public-only session access can use public workflows but cannot
+establish or advance Encrypted Links. The SDK derives and persists public
+`IdentityState` from that access during initialization.
 
 If `load_session_access` returns `None`, no live session access is currently
 available. Ordinary refreshes must preserve the shared Paykit state and block
@@ -324,10 +328,13 @@ Identity status reports the last initialized public key and live-session
 availability directly. A public key with no live session identifies the stored
 state but Pubky-backed workflows must wait. A matching live session can run
 public operations. Encrypted Link workflows also require access to the matching
-local Pubky secret. Transient absence of live session access and explicit app
-sign-out must preserve private SDK state. If session access changes to another
-identity, the SDK rejects the existing state backing without modifying it; the
-caller must select the shared state backing for the new identity.
+Paykit identity secret, supplied directly or derived from the local Pubky
+secret for the required generation. Session access without an explicit Paykit
+secret falls back to generation 1; after rotation, the current derived key must
+be supplied explicitly. Transient absence of live session access and explicit
+app sign-out must preserve private SDK state. If session access changes to
+another identity, the SDK rejects the existing state backing without modifying
+it; the caller must select the shared state backing for the new identity.
 
 The SDK should provide high-level initialization, backup/export/restore, and
 sign-out APIs itself. The provider is the narrow platform hook for secure
@@ -385,6 +392,7 @@ The registry uses this closed-world JSON shape:
 {
   "version": 1,
   "kind": "paykit.app_registry",
+  "key_generation": 1,
   "noise_public_key": "<z32-public-key>",
   "apps": {
     "bitkit": {
@@ -411,9 +419,11 @@ concurrent writers need homeserver conditional writes so one app cannot
 overwrite another app's newer registration.
 
 `noise_public_key` may be omitted while only public-capable apps are
-registered. The first private-capable app initializes it from the normative
-Noise-key derivation above. After initialization it is immutable, and private
-capabilities cannot be registered without it.
+registered. The first private-capable app initializes it from the current
+Paykit identity secret. Key rotation advances `key_generation`, replaces the
+Noise public key, re-encrypts shared state, clears old Encrypted Link
+snapshots, and preserves non-cryptographic history. Private capabilities cannot
+be registered without a Noise public key.
 
 An app must successfully publish its registry entry before creating
 app-attributed private work. Removal preflight reports outstanding requests,
@@ -900,7 +910,7 @@ public endpoint sync with their own process or storage lock.
 1. Acquire identity lock.
 2. Import or restore the Pubky session through SDK-owned Pubky logic.
 3. Persist resulting session access through SDK storage/session hooks.
-4. Validate session access and matching local Pubky secret availability when
+4. Validate session access and current Paykit identity key availability when
    private capability is expected.
 5. Persist identity state.
 6. If identity changed, reject the current state backing without modifying it;
@@ -933,7 +943,9 @@ unless explicitly configured to manage that app's complete endpoint namespace.
 6. When the handshake is pending, replace the stored handshake snapshot.
 7. When the handshake completes, persist the active link snapshot, clear the
    handshake snapshot/role, and mark the peer `linked`.
-8. If the stored handshake or link snapshot cannot be restored, mark the peer
+8. Before restoring a snapshot, compare its counterparty Noise key with the
+   current App Registry and require recovery when the counterparty rotated it.
+9. If the stored handshake or link snapshot cannot be restored, mark the peer
    recovery-required and stop private automation for that peer. If a restored
    handshake fails to advance, keep the peer `linking` and retry later.
 
@@ -1346,7 +1358,9 @@ Core tests:
 - Private Payment List latest valid message wins per source App ID
 - stale private link reports recovery or uses public endpoints only when the
   resolution request includes them
-- private-capable session access requires the matching local Pubky secret
+- private-capable session access requires current Paykit identity key material
+- key rotation preserves durable history while clearing old Encrypted Link
+  snapshots and rejecting wrong-generation shared state
 - missing live session access blocks private operations without clearing cached
   private state
 - outbound retries reuse exact Event ID and payload
@@ -1381,3 +1395,5 @@ Platform tests:
 - higher-level platform wrapper/package policy on top of the SDK bindings
 - Multi-device synchronization and recovery policy on top of the
   identity-wide shared-state resource.
+- Revocable Pubky credentials and secure Paykit key distribution across
+  authorized applications and devices.

@@ -13,7 +13,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::{default_pubky_client_config, FfiPubkyClientConfig};
 use crate::errors::{ffi_error_to_sdk, identity_error, validation_error, PaykitFfiError};
-use crate::secrets::FfiPubkyLocalSecretKey;
+use crate::secrets::{FfiPaykitIdentitySecretKey, FfiPubkyLocalSecretKey};
 
 pub(crate) fn parse_public_key(value: String) -> Result<PubkyPublicKey, PaykitFfiError> {
     PubkyPublicKey::from_raw_or_app_key(value).map_err(Into::into)
@@ -58,6 +58,7 @@ pub enum FfiPubkyAuthRequestKind {
 pub struct FfiPubkySessionAccess {
     pub(crate) session_secret: String,
     pub(crate) local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
+    pub(crate) paykit_identity_secret_key: Option<Arc<FfiPaykitIdentitySecretKey>>,
     pub(crate) live_access: Option<PubkySessionAccess>,
     pub(crate) live_client_config: Option<FfiPubkyClientConfig>,
 }
@@ -79,6 +80,13 @@ impl fmt::Debug for FfiPubkySessionAccess {
                     .as_ref()
                     .map(|key| format!("<redacted:{} bytes>", key.bytes.len())),
             )
+            .field(
+                "paykit_identity_secret_key",
+                &self
+                    .paykit_identity_secret_key
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
             .field("live_access", &self.live_access.as_ref().map(|_| "<live>"))
             .field("live_client_config", &self.live_client_config)
             .finish()
@@ -92,10 +100,12 @@ impl FfiPubkySessionAccess {
     pub fn new(
         session_secret: String,
         local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
+        paykit_identity_secret_key: Option<Arc<FfiPaykitIdentitySecretKey>>,
     ) -> Self {
         Self {
             session_secret,
             local_secret_key,
+            paykit_identity_secret_key,
             live_access: None,
             live_client_config: None,
         }
@@ -109,6 +119,11 @@ impl FfiPubkySessionAccess {
     /// Export the local Pubky secret key, when available.
     pub fn export_local_secret_key(&self) -> Option<Arc<FfiPubkyLocalSecretKey>> {
         self.local_secret_key.clone()
+    }
+
+    /// Export the delegated Paykit identity secret, when supplied separately.
+    pub fn export_paykit_identity_secret_key(&self) -> Option<Arc<FfiPaykitIdentitySecretKey>> {
+        self.paykit_identity_secret_key.clone()
     }
 }
 
@@ -265,11 +280,18 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
             .map(|key| local_secret_from_bytes(key.export_bytes()))
             .transpose()
             .map_err(|err| ffi_error_to_sdk(err, "load local Pubky secret key"))?;
+        let paykit_identity_secret_key = access
+            .paykit_identity_secret_key
+            .as_ref()
+            .map(|key| key.to_sdk())
+            .transpose()
+            .map_err(|err| ffi_error_to_sdk(err, "load Paykit identity secret key"))?;
 
         if access.live_client_config.as_ref() == Some(&self.pubky_client) {
             if let Some(live_access) = &access.live_access {
                 let mut live_access = live_access.clone();
                 live_access.local_secret_key = local_secret_key;
+                live_access.paykit_identity_secret_key = paykit_identity_secret_key;
                 return Ok(Some(live_access));
             }
         }
@@ -286,6 +308,7 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
             session,
             outbox_client: self.pubky.clone(),
             local_secret_key,
+            paykit_identity_secret_key,
         }))
     }
 
@@ -645,6 +668,7 @@ fn bootstrap_result_to_ffi(
         session_access: Arc::new(FfiPubkySessionAccess {
             session_secret,
             local_secret_key: local_secret_key.as_ref().map(secret_to_ffi),
+            paykit_identity_secret_key: None,
             live_access: Some(live_access),
             live_client_config: Some(pubky_client.clone()),
         }),

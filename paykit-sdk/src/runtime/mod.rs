@@ -126,6 +126,7 @@ mod app_removal;
 mod backup;
 mod contacts;
 mod encrypted_links;
+mod key_rotation;
 mod outbound_private;
 mod payment_requests;
 mod payment_resolution;

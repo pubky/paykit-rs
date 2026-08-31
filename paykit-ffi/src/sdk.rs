@@ -157,7 +157,7 @@ impl FfiPaykitSdk {
 
     /// Create a Pubky shared-state runtime with explicit client configuration.
     ///
-    /// Requires active session access with the matching local identity secret
+    /// Requires active session access with current Paykit identity key material
     /// and `required_session_capabilities()`, plus externally serialized writes
     /// across independent runtimes.
     #[uniffi::constructor]
@@ -176,7 +176,7 @@ impl FfiPaykitSdk {
 
     /// Create a Pubky shared-state runtime with payment adapter callbacks.
     ///
-    /// Requires active session access with the matching local identity secret
+    /// Requires active session access with current Paykit identity key material
     /// and `required_session_capabilities()`, plus externally serialized writes
     /// across independent runtimes.
     #[uniffi::constructor]
@@ -195,7 +195,7 @@ impl FfiPaykitSdk {
 
     /// Create a Pubky shared-state runtime with payment and client configuration.
     ///
-    /// Requires active session access with the matching local identity secret
+    /// Requires active session access with current Paykit identity key material
     /// and `required_session_capabilities()`, plus externally serialized writes
     /// across independent runtimes.
     #[uniffi::constructor]

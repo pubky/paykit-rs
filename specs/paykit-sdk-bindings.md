@@ -178,8 +178,8 @@ flow, but Paykit does not prescribe one product's identity UI.
 The platform session provider should return one of:
 
 - no live session access
-- live session access, including local Pubky secret access when private Paykit
-  workflows are required
+- live session access, including current Paykit identity key material when
+  private Paykit workflows are required
 
 `None` or `null` means no live session is currently available. Explicit
 sign-out is a separate SDK call that clears this application's session access
@@ -426,7 +426,7 @@ Binding tests should cover:
 - stale state blob revision conflicts
 - identity and live-session availability transitions
 - missing live session access preserving cached private state
-- identity-wide Noise key derivation from local Pubky secret material
+- generation-specific Paykit key derivation and delegated/rotated key loading
 - payment adapter batch selection and reservation release
 - candidate ID mapping across payment adapter callbacks
 - structured error mapping

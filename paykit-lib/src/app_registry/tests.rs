@@ -51,6 +51,7 @@ fn test_app_registry_json_round_trips() {
     let value = serde_json::from_str::<serde_json::Value>(&json).unwrap();
     assert_eq!(value["version"], 1);
     assert_eq!(value["kind"], "paykit.app_registry");
+    assert_eq!(value["key_generation"], 1);
     assert_eq!(value["apps"]["bitkit"]["display_name"], "Bitkit");
     assert_eq!(
         value["default_apps_by_endpoint"]["btc-lightning-bolt11"],
@@ -94,6 +95,7 @@ fn test_remote_registry_reports_invalid_app_without_noise_key() {
     let raw = json!({
         "version": APP_REGISTRY_VERSION,
         "kind": APP_REGISTRY_KIND,
+        "key_generation": INITIAL_PAYKIT_KEY_GENERATION,
         "noise_public_key": null,
         "apps": {
             "bitkit": {
@@ -135,10 +137,30 @@ fn test_app_registry_rejects_unregistered_defaults() {
     let raw = json!({
         "version": 1,
         "kind": "paykit.app_registry",
+        "key_generation": INITIAL_PAYKIT_KEY_GENERATION,
         "noise_public_key": pubky::Keypair::from_secret(&[7; 32]).public_key().z32(),
         "apps": {},
         "default_app_id": "missing",
         "default_apps_by_endpoint": {}
+    })
+    .to_string();
+
+    assert!(matches!(
+        parse_paykit_app_registry_json(&raw),
+        Err(PaykitError::InvalidData { .. })
+    ));
+}
+
+#[test]
+fn test_app_registry_rejects_zero_key_generation() {
+    let raw = json!({
+        "version": APP_REGISTRY_VERSION,
+        "kind": APP_REGISTRY_KIND,
+        "key_generation": 0,
+        "noise_public_key": null,
+        "apps": {},
+        "default_app_id": null,
+        "default_apps_by_endpoint": {},
     })
     .to_string();
 
@@ -181,7 +203,7 @@ fn test_app_registry_prefers_endpoint_default_over_identity_default() {
 fn test_app_registry_rejects_duplicate_apps() {
     let public_key = pubky::Keypair::from_secret(&[7; 32]).public_key().z32();
     let raw = format!(
-        r#"{{"version":1,"kind":"paykit.app_registry","noise_public_key":"{public_key}","apps":{{"bitkit":{{"display_name":"Bitkit","capabilities":{{"private_payments":true,"payment_requests":true,"receipts":true,"outgoing_payments":true}}}},"bitkit":{{"display_name":"Other","capabilities":{{"private_payments":true,"payment_requests":true,"receipts":true,"outgoing_payments":true}}}}}},"default_app_id":null,"default_apps_by_endpoint":{{}}}}"#
+        r#"{{"version":1,"kind":"paykit.app_registry","key_generation":1,"noise_public_key":"{public_key}","apps":{{"bitkit":{{"display_name":"Bitkit","capabilities":{{"private_payments":true,"payment_requests":true,"receipts":true,"outgoing_payments":true}}}},"bitkit":{{"display_name":"Other","capabilities":{{"private_payments":true,"payment_requests":true,"receipts":true,"outgoing_payments":true}}}}}},"default_app_id":null,"default_apps_by_endpoint":{{}}}}"#
     );
 
     assert!(matches!(
@@ -236,6 +258,7 @@ fn test_app_registry_rejects_too_many_remote_apps() {
     let raw = json!({
         "version": APP_REGISTRY_VERSION,
         "kind": APP_REGISTRY_KIND,
+        "key_generation": INITIAL_PAYKIT_KEY_GENERATION,
         "noise_public_key": pubky::Keypair::from_secret(&[7; 32]).public_key().z32(),
         "apps": apps,
         "default_app_id": null,
@@ -247,6 +270,22 @@ fn test_app_registry_rejects_too_many_remote_apps() {
         parse_paykit_app_registry_json(&raw),
         Err(PaykitError::InvalidData { .. })
     ));
+}
+
+#[test]
+fn test_app_registry_rotates_noise_key_only_to_next_generation() {
+    let mut registry = registry();
+    let replacement = pubky::Keypair::from_secret(&[8; 32]).public_key();
+
+    registry
+        .rotate_noise_public_key(replacement.clone(), 2)
+        .unwrap();
+
+    assert_eq!(registry.key_generation(), 2);
+    assert_eq!(registry.noise_public_key(), Some(&replacement));
+    assert!(registry
+        .rotate_noise_public_key(pubky::Keypair::from_secret(&[9; 32]).public_key(), 4)
+        .is_err());
 }
 
 #[test]

@@ -299,7 +299,7 @@ where
         max_advance_steps: u32,
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let (peer_state, link_state) = self
+        let (mut peer_state, link_state) = self
             .storage
             .transaction(|tx| {
                 Ok((
@@ -308,6 +308,43 @@ where
                 ))
             })
             .await?;
+
+        if !matches!(
+            peer_state,
+            Some(LinkedPeerState::RecoveryRequired | LinkedPeerState::Blocked)
+        ) {
+            if let Some(state) = link_state.as_ref() {
+                let snapshot_remote_key = if let Some(snapshot) = state.link_snapshot.as_ref() {
+                    Some(
+                        paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot)
+                            .map(|snapshot| snapshot.remote_noise_public_key().clone()),
+                    )
+                } else {
+                    state.handshake_snapshot.as_ref().map(|snapshot| {
+                        paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot)
+                            .map(|snapshot| snapshot.remote_noise_public_key().clone())
+                    })
+                };
+                if let Some(snapshot_remote_key) = snapshot_remote_key {
+                    let requires_recovery = match snapshot_remote_key {
+                        Ok(snapshot_remote_key) => {
+                            !self
+                                .snapshot_uses_current_counterparty_noise_key(
+                                    &counterparty,
+                                    &snapshot_remote_key,
+                                )
+                                .await?
+                        }
+                        Err(_) => true,
+                    };
+                    if requires_recovery {
+                        self.mark_link_recovery_required(&counterparty, lease.clone())
+                            .await?;
+                        peer_state = Some(LinkedPeerState::RecoveryRequired);
+                    }
+                }
+            }
+        }
 
         let mut report = match (peer_state, link_state) {
             (Some(LinkedPeerState::RecoveryRequired), _) => {
@@ -508,6 +545,18 @@ where
         let (session_access, secret_key) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
         let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot_bytes)?;
+        if !self
+            .snapshot_uses_current_counterparty_noise_key(
+                &counterparty,
+                snapshot.remote_noise_public_key(),
+            )
+            .await?
+        {
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!("counterparty {counterparty} rotated its Paykit identity key"),
+                source: None,
+            });
+        }
         paykit_lib::restore_encrypted_link_handshake(
             session_access.session.clone(),
             secret_key,
@@ -765,14 +814,7 @@ where
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let secret_key = session_access
-            .local_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
-                source: None,
-            })?
-            .paykit_noise_secret_key();
+        let secret_key = session_access.paykit_noise_secret_key()?;
         Ok((session_access, secret_key))
     }
 
@@ -806,6 +848,14 @@ where
                 ),
                 source: None,
             })
+    }
+
+    pub(super) async fn snapshot_uses_current_counterparty_noise_key(
+        &self,
+        counterparty: &PubkyPublicKey,
+        snapshot_remote_key: &paykit_lib::PublicKey,
+    ) -> Result<bool> {
+        Ok(self.counterparty_noise_public_key(counterparty).await? == *snapshot_remote_key)
     }
 }
 

@@ -1501,6 +1501,20 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1583,6 +1597,12 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_func_resolve_pubky_url() != 12085.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitidentitysecretkey_export_bytes() != 28268.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitidentitysecretkey_key_generation() != 58064.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 32868.toShort()) {
@@ -1816,6 +1836,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_rotate_paykit_identity_key() != 22596.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 1121.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1885,10 +1908,16 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 26526.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_derive_paykit_identity_secret_key() != 28900.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_export_bytes() != 58726.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_local_secret_key() != 61849.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_paykit_identity_secret_key() != 10109.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 4660.toShort()) {
@@ -1966,6 +1995,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically() != 61831.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_constructor_ffipaykitidentitysecretkey_new() != 64529.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_constructor_ffipaykitsdk_new() != 15447.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1975,10 +2007,10 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_client_config() != 36484.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state() != 40170.toShort()) {
+        if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state() != 25288.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state_and_client_config() != 1168.toShort()) {
+        if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state_and_client_config() != 62896.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_client_config() != 13764.toShort()) {
@@ -1987,7 +2019,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state() != 14843.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config() != 2605.toShort()) {
+        if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config() != 2383.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_constructor_ffipaymentpayload_new() != 12481.toShort()) {
@@ -2002,7 +2034,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 2417.toShort()) {
+        if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 34039.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 44998.toShort()) {
@@ -2067,6 +2099,12 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_func_resolve_pubky_url(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitidentitysecretkey_export_bytes(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitidentitysecretkey_key_generation(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer(
@@ -2300,6 +2338,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_rotate_paykit_identity_key(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_save_contact(
     ): Short
     @JvmStatic
@@ -2369,10 +2410,16 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipubkyauthrequest_complete(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipubkylocalsecretkey_derive_paykit_identity_secret_key(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipubkylocalsecretkey_export_bytes(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipubkysessionaccess_export_local_secret_key(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipubkysessionaccess_export_paykit_identity_secret_key(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret(
@@ -2450,6 +2497,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffipaykitidentitysecretkey_new(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_constructor_ffipaykitsdk_new(
     ): Short
     @JvmStatic
@@ -2525,6 +2575,32 @@ internal object UniffiLib : Library {
     internal val CLEANER: UniffiCleaner by lazy {
         UniffiCleaner.create()
     }
+    @JvmStatic
+    external fun uniffi_paykit_fn_clone_ffipaykitidentitysecretkey(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_free_ffipaykitidentitysecretkey(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffipaykitidentitysecretkey_new(
+        `bytes`: RustBufferByValue,
+        `keyGeneration`: Long,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitidentitysecretkey_export_bytes(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitidentitysecretkey_key_generation(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_clone_ffipaykitsdk(
         `ptr`: Pointer?,
@@ -2993,6 +3069,11 @@ internal object UniffiLib : Library {
         `receiptId`: RustBufferByValue,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_rotate_paykit_identity_key(
+        `ptr`: Pointer?,
+        `replacementKey`: Pointer?,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_save_contact(
         `ptr`: Pointer?,
         `update`: RustBufferByValue,
@@ -3190,6 +3271,12 @@ internal object UniffiLib : Library {
         uniffiCallStatus: UniffiRustCallStatus,
     ): Pointer?
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipubkylocalsecretkey_derive_paykit_identity_secret_key(
+        `ptr`: Pointer?,
+        `keyGeneration`: Long,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipubkylocalsecretkey_export_bytes(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
@@ -3208,10 +3295,16 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_constructor_ffipubkysessionaccess_new(
         `sessionSecret`: RustBufferByValue,
         `localSecretKey`: RustBufferByValue,
+        `paykitIdentitySecretKey`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Pointer?
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipubkysessionaccess_export_local_secret_key(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipubkysessionaccess_export_paykit_identity_secret_key(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
     ): RustBufferByValue
@@ -4033,6 +4126,180 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
     override fun write(value: ByteArray, buf: ByteBuffer) {
         buf.putInt(value.size)
         buf.put(value)
+    }
+}
+
+
+
+/**
+ * Rotatable identity-wide Paykit secret supplied by secure platform storage.
+ */
+public open class PaykitIdentitySecretKey: Disposable, PaykitIdentitySecretKeyInterface {
+
+    public constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    public constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(null))
+    }
+    /**
+     * Create Paykit key material from secure platform storage.
+     */
+    public constructor(`bytes`: kotlin.ByteArray, `keyGeneration`: kotlin.ULong) : this(
+        uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+            UniffiLib.uniffi_paykit_fn_constructor_ffipaykitidentitysecretkey_new(
+                FfiConverterByteArray.lower(`bytes`),
+                FfiConverterULong.lower(`keyGeneration`),
+                uniffiRustCallStatus,
+            )
+        }!!
+    )
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed: kotlinx.atomicfu.AtomicBoolean = kotlinx.atomicfu.atomic(false)
+    private val callCounter: kotlinx.atomicfu.AtomicLong = kotlinx.atomicfu.atomic(1L)
+
+    private val lock = kotlinx.atomicfu.locks.ReentrantLock()
+
+    private fun <T> synchronized(block: () -> T): T {
+        lock.lock()
+        try {
+            return block()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    override fun close() {
+        synchronized { this.destroy() }
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.value
+            if (c == 0L) {
+                throw IllegalStateException("${this::class::simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this::class::simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiPointerDestroyer(private val pointer: Pointer?) : Disposable {
+        override fun destroy() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.uniffi_paykit_fn_free_ffipaykitidentitysecretkey(ptr, status)
+                }
+            }
+        }
+    }
+
+    public fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall { status ->
+            UniffiLib.uniffi_paykit_fn_clone_ffipaykitidentitysecretkey(pointer!!, status)
+        }!!
+    }
+
+
+    /**
+     * Export the secret bytes for secure platform storage or delegation.
+     */
+    public override fun `exportBytes`(): kotlin.ByteArray {
+        return FfiConverterByteArray.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitidentitysecretkey_export_bytes(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the key generation.
+     */
+    public override fun `keyGeneration`(): kotlin.ULong {
+        return FfiConverterULong.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitidentitysecretkey_key_generation(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+
+
+
+
+
+
+    public companion object
+
+}
+
+
+
+
+
+public object FfiConverterTypePaykitIdentitySecretKey: FfiConverter<PaykitIdentitySecretKey, Pointer> {
+
+    override fun lower(value: PaykitIdentitySecretKey): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): PaykitIdentitySecretKey {
+        return PaykitIdentitySecretKey(value)
+    }
+
+    override fun read(buf: ByteBuffer): PaykitIdentitySecretKey {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(buf.getLong().toPointer())
+    }
+
+    override fun allocationSize(value: PaykitIdentitySecretKey): ULong = 8UL
+
+    override fun write(value: PaykitIdentitySecretKey, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(lower(value).toLong())
     }
 }
 
@@ -5941,6 +6208,32 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
+     * Rotate identity-wide Paykit key material to the next generation.
+     *
+     * Persist and distribute the replacement key to remaining authorized
+     * applications before private Paykit operations resume.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `rotatePaykitIdentityKey`(`replacementKey`: PaykitIdentitySecretKey): PaykitAppRegistry {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_rotate_paykit_identity_key(
+                    thisPtr,
+                    FfiConverterTypePaykitIdentitySecretKey.lower(`replacementKey`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypePaykitAppRegistry.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Save or update a Contact Record.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -6307,7 +6600,7 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
         /**
          * Create a Pubky shared-state runtime with payment adapter callbacks.
          *
-         * Requires active session access with the matching local identity secret
+         * Requires active session access with current Paykit identity key material
          * and `required_session_capabilities()`, plus externally serialized writes
          * across independent runtimes.
          */
@@ -6327,7 +6620,7 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
         /**
          * Create a Pubky shared-state runtime with payment and client configuration.
          *
-         * Requires active session access with the matching local identity secret
+         * Requires active session access with current Paykit identity key material
          * and `required_session_capabilities()`, plus externally serialized writes
          * across independent runtimes.
          */
@@ -6385,7 +6678,7 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
         /**
          * Create a Pubky shared-state runtime with explicit client configuration.
          *
-         * Requires active session access with the matching local identity secret
+         * Requires active session access with current Paykit identity key material
          * and `required_session_capabilities()`, plus externally serialized writes
          * across independent runtimes.
          */
@@ -7392,6 +7685,22 @@ public open class PubkyLocalSecretKey: Disposable, PubkyLocalSecretKeyInterface 
 
 
     /**
+     * Derive one generation of the identity-wide Paykit secret.
+     */
+    @Throws(PaykitException::class)
+    public override fun `derivePaykitIdentitySecretKey`(`keyGeneration`: kotlin.ULong): PaykitIdentitySecretKey {
+        return FfiConverterTypePaykitIdentitySecretKey.lift(callWithPointer {
+            uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffipubkylocalsecretkey_derive_paykit_identity_secret_key(
+                    it,
+                    FfiConverterULong.lower(`keyGeneration`),
+                    uniffiRustCallStatus,
+                )
+            }!!
+        })
+    }
+
+    /**
      * Export the raw bytes for platform secure storage.
      */
     public override fun `exportBytes`(): kotlin.ByteArray {
@@ -7468,11 +7777,12 @@ public open class PubkySessionAccess: Disposable, PubkySessionAccessInterface {
     /**
      * Create session access material from platform secure storage.
      */
-    public constructor(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?) : this(
+    public constructor(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `paykitIdentitySecretKey`: PaykitIdentitySecretKey?) : this(
         uniffiRustCall { uniffiRustCallStatus ->
             UniffiLib.uniffi_paykit_fn_constructor_ffipubkysessionaccess_new(
                 FfiConverterString.lower(`sessionSecret`),
                 FfiConverterOptionalTypeFfiPubkyLocalSecretKey.lower(`localSecretKey`),
+                FfiConverterOptionalTypeFfiPaykitIdentitySecretKey.lower(`paykitIdentitySecretKey`),
                 uniffiRustCallStatus,
             )
         }!!
@@ -7558,6 +7868,20 @@ public open class PubkySessionAccess: Disposable, PubkySessionAccessInterface {
         return FfiConverterOptionalTypeFfiPubkyLocalSecretKey.lift(callWithPointer {
             uniffiRustCall { uniffiRustCallStatus ->
                 UniffiLib.uniffi_paykit_fn_method_ffipubkysessionaccess_export_local_secret_key(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Export the delegated Paykit identity secret, when supplied separately.
+     */
+    public override fun `exportPaykitIdentitySecretKey`(): PaykitIdentitySecretKey? {
+        return FfiConverterOptionalTypeFfiPaykitIdentitySecretKey.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffipubkysessionaccess_export_paykit_identity_secret_key(
                     it,
                     uniffiRustCallStatus,
                 )
@@ -9891,6 +10215,7 @@ public object FfiConverterTypePaykitAppCapabilities: FfiConverterRustBuffer<Payk
 public object FfiConverterTypePaykitAppRegistry: FfiConverterRustBuffer<PaykitAppRegistry> {
     override fun read(buf: ByteBuffer): PaykitAppRegistry {
         return PaykitAppRegistry(
+            FfiConverterULong.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterSequenceTypePaykitApp.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -9899,6 +10224,7 @@ public object FfiConverterTypePaykitAppRegistry: FfiConverterRustBuffer<PaykitAp
     }
 
     override fun allocationSize(value: PaykitAppRegistry): ULong = (
+            FfiConverterULong.allocationSize(value.`keyGeneration`) +
             FfiConverterOptionalString.allocationSize(value.`noisePublicKey`) +
             FfiConverterSequenceTypePaykitApp.allocationSize(value.`apps`) +
             FfiConverterOptionalString.allocationSize(value.`defaultAppId`) +
@@ -9906,6 +10232,7 @@ public object FfiConverterTypePaykitAppRegistry: FfiConverterRustBuffer<PaykitAp
     )
 
     override fun write(value: PaykitAppRegistry, buf: ByteBuffer) {
+        FfiConverterULong.write(value.`keyGeneration`, buf)
         FfiConverterOptionalString.write(value.`noisePublicKey`, buf)
         FfiConverterSequenceTypePaykitApp.write(value.`apps`, buf)
         FfiConverterOptionalString.write(value.`defaultAppId`, buf)
@@ -12377,6 +12704,35 @@ public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteA
         } else {
             buf.put(1)
             FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiPaykitIdentitySecretKey: FfiConverterRustBuffer<PaykitIdentitySecretKey?> {
+    override fun read(buf: ByteBuffer): PaykitIdentitySecretKey? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypePaykitIdentitySecretKey.read(buf)
+    }
+
+    override fun allocationSize(value: PaykitIdentitySecretKey?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypePaykitIdentitySecretKey.allocationSize(value)
+        }
+    }
+
+    override fun write(value: PaykitIdentitySecretKey?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypePaykitIdentitySecretKey.write(value, buf)
         }
     }
 }

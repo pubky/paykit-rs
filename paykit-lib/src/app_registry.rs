@@ -15,6 +15,8 @@ use crate::{
 const APP_REGISTRY_KIND: &str = "paykit.app_registry";
 const APP_REGISTRY_VERSION: u8 = 1;
 const APP_DISPLAY_NAME_MAX_LEN: usize = 128;
+/// Initial generation for identity-wide Paykit key material.
+pub const INITIAL_PAYKIT_KEY_GENERATION: u64 = 1;
 /// Maximum serialized Paykit App Registry size accepted from public storage.
 pub const PAYKIT_APP_REGISTRY_MAX_BYTES: usize = 64 * 1024;
 /// Maximum number of applications in one Paykit App Registry.
@@ -75,6 +77,7 @@ impl PaykitApp {
 /// Public registry shared by every application using one Paykit identity.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PaykitAppRegistry {
+    key_generation: u64,
     noise_public_key: Option<PublicKey>,
     apps: HashMap<PaykitAppId, PaykitApp>,
     default_app_id: Option<PaykitAppId>,
@@ -84,6 +87,7 @@ pub struct PaykitAppRegistry {
 impl fmt::Debug for PaykitAppRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PaykitAppRegistry")
+            .field("key_generation", &self.key_generation)
             .field("noise_public_key", &self.noise_public_key)
             .field("apps", &self.apps)
             .field("default_app_id", &self.default_app_id)
@@ -99,11 +103,17 @@ impl PaykitAppRegistry {
     /// before a private-capable application initializes the Noise key.
     pub fn new(noise_public_key: Option<PublicKey>) -> Self {
         Self {
+            key_generation: INITIAL_PAYKIT_KEY_GENERATION,
             noise_public_key,
             apps: HashMap::new(),
             default_app_id: None,
             default_apps_by_endpoint: HashMap::new(),
         }
+    }
+
+    /// Return the generation of identity-wide Paykit key material.
+    pub fn key_generation(&self) -> u64 {
+        self.key_generation
     }
 
     /// Return the identity-wide Noise public key, when initialized.
@@ -124,6 +134,26 @@ impl PaykitAppRegistry {
             ));
         }
         self.noise_public_key = Some(noise_public_key);
+        Ok(())
+    }
+
+    /// Rotate the identity-wide Noise public key to the next key generation.
+    pub fn rotate_noise_public_key(
+        &mut self,
+        noise_public_key: PublicKey,
+        key_generation: u64,
+    ) -> Result<()> {
+        let expected_generation = self.key_generation.checked_add(1).ok_or_else(|| {
+            PaykitError::Validation("Paykit App Registry key generation is exhausted".into())
+        })?;
+        if key_generation != expected_generation {
+            return Err(PaykitError::Validation(format!(
+                "Paykit App Registry key generation must advance from {} to {expected_generation}",
+                self.key_generation
+            )));
+        }
+        self.noise_public_key = Some(noise_public_key);
+        self.key_generation = key_generation;
         Ok(())
     }
 
@@ -257,6 +287,7 @@ impl From<PaykitApp> for PaykitAppWire {
 struct AppRegistryWire {
     version: u8,
     kind: String,
+    key_generation: u64,
     noise_public_key: Option<String>,
     #[serde(deserialize_with = "deserialize_unique_map")]
     apps: HashMap<String, PaykitAppWire>,
@@ -269,6 +300,7 @@ struct AppRegistryWire {
 struct AppRegistryWireRef<'a> {
     version: u8,
     kind: &'static str,
+    key_generation: u64,
     noise_public_key: Option<String>,
     apps: BTreeMap<&'a str, &'a PaykitApp>,
     default_app_id: Option<&'a str>,
@@ -291,6 +323,7 @@ pub fn serialize_paykit_app_registry(registry: &PaykitAppRegistry) -> Result<Str
     let raw_json = serde_json::to_string(&AppRegistryWireRef {
         version: APP_REGISTRY_VERSION,
         kind: APP_REGISTRY_KIND,
+        key_generation: registry.key_generation,
         noise_public_key: registry.noise_public_key.as_ref().map(PublicKey::z32),
         apps,
         default_app_id: registry.default_app_id.as_ref().map(PaykitAppId::as_str),
@@ -330,6 +363,12 @@ pub fn parse_paykit_app_registry_json(raw_json: &str) -> Result<PaykitAppRegistr
             None,
         ));
     }
+    if wire.key_generation == 0 {
+        return Err(invalid_data(
+            "Paykit App Registry key generation must be greater than zero",
+            None,
+        ));
+    }
     if wire.apps.len() > PAYKIT_APP_REGISTRY_MAX_APPS {
         return Err(invalid_data(
             format!(
@@ -359,6 +398,7 @@ pub fn parse_paykit_app_registry_json(raw_json: &str) -> Result<PaykitAppRegistr
         })
         .transpose()?;
     let mut registry = PaykitAppRegistry::new(noise_public_key);
+    registry.key_generation = wire.key_generation;
     for (raw_app_id, raw_app) in wire.apps {
         let app_id = parse_remote_app_id(raw_app_id)?;
         let app = PaykitApp::try_from(raw_app).map_err(|err| {

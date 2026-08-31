@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use paykit_lib::PaymentEndpointIdentifier;
 use paykit_sdk::{
@@ -8,6 +9,7 @@ use paykit_sdk::{
 use crate::{
     errors::{validation_error, PaykitFfiError},
     sdk::FfiPaykitSdk,
+    secrets::FfiPaykitIdentitySecretKey,
     session::parse_public_key,
 };
 
@@ -38,6 +40,8 @@ pub struct FfiPaykitApp {
 /// Public application registry for one Paykit identity.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiPaykitAppRegistry {
+    /// Generation of the identity-wide Paykit key material.
+    pub key_generation: u64,
     /// Identity-wide Noise public key as raw z32 text, when initialized.
     ///
     /// Public-only registries may omit this value. This is not a Pubky identity
@@ -75,6 +79,21 @@ impl FfiPaykitSdk {
             .paykit_app_registry(parse_public_key(public_key)?)
             .await
             .map(|registry| registry.map(Into::into))
+            .map_err(Into::into)
+    }
+
+    /// Rotate identity-wide Paykit key material to the next generation.
+    ///
+    /// Persist and distribute the replacement key to remaining authorized
+    /// applications before private Paykit operations resume.
+    pub async fn rotate_paykit_identity_key(
+        &self,
+        replacement_key: Arc<FfiPaykitIdentitySecretKey>,
+    ) -> Result<FfiPaykitAppRegistry, PaykitFfiError> {
+        self.runtime
+            .rotate_paykit_identity_key(replacement_key.to_sdk()?)
+            .await
+            .map(Into::into)
             .map_err(Into::into)
     }
 
@@ -200,6 +219,7 @@ impl From<PaykitAppRegistry> for FfiPaykitAppRegistry {
             .collect::<Vec<_>>();
         apps.sort_by(|left, right| left.app_id.cmp(&right.app_id));
         Self {
+            key_generation: value.key_generation(),
             noise_public_key: value.noise_public_key().map(pubky::PublicKey::z32),
             apps,
             default_app_id: value.default_app_id().map(ToString::to_string),
@@ -252,6 +272,7 @@ mod tests {
         let ffi = FfiPaykitAppRegistry::from(registry);
 
         assert!(ffi.noise_public_key.is_some());
+        assert_eq!(ffi.key_generation, 1);
         assert_eq!(ffi.apps.len(), 1);
         assert_eq!(ffi.apps[0].app_id, "bitkit");
         assert_eq!(ffi.apps[0].display_name, "Bitkit");
@@ -269,6 +290,7 @@ mod tests {
     fn test_app_registry_conversion_preserves_uninitialized_noise_key() {
         let ffi = FfiPaykitAppRegistry::from(PaykitAppRegistry::new(None));
 
+        assert_eq!(ffi.key_generation, 1);
         assert!(ffi.noise_public_key.is_none());
     }
 }

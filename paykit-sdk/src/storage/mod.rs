@@ -26,7 +26,7 @@ pub(crate) use records::NewPrivateStreamItemDetails;
 use crate::{
     domain::contacts::ContactRecord,
     domain::receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
-    identity::{IdentityState, PubkyPublicKey},
+    identity::{IdentityState, PaykitIdentitySecretKey, PubkyPublicKey},
     PaykitSdkError, Result,
 };
 
@@ -68,6 +68,21 @@ pub trait StorageAdapter: Send + Sync {
         f: StorageTransactionCallback<'a>,
     ) -> Result<Box<dyn Any + Send>>;
 
+    /// Atomically transform state while rotating identity-wide Paykit key material.
+    ///
+    /// Adapters that encrypt SDK state with the Paykit identity secret must
+    /// override this method and re-encrypt the committed state with
+    /// `replacement_key`. Other adapters use the ordinary atomic transaction
+    /// contract because their at-rest protection is app-owned.
+    async fn rotate_paykit_identity_key_erased<'a>(
+        &self,
+        _current_key: PaykitIdentitySecretKey,
+        _replacement_key: PaykitIdentitySecretKey,
+        f: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        self.transaction_erased(f).await
+    }
+
     /// Run an atomic storage transaction.
     async fn transaction<T, F>(&self, f: F) -> Result<T>
     where
@@ -85,6 +100,34 @@ pub trait StorageAdapter: Send + Sync {
             .map(|value| *value)
             .map_err(|_| PaykitSdkError::Storage {
                 context: "storage transaction result type mismatch".into(),
+                source: None,
+            })
+    }
+
+    /// Run an atomic state transformation while rotating Paykit key material.
+    async fn rotate_paykit_identity_key<T, F>(
+        &self,
+        current_key: PaykitIdentitySecretKey,
+        replacement_key: PaykitIdentitySecretKey,
+        f: F,
+    ) -> Result<T>
+    where
+        Self: Sized,
+        T: Send + 'static,
+        F: FnOnce(&mut dyn StorageTransaction) -> Result<T> + Send,
+    {
+        let result = self
+            .rotate_paykit_identity_key_erased(
+                current_key,
+                replacement_key,
+                Box::new(move |tx| Ok(Box::new(f(tx)?) as Box<dyn Any + Send>)),
+            )
+            .await?;
+        result
+            .downcast::<T>()
+            .map(|value| *value)
+            .map_err(|_| PaykitSdkError::Storage {
+                context: "storage key-rotation result type mismatch".into(),
                 source: None,
             })
     }
@@ -127,6 +170,17 @@ where
     ) -> Result<Box<dyn Any + Send>> {
         (**self).transaction_erased(f).await
     }
+
+    async fn rotate_paykit_identity_key_erased<'a>(
+        &self,
+        current_key: PaykitIdentitySecretKey,
+        replacement_key: PaykitIdentitySecretKey,
+        f: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        (**self)
+            .rotate_paykit_identity_key_erased(current_key, replacement_key, f)
+            .await
+    }
 }
 
 #[async_trait]
@@ -139,6 +193,17 @@ where
         f: StorageTransactionCallback<'a>,
     ) -> Result<Box<dyn Any + Send>> {
         (**self).transaction_erased(f).await
+    }
+
+    async fn rotate_paykit_identity_key_erased<'a>(
+        &self,
+        current_key: PaykitIdentitySecretKey,
+        replacement_key: PaykitIdentitySecretKey,
+        f: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        (**self)
+            .rotate_paykit_identity_key_erased(current_key, replacement_key, f)
+            .await
     }
 }
 

@@ -84,9 +84,10 @@ pub use domain::recovery::EncryptedLinkRecoveryMarkerReport;
 pub use error::PaykitSdkError;
 #[doc(inline)]
 pub use identity::{
-    IdentityState, IdentityStatus, PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey,
-    PubkySessionAccess,
+    IdentityState, IdentityStatus, PaykitIdentitySecretKey, PubkyIdentityCapability,
+    PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
 };
+pub use paykit_lib::INITIAL_PAYKIT_KEY_GENERATION;
 #[doc(inline)]
 pub use paykit_lib::{PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitAppRegistry};
 #[doc(inline)]

@@ -522,6 +522,167 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * Rotatable identity-wide Paykit secret supplied by secure platform storage.
+ */
+public protocol PaykitIdentitySecretKeyProtocol: AnyObject, Sendable {
+
+    /**
+     * Export the secret bytes for secure platform storage or delegation.
+     */
+    func exportBytes()  -> Data
+
+    /**
+     * Return the key generation.
+     */
+    func keyGeneration()  -> UInt64
+
+}
+/**
+ * Rotatable identity-wide Paykit secret supplied by secure platform storage.
+ */
+open class PaykitIdentitySecretKey: PaykitIdentitySecretKeyProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffipaykitidentitysecretkey(self.pointer, $0) }
+    }
+    /**
+     * Create Paykit key material from secure platform storage.
+     */
+public convenience init(bytes: Data, keyGeneration: UInt64)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffipaykitidentitysecretkey_new(
+        FfiConverterData.lower(bytes),
+        FfiConverterUInt64.lower(keyGeneration),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffipaykitidentitysecretkey(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Export the secret bytes for secure platform storage or delegation.
+     */
+open func exportBytes() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipaykitidentitysecretkey_export_bytes(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the key generation.
+     */
+open func keyGeneration() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipaykitidentitysecretkey_key_generation(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaykitIdentitySecretKey: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PaykitIdentitySecretKey
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PaykitIdentitySecretKey {
+        return PaykitIdentitySecretKey(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PaykitIdentitySecretKey) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaykitIdentitySecretKey {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PaykitIdentitySecretKey, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitIdentitySecretKey_lift(_ pointer: UnsafeMutableRawPointer) throws -> PaykitIdentitySecretKey {
+    return try FfiConverterTypePaykitIdentitySecretKey.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitIdentitySecretKey_lower(_ value: PaykitIdentitySecretKey) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePaykitIdentitySecretKey.lower(value)
+}
+
+
+
+
+
+
+/**
  * Stateful Paykit SDK runtime handle.
  */
 public protocol PaykitSdkProtocol: AnyObject, Sendable {
@@ -932,6 +1093,14 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func retrieveReceipt(counterparty: String, receiptId: String) async throws  -> ReceiptRecord
 
     /**
+     * Rotate identity-wide Paykit key material to the next generation.
+     *
+     * Persist and distribute the replacement key to remaining authorized
+     * applications before private Paykit operations resume.
+     */
+    func rotatePaykitIdentityKey(replacementKey: PaykitIdentitySecretKey) async throws  -> PaykitAppRegistry
+
+    /**
      * Save or update a Contact Record.
      */
     func saveContact(update: ContactUpdate) async throws  -> ContactRecord
@@ -1106,7 +1275,7 @@ public static func withPaymentAdapterAndPubkyClientConfig(stateStore: SdkStateBl
     /**
      * Create a Pubky shared-state runtime with payment adapter callbacks.
      *
-     * Requires active session access with the matching local identity secret
+     * Requires active session access with current Paykit identity key material
      * and `required_session_capabilities()`, plus externally serialized writes
      * across independent runtimes.
      */
@@ -1123,7 +1292,7 @@ public static func withPaymentAdapterAndPubkySharedState(sessionProvider: SdkPub
     /**
      * Create a Pubky shared-state runtime with payment and client configuration.
      *
-     * Requires active session access with the matching local identity secret
+     * Requires active session access with current Paykit identity key material
      * and `required_session_capabilities()`, plus externally serialized writes
      * across independent runtimes.
      */
@@ -1172,7 +1341,7 @@ public static func withPubkySharedState(sessionProvider: SdkPubkySessionProvider
     /**
      * Create a Pubky shared-state runtime with explicit client configuration.
      *
-     * Requires active session access with the matching local identity secret
+     * Requires active session access with current Paykit identity key material
      * and `required_session_capabilities()`, plus externally serialized writes
      * across independent runtimes.
      */
@@ -2739,6 +2908,29 @@ open func retrieveReceipt(counterparty: String, receiptId: String)async throws  
 }
 
     /**
+     * Rotate identity-wide Paykit key material to the next generation.
+     *
+     * Persist and distribute the replacement key to remaining authorized
+     * applications before private Paykit operations resume.
+     */
+open func rotatePaykitIdentityKey(replacementKey: PaykitIdentitySecretKey)async throws  -> PaykitAppRegistry  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_rotate_paykit_identity_key(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaykitIdentitySecretKey_lower(replacementKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaykitAppRegistry_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Save or update a Contact Record.
      */
 open func saveContact(update: ContactUpdate)async throws  -> ContactRecord  {
@@ -3867,6 +4059,11 @@ public func FfiConverterTypePubkyAuthRequest_lower(_ value: PubkyAuthRequest) ->
 public protocol PubkyLocalSecretKeyProtocol: AnyObject, Sendable {
 
     /**
+     * Derive one generation of the identity-wide Paykit secret.
+     */
+    func derivePaykitIdentitySecretKey(keyGeneration: UInt64) throws  -> PaykitIdentitySecretKey
+
+    /**
      * Export the raw bytes for platform secure storage.
      */
     func exportBytes()  -> Data
@@ -3937,6 +4134,17 @@ public convenience init(bytes: Data) {
 
 
 
+
+    /**
+     * Derive one generation of the identity-wide Paykit secret.
+     */
+open func derivePaykitIdentitySecretKey(keyGeneration: UInt64)throws  -> PaykitIdentitySecretKey  {
+    return try  FfiConverterTypePaykitIdentitySecretKey_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_method_ffipubkylocalsecretkey_derive_paykit_identity_secret_key(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(keyGeneration),$0
+    )
+})
+}
 
     /**
      * Export the raw bytes for platform secure storage.
@@ -4017,6 +4225,11 @@ public protocol PubkySessionAccessProtocol: AnyObject, Sendable {
     func exportLocalSecretKey()  -> PubkyLocalSecretKey?
 
     /**
+     * Export the delegated Paykit identity secret, when supplied separately.
+     */
+    func exportPaykitIdentitySecretKey()  -> PaykitIdentitySecretKey?
+
+    /**
      * Export the Pubky session bearer secret for platform secure storage.
      */
     func exportSessionSecret()  -> String
@@ -4067,12 +4280,13 @@ open class PubkySessionAccess: PubkySessionAccessProtocol, @unchecked Sendable {
     /**
      * Create session access material from platform secure storage.
      */
-public convenience init(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?) {
+public convenience init(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, paykitIdentitySecretKey: PaykitIdentitySecretKey?) {
     let pointer =
         try! rustCall() {
     uniffi_paykit_fn_constructor_ffipubkysessionaccess_new(
         FfiConverterString.lower(sessionSecret),
-        FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),$0
+        FfiConverterOptionTypePubkyLocalSecretKey.lower(localSecretKey),
+        FfiConverterOptionTypePaykitIdentitySecretKey.lower(paykitIdentitySecretKey),$0
     )
 }
     self.init(unsafeFromRawPointer: pointer)
@@ -4095,6 +4309,16 @@ public convenience init(sessionSecret: String, localSecretKey: PubkyLocalSecretK
 open func exportLocalSecretKey() -> PubkyLocalSecretKey?  {
     return try!  FfiConverterOptionTypePubkyLocalSecretKey.lift(try! rustCall() {
     uniffi_paykit_fn_method_ffipubkysessionaccess_export_local_secret_key(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Export the delegated Paykit identity secret, when supplied separately.
+     */
+open func exportPaykitIdentitySecretKey() -> PaykitIdentitySecretKey?  {
+    return try!  FfiConverterOptionTypePaykitIdentitySecretKey.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkysessionaccess_export_paykit_identity_secret_key(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -7569,6 +7793,10 @@ public func FfiConverterTypePaykitAppCapabilities_lower(_ value: PaykitAppCapabi
  */
 public struct PaykitAppRegistry {
     /**
+     * Generation of the identity-wide Paykit key material.
+     */
+    public var keyGeneration: UInt64
+    /**
      * Identity-wide Noise public key as raw z32 text, when initialized.
      *
      * Public-only registries may omit this value. This is not a Pubky identity
@@ -7592,6 +7820,9 @@ public struct PaykitAppRegistry {
     // declare one manually.
     public init(
         /**
+         * Generation of the identity-wide Paykit key material.
+         */keyGeneration: UInt64,
+        /**
          * Identity-wide Noise public key as raw z32 text, when initialized.
          *
          * Public-only registries may omit this value. This is not a Pubky identity
@@ -7606,6 +7837,7 @@ public struct PaykitAppRegistry {
         /**
          * Per-endpoint default applications.
          */defaultAppsByEndpoint: [String: String]) {
+        self.keyGeneration = keyGeneration
         self.noisePublicKey = noisePublicKey
         self.apps = apps
         self.defaultAppId = defaultAppId
@@ -7620,6 +7852,9 @@ extension PaykitAppRegistry: Sendable {}
 
 extension PaykitAppRegistry: Equatable, Hashable {
     public static func ==(lhs: PaykitAppRegistry, rhs: PaykitAppRegistry) -> Bool {
+        if lhs.keyGeneration != rhs.keyGeneration {
+            return false
+        }
         if lhs.noisePublicKey != rhs.noisePublicKey {
             return false
         }
@@ -7636,6 +7871,7 @@ extension PaykitAppRegistry: Equatable, Hashable {
     }
 
     public func hash(into hasher: inout Hasher) {
+        hasher.combine(keyGeneration)
         hasher.combine(noisePublicKey)
         hasher.combine(apps)
         hasher.combine(defaultAppId)
@@ -7654,6 +7890,7 @@ public struct FfiConverterTypePaykitAppRegistry: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaykitAppRegistry {
         return
             try PaykitAppRegistry(
+                keyGeneration: FfiConverterUInt64.read(from: &buf),
                 noisePublicKey: FfiConverterOptionString.read(from: &buf),
                 apps: FfiConverterSequenceTypePaykitApp.read(from: &buf),
                 defaultAppId: FfiConverterOptionString.read(from: &buf),
@@ -7662,6 +7899,7 @@ public struct FfiConverterTypePaykitAppRegistry: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: PaykitAppRegistry, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.keyGeneration, into: &buf)
         FfiConverterOptionString.write(value.noisePublicKey, into: &buf)
         FfiConverterSequenceTypePaykitApp.write(value.apps, into: &buf)
         FfiConverterOptionString.write(value.defaultAppId, into: &buf)
@@ -16309,6 +16547,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypePaykitIdentitySecretKey: FfiConverterRustBuffer {
+    typealias SwiftType = PaykitIdentitySecretKey?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePaykitIdentitySecretKey.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePaykitIdentitySecretKey.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePrivateOperationError: FfiConverterRustBuffer {
     typealias SwiftType = PrivateOperationError?
 
@@ -17986,6 +18248,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_resolve_pubky_url() != 12085) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitidentitysecretkey_export_bytes() != 28268) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitidentitysecretkey_key_generation() != 58064) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 32868) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18217,6 +18485,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_rotate_paykit_identity_key() != 22596) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 1121) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18286,10 +18557,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkyauthrequest_complete() != 26526) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_derive_paykit_identity_secret_key() != 28900) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_export_bytes() != 58726) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_local_secret_key() != 61849) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_paykit_identity_secret_key() != 10109) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 4660) {
@@ -18367,6 +18644,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically() != 61831) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_constructor_ffipaykitidentitysecretkey_new() != 64529) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_new() != 15447) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18376,10 +18656,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_client_config() != 36484) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state() != 40170) {
+    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state() != 25288) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state_and_client_config() != 1168) {
+    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_payment_adapter_and_pubky_shared_state_and_client_config() != 62896) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_client_config() != 13764) {
@@ -18388,7 +18668,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state() != 14843) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config() != 2605) {
+    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config() != 2383) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipaymentpayload_new() != 12481) {
@@ -18403,7 +18683,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 2417) {
+    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 34039) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 44998) {

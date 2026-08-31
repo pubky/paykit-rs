@@ -62,9 +62,30 @@ fn test_pubky_local_secret_key_returns_public_key() {
 #[test]
 fn test_shared_state_key_is_deterministic_and_separate_from_noise_key() {
     let key = PubkyLocalSecretKey::new([9; 32]);
+    let paykit_key = key
+        .derive_paykit_identity_secret_key(INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    let next_paykit_key = key.derive_paykit_identity_secret_key(2).unwrap();
 
-    assert_eq!(key.paykit_shared_state_key(), key.paykit_shared_state_key());
-    assert_ne!(key.paykit_shared_state_key(), key.paykit_noise_secret_key());
+    assert_eq!(paykit_key.key_generation(), INITIAL_PAYKIT_KEY_GENERATION);
+    assert_eq!(paykit_key.shared_state_key(), paykit_key.shared_state_key());
+    assert_ne!(paykit_key.shared_state_key(), paykit_key.noise_secret_key());
+    assert_ne!(paykit_key.as_bytes(), key.as_bytes());
+    assert_ne!(paykit_key.as_bytes(), next_paykit_key.as_bytes());
+    assert_eq!(
+        next_paykit_key,
+        key.derive_paykit_identity_secret_key(2).unwrap()
+    );
+    assert!(key.derive_paykit_identity_secret_key(0).is_err());
+}
+
+#[test]
+fn test_paykit_identity_secret_validates_generation_and_redacts_debug() {
+    let key = PaykitIdentitySecretKey::new([7; 32], 2).unwrap();
+
+    assert_eq!(key.key_generation(), 2);
+    assert!(!format!("{key:?}").contains(&hex::encode([7; 32])));
+    assert!(PaykitIdentitySecretKey::new([7; 32], 0).is_err());
 }
 
 #[test]

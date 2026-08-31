@@ -30,6 +30,24 @@ fn test_pubky_secret_key_derivation_matches_pubky_core_mnemonic() {
     );
 }
 
+#[test]
+fn test_paykit_identity_secret_derivation_and_generation() {
+    let pubky_secret = FfiPubkyLocalSecretKey::new(vec![3; 32]);
+    let paykit_secret = pubky_secret.derive_paykit_identity_secret_key(1).unwrap();
+    let next_paykit_secret = pubky_secret.derive_paykit_identity_secret_key(2).unwrap();
+
+    assert_eq!(paykit_secret.export_bytes().len(), 32);
+    assert_ne!(paykit_secret.export_bytes(), pubky_secret.export_bytes());
+    assert_ne!(
+        paykit_secret.export_bytes(),
+        next_paykit_secret.export_bytes()
+    );
+    assert_eq!(paykit_secret.key_generation(), 1);
+    assert_eq!(next_paykit_secret.key_generation(), 2);
+    assert!(pubky_secret.derive_paykit_identity_secret_key(0).is_err());
+    assert!(FfiPaykitIdentitySecretKey::new(vec![7; 32], 0).is_err());
+}
+
 #[tokio::test]
 #[ignore = "requires a live Pubky homeserver session"]
 async fn test_ffi_session_provider_reimports_repeatedly() {

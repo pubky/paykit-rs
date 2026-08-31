@@ -235,16 +235,7 @@ where
         lease: &PeerLinkOperationLease,
         force_new_attempt: bool,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
-        let secret_key = session_access
-            .local_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context:
-                    "local Pubky secret key is unavailable for Encrypted Link recovery markers"
-                        .into(),
-                source: None,
-            })?
-            .paykit_noise_secret_key();
+        let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_noise_public_key = self.counterparty_noise_public_key(counterparty).await?;
         let now = self.clock.now();
         let marker = self
@@ -359,16 +350,7 @@ where
                     context: "no Pubky public storage available for recovery marker lookup".into(),
                     source: None,
                 })?;
-        let secret_key = session_access
-            .local_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context:
-                    "local Pubky secret key is unavailable for Encrypted Link recovery markers"
-                        .into(),
-                source: None,
-            })?
-            .paykit_noise_secret_key();
+        let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
         let remote_registry =
             paykit_lib::get_paykit_app_registry(&public_storage, &remote_public_key)

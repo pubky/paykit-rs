@@ -60,14 +60,7 @@ where
         lease: PeerLinkOperationLease,
         session_access: GuardedSessionAccess,
     ) -> Result<PrivateStreamIntakeReport> {
-        let secret_key = session_access
-            .local_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
-                source: None,
-            })?
-            .paykit_noise_secret_key();
+        let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
         let authorized_receipt_apps =
             match self.authorized_receipt_apps_for_peer(&counterparty).await {
@@ -140,6 +133,34 @@ where
                 return Err(err.into());
             }
         };
+        if !self
+            .snapshot_uses_current_counterparty_noise_key(
+                &counterparty,
+                snapshot.remote_noise_public_key(),
+            )
+            .await?
+        {
+            let now = self.clock.now();
+            let mark = mark_recovery_required_with_lease(
+                &self.storage,
+                counterparty.clone(),
+                lease.clone(),
+                now,
+            )
+            .await?;
+            let _ = self
+                .publish_local_recovery_marker_with_session(
+                    &counterparty,
+                    &session_access,
+                    &lease,
+                    mark.new_episode,
+                )
+                .await;
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!("counterparty {counterparty} rotated its Paykit identity key"),
+                source: None,
+            });
+        }
 
         let mut link = match paykit_lib::restore_encrypted_link(
             session_access.session.clone(),

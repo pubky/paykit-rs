@@ -1,5 +1,10 @@
 use std::fmt;
+use std::sync::Arc;
+
+use paykit_sdk::{PaykitIdentitySecretKey, PubkyLocalSecretKey};
 use zeroize::Zeroize;
+
+use crate::errors::{validation_error, PaykitFfiError};
 
 /// Identity-wide SDK state blob owned by the configured storage boundary.
 ///
@@ -102,4 +107,91 @@ impl FfiPubkyLocalSecretKey {
     pub fn export_bytes(&self) -> Vec<u8> {
         self.bytes.clone()
     }
+
+    /// Derive one generation of the identity-wide Paykit secret.
+    pub fn derive_paykit_identity_secret_key(
+        &self,
+        key_generation: u64,
+    ) -> Result<Arc<FfiPaykitIdentitySecretKey>, PaykitFfiError> {
+        let bytes: [u8; 32] = self.bytes.clone().try_into().map_err(|bytes: Vec<u8>| {
+            validation_error(format!(
+                "Pubky local secret key must be 32 bytes, got {}",
+                bytes.len()
+            ))
+        })?;
+        let secret =
+            PubkyLocalSecretKey::new(bytes).derive_paykit_identity_secret_key(key_generation)?;
+        Ok(Arc::new(FfiPaykitIdentitySecretKey::from_sdk(&secret)))
+    }
+}
+
+/// Rotatable identity-wide Paykit secret supplied by secure platform storage.
+#[derive(uniffi::Object)]
+pub struct FfiPaykitIdentitySecretKey {
+    bytes: Vec<u8>,
+    key_generation: u64,
+}
+
+impl Drop for FfiPaykitIdentitySecretKey {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+impl fmt::Debug for FfiPaykitIdentitySecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FfiPaykitIdentitySecretKey")
+            .field(
+                "bytes",
+                &format_args!("<redacted:{} bytes>", self.bytes.len()),
+            )
+            .field("key_generation", &self.key_generation)
+            .finish()
+    }
+}
+
+#[uniffi::export]
+impl FfiPaykitIdentitySecretKey {
+    /// Create Paykit key material from secure platform storage.
+    #[uniffi::constructor]
+    pub fn new(bytes: Vec<u8>, key_generation: u64) -> Result<Self, PaykitFfiError> {
+        let secret = paykit_identity_secret_from_bytes(bytes, key_generation)?;
+        Ok(Self::from_sdk(&secret))
+    }
+
+    /// Export the secret bytes for secure platform storage or delegation.
+    pub fn export_bytes(&self) -> Vec<u8> {
+        self.bytes.clone()
+    }
+
+    /// Return the key generation.
+    pub fn key_generation(&self) -> u64 {
+        self.key_generation
+    }
+}
+
+impl FfiPaykitIdentitySecretKey {
+    pub(crate) fn to_sdk(&self) -> Result<PaykitIdentitySecretKey, PaykitFfiError> {
+        paykit_identity_secret_from_bytes(self.bytes.clone(), self.key_generation)
+    }
+
+    fn from_sdk(secret: &PaykitIdentitySecretKey) -> Self {
+        Self {
+            bytes: secret.as_bytes().to_vec(),
+            key_generation: secret.key_generation(),
+        }
+    }
+}
+
+fn paykit_identity_secret_from_bytes(
+    bytes: Vec<u8>,
+    key_generation: u64,
+) -> Result<PaykitIdentitySecretKey, PaykitFfiError> {
+    let bytes: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+        validation_error(format!(
+            "Paykit identity secret key must be 32 bytes, got {}",
+            bytes.len()
+        ))
+    })?;
+    PaykitIdentitySecretKey::new(bytes, key_generation).map_err(Into::into)
 }

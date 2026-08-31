@@ -411,12 +411,15 @@ where
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let local_noise_public_key = session_access.local_secret_key.as_ref().map(|secret_key| {
-            let noise_secret_key = secret_key.paykit_noise_secret_key();
-            pubky::Keypair::from_secret(&noise_secret_key)
-                .public_key()
-                .clone()
-        });
+        let local_noise_public_key =
+            session_access
+                .paykit_identity_secret_key()
+                .map(|secret_key| {
+                    let noise_secret_key = secret_key.noise_secret_key();
+                    pubky::Keypair::from_secret(&noise_secret_key)
+                        .public_key()
+                        .clone()
+                });
         let public_storage = session_access.outbox_client.public_storage();
         let owner = session_access.session.info().public_key();
         let existing = paykit_lib::get_paykit_app_registry(&public_storage, owner).await?;

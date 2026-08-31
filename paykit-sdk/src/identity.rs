@@ -2,7 +2,7 @@ use std::fmt;
 
 use bip39::{Language, Mnemonic};
 use chrono::{DateTime, Utc};
-use paykit_lib::PublicKey;
+use paykit_lib::{PublicKey, INITIAL_PAYKIT_KEY_GENERATION};
 use pubky::{Capabilities, Capability};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -11,6 +11,7 @@ const PUBKY_APP_KEY_PREFIX: &str = "pubky";
 const PUBKY_PUBLIC_KEY_Z32_LEN: usize = 52;
 const BIP39_SEED_BYTES: usize = 64;
 const PUBKY_SECRET_BYTES: usize = 32;
+const PAYKIT_IDENTITY_SECRET_CONTEXT: &str = "paykit/identity-secret";
 
 /// Pubky public key string used by SDK records.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -111,7 +112,7 @@ pub enum PubkyIdentityCapability {
     PrivateLinkCapable,
 }
 
-/// Local Pubky secret key used for Pubky sessions and Encrypted Links.
+/// Local Pubky secret key used for Pubky identity operations.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PubkyLocalSecretKey([u8; 32]);
 
@@ -185,13 +186,26 @@ impl PubkyLocalSecretKey {
         PubkyPublicKey::from_public_key(&self.keypair().public_key())
     }
 
-    /// Derive the identity-wide secret used for Paykit Encrypted Links.
-    pub(crate) fn paykit_noise_secret_key(&self) -> [u8; 32] {
-        paykit_lib::derive_paykit_noise_secret_key(&self.0)
-    }
-
-    pub(crate) fn paykit_shared_state_key(&self) -> [u8; 32] {
-        blake3::derive_key("paykit/shared-state", &self.0)
+    /// Derive one generation of the identity-wide Paykit secret.
+    ///
+    /// The generation is included in the derivation, so a delegated key cannot
+    /// derive any other generation. A holder of the Pubky identity secret can
+    /// derive the current generation for authorized applications without
+    /// exposing the Pubky secret itself.
+    pub fn derive_paykit_identity_secret_key(
+        &self,
+        key_generation: u64,
+    ) -> crate::Result<PaykitIdentitySecretKey> {
+        validate_paykit_key_generation(key_generation)?;
+        let mut key_material = [0u8; PUBKY_SECRET_BYTES + std::mem::size_of::<u64>()];
+        key_material[..PUBKY_SECRET_BYTES].copy_from_slice(&self.0);
+        key_material[PUBKY_SECRET_BYTES..].copy_from_slice(&key_generation.to_be_bytes());
+        let bytes = blake3::derive_key(PAYKIT_IDENTITY_SECRET_CONTEXT, &key_material);
+        key_material.zeroize();
+        Ok(PaykitIdentitySecretKey {
+            bytes,
+            key_generation,
+        })
     }
 
     pub(crate) fn keypair(&self) -> pubky::Keypair {
@@ -224,10 +238,106 @@ impl From<[u8; 32]> for PubkyLocalSecretKey {
     }
 }
 
+/// Rotatable identity-wide Paykit secret shared with authorized applications.
+///
+/// This is not the Pubky identity secret. Paykit derives independent Noise and
+/// shared-state encryption keys from it. The generation identifies which
+/// secret protects current identity-wide private state.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PaykitIdentitySecretKey {
+    bytes: [u8; 32],
+    key_generation: u64,
+}
+
+impl PaykitIdentitySecretKey {
+    /// Wrap a 32-byte Paykit identity secret and its nonzero generation.
+    pub fn new(bytes: [u8; 32], key_generation: u64) -> crate::Result<Self> {
+        validate_paykit_key_generation(key_generation)?;
+        Ok(Self {
+            bytes,
+            key_generation,
+        })
+    }
+
+    /// Return the key generation.
+    pub fn key_generation(&self) -> u64 {
+        self.key_generation
+    }
+
+    /// Borrow the secret bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.bytes
+    }
+
+    /// Consume the wrapper and return the secret bytes.
+    pub fn into_inner(mut self) -> [u8; 32] {
+        let bytes = self.bytes;
+        self.bytes.zeroize();
+        bytes
+    }
+
+    pub(crate) fn noise_secret_key(&self) -> [u8; 32] {
+        paykit_lib::derive_paykit_noise_secret_key(&self.bytes)
+    }
+
+    pub(crate) fn shared_state_key(&self) -> [u8; 32] {
+        blake3::derive_key("paykit/shared-state", &self.bytes)
+    }
+
+    pub(crate) fn validate_successor(&self, replacement: &Self) -> crate::Result<()> {
+        let expected_generation =
+            self.key_generation
+                .checked_add(1)
+                .ok_or_else(|| crate::PaykitSdkError::Identity {
+                    context: "Paykit key generation is exhausted".into(),
+                    source: None,
+                })?;
+        if replacement.key_generation != expected_generation {
+            return Err(crate::PaykitSdkError::Identity {
+                context: format!("replacement Paykit key generation must be {expected_generation}"),
+                source: None,
+            });
+        }
+        if replacement.bytes == self.bytes {
+            return Err(crate::PaykitSdkError::Identity {
+                context: "replacement Paykit identity secret must use new key material".into(),
+                source: None,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for PaykitIdentitySecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaykitIdentitySecretKey")
+            .field("bytes", &"<redacted>")
+            .field("key_generation", &self.key_generation)
+            .finish()
+    }
+}
+
+impl Drop for PaykitIdentitySecretKey {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+fn validate_paykit_key_generation(key_generation: u64) -> crate::Result<()> {
+    if key_generation == 0 {
+        return Err(crate::PaykitSdkError::Identity {
+            context: "Paykit key generation must be greater than zero".into(),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
 /// Live Pubky access used by the SDK for one Paykit identity.
 ///
-/// The SDK validates that a present local secret key belongs to the session
-/// public key before using it for private-link capability.
+/// The SDK validates that a present local Pubky secret belongs to the session
+/// public key. Private-link capability can use a delegated Paykit secret
+/// without exposing that Pubky root secret.
 #[derive(Clone)]
 pub struct PubkySessionAccess {
     /// Authenticated Pubky session for local homeserver writes.
@@ -236,6 +346,11 @@ pub struct PubkySessionAccess {
     pub outbox_client: pubky::Pubky,
     /// Local secret key required for Encrypted Links, when available.
     pub local_secret_key: Option<PubkyLocalSecretKey>,
+    /// Delegated identity-wide Paykit secret, when supplied separately.
+    ///
+    /// When absent, a local Pubky secret derives generation 1. Later
+    /// generations must be supplied explicitly after rotation.
+    pub paykit_identity_secret_key: Option<PaykitIdentitySecretKey>,
 }
 
 impl PubkySessionAccess {
@@ -292,7 +407,26 @@ impl PubkySessionAccess {
     }
 
     fn private_link_capable_unchecked(&self) -> bool {
-        self.local_secret_key.is_some()
+        self.paykit_identity_secret_key().is_some()
+    }
+
+    pub(crate) fn paykit_identity_secret_key(&self) -> Option<PaykitIdentitySecretKey> {
+        self.paykit_identity_secret_key.clone().or_else(|| {
+            self.local_secret_key.as_ref().map(|secret| {
+                secret
+                    .derive_paykit_identity_secret_key(INITIAL_PAYKIT_KEY_GENERATION)
+                    .expect("initial Paykit key generation must be valid")
+            })
+        })
+    }
+
+    pub(crate) fn paykit_noise_secret_key(&self) -> crate::Result<[u8; 32]> {
+        self.paykit_identity_secret_key()
+            .map(|secret| secret.noise_secret_key())
+            .ok_or_else(|| crate::PaykitSdkError::Identity {
+                context: "Paykit identity secret is unavailable for Encrypted Links".into(),
+                source: None,
+            })
     }
 }
 
@@ -345,6 +479,10 @@ impl fmt::Debug for PubkySessionAccess {
             .field("session", &"<redacted>")
             .field("outbox_client", &self.outbox_client)
             .field("local_secret_key", &self.local_secret_key)
+            .field(
+                "paykit_identity_secret_key",
+                &self.paykit_identity_secret_key,
+            )
             .finish()
     }
 }

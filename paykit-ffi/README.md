@@ -53,6 +53,8 @@ load the native UniFFI library just to format keys.
   callbacks.
 - `paykitAppRegistry` — fetch an identity's public Paykit App Registry.
 - `publishPaykitApp` — publish this app's registry entry before endpoint sync.
+- `rotatePaykitIdentityKey` — re-encrypt shared state with the next Paykit key
+  generation and require fresh Encrypted Links while preserving durable history.
 - `removePaykitApp` — remove this app's public Payment Endpoints and registry
   entry after its active Payment Requests and pending private financial work
   are complete.
@@ -261,10 +263,14 @@ identity profile fields without exposing an FFI JSON value model.
 - `SdkBackupBlob` — SDK backup/export payload for app-controlled
   backup flows.
 - `PubkyLocalSecretKey` — local Pubky secret key bytes.
+- `PaykitIdentitySecretKey` — rotatable identity-wide Paykit secret plus key
+  generation.
 
-The SDK derives the identity-wide Paykit Noise key from the local Pubky secret.
-Private-link workflows therefore require session access that includes that
-local secret.
+Any generation can be derived from `PubkyLocalSecretKey` by passing its
+generation number. Delegated apps can instead load `PaykitIdentitySecretKey`
+without receiving the Pubky root secret. After rotation, every remaining app
+must persist the replacement Paykit secret;
+it cannot be re-derived from the unchanged Pubky key.
 
 `PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.
@@ -296,8 +302,8 @@ status = sdk.identityStatus()
 
 Apps that share one identity-wide Pubky state can instead construct the handle
 with `withPaymentAdapterAndPubkySharedState`. This mode does not use
-`SdkStateBlobStore` callbacks. It requires active session access with the
-matching local identity secret for every operation, and independent runtimes
+`SdkStateBlobStore` callbacks. It requires active session access with current
+Paykit identity key material for every operation, and independent runtimes
 must serialize writes until the homeserver provides conditional writes or
 durable locking.
 
@@ -307,7 +313,7 @@ wait even though the identity and its Paykit state remain available. With
 callback storage, `PublicOnly` permits public workflows and
 `PrivateLinkCapable` also permits Encrypted Link workflows. Pubky shared-state
 storage requires `PrivateLinkCapable` access because decrypting state requires
-the local identity secret.
+the Paykit identity secret.
 
 When callback storage is selected, `SdkStateBlobStore` must persist every blob
 save atomically. Every runtime for the same Pubky identity must resolve to the

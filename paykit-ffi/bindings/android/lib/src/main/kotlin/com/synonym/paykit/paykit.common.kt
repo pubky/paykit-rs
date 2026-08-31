@@ -106,6 +106,27 @@ public object NoPointer
 
 
 /**
+ * Rotatable identity-wide Paykit secret supplied by secure platform storage.
+ */
+public interface PaykitIdentitySecretKeyInterface {
+
+    /**
+     * Export the secret bytes for secure platform storage or delegation.
+     */
+    public fun `exportBytes`(): kotlin.ByteArray
+
+    /**
+     * Return the key generation.
+     */
+    public fun `keyGeneration`(): kotlin.ULong
+
+    public companion object
+}
+
+
+
+
+/**
  * Stateful Paykit SDK runtime handle.
  */
 public interface PaykitSdkInterface {
@@ -592,6 +613,15 @@ public interface PaykitSdkInterface {
     public suspend fun `retrieveReceipt`(`counterparty`: kotlin.String, `receiptId`: kotlin.String): ReceiptRecord
 
     /**
+     * Rotate identity-wide Paykit key material to the next generation.
+     *
+     * Persist and distribute the replacement key to remaining authorized
+     * applications before private Paykit operations resume.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `rotatePaykitIdentityKey`(`replacementKey`: PaykitIdentitySecretKey): PaykitAppRegistry
+
+    /**
      * Save or update a Contact Record.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -798,6 +828,12 @@ public interface PubkyAuthRequestInterface {
 public interface PubkyLocalSecretKeyInterface {
 
     /**
+     * Derive one generation of the identity-wide Paykit secret.
+     */
+    @Throws(PaykitException::class)
+    public fun `derivePaykitIdentitySecretKey`(`keyGeneration`: kotlin.ULong): PaykitIdentitySecretKey
+
+    /**
      * Export the raw bytes for platform secure storage.
      */
     public fun `exportBytes`(): kotlin.ByteArray
@@ -817,6 +853,11 @@ public interface PubkySessionAccessInterface {
      * Export the local Pubky secret key, when available.
      */
     public fun `exportLocalSecretKey`(): PubkyLocalSecretKey?
+
+    /**
+     * Export the delegated Paykit identity secret, when supplied separately.
+     */
+    public fun `exportPaykitIdentitySecretKey`(): PaykitIdentitySecretKey?
 
     /**
      * Export the Pubky session bearer secret for platform secure storage.
@@ -1555,6 +1596,10 @@ public data class PaykitAppCapabilities (
  */
 @kotlinx.serialization.Serializable
 public data class PaykitAppRegistry (
+    /**
+     * Generation of the identity-wide Paykit key material.
+     */
+    val `keyGeneration`: kotlin.ULong,
     /**
      * Identity-wide Noise public key as raw z32 text, when initialized.
      *

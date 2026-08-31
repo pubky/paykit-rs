@@ -388,6 +388,7 @@ fn session_result(
         session,
         outbox_client,
         local_secret_key,
+        paykit_identity_secret_key: None,
     };
     let public_key = access.public_key()?;
     let capability = access.capability_for_capabilities(required_capabilities)?;

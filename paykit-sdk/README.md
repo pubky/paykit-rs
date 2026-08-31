@@ -34,7 +34,7 @@ aggregated across apps when resolving a private payment.
 
 Public-only apps may publish registry entries and public Payment Endpoints
 before the identity-wide Noise key is initialized. Private capabilities require
-a local identity secret and initialize the registry's immutable Noise key.
+identity-wide Paykit key material and initialize the registry's Noise key.
 
 Multiple app processes using the same identity must also use the same durable
 SDK state and serialize updates to the shared Encrypted Link checkpoint. The
@@ -81,10 +81,11 @@ Apps construct `PaykitSdk` with three pieces:
   payment-target construction
 
 `PubkySharedStateStorage` is the first-party shared implementation. It derives
-an encryption key from the local Pubky secret and stores the complete encrypted
-state at `/pub/paykit/v0/shared-state.bin`. It requires live session access and
-the matching local secret for every operation. Signing out clears the app's
-session access but leaves the encrypted resource intact.
+an encryption key from the identity-wide Paykit secret and stores the complete
+encrypted state at `/pub/paykit/v0/shared-state.bin`. Initial key material can
+be derived from the Pubky secret or supplied separately to delegated apps.
+Signing out clears the app's session access but leaves the encrypted resource
+intact.
 
 The session provider is only the boundary for live Pubky access. It is not a
 requirement to use Ring or another wallet as an identity coordinator before an
@@ -145,8 +146,13 @@ Common workflows:
   encrypts that payload, delivers it to the derived relay channel, and only
   then approves normal Pubky Auth
 - when deriving a Pubky key from identity seed material, use the Pubky
-  Core/Ring-compatible BIP39 seed or mnemonic helpers; apps intentionally
-  sharing an identity derive the same identity and identity-wide Noise key
+  Core/Ring-compatible BIP39 seed or mnemonic helpers; the Pubky secret can
+  deterministically derive any generation-specific Paykit secret
+- rotate identity-wide Paykit key material with
+  `rotate_paykit_identity_key`; rotation preserves durable history, resets old
+  Encrypted Link state, and requires the derived or externally supplied
+  replacement key to be persisted by every remaining authorized app before
+  private work resumes
 - call `receive_private_messages` before deriving Private Payment Lists,
   Payment Requests, Receipt Access state, or resolving a private contact
   payment when the freshest private endpoints matter

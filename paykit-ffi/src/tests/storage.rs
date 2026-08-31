@@ -1111,6 +1111,7 @@ fn test_blob_debug_redacts_bytes() {
     let state = FfiSdkStateBlob::new(vec![1, 2, 3]);
     let backup = FfiSdkBackupBlob::new(vec![4, 5, 6, 7]);
     let secret = FfiPubkyLocalSecretKey::new(vec![8; 32]);
+    let paykit_secret = FfiPaykitIdentitySecretKey::new(vec![9; 32], 2).unwrap();
     let payment_payload = FfiPaymentPayload::new("bc1qexample".into());
     let attribution = FfiReservationAttribution::new(HashMap::from([(
         "backend_reference".into(),
@@ -1125,6 +1126,10 @@ fn test_blob_debug_redacts_bytes() {
     assert_eq!(
         format!("{secret:?}"),
         "FfiPubkyLocalSecretKey(<redacted:32 bytes>)"
+    );
+    assert_eq!(
+        format!("{paykit_secret:?}"),
+        "FfiPaykitIdentitySecretKey { bytes: <redacted:32 bytes>, key_generation: 2 }"
     );
     assert_eq!(
         format!("{payment_payload:?}"),

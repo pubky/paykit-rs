@@ -137,8 +137,8 @@ The `payment_endpoints` field is a `HashMap<PaymentEndpointIdentifier, PaymentEn
 `PaykitAppId` identifies the app that owns a public Payment Endpoint or sent a
 private message. `PaykitAppRegistry` is one public identity-wide record at
 `/pub/paykit/v0/app-registry.json`; it lists participating apps, their coarse
-capabilities, the identity-wide Noise public key, and optional default-app
-preferences. It is not private SDK state.
+capabilities, the current identity-wide Noise public key and key generation,
+and optional default-app preferences. It is not private SDK state.
 
 Registries are bounded to 64 KiB, 64 applications, and 256 endpoint-specific
 defaults so remote data cannot trigger unbounded parsing or endpoint lookups.

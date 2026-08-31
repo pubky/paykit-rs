@@ -15,8 +15,8 @@ use super::{
     StorageAdapter, StorageState, StorageTransactionCallback,
 };
 use crate::{
-    validate_storage_state, PaykitSdkError, PubkyPublicKey, PubkySessionAccess,
-    PubkySessionProvider, Result, PAYKIT_SESSION_CAPABILITIES,
+    validate_storage_state, PaykitIdentitySecretKey, PaykitSdkError, PubkyPublicKey,
+    PubkySessionAccess, PubkySessionProvider, Result, PAYKIT_SESSION_CAPABILITIES,
 };
 
 const SHARED_STATE_ENVELOPE_VERSION: u32 = 1;
@@ -25,6 +25,7 @@ const MAX_SHARED_STATE_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Serialize)]
 struct EncryptedStateEnvelopeRef<'a> {
     version: u32,
+    key_generation: u64,
     nonce: [u8; 24],
     ciphertext: &'a [u8],
 }
@@ -32,6 +33,7 @@ struct EncryptedStateEnvelopeRef<'a> {
 #[derive(Deserialize)]
 struct EncryptedStateEnvelope<'a> {
     version: u32,
+    key_generation: u64,
     nonce: [u8; 24],
     #[serde(borrow)]
     ciphertext: &'a [u8],
@@ -62,10 +64,11 @@ pub struct PubkySharedStateStorage {
 impl PubkySharedStateStorage {
     /// Create encrypted Pubky-backed storage using the current live session.
     ///
-    /// The provider must supply the matching local identity secret and a
-    /// session with [`crate::PAYKIT_SESSION_CAPABILITIES`]. Session creation,
-    /// persistence, capability renewal, and key rotation remain the caller's
-    /// responsibility. Request timeouts come from the supplied Pubky client.
+    /// The provider must supply identity-wide Paykit key material, either
+    /// directly or derived from the matching local Pubky identity secret, plus
+    /// a session with [`crate::PAYKIT_SESSION_CAPABILITIES`]. Session creation,
+    /// persistence, capability renewal, and key distribution remain the
+    /// caller's responsibility. Request timeouts come from the Pubky client.
     pub fn new<K>(session_provider: K) -> Self
     where
         K: PubkySessionProvider + 'static,
@@ -88,7 +91,7 @@ impl PubkySharedStateStorage {
             })
     }
 
-    async fn load_access(&self) -> Result<PubkySessionAccess> {
+    async fn load_session_access(&self) -> Result<PubkySessionAccess> {
         let access = self
             .session_provider
             .load_session_access()
@@ -98,9 +101,14 @@ impl PubkySharedStateStorage {
                 source: None,
             })?;
         access.validate_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
-        if access.local_secret_key.is_none() {
+        Ok(access)
+    }
+
+    async fn load_access(&self) -> Result<PubkySessionAccess> {
+        let access = self.load_session_access().await?;
+        if access.paykit_identity_secret_key().is_none() {
             return Err(PaykitSdkError::Identity {
-                context: "Pubky shared state requires the local identity secret".into(),
+                context: "Pubky shared state requires the Paykit identity secret".into(),
                 source: None,
             });
         }
@@ -128,6 +136,48 @@ impl PubkySharedStateStorage {
                 source: Some(anyhow::anyhow!(err.to_string())),
             })? = revision;
         Ok(())
+    }
+
+    async fn commit_encrypted_state(
+        &self,
+        access: &PubkySessionAccess,
+        expected_revision: Option<String>,
+        encrypted: Vec<u8>,
+    ) -> Result<()> {
+        let current_revision = load_encrypted_blob(access)
+            .await?
+            .as_deref()
+            .map(state_revision);
+        if current_revision != expected_revision {
+            return Err(PaykitSdkError::Storage {
+                context: "Pubky shared state changed during transaction".into(),
+                source: None,
+            });
+        }
+
+        let revision = state_revision(&encrypted);
+        let write_result = access
+            .session
+            .storage()
+            .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, encrypted)
+            .await;
+        if let Err(write_error) = write_result {
+            let committed = load_encrypted_blob(access)
+                .await
+                .map(|stored| {
+                    stored
+                        .as_deref()
+                        .is_some_and(|bytes| state_revision(bytes) == revision)
+                })
+                .unwrap_or(false);
+            if !committed {
+                return Err(PaykitSdkError::Transport {
+                    context: "write encrypted Pubky shared state could not be confirmed".into(),
+                    source: Some(write_error.into()),
+                });
+            }
+        }
+        self.record_revision(Some(revision))
     }
 }
 
@@ -160,40 +210,60 @@ impl StorageAdapter for PubkySharedStateStorage {
             source: None,
         })?;
         let encrypted = encrypt_state(&access, &updated_state)?;
-        let current_revision = load_encrypted_blob(&access)
-            .await?
-            .as_deref()
-            .map(state_revision);
-        if current_revision != snapshot.revision {
+        self.commit_encrypted_state(&access, snapshot.revision, encrypted)
+            .await?;
+        Ok(result)
+    }
+
+    async fn rotate_paykit_identity_key_erased<'a>(
+        &self,
+        current_key: PaykitIdentitySecretKey,
+        replacement_key: PaykitIdentitySecretKey,
+        f: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        current_key.validate_successor(&replacement_key)?;
+        let _guard = self.transaction_lock.lock().await;
+        let access = self.load_session_access().await?;
+        let encrypted = load_encrypted_blob(&access).await?;
+        let revision = encrypted.as_deref().map(state_revision);
+        if self.last_revision()?.is_some() && revision.is_none() {
             return Err(PaykitSdkError::Storage {
-                context: "Pubky shared state changed during transaction".into(),
+                context: "previously observed Pubky shared state is missing".into(),
                 source: None,
             });
         }
+        self.record_revision(revision.clone())?;
 
-        let revision = state_revision(&encrypted);
-        let write_result = access
-            .session
-            .storage()
-            .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, encrypted)
-            .await;
-        if let Err(write_error) = write_result {
-            let committed = load_encrypted_blob(&access)
-                .await
-                .map(|stored| {
-                    stored
-                        .as_deref()
-                        .is_some_and(|bytes| state_revision(bytes) == revision)
-                })
-                .unwrap_or(false);
-            if !committed {
-                return Err(PaykitSdkError::Transport {
-                    context: "write encrypted Pubky shared state could not be confirmed".into(),
-                    source: Some(write_error.into()),
-                });
-            }
-        }
-        self.record_revision(Some(revision))?;
+        let initial_state = match encrypted.as_deref() {
+            None => StorageState::default(),
+            Some(encrypted) => match encrypted_state_key_generation(encrypted)? {
+                generation if generation == current_key.key_generation() => {
+                    decrypt_state_with_key(&current_key, &access.public_key()?, encrypted)?
+                }
+                generation if generation == replacement_key.key_generation() => {
+                    decrypt_state_with_key(&replacement_key, &access.public_key()?, encrypted)?
+                }
+                generation => {
+                    return Err(PaykitSdkError::Identity {
+                        context: format!(
+                            "shared-state key generation {generation} cannot rotate from {} to {}",
+                            current_key.key_generation(),
+                            replacement_key.key_generation()
+                        ),
+                        source: None,
+                    });
+                }
+            },
+        };
+        let (updated_state, result) = run_storage_state_transaction(initial_state, f)?;
+        validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
+            context: "SDK state failed validation before Paykit key rotation".into(),
+            source: None,
+        })?;
+        let encrypted =
+            encrypt_state_with_key(&replacement_key, &access.public_key()?, &updated_state)?;
+        self.commit_encrypted_state(&access, revision, encrypted)
+            .await?;
         Ok(result)
     }
 }
@@ -238,41 +308,41 @@ async fn load_encrypted_blob(access: &PubkySessionAccess) -> Result<Option<Vec<u
 }
 
 fn encrypt_state(access: &PubkySessionAccess, state: &StorageState) -> Result<Vec<u8>> {
-    let key = shared_state_key(access)?;
-    encrypt_state_with_key(&key, &access.public_key()?, state)
+    let secret = paykit_identity_secret_key(access)?;
+    encrypt_state_with_key(&secret, &access.public_key()?, state)
 }
 
 fn decrypt_state(access: &PubkySessionAccess, encrypted: &[u8]) -> Result<StorageState> {
-    let key = shared_state_key(access)?;
-    decrypt_state_with_key(&key, &access.public_key()?, encrypted)
+    let secret = paykit_identity_secret_key(access)?;
+    decrypt_state_with_key(&secret, &access.public_key()?, encrypted)
 }
 
-fn shared_state_key(access: &PubkySessionAccess) -> Result<Zeroizing<[u8; 32]>> {
+fn paykit_identity_secret_key(access: &PubkySessionAccess) -> Result<PaykitIdentitySecretKey> {
     access
-        .local_secret_key
-        .as_ref()
-        .map(|secret| Zeroizing::new(secret.paykit_shared_state_key()))
+        .paykit_identity_secret_key()
         .ok_or_else(|| PaykitSdkError::Identity {
-            context: "Pubky shared state requires the local identity secret".into(),
+            context: "Pubky shared state requires the Paykit identity secret".into(),
             source: None,
         })
 }
 
 fn encrypt_state_with_key(
-    key: &[u8; 32],
+    secret: &PaykitIdentitySecretKey,
     public_key: &PubkyPublicKey,
     state: &StorageState,
 ) -> Result<Vec<u8>> {
     validate_state_identity(public_key, state)?;
     let plaintext = Zeroizing::new(encode_storage_state_blob(state)?);
-    let cipher = XChaCha20Poly1305::new(key.into());
+    let key = Zeroizing::new(secret.shared_state_key());
+    let cipher = XChaCha20Poly1305::new(key.as_ref().into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let aad = shared_state_aad(public_key, secret.key_generation());
     let ciphertext = cipher
         .encrypt(
             &nonce,
             Payload {
                 msg: plaintext.as_ref(),
-                aad: public_key.as_str().as_bytes(),
+                aad: &aad,
             },
         )
         .map_err(|_| PaykitSdkError::Storage {
@@ -281,6 +351,7 @@ fn encrypt_state_with_key(
         })?;
     let envelope = EncryptedStateEnvelopeRef {
         version: SHARED_STATE_ENVELOPE_VERSION,
+        key_generation: secret.key_generation(),
         nonce: nonce.into(),
         ciphertext: &ciphertext,
     };
@@ -295,7 +366,7 @@ fn encrypt_state_with_key(
 }
 
 fn decrypt_state_with_key(
-    key: &[u8; 32],
+    secret: &PaykitIdentitySecretKey,
     public_key: &PubkyPublicKey,
     encrypted: &[u8],
 ) -> Result<StorageState> {
@@ -316,14 +387,26 @@ fn decrypt_state_with_key(
             source: None,
         });
     }
-    let cipher = XChaCha20Poly1305::new(key.into());
+    if envelope.key_generation != secret.key_generation() {
+        return Err(PaykitSdkError::Identity {
+            context: format!(
+                "Paykit key generation {} does not match shared-state generation {}",
+                secret.key_generation(),
+                envelope.key_generation
+            ),
+            source: None,
+        });
+    }
+    let key = Zeroizing::new(secret.shared_state_key());
+    let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+    let aad = shared_state_aad(public_key, envelope.key_generation);
     let plaintext = Zeroizing::new(
         cipher
             .decrypt(
                 XNonce::from_slice(&envelope.nonce),
                 Payload {
                     msg: envelope.ciphertext,
-                    aad: public_key.as_str().as_bytes(),
+                    aad: &aad,
                 },
             )
             .map_err(|_| PaykitSdkError::Storage {
@@ -334,6 +417,26 @@ fn decrypt_state_with_key(
     let state = decode_storage_state_blob(&plaintext)?;
     validate_state_identity(public_key, &state)?;
     Ok(state)
+}
+
+fn encrypted_state_key_generation(encrypted: &[u8]) -> Result<u64> {
+    let envelope: EncryptedStateEnvelope<'_> =
+        postcard::from_bytes(encrypted).map_err(|err| PaykitSdkError::Storage {
+            context: "decode encrypted Pubky shared state".into(),
+            source: Some(err.into()),
+        })?;
+    if envelope.version != SHARED_STATE_ENVELOPE_VERSION || envelope.key_generation == 0 {
+        return Err(PaykitSdkError::Storage {
+            context: "encrypted Pubky shared state has an unsupported version or key generation"
+                .into(),
+            source: None,
+        });
+    }
+    Ok(envelope.key_generation)
+}
+
+fn shared_state_aad(public_key: &PubkyPublicKey, key_generation: u64) -> Vec<u8> {
+    format!("{}:{key_generation}", public_key.as_str()).into_bytes()
 }
 
 fn validate_state_identity(public_key: &PubkyPublicKey, state: &StorageState) -> Result<()> {
@@ -398,10 +501,14 @@ mod tests {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
     }
 
+    fn secret(byte: u8, key_generation: u64) -> PaykitIdentitySecretKey {
+        PaykitIdentitySecretKey::new([byte; 32], key_generation).unwrap()
+    }
+
     #[test]
     fn test_encrypted_state_round_trips() {
         let state = StorageState::default();
-        let key = [7; 32];
+        let key = secret(7, 1);
         let identity = identity();
         let encrypted = encrypt_state_with_key(&key, &identity, &state).unwrap();
         assert_eq!(
@@ -414,29 +521,55 @@ mod tests {
     fn test_encrypted_state_rejects_wrong_key_and_identity() {
         let state = StorageState::default();
         let identity = identity();
-        let encrypted = encrypt_state_with_key(&[7; 32], &identity, &state).unwrap();
-        assert!(decrypt_state_with_key(&[8; 32], &identity, &encrypted).is_err());
-        assert!(decrypt_state_with_key(&[7; 32], &self::identity(), &encrypted).is_err());
+        let encrypted = encrypt_state_with_key(&secret(7, 1), &identity, &state).unwrap();
+        assert!(decrypt_state_with_key(&secret(8, 1), &identity, &encrypted).is_err());
+        assert!(decrypt_state_with_key(&secret(7, 1), &self::identity(), &encrypted).is_err());
+        assert!(decrypt_state_with_key(&secret(7, 2), &identity, &encrypted).is_err());
     }
 
     #[test]
     fn test_encrypted_state_rejects_tampering() {
         let state = StorageState::default();
         let identity = identity();
-        let mut encrypted = encrypt_state_with_key(&[7; 32], &identity, &state).unwrap();
+        let mut encrypted = encrypt_state_with_key(&secret(7, 1), &identity, &state).unwrap();
         let last = encrypted.last_mut().unwrap();
         *last ^= 1;
-        assert!(decrypt_state_with_key(&[7; 32], &identity, &encrypted).is_err());
+        assert!(decrypt_state_with_key(&secret(7, 1), &identity, &encrypted).is_err());
     }
 
     #[test]
     fn test_encrypted_state_uses_fresh_nonce() {
         let state = StorageState::default();
         let identity = identity();
-        let first = encrypt_state_with_key(&[7; 32], &identity, &state).unwrap();
-        let second = encrypt_state_with_key(&[7; 32], &identity, &state).unwrap();
+        let secret = secret(7, 1);
+        let first = encrypt_state_with_key(&secret, &identity, &state).unwrap();
+        let second = encrypt_state_with_key(&secret, &identity, &state).unwrap();
         assert_ne!(first, second);
         assert_ne!(state_revision(&first), state_revision(&second));
+    }
+
+    #[test]
+    fn test_encrypted_state_rekeys_without_changing_logical_state() {
+        let identity = identity();
+        let state = StorageState {
+            identity_state: Some(crate::IdentityState {
+                public_key: Some(identity.clone()),
+                initialized_at: chrono::Utc::now(),
+            }),
+            ..StorageState::default()
+        };
+        let current_key = secret(7, 1);
+        let replacement_key = secret(8, 2);
+        let current = encrypt_state_with_key(&current_key, &identity, &state).unwrap();
+        let decoded = decrypt_state_with_key(&current_key, &identity, &current).unwrap();
+        let replacement = encrypt_state_with_key(&replacement_key, &identity, &decoded).unwrap();
+
+        assert_eq!(encrypted_state_key_generation(&replacement).unwrap(), 2);
+        assert!(decrypt_state_with_key(&current_key, &identity, &replacement).is_err());
+        assert_eq!(
+            decrypt_state_with_key(&replacement_key, &identity, &replacement).unwrap(),
+            state
+        );
     }
 
     #[test]
@@ -450,7 +583,7 @@ mod tests {
             ..StorageState::default()
         };
 
-        let error = encrypt_state_with_key(&[7; 32], &active_identity, &state).unwrap_err();
+        let error = encrypt_state_with_key(&secret(7, 1), &active_identity, &state).unwrap_err();
 
         assert!(matches!(
             error,

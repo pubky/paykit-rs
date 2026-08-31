@@ -59,27 +59,31 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     // on the homeserver before removal. This also validates the fetch
     // arguments themselves, so the post-removal `None` below is meaningful.
     let storage = pair.bob.access.outbox_client.public_storage();
-    let bob_pubky_secret_key = pair
+    let bob_paykit_identity_secret_key = pair
         .bob
         .access
         .local_secret_key
         .as_ref()
         .expect("bob's session should retain a local secret key")
-        .as_bytes();
-    let bob_noise_secret_key = paykit_lib::derive_paykit_noise_secret_key(bob_pubky_secret_key);
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .expect("initial Bob Paykit key derivation should succeed");
+    let bob_noise_secret_key =
+        paykit_lib::derive_paykit_noise_secret_key(bob_paykit_identity_secret_key.as_bytes());
     let alice_public_key = pair
         .alice
         .public_key
         .to_public_key()
         .expect("public key conversion should succeed");
-    let alice_noise_public_key = paykit_lib::derive_paykit_noise_public_key(
-        pair.alice
-            .access
-            .local_secret_key
-            .as_ref()
-            .expect("alice's session should retain a local secret key")
-            .as_bytes(),
-    );
+    let alice_paykit_identity_secret_key = pair
+        .alice
+        .access
+        .local_secret_key
+        .as_ref()
+        .expect("alice's session should retain a local secret key")
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .expect("initial Alice Paykit key derivation should succeed");
+    let alice_noise_public_key =
+        paykit_lib::derive_paykit_noise_public_key(alice_paykit_identity_secret_key.as_bytes());
     let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
         &storage,
         &bob_noise_secret_key,

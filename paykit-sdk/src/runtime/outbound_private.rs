@@ -211,14 +211,7 @@ where
         lease: &PeerLinkOperationLease,
         session_access: &PubkySessionAccess,
     ) -> Result<(paykit_lib::EncryptedLink, EncryptedLinkStateRecord)> {
-        let secret_key = session_access
-            .local_secret_key
-            .as_ref()
-            .ok_or_else(|| PaykitSdkError::Identity {
-                context: "local Pubky secret key is unavailable for Encrypted Links".into(),
-                source: None,
-            })?
-            .paykit_noise_secret_key();
+        let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
         let stored_link_state = self
             .storage
@@ -246,6 +239,20 @@ where
                 return Err(err.into());
             }
         };
+        if !self
+            .snapshot_uses_current_counterparty_noise_key(
+                counterparty,
+                snapshot.remote_noise_public_key(),
+            )
+            .await?
+        {
+            self.mark_outbound_link_recovery_required(counterparty, lease, session_access)
+                .await?;
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!("counterparty {counterparty} rotated its Paykit identity key"),
+                source: None,
+            });
+        }
         let link = match paykit_lib::restore_encrypted_link(
             session_access.session.clone(),
             secret_key,

@@ -49,10 +49,15 @@
 - **Related terms**: Paykit App, Paykit App Registry, Payment Endpoint
 
 ### Paykit App Registry
-- **Definition**: The identity-wide public record that lists the Paykit Apps participating in one Paykit identity, their display names and capabilities, the identity-wide Noise public key, and optional default-app preferences.
+- **Definition**: The identity-wide public record that lists the Paykit Apps participating in one Paykit identity, their display names and capabilities, the current identity-wide Noise public key and key generation, and optional default-app preferences.
 - **NOT**: Shared private SDK state, a contact list, a Payment List, or one registry file per app.
 - **Synonyms to AVOID**: receiver registry, receiver index
 - **Related terms**: Paykit App, Paykit App ID, Pubky Routing
+
+### Paykit Identity Secret
+- **Definition**: Rotatable identity-wide secret material from which Paykit derives separate Noise and shared-state encryption keys. A holder of the Pubky identity secret can derive any generation; authorized apps may instead receive only the current generation from the identity's key-management layer.
+- **NOT**: The Pubky identity secret, an Encrypted Link snapshot, or an app-specific payment key.
+- **Related terms**: Paykit App Registry, Encrypted Link, Paykit SDK
 
 ### Paykit Profile
 - **Definition**: Public Paykit-facing display metadata published by a Pubky identity at `/pub/paykit/profile.json`, with a small shared display core and optional application-defined `extra` JSON object.

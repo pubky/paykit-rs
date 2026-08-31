@@ -37,7 +37,7 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
     assert!(matches!(
         error,
         PaykitSdkError::Identity { context, .. }
-            if context.contains("requires the local identity secret")
+            if context.contains("requires the Paykit identity secret")
     ));
 
     let bitkit_provider = TestnetSessionProvider::new(access.clone());
@@ -77,6 +77,72 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
         .await
         .unwrap();
     assert_eq!(after_sign_out, before_sign_out);
+}
+
+#[tokio::test]
+async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
+    let testnet = build_testnet().await;
+    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap())
+        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .unwrap()
+        .access;
+    let provider = TestnetSessionProvider::new(access.clone());
+    let storage = PubkySharedStateStorage::new(provider.clone());
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    let initialized = sdk.initialize().await.unwrap();
+    let owner = initialized
+        .public_key
+        .clone()
+        .expect("initialized SDK should report its identity");
+    sdk.publish_paykit_app(test_app("Bitkit")).await.unwrap();
+
+    let replacement = secret
+        .derive_paykit_identity_secret_key(2)
+        .expect("replacement Paykit key derivation should succeed");
+    let registry = sdk
+        .rotate_paykit_identity_key(replacement.clone())
+        .await
+        .expect("Paykit key rotation should succeed");
+    assert_eq!(registry.key_generation(), 2);
+
+    let old_key_error = storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .expect_err("the previous Paykit key must not decrypt rotated state");
+    assert!(matches!(old_key_error, PaykitSdkError::Identity { .. }));
+
+    let mut replacement_access = access;
+    replacement_access.paykit_identity_secret_key = Some(replacement);
+    let replacement_provider = TestnetSessionProvider::new(replacement_access);
+    let replacement_storage = PubkySharedStateStorage::new(replacement_provider.clone());
+    let replacement_sdk = PaykitSdk::new(
+        replacement_storage.clone(),
+        replacement_provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    let resumed = replacement_sdk.initialize().await.unwrap();
+    assert_eq!(resumed.public_key, initialized.public_key);
+
+    let state = replacement_storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap();
+    assert_eq!(state.registered_paykit_apps.len(), 1);
+    let registry = replacement_sdk
+        .paykit_app_registry(owner)
+        .await
+        .unwrap()
+        .expect("rotated App Registry should remain published");
+    assert_eq!(registry.key_generation(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

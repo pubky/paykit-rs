@@ -24,7 +24,7 @@ pub use app::PaykitAppId;
 pub use app_registry::{
     get_paykit_app_registry, parse_paykit_app_registry_json, serialize_paykit_app_registry,
     set_paykit_app_registry, PaykitApp, PaykitAppCapabilities, PaykitAppRegistry,
-    PAYKIT_APP_REGISTRY_MAX_APPS, PAYKIT_APP_REGISTRY_MAX_BYTES,
+    INITIAL_PAYKIT_KEY_GENERATION, PAYKIT_APP_REGISTRY_MAX_APPS, PAYKIT_APP_REGISTRY_MAX_BYTES,
     PAYKIT_APP_REGISTRY_MAX_ENDPOINT_DEFAULTS,
 };
 #[doc(inline)]
