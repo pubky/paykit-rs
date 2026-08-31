@@ -269,19 +269,18 @@ where
     /// Missing live session access should be represented by
     /// [`PubkySessionProvider::load_session_access`] returning `None`; that
     /// preserves stored SDK state and causes sign-out to fail until revocation
-    /// can be attempted. Use [`Self::forget_session_access`] only for explicit
+    /// can be attempted. Access for a different identity is also rejected
+    /// before revocation. Use [`Self::forget_session_access`] only for explicit
     /// local-only cleanup.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
+        let initialized_public_key = self
+            .storage
+            .load_identity_state()
+            .await?
+            .and_then(|state| state.local_pubky_public_key);
         let session_access = self.pubky.load_session_access().await?;
-        if session_access.is_none()
-            && self
-                .storage
-                .load_identity_state()
-                .await?
-                .and_then(|state| state.local_pubky_public_key)
-                .is_some()
-        {
+        if session_access.is_none() && initialized_public_key.is_some() {
             return Err(PaykitSdkError::Identity {
                 context: "cannot revoke Pubky grant during sign-out without live session access"
                     .into(),
@@ -290,6 +289,16 @@ where
         }
         if let Some(access) = session_access {
             access.validate()?;
+            if let Some(expected_public_key) = initialized_public_key {
+                if access.public_key()? != expected_public_key {
+                    return Err(PaykitSdkError::Identity {
+                        context:
+                            "cannot sign out because active Pubky session does not match initialized identity"
+                                .into(),
+                        source: None,
+                    });
+                }
+            }
             self.pubky.revoke_session_access(&access).await?;
         }
         self.clear_local_identity_state().await

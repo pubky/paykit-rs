@@ -1,10 +1,12 @@
 use paykit_sdk::{
-    PaykitReceiverPath, PaykitSdkConfig, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
-    ReceiverNoiseSecretKey,
+    PaykitReceiverPath, PaykitSdk, PaykitSdkConfig, PubkyLocalSecretKey, PubkyPublicKey,
+    PubkySessionAccess, ReceiverNoiseSecretKey, StorageAdapter,
 };
 use pubky_testnet::pubky::Keypair;
 
-use crate::harness::{build_testnet, session_bootstrap, TestUser};
+use crate::harness::{
+    build_testnet, session_bootstrap, TestUser, TestnetPaymentAdapter, TestnetSessionProvider,
+};
 
 const TEST_CLIENT_ID: &str = "paykit-sdk.test";
 
@@ -244,4 +246,52 @@ async fn test_sdk_sign_out_revokes_grant_session() {
         .restore_session(&session_secret)
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn test_sdk_sign_out_rejects_session_for_different_identity() {
+    let testnet = build_testnet().await;
+    let initialized_user = TestUser::sign_up(&testnet).await;
+    let active_user = TestUser::sign_up(&testnet).await;
+    let active_session_secret = active_user
+        .access
+        .session
+        .as_grant()
+        .expect("test session should be grant-backed")
+        .export_local_secret()
+        .await
+        .expect("test grant should export local restore material");
+    let provider =
+        TestnetSessionProvider::new(active_user.access.clone(), active_session_secret.clone());
+    let sdk = PaykitSdk::new(
+        initialized_user.storage.clone(),
+        provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new(initialized_user.receiver_path.clone()),
+    )
+    .expect("SDK construction should succeed");
+
+    let error = sdk
+        .sign_out()
+        .await
+        .expect_err("sign-out must reject access for another identity");
+
+    assert!(error
+        .to_string()
+        .contains("does not match initialized identity"));
+    assert_eq!(
+        initialized_user
+            .storage
+            .load_identity_state()
+            .await
+            .unwrap()
+            .and_then(|state| state.local_pubky_public_key),
+        Some(initialized_user.public_key)
+    );
+    testnet
+        .sdk()
+        .expect("testnet Pubky client should be available")
+        .restore_session(&active_session_secret)
+        .await
+        .expect("mismatched grant must remain active");
 }

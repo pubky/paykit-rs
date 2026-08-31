@@ -286,8 +286,9 @@ block Pubky-backed workflows until session access is available again. Explicit
 SDK-managed identity-scoped state. If remote revocation fails, local state is
 preserved so the operation can be retried. When an initialized identity has no
 live session access, `sign_out` also preserves state and returns an error because
-it cannot prove revocation. If revocation succeeds but provider or SDK storage
-cleanup fails, `forget_session_access` completes the remaining local cleanup.
+it cannot prove revocation. A session for a different identity is rejected
+before revocation. If revocation succeeds but provider or SDK storage cleanup
+fails, `forget_session_access` completes the remaining local cleanup.
 It is also the explicit local-only escape hatch when remote revocation is
 unavailable; in that case it does not invalidate other persisted copies of the
 grant.

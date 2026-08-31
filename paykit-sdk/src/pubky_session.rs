@@ -797,10 +797,6 @@ async fn validate_grant_session_identity(
 fn is_confirmed_inactive_grant_error(error: &pubky::Error) -> bool {
     matches!(
         error,
-        pubky::Error::Authentication(pubky::errors::AuthError::Validation(message))
-            if message == "stored grant credential has expired"
-    ) || matches!(
-        error,
         pubky::Error::Request(pubky::errors::RequestError::Server { status, message })
             if status.as_u16() == 401
                 && matches!(

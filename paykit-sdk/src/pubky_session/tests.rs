@@ -215,7 +215,7 @@ fn test_confirmed_inactive_grant_error_accepts_only_explicit_revocation_or_expir
         "Grant not found",
     )));
 
-    assert!(is_confirmed_inactive_grant_error(
+    assert!(!is_confirmed_inactive_grant_error(
         &pubky::Error::Authentication(pubky::errors::AuthError::Validation(
             "stored grant credential has expired".into(),
         )),
