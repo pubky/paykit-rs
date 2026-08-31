@@ -281,10 +281,11 @@ identity/runtime coordinator.
 If `load_session_access` returns `None`, no live session access is currently
 available. Ordinary refreshes must preserve the last identity-scoped state and
 block Pubky-backed workflows until session access is available again. Explicit
-`sign_out` is the path that clears SDK-managed identity-scoped state.
-Sign-out should clear live session access before deleting SDK-managed local
-state. If local storage clearing fails after session access is cleared, the app
-must retry sign-out or clear SDK storage through its adapter.
+`sign_out` revokes the live Pubky grant, then clears session access and
+SDK-managed identity-scoped state. If remote revocation fails, local state is
+preserved so the operation can be retried. `forget_session_access` provides an
+explicit local-only escape hatch when remote revocation is unavailable; it does
+not invalidate other persisted copies of the grant.
 Apps that want explicit sign-out to be reversible for the same user must export
 and persist an SDK backup before calling `sign_out`; sign-out must not be used
 when live session access is merely unavailable.
@@ -856,10 +857,11 @@ writes still check the stored lease id so an earlier holder cannot commit after
 a newer lease has replaced it.
 
 The Rust SDK implementation provides storage-backed per-peer leases for
-Encrypted Link work and serializes `initialize`, `sign_out`, and public endpoint
-sync calls on one runtime instance. Integrators that run more than one runtime
-instance against the same storage must serialize identity-scoped operations and
-public endpoint sync with their own process or storage lock.
+Encrypted Link work and serializes `initialize`, `sign_out`,
+`forget_session_access`, and public endpoint sync calls on one runtime instance.
+Integrators that run more than one runtime instance against the same storage
+must serialize identity-scoped operations and public endpoint sync with their
+own process or storage lock.
 
 ## Workflows
 

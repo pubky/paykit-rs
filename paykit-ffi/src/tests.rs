@@ -11,7 +11,7 @@ use paykit_sdk::PaykitSdkConfig;
 use paykit_sdk::{
     ContactRecord, EncryptedLinkHandshakeRole, IdentityState, LinkedPeerState,
     OutboundPrivateMessageStatus, PaykitProfile, PrivateStreamParseStatus, PubkyPublicKey,
-    PublicationStatus,
+    PubkySessionProvider, PublicationStatus,
 };
 
 use crate::errors::storage_error;
@@ -658,43 +658,24 @@ fn test_pubky_secret_key_derivation_matches_pubky_core_mnemonic() {
 
 #[tokio::test]
 #[ignore = "requires a live Pubky homeserver session"]
-async fn test_ffi_session_provider_reimports_repeatedly() {
-    #[derive(Default)]
-    struct MemoryStore {
-        snapshot: Mutex<Option<FfiSdkStateBlobSnapshot>>,
+async fn test_ffi_session_provider_caches_concurrent_restores() {
+    struct RestoredSessionProvider {
+        client_id: String,
+        session_secret: String,
+        local_secret_key: Option<Arc<FfiPubkyLocalSecretKey>>,
+        receiver_noise_secret_key: Arc<FfiReceiverNoiseSecretKey>,
     }
 
-    impl FfiSdkStateBlobStore for MemoryStore {
-        fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
-            Ok(self.snapshot.lock().unwrap().clone())
-        }
-
-        fn save_state_blob_atomically(
-            &self,
-            blob: Arc<FfiSdkStateBlob>,
-            expected_revision: Option<String>,
-        ) -> Result<String, PaykitFfiError> {
-            let mut snapshot = self.snapshot.lock().unwrap();
-            let current_revision = snapshot.as_ref().map(|snapshot| snapshot.revision.clone());
-            assert_eq!(current_revision, expected_revision);
-            let revision = format!("revision-{}", blob.export_bytes().len());
-            *snapshot = Some(FfiSdkStateBlobSnapshot {
-                blob,
-                revision: revision.clone(),
-            });
-            Ok(revision)
-        }
-    }
-
-    struct MemorySessionProvider {
-        access: Arc<FfiPubkySessionAccess>,
-    }
-
-    impl FfiSdkPubkySessionProvider for MemorySessionProvider {
+    impl FfiSdkPubkySessionProvider for RestoredSessionProvider {
         fn load_session_access(
             &self,
         ) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError> {
-            Ok(Some(self.access.clone()))
+            Ok(Some(Arc::new(FfiPubkySessionAccess::new(
+                self.client_id.clone(),
+                self.session_secret.clone(),
+                self.local_secret_key.clone(),
+                self.receiver_noise_secret_key.clone(),
+            )?)))
         }
 
         fn public_storage_available(&self) -> Result<bool, PaykitFfiError> {
@@ -719,22 +700,28 @@ async fn test_ffi_session_provider_reimports_repeatedly() {
         )
         .await
         .unwrap();
-    let store = Arc::new(MemoryStore::default());
-    let provider = Arc::new(MemorySessionProvider {
-        access: result.session_access.clone(),
+    let provider = Arc::new(RestoredSessionProvider {
+        client_id: result.session_access.client_id(),
+        session_secret: result.session_access.export_session_secret(),
+        local_secret_key: result.session_access.export_local_secret_key(),
+        receiver_noise_secret_key: result.session_access.export_receiver_noise_secret_key(),
     });
-    let sdk = FfiPaykitSdk::with_payment_adapter(
-        store,
+    let adapter = FfiSdkPubkySessionProviderAdapter::new(
         provider,
-        Arc::new(FfiNoopSdkPaymentAdapter),
-        config,
-    )
-    .unwrap();
+        pubky_from_config(&default_pubky_client_config()).unwrap(),
+    );
 
-    sdk.initialize().await.unwrap();
-    for _ in 0..5 {
-        let status = sdk.identity_status().await.unwrap().unwrap();
-        assert_eq!(status.public_key, Some(result.public_key.clone()));
-        assert!(status.live_session_available);
+    let (first, second, third) = tokio::join!(
+        adapter.load_session_access(),
+        adapter.load_session_access(),
+        adapter.load_session_access(),
+    );
+    for access in [first.unwrap(), second.unwrap(), third.unwrap()] {
+        let access = access.expect("restored access should be available");
+        assert_eq!(
+            access.session.info().public_key().z32(),
+            raw_pubky_public_key(result.public_key.clone()).unwrap()
+        );
+        assert!(access.session.revalidate().await.unwrap().is_some());
     }
 }

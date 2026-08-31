@@ -23,7 +23,10 @@ pub trait PubkySessionProvider: Send + Sync {
     /// Load public Pubky storage for unauthenticated counterparty reads.
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>>;
 
-    /// Clear local Pubky session access during sign-out.
+    /// Clear Pubky session access from local platform storage.
+    ///
+    /// The SDK revokes a live grant before calling this during normal sign-out.
+    /// Local-only session removal calls this without remote revocation.
     async fn clear_session_access(&self) -> Result<()>;
 }
 

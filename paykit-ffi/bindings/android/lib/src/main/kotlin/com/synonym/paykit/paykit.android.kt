@@ -1507,6 +1507,8 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1672,6 +1674,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 17257.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access() != 58467.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_identity_status() != 8559.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1819,7 +1824,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 7511.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffipaykitsdk_sign_out() != 28715.toShort()) {
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_sign_out() != 37726.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 21336.toShort()) {
@@ -1966,7 +1971,7 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffisdkpubkysessionprovider_public_storage_available() != 360.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
-        if (uniffi_paykit_checksum_method_ffisdkpubkysessionprovider_clear_session_access() != 38150.toShort()) {
+        if (uniffi_paykit_checksum_method_ffisdkpubkysessionprovider_clear_session_access() != 61806.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffisdkstateblob_export_bytes() != 31016.toShort()) {
@@ -2157,6 +2162,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_identity_status(
@@ -2725,6 +2733,10 @@ internal object UniffiLib : Library {
     external fun uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_text(
         `ptr`: Pointer?,
         `uri`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_forget_session_access(
+        `ptr`: Pointer?,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_identity_status(
@@ -4845,6 +4857,31 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
+     * Clear local session access and SDK identity state without revoking the grant.
+     *
+     * Use this only when remote revocation cannot be reached and the app
+     * intentionally accepts that persisted copies of the grant remain valid.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `forgetSessionAccess`(): IdentityStatus {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_forget_session_access(
+                    thisPtr,
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeIdentityStatus.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Return current identity status, when initialized.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -6014,7 +6051,7 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
-     * Clear live Pubky session access and SDK-managed identity-scoped state.
+     * Revoke the current Pubky grant and clear local SDK identity state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `signOut`(): IdentityStatus {
@@ -9247,7 +9284,9 @@ public open class SdkPubkySessionProviderImpl: Disposable, SdkPubkySessionProvid
     }
 
     /**
-     * Clear platform session access during explicit SDK sign-out.
+     * Clear Pubky session access from local platform storage.
+     *
+     * Normal SDK sign-out revokes the live grant before invoking this callback.
      */
     @Throws(PaykitException::class)
     public override fun `clearSessionAccess`() {

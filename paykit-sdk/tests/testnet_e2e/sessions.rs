@@ -4,7 +4,7 @@ use paykit_sdk::{
 };
 use pubky_testnet::pubky::Keypair;
 
-use crate::harness::{build_testnet, session_bootstrap};
+use crate::harness::{build_testnet, session_bootstrap, TestUser};
 
 const TEST_CLIENT_ID: &str = "paykit-sdk.test";
 
@@ -214,4 +214,27 @@ fn session_capabilities(session: &pubky::PubkySession) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+#[tokio::test]
+async fn test_sdk_sign_out_revokes_grant_session() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    let session_secret = user
+        .access
+        .session
+        .as_grant()
+        .expect("test session should be grant-backed")
+        .export_local_secret()
+        .await
+        .expect("test grant should export local restore material");
+
+    user.sdk.sign_out().await.expect("sign-out should succeed");
+
+    assert!(testnet
+        .sdk()
+        .expect("testnet Pubky client should be available")
+        .restore_session(&session_secret)
+        .await
+        .is_err());
 }

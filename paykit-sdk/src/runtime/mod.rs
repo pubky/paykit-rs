@@ -260,7 +260,7 @@ where
         })
     }
 
-    /// Clear live Pubky session access and SDK-managed identity-scoped state.
+    /// Revoke the current Pubky grant and clear SDK-managed identity state.
     ///
     /// This is an explicit destructive sign-out. Apps that want to restore the
     /// same user's private Paykit state later should export and persist an SDK
@@ -271,6 +271,29 @@ where
     /// preserves stored SDK state and only blocks Pubky-backed workflows.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
+        if let Some(access) = self.pubky.load_session_access().await? {
+            access
+                .session
+                .signout()
+                .await
+                .map_err(|(err, _session)| PaykitSdkError::Identity {
+                    context: "revoke Pubky grant during sign-out".into(),
+                    source: Some(err.into()),
+                })?;
+        }
+        self.clear_local_identity_state().await
+    }
+
+    /// Clear local session access and SDK identity state without revoking the grant.
+    ///
+    /// This is an offline recovery escape hatch. A copied or separately
+    /// persisted grant remains valid until it expires or is revoked elsewhere.
+    pub async fn forget_session_access(&self) -> Result<IdentityStatus> {
+        let _identity_guard = self.claim_identity_operation("forget session access")?;
+        self.clear_local_identity_state().await
+    }
+
+    async fn clear_local_identity_state(&self) -> Result<IdentityStatus> {
         self.pubky.clear_session_access().await?;
 
         let now = self.clock.now();

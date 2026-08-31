@@ -272,6 +272,15 @@ public interface PaykitSdkInterface {
     public suspend fun `fetchPubkyText`(`uri`: kotlin.String): kotlin.String?
 
     /**
+     * Clear local session access and SDK identity state without revoking the grant.
+     *
+     * Use this only when remote revocation cannot be reached and the app
+     * intentionally accepts that persisted copies of the grant remain valid.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `forgetSessionAccess`(): IdentityStatus
+
+    /**
      * Return current identity status, when initialized.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -573,7 +582,7 @@ public interface PaykitSdkInterface {
     public suspend fun `saveContact`(`update`: ContactUpdate): ContactRecord
 
     /**
-     * Clear live Pubky session access and SDK-managed identity-scoped state.
+     * Revoke the current Pubky grant and clear local SDK identity state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `signOut`(): IdentityStatus
@@ -1027,7 +1036,9 @@ public interface SdkPubkySessionProvider {
     public fun `publicStorageAvailable`(): kotlin.Boolean
 
     /**
-     * Clear platform session access during explicit SDK sign-out.
+     * Clear Pubky session access from local platform storage.
+     *
+     * Normal SDK sign-out revokes the live grant before invoking this callback.
      */
     @Throws(PaykitException::class)
     public fun `clearSessionAccess`()

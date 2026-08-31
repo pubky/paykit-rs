@@ -205,7 +205,7 @@ async fn test_identity_status_cached_identity_requires_live_session() {
 }
 
 #[tokio::test]
-async fn test_sign_out_clears_identity_scoped_state() {
+async fn test_forget_session_access_clears_identity_scoped_state() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -274,7 +274,7 @@ async fn test_sign_out_clears_identity_scoped_state() {
         FixedClock,
     );
 
-    let status = sdk.sign_out().await.unwrap();
+    let status = sdk.forget_session_access().await.unwrap();
 
     assert!(status.public_key.is_none());
     assert!(!status.live_session_available);

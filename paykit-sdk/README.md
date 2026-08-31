@@ -180,7 +180,7 @@ Common workflows:
   `process_pending_private_messages` from a broader retry worker
 - call `sync_public_contact_markers` on startup if the app uses public contact
   markers
-- call `sign_out` when the app wants to clear live Pubky access and
+- call `sign_out` when the app wants to revoke its Pubky grant and clear
   SDK-managed identity-scoped state
 - export and persist an SDK backup before `sign_out` if the app wants that
   sign-out to be reversible for the same user
@@ -237,18 +237,23 @@ that transaction boundary, it should fail the receive operation instead of
 persisting a partial checkpoint.
 
 Apps should also serialize identity-scoped operations such as `initialize`,
-`sign_out`, backup restore, and public endpoint sync when multiple runtime
-instances share the same storage. The SDK serializes `initialize`, `sign_out`,
-and public endpoint sync calls on one runtime instance and uses storage-backed
-per-peer leases for Encrypted Link work, but it does not add a process-wide
-identity or public endpoint lock by itself.
+`sign_out`, `forget_session_access`, backup restore, and public endpoint sync
+when multiple runtime instances share the same storage. The SDK serializes
+these calls on one runtime instance and uses storage-backed per-peer leases for
+Encrypted Link work, but it does not add a process-wide identity or public
+endpoint lock by itself.
 
-`sign_out` clears live Pubky session access before clearing SDK-managed
-identity-scoped storage. If provider clearing fails, the SDK leaves local state
-intact so callers can retry without losing contacts, links, queues, or receipts.
-If provider clearing succeeds but local storage clearing fails, Pubky-backed
-workflows remain blocked because no live session is available; retry `sign_out`
-or clear SDK storage through the adapter.
+`sign_out` revokes the current Pubky grant before clearing live session access
+and SDK-managed identity-scoped storage. If revocation or provider clearing
+fails, the SDK leaves local state intact so callers can retry without losing
+contacts, links, queues, or receipts. If local storage clearing fails after the
+grant and provider access are cleared, retry `sign_out` or clear SDK storage
+through the adapter.
+
+`forget_session_access` performs the same destructive local cleanup without
+remote revocation. It is an offline recovery escape hatch: other persisted
+copies of the grant remain usable until the grant expires or is revoked
+elsewhere.
 
 If the provider returns no live session access during ordinary startup or
 workflow calls, the SDK blocks Pubky-backed work but preserves the last
