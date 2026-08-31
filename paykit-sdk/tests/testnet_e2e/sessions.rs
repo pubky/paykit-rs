@@ -229,6 +229,13 @@ async fn test_sdk_sign_out_revokes_grant_session() {
         .await
         .expect("test grant should export local restore material");
 
+    testnet
+        .sdk()
+        .expect("testnet Pubky client should be available")
+        .restore_session(&session_secret)
+        .await
+        .expect("rotating the current bearer should succeed");
+
     user.sdk.sign_out().await.expect("sign-out should succeed");
 
     assert!(testnet

@@ -244,16 +244,16 @@ Encrypted Link work, but it does not add a process-wide identity or public
 endpoint lock by itself.
 
 `sign_out` revokes the current Pubky grant before clearing live session access
-and SDK-managed identity-scoped storage. If revocation or provider clearing
-fails, the SDK leaves local state intact so callers can retry without losing
-contacts, links, queues, or receipts. If local storage clearing fails after the
-grant and provider access are cleared, retry `sign_out` or clear SDK storage
-through the adapter.
+and SDK-managed identity-scoped storage. If revocation fails, the SDK leaves
+local state intact so callers can retry without losing contacts, links, queues,
+or receipts. If provider or SDK storage clearing fails after revocation, finish
+local cleanup with `forget_session_access`; retrying remote revocation may no
+longer be possible.
 
 `forget_session_access` performs the same destructive local cleanup without
-remote revocation. It is an offline recovery escape hatch: other persisted
-copies of the grant remain usable until the grant expires or is revoked
-elsewhere.
+attempting remote revocation. It is also the recovery path after confirmed
+revocation if local cleanup fails. Otherwise, persisted copies of the grant may
+remain usable until the grant expires or is revoked elsewhere.
 
 If the provider returns no live session access during ordinary startup or
 workflow calls, the SDK blocks Pubky-backed work but preserves the last

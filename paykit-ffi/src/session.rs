@@ -386,6 +386,26 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
         }))
     }
 
+    async fn revoke_session_access(&self, access: &PubkySessionAccess) -> paykit_sdk::Result<()> {
+        let provider_access = self
+            .provider
+            .load_session_access()
+            .map_err(|err| ffi_error_to_sdk(err, "load Pubky session access for revocation"))?
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context: "cannot revoke Pubky grant without persisted session access".into(),
+                source: None,
+            })?;
+        let bootstrap =
+            PubkySessionBootstrap::with_pubky(self.pubky.clone(), &provider_access.client_id)?;
+
+        let mut cached_session = self.cached_session.lock().await;
+        bootstrap
+            .revoke_grant(&provider_access.session_secret, access)
+            .await?;
+        *cached_session = None;
+        Ok(())
+    }
+
     async fn load_public_storage(&self) -> paykit_sdk::Result<Option<pubky::PublicStorage>> {
         let available = self
             .provider

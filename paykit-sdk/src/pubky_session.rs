@@ -19,6 +19,8 @@ use crate::{
     PaykitSdkError, Result,
 };
 
+const GRANT_REVOCATION_MAX_ATTEMPTS: usize = 4;
+
 /// Parsed Pubky resource with a normalized owner and path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PubkyResourceRef {
@@ -415,6 +417,72 @@ impl PubkySessionBootstrap {
         .await
     }
 
+    /// Revoke the grant represented by an exported session secret.
+    ///
+    /// The helper restores the latest bearer before revocation and then
+    /// verifies that the grant can no longer be restored. If another runtime
+    /// rotates the bearer concurrently, it retries with the newly restored
+    /// bearer. It fails closed if revocation cannot be confirmed.
+    pub async fn revoke_grant(
+        &self,
+        session_secret: &str,
+        access: &crate::PubkySessionAccess,
+    ) -> Result<()> {
+        access.validate()?;
+        let grant = access
+            .session
+            .as_grant()
+            .ok_or_else(|| unsupported_session_error("Pubky session must be grant-backed"))?;
+        let exported_secret =
+            Zeroizing::new(grant.export_local_secret().await.ok_or_else(|| {
+                unsupported_session_error("cannot verify a delegated Pubky grant session")
+            })?);
+        if exported_secret.as_str() != session_secret {
+            return Err(PaykitSdkError::Identity {
+                context: "Pubky session secret does not match the live grant".into(),
+                source: None,
+            });
+        }
+        let expected_public_key = access.public_key()?;
+
+        let mut session = match self.pubky.restore_session(session_secret).await {
+            Ok(session) => session,
+            Err(err) if is_inactive_grant_error(&err) => return Ok(()),
+            Err(err) => {
+                return Err(map_pubky_identity_error(
+                    "restore Pubky grant before revocation",
+                    err,
+                ))
+            }
+        };
+
+        for _ in 0..GRANT_REVOCATION_MAX_ATTEMPTS {
+            validate_grant_session_identity(&session, &self.client_id, &expected_public_key)
+                .await?;
+            session
+                .signout()
+                .await
+                .map_err(|(err, _session)| map_pubky_identity_error("revoke Pubky grant", err))?;
+
+            match self.pubky.restore_session(session_secret).await {
+                Err(err) if is_inactive_grant_error(&err) => return Ok(()),
+                Err(err) => {
+                    return Err(map_pubky_identity_error(
+                        "confirm Pubky grant revocation",
+                        err,
+                    ))
+                }
+                Ok(restored) => session = restored,
+            }
+        }
+
+        Err(PaykitSdkError::Identity {
+            context: "could not confirm Pubky grant revocation because its bearer kept changing"
+                .into(),
+            source: None,
+        })
+    }
+
     /// Start a sign-in auth flow for an external signer such as Pubky Ring.
     pub async fn start_sign_in_auth(&self, capabilities: &str) -> Result<PubkyAuthRequest> {
         self.start_auth(capabilities, AuthFlowKind::signin()).await
@@ -706,6 +774,32 @@ async fn validate_grant_session(
         });
     }
     Ok(())
+}
+
+async fn validate_grant_session_identity(
+    session: &PubkySession,
+    expected_client_id: &ClientId,
+    expected_public_key: &PubkyPublicKey,
+) -> Result<()> {
+    validate_grant_session(session, expected_client_id).await?;
+    let actual_public_key = PubkyPublicKey::from_public_key(session.info().public_key());
+    if &actual_public_key != expected_public_key {
+        return Err(PaykitSdkError::Identity {
+            context: format!(
+                "Pubky grant identity `{actual_public_key}` did not match `{expected_public_key}`"
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+fn is_inactive_grant_error(error: &pubky::Error) -> bool {
+    matches!(
+        error,
+        pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
+            if status.as_u16() == 401
+    )
 }
 
 fn validate_session_exact_capabilities(

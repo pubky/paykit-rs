@@ -289,14 +289,8 @@ where
             });
         }
         if let Some(access) = session_access {
-            access
-                .session
-                .signout()
-                .await
-                .map_err(|(err, _session)| PaykitSdkError::Identity {
-                    context: "revoke Pubky grant during sign-out".into(),
-                    source: Some(err.into()),
-                })?;
+            access.validate()?;
+            self.pubky.revoke_session_access(&access).await?;
         }
         self.clear_local_identity_state().await
     }

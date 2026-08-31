@@ -59,6 +59,10 @@ impl PubkySessionProvider for TestPubkySessionProvider {
         Ok(self.session.clone())
     }
 
+    async fn revoke_session_access(&self, _access: &PubkySessionAccess) -> Result<()> {
+        Ok(())
+    }
+
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
         Ok(self
             .session

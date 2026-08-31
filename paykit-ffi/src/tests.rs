@@ -690,7 +690,7 @@ fn test_pubky_secret_key_derivation_matches_pubky_core_mnemonic() {
 }
 
 #[tokio::test]
-async fn test_ffi_session_provider_caches_concurrent_restores() {
+async fn test_ffi_session_provider_caches_restores_and_revokes_rotated_bearer() {
     struct RestoredSessionProvider {
         client_id: String,
         session_secret: String,
@@ -750,7 +750,7 @@ async fn test_ffi_session_provider_caches_concurrent_restores() {
     let session_secret = result.export_session_secret().await.unwrap().into_inner();
     let provider = Arc::new(RestoredSessionProvider {
         client_id: TEST_CLIENT_ID.into(),
-        session_secret,
+        session_secret: session_secret.clone(),
         local_secret_key: Some(Arc::new(FfiPubkyLocalSecretKey::new(
             local_secret.as_bytes().to_vec(),
         ))),
@@ -758,19 +758,33 @@ async fn test_ffi_session_provider_caches_concurrent_restores() {
             receiver_noise_secret.as_bytes().to_vec(),
         )),
     });
-    let adapter = FfiSdkPubkySessionProviderAdapter::new(provider, pubky);
+    let adapter = FfiSdkPubkySessionProviderAdapter::new(provider, pubky.clone());
 
     let (first, second, third) = tokio::join!(
         adapter.load_session_access(),
         adapter.load_session_access(),
         adapter.load_session_access(),
     );
-    for access in [first.unwrap(), second.unwrap(), third.unwrap()] {
-        let access = access.expect("restored access should be available");
+    let first = first.unwrap().expect("restored access should be available");
+    for access in [
+        first.clone(),
+        second.unwrap().unwrap(),
+        third.unwrap().unwrap(),
+    ] {
         assert_eq!(
             access.session.info().public_key().z32(),
             public_key.as_str()
         );
         assert!(access.session.revalidate().await.unwrap().is_some());
     }
+
+    pubky
+        .restore_session(&session_secret)
+        .await
+        .expect("a second runtime should rotate the cached bearer");
+    adapter
+        .revoke_session_access(&first)
+        .await
+        .expect("revocation should recover from a rotated bearer");
+    assert!(pubky.restore_session(&session_secret).await.is_err());
 }

@@ -20,6 +20,19 @@ pub trait PubkySessionProvider: Send + Sync {
     /// sign-out is a separate runtime operation.
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>>;
 
+    /// Revoke the grant represented by the supplied live access.
+    ///
+    /// Implementations must not report success unless remote grant revocation
+    /// is confirmed. Providers that persist grant restore material should use
+    /// [`crate::PubkySessionBootstrap::revoke_grant`] so a rotated bearer cannot
+    /// turn sign-out into a successful no-op.
+    async fn revoke_session_access(&self, _access: &PubkySessionAccess) -> Result<()> {
+        Err(PaykitSdkError::Identity {
+            context: "Pubky session provider does not support confirmed grant revocation".into(),
+            source: None,
+        })
+    }
+
     /// Load public Pubky storage for unauthenticated counterparty reads.
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>>;
 
