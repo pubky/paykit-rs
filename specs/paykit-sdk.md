@@ -263,6 +263,7 @@ runtime.
 ```rust
 pub trait PubkySessionProvider {
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>>;
+    async fn revoke_session_access(&self, access: &PubkySessionAccess) -> Result<()>;
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>>;
     async fn clear_session_access(&self) -> Result<()>;
 }

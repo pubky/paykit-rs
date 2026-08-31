@@ -447,7 +447,7 @@ impl PubkySessionBootstrap {
 
         let mut session = match self.pubky.restore_session(session_secret).await {
             Ok(session) => session,
-            Err(err) if is_inactive_grant_error(&err) => return Ok(()),
+            Err(err) if is_confirmed_inactive_grant_error(&err) => return Ok(()),
             Err(err) => {
                 return Err(map_pubky_identity_error(
                     "restore Pubky grant before revocation",
@@ -465,7 +465,7 @@ impl PubkySessionBootstrap {
                 .map_err(|(err, _session)| map_pubky_identity_error("revoke Pubky grant", err))?;
 
             match self.pubky.restore_session(session_secret).await {
-                Err(err) if is_inactive_grant_error(&err) => return Ok(()),
+                Err(err) if is_confirmed_inactive_grant_error(&err) => return Ok(()),
                 Err(err) => {
                     return Err(map_pubky_identity_error(
                         "confirm Pubky grant revocation",
@@ -794,11 +794,21 @@ async fn validate_grant_session_identity(
     Ok(())
 }
 
-fn is_inactive_grant_error(error: &pubky::Error) -> bool {
+fn is_confirmed_inactive_grant_error(error: &pubky::Error) -> bool {
     matches!(
         error,
-        pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
+        pubky::Error::Authentication(pubky::errors::AuthError::Validation(message))
+            if message == "stored grant credential has expired"
+    ) || matches!(
+        error,
+        pubky::Error::Request(pubky::errors::RequestError::Server { status, message })
             if status.as_u16() == 401
+                && matches!(
+                    message.trim(),
+                    "Grant has been revoked"
+                        | "Grant has expired"
+                        | "Invalid grant: grant has expired"
+                )
     )
 }
 
