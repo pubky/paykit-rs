@@ -1,18 +1,32 @@
+use std::{
+    any::Any,
+    sync::{
+        mpsc::{sync_channel, Receiver, SyncSender},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+
+use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use paykit_lib::{
     PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestId,
     PaymentRequestTerms, Recurrence, RecurrenceUnit,
 };
 use paykit_sdk::{
-    PaykitApp, PaykitAppCapabilities, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
+    storage::StorageTransactionCallback, LinkedPeerState, OutboundPrivateMessageStatus, PaykitApp,
+    PaykitAppCapabilities, PaykitAppId, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
     PaymentRequestLifecycleState, PrivatePaymentEndpointReservation, PrivateReceivingDetail,
-    PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionBootstrap,
-    PubkySharedStateStorage, StorageAdapter, PAYKIT_SESSION_CAPABILITIES,
+    PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
+    PubkySessionBootstrap, PubkySharedStateStorage, Result as PaykitResult, StorageAdapter,
+    PAYKIT_SESSION_CAPABILITIES,
 };
+use pubky_testnet::EphemeralTestnet;
 use serde_json::Map as JsonMap;
 
 use crate::harness::{
-    app_id, build_testnet, linked_two_party, TestnetPaymentAdapter, TestnetSessionProvider,
+    app_id, build_testnet, linked_two_party, TestUser, TestnetPaymentAdapter,
+    TestnetSessionProvider,
 };
 
 #[tokio::test]
@@ -276,6 +290,351 @@ async fn test_pubky_shared_state_rejects_a_missing_previously_observed_resource(
         PaykitSdkError::Storage { context, .. }
             if context.contains("previously observed Pubky shared state is missing")
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_homeserver_backed_apps_share_noise_state_under_concurrency() {
+    let pair = linked_homeserver_shared_pair().await;
+
+    let first_outbound = pair
+        .bitkit
+        .sdk
+        .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
+        .await
+        .expect("Bitkit should queue its Payment Request");
+    let second_outbound = pair
+        .server
+        .sdk
+        .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
+        .await
+        .expect("Paykit Server should queue its Payment Request");
+
+    let (bitkit_send_sdk, send_loaded, continue_send) = pair.bitkit.paused_sdk();
+    let send_counterparty = pair.bob.public_key.clone();
+    let stale_send_sdk = bitkit_send_sdk.clone();
+    let stale_send = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(stale_send_sdk.process_outbound_private_messages(send_counterparty))
+    });
+    send_loaded
+        .recv()
+        .expect("the stale sender should load shared state");
+    let successful_send = pair
+        .server
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .expect("the concurrent sender should commit both queued messages");
+    assert_eq!(successful_send.sent.len(), 2);
+    continue_send
+        .send(())
+        .expect("the stale sender should resume");
+    let stale_send = stale_send.join().unwrap();
+    assert!(is_shared_state_conflict(&stale_send));
+
+    let retried_send = bitkit_send_sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .expect("the stale sender should reload shared state and retry safely");
+    assert!(retried_send.attempted.is_empty());
+
+    let received_outbound = pair
+        .bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .expect("the peer should decrypt both shared-state sends");
+    assert_eq!(received_outbound.stream_item_ids.len(), 2);
+    let received_ids = pair
+        .bob
+        .sdk
+        .received_payment_requests_from(&pair.bitkit.public_key)
+        .await
+        .expect("the peer should derive both Payment Requests")
+        .into_iter()
+        .map(|request| request.payment_request_id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(received_ids.len(), 2);
+    assert!(received_ids.contains(&first_outbound.payment_request_id));
+    assert!(received_ids.contains(&second_outbound.payment_request_id));
+
+    pair.bob
+        .sdk
+        .propose_payment_request(pair.bitkit.public_key.clone(), recurring_request_terms())
+        .await
+        .expect("the peer should queue the first inbound Payment Request");
+    pair.bob
+        .sdk
+        .propose_payment_request(pair.bitkit.public_key.clone(), recurring_request_terms())
+        .await
+        .expect("the peer should queue the second inbound Payment Request");
+    let peer_send = pair
+        .bob
+        .sdk
+        .process_outbound_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .expect("the peer should send both inbound Payment Requests");
+    assert_eq!(peer_send.sent.len(), 2);
+
+    let (bitkit_receive_sdk, receive_loaded, continue_receive) = pair.bitkit.paused_sdk();
+    let receive_counterparty = pair.bob.public_key.clone();
+    let stale_receive_sdk = bitkit_receive_sdk.clone();
+    let stale_receive = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(stale_receive_sdk.receive_private_messages(receive_counterparty))
+    });
+    receive_loaded
+        .recv()
+        .expect("the stale receiver should load shared state");
+    let successful_receive = pair
+        .server
+        .sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .expect("the concurrent receiver should commit both inbound messages");
+    assert_eq!(successful_receive.stream_item_ids.len(), 2);
+    continue_receive
+        .send(())
+        .expect("the stale receiver should resume");
+    let stale_receive = stale_receive.join().unwrap();
+    assert!(is_shared_state_conflict(&stale_receive));
+
+    let retried_receive = bitkit_receive_sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .expect("the stale receiver should reload shared state and retry safely");
+    assert!(retried_receive.stream_item_ids.is_empty());
+
+    let bitkit_state = pair.bitkit.storage_state().await;
+    let server_state = pair.server.storage_state().await;
+    assert_eq!(bitkit_state, server_state);
+    assert!(bitkit_state.peer_link_operation_leases.is_empty());
+    assert!(bitkit_state
+        .outbound_private_messages
+        .iter()
+        .all(
+            |message| message.status == OutboundPrivateMessageStatus::Sent
+                && message.prepared_send.is_none()
+        ));
+    assert_eq!(
+        bitkit_state
+            .private_stream_items
+            .iter()
+            .filter(|item| item.counterparty == pair.bob.public_key)
+            .count(),
+        2
+    );
+}
+
+type SharedStateSdk =
+    PaykitSdk<PubkySharedStateStorage, TestnetSessionProvider, TestnetPaymentAdapter>;
+type PausedSharedStateSdk =
+    PaykitSdk<OneShotPausedStorage, TestnetSessionProvider, TestnetPaymentAdapter>;
+
+struct SharedStateTestUser {
+    sdk: SharedStateSdk,
+    storage: PubkySharedStateStorage,
+    access: PubkySessionAccess,
+    public_key: PubkyPublicKey,
+    app_id: PaykitAppId,
+}
+
+impl SharedStateTestUser {
+    async fn new(
+        access: PubkySessionAccess,
+        public_key: PubkyPublicKey,
+        app_id: PaykitAppId,
+        display_name: &str,
+    ) -> Self {
+        let provider = TestnetSessionProvider::new(access.clone());
+        let storage = PubkySharedStateStorage::new(provider.clone());
+        let sdk = PaykitSdk::new(
+            storage.clone(),
+            provider,
+            TestnetPaymentAdapter::default(),
+            PaykitSdkConfig::new(app_id.clone()).unwrap(),
+        );
+        sdk.initialize()
+            .await
+            .expect("shared-state SDK initialization should succeed");
+        sdk.publish_paykit_app(test_app(display_name))
+            .await
+            .expect("shared-state Paykit app publication should succeed");
+        Self {
+            sdk,
+            storage,
+            access,
+            public_key,
+            app_id,
+        }
+    }
+
+    fn paused_sdk(&self) -> (Arc<PausedSharedStateSdk>, Receiver<()>, SyncSender<()>) {
+        let provider = TestnetSessionProvider::new(self.access.clone());
+        let (storage, loaded, resume) =
+            OneShotPausedStorage::new(PubkySharedStateStorage::new(provider.clone()));
+        let sdk = PaykitSdk::new(
+            storage,
+            provider,
+            TestnetPaymentAdapter::default(),
+            PaykitSdkConfig::new(self.app_id.clone()).unwrap(),
+        );
+        (Arc::new(sdk), loaded, resume)
+    }
+
+    async fn storage_state(&self) -> paykit_sdk::storage::StorageState {
+        self.storage
+            .transaction(|tx| Ok(tx.export_storage_state()))
+            .await
+            .expect("shared state should remain readable")
+    }
+}
+
+struct HomeserverSharedPair {
+    _testnet: EphemeralTestnet,
+    bitkit: SharedStateTestUser,
+    server: SharedStateTestUser,
+    bob: TestUser,
+}
+
+async fn linked_homeserver_shared_pair() -> HomeserverSharedPair {
+    let testnet = build_testnet().await;
+    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let result = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
+        .unwrap()
+        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .expect("shared identity sign-up should succeed");
+    let bitkit = SharedStateTestUser::new(
+        result.access.clone(),
+        result.public_key.clone(),
+        app_id("bitkit"),
+        "Bitkit",
+    )
+    .await;
+    let server = SharedStateTestUser::new(
+        result.access,
+        result.public_key,
+        app_id("paykit-server"),
+        "Paykit Server",
+    )
+    .await;
+    let bob = TestUser::sign_up_with_app(&testnet, app_id("paykit-server")).await;
+
+    bitkit
+        .sdk
+        .initiate_link_with_peer(bob.public_key.clone())
+        .await
+        .expect("shared identity should initiate the Encrypted Link Handshake");
+    bob.sdk
+        .accept_link_with_peer(bitkit.public_key.clone())
+        .await
+        .expect("the peer should accept the Encrypted Link Handshake");
+    drive_shared_link_to_linked(&bitkit, &bob).await;
+
+    HomeserverSharedPair {
+        _testnet: testnet,
+        bitkit,
+        server,
+        bob,
+    }
+}
+
+async fn drive_shared_link_to_linked(alice: &SharedStateTestUser, bob: &TestUser) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut alice_state = LinkedPeerState::Linking;
+    let mut bob_state = LinkedPeerState::Linking;
+    while alice_state != LinkedPeerState::Linked || bob_state != LinkedPeerState::Linked {
+        assert!(
+            Instant::now() < deadline,
+            "shared-state Encrypted Link Handshake timed out"
+        );
+        if alice_state != LinkedPeerState::Linked {
+            alice_state = alice
+                .sdk
+                .advance_link_handshake(bob.public_key.clone())
+                .await
+                .expect("shared-state initiator handshake advance should succeed")
+                .state;
+        }
+        if bob_state != LinkedPeerState::Linked {
+            bob_state = bob
+                .sdk
+                .advance_link_handshake(alice.public_key.clone())
+                .await
+                .expect("peer handshake advance should succeed")
+                .state;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[derive(Clone)]
+struct OneShotPausedStorage {
+    inner: PubkySharedStateStorage,
+    pause: Arc<Mutex<Option<TransactionPause>>>,
+}
+
+struct TransactionPause {
+    loaded: SyncSender<()>,
+    resume: Receiver<()>,
+}
+
+impl OneShotPausedStorage {
+    fn new(inner: PubkySharedStateStorage) -> (Self, Receiver<()>, SyncSender<()>) {
+        let (loaded_tx, loaded_rx) = sync_channel(0);
+        let (resume_tx, resume_rx) = sync_channel(0);
+        (
+            Self {
+                inner,
+                pause: Arc::new(Mutex::new(Some(TransactionPause {
+                    loaded: loaded_tx,
+                    resume: resume_rx,
+                }))),
+            },
+            loaded_rx,
+            resume_tx,
+        )
+    }
+}
+
+#[async_trait]
+impl StorageAdapter for OneShotPausedStorage {
+    async fn transaction_erased<'a>(
+        &self,
+        transaction: StorageTransactionCallback<'a>,
+    ) -> PaykitResult<Box<dyn Any + Send>> {
+        let pause = self.pause.clone();
+        self.inner
+            .transaction_erased(Box::new(move |tx| {
+                let before = tx.export_storage_state();
+                let result = transaction(tx);
+                if result.is_ok() && tx.export_storage_state() != before {
+                    let pause = pause.lock().expect("pause lock poisoned").take();
+                    if let Some(pause) = pause {
+                        pause.loaded.send(()).expect("test should await the load");
+                        pause.resume.recv().expect("test should resume the write");
+                    }
+                }
+                result
+            }))
+            .await
+    }
+}
+
+fn is_shared_state_conflict<T>(result: &PaykitResult<T>) -> bool {
+    matches!(
+        result,
+        Err(PaykitSdkError::Storage { context, .. })
+            if context.contains("changed during transaction")
+    )
 }
 
 fn test_app(name: &str) -> PaykitApp {
