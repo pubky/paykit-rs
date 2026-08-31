@@ -662,6 +662,14 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func fetchPubkyText(uri: String) async throws  -> String?
 
     /**
+     * Clear local session access and SDK identity state without revoking the grant.
+     *
+     * Use this only when remote revocation cannot be reached and the app
+     * intentionally accepts that persisted copies of the grant remain valid.
+     */
+    func forgetSessionAccess() async throws  -> IdentityStatus
+
+    /**
      * Return current identity status, when initialized.
      */
     func identityStatus() async throws  -> IdentityStatus?
@@ -914,7 +922,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func saveContact(update: ContactUpdate) async throws  -> ContactRecord
 
     /**
-     * Clear live Pubky session access and SDK-managed identity-scoped state.
+     * Revoke the current Pubky grant and clear local SDK identity state.
      */
     func signOut() async throws  -> IdentityStatus
 
@@ -1606,6 +1614,29 @@ open func fetchPubkyText(uri: String)async throws  -> String?  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionString.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Clear local session access and SDK identity state without revoking the grant.
+     *
+     * Use this only when remote revocation cannot be reached and the app
+     * intentionally accepts that persisted copies of the grant remain valid.
+     */
+open func forgetSessionAccess()async throws  -> IdentityStatus  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_forget_session_access(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeIdentityStatus_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -2598,7 +2629,7 @@ open func saveContact(update: ContactUpdate)async throws  -> ContactRecord  {
 }
 
     /**
-     * Clear live Pubky session access and SDK-managed identity-scoped state.
+     * Revoke the current Pubky grant and clear local SDK identity state.
      */
 open func signOut()async throws  -> IdentityStatus  {
     return
@@ -5503,7 +5534,9 @@ public protocol SdkPubkySessionProvider: AnyObject, Sendable {
     func publicStorageAvailable() throws  -> Bool
 
     /**
-     * Clear platform session access during explicit SDK sign-out.
+     * Clear Pubky session access from local platform storage.
+     *
+     * Normal SDK sign-out revokes the live grant before invoking this callback.
      */
     func clearSessionAccess() throws
 
@@ -5584,7 +5617,9 @@ open func publicStorageAvailable()throws  -> Bool  {
 }
 
     /**
-     * Clear platform session access during explicit SDK sign-out.
+     * Clear Pubky session access from local platform storage.
+     *
+     * Normal SDK sign-out revokes the live grant before invoking this callback.
      */
 open func clearSessionAccess()throws   {try rustCallWithError(FfiConverterTypePaykitError_lift) {
     uniffi_paykit_fn_method_ffisdkpubkysessionprovider_clear_session_access(self.uniffiClonePointer(),$0
@@ -18202,6 +18237,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 17257) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access() != 58467) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_identity_status() != 8559) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18349,7 +18387,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 7511) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_sign_out() != 28715) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_sign_out() != 37726) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 21336) {
@@ -18496,7 +18534,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkpubkysessionprovider_public_storage_available() != 360) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkpubkysessionprovider_clear_session_access() != 38150) {
+    if (uniffi_paykit_checksum_method_ffisdkpubkysessionprovider_clear_session_access() != 61806) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkstateblob_export_bytes() != 31016) {

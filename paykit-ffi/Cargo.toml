@@ -1,6 +1,6 @@
 [package]
 name = "paykit-ffi"
-version = "0.1.0-rc49"
+version = "0.1.0-rc50"
 edition = "2021"
 rust-version = "1.91.1"
 description = "UniFFI bindings for Paykit SDK targeting iOS and Android"
@@ -40,3 +40,8 @@ url = "2"
 android_logger = "0.14"
 jni = "0.21"
 rustls-platform-verifier = "0.6.2"
+
+[dev-dependencies]
+http-relay = { version = "0.7.0", default-features = false, features = ["server"] }
+pubky-testnet = { version = "0.11.0", features = ["docker-postgres"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

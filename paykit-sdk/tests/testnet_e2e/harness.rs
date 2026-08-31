@@ -70,12 +70,14 @@ pub fn session_bootstrap(testnet: &EphemeralTestnet, client_id: &str) -> PubkySe
 #[derive(Clone)]
 pub struct TestnetSessionProvider {
     session: Arc<Mutex<Option<PubkySessionAccess>>>,
+    session_secret: Arc<String>,
 }
 
 impl TestnetSessionProvider {
-    pub fn new(access: PubkySessionAccess) -> Self {
+    pub fn new(access: PubkySessionAccess, session_secret: String) -> Self {
         Self {
             session: Arc::new(Mutex::new(Some(access))),
+            session_secret: Arc::new(session_secret),
         }
     }
 }
@@ -84,6 +86,12 @@ impl TestnetSessionProvider {
 impl PubkySessionProvider for TestnetSessionProvider {
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
         Ok(self.session.lock().expect("session lock poisoned").clone())
+    }
+
+    async fn revoke_session_access(&self, access: &PubkySessionAccess) -> Result<()> {
+        PubkySessionBootstrap::with_pubky(access.outbox_client.clone(), TEST_CLIENT_ID)?
+            .revoke_grant(&self.session_secret, access)
+            .await
     }
 
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
@@ -234,6 +242,11 @@ impl TestUser {
             )
             .await
             .expect("testnet sign-up should succeed");
+        let session_secret = result
+            .export_session_secret()
+            .await
+            .expect("test grant should export local restore material")
+            .into_inner();
         assert_eq!(
             result.access.receiver_noise_secret_key.public_key(),
             receiver_noise_public_key
@@ -245,7 +258,7 @@ impl TestUser {
 
         let storage = InMemoryStorage::default();
         let adapter = TestnetPaymentAdapter::default();
-        let provider = TestnetSessionProvider::new(access.clone());
+        let provider = TestnetSessionProvider::new(access.clone(), session_secret);
         let sdk = PaykitSdk::new(storage.clone(), provider, adapter.clone(), config)
             .expect("SDK construction should succeed");
 

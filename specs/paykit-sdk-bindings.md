@@ -166,8 +166,12 @@ The platform session provider should return one of:
 - live session access with its required receiver Noise key
 
 `None` or `null` means no live session is currently available. It does not mean
-explicit sign-out. Explicit sign-out should be a separate SDK call that clears
-session access first and then clears SDK-managed identity-scoped state.
+explicit sign-out. The regular sign-out call revokes the live Pubky grant before
+clearing local session access and SDK-managed identity-scoped state. If live
+access is unavailable, regular sign-out fails and preserves local state so the
+app can retry. Bindings also expose a distinctly named local-only forget
+operation for offline recovery and for finishing local cleanup after confirmed
+revocation; it must not be presented as remote revocation.
 Bindings should document that apps must export and persist an SDK backup before
 explicit sign-out if they want to restore the same user's private Paykit state
 later.

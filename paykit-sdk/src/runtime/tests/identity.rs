@@ -205,7 +205,7 @@ async fn test_identity_status_cached_identity_requires_live_session() {
 }
 
 #[tokio::test]
-async fn test_sign_out_clears_identity_scoped_state() {
+async fn test_forget_session_access_clears_identity_scoped_state() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -274,7 +274,7 @@ async fn test_sign_out_clears_identity_scoped_state() {
         FixedClock,
     );
 
-    let status = sdk.sign_out().await.unwrap();
+    let status = sdk.forget_session_access().await.unwrap();
 
     assert!(status.public_key.is_none());
     assert!(!status.live_session_available);
@@ -307,7 +307,7 @@ async fn test_sign_out_rejects_concurrent_identity_operation() {
 }
 
 #[tokio::test]
-async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
+async fn test_sign_out_without_live_session_preserves_identity_scoped_state() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -343,7 +343,7 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
         .unwrap();
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
-        FailingClearSessionProvider,
+        TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
         PaykitSdkConfig::default(),
         FixedClock,
@@ -351,7 +351,11 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
 
     let result = sdk.sign_out().await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert!(matches!(
+        result,
+        Err(PaykitSdkError::Identity { context, .. })
+            if context.contains("without live session access")
+    ));
     let snapshot = storage.snapshot().unwrap();
     let identity = snapshot.identity_state.unwrap();
     assert_eq!(identity.sign_out_generation, 3);

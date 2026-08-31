@@ -23,8 +23,11 @@ on low-level `paykit-lib` protocol bindings.
 - `SdkPaymentAdapter` — platform callback interface for receiving details,
   endpoint reservation cleanup, payable endpoint ordering, and payment target
   construction.
-- `PaykitSdk.initialize`, `identityStatus`, and `signOut` — app-facing
-  account/session lifecycle for the current Paykit runtime.
+- `PaykitSdk.initialize`, `identityStatus`, `signOut`, and
+  `forgetSessionAccess` — app-facing account/session lifecycle for the current
+  Paykit runtime. `signOut` revokes the Pubky grant and preserves local state if
+  live access or remote revocation is unavailable; `forgetSessionAccess`
+  performs explicit local-only cleanup.
 - `PaykitSdk.stateRevision` — return the platform SDK state revision so
   apps can detect when SDK-managed state changed.
 - `PubkySessionAccess` — opaque Pubky session access material. Use its
