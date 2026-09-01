@@ -53,71 +53,183 @@ pub enum FfiAllowanceHistoryStatus {
     Unknown,
 }
 
-/// Inclusive per-payment amount range for Allowance Terms.
-#[derive(uniffi::Record, Clone, PartialEq, Eq)]
-pub struct FfiAllowanceAmountRange {
-    /// Minimum decimal wire spelling.
-    pub minimum: String,
-    /// Maximum decimal wire spelling.
-    pub maximum: String,
+macro_rules! impl_redacted_formatting {
+    ($type:ty, $name:literal) => {
+        impl fmt::Debug for $type {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(concat!($name, "(<redacted>)"))
+            }
+        }
+
+        impl fmt::Display for $type {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Debug::fmt(self, f)
+            }
+        }
+    };
 }
 
-impl fmt::Debug for FfiAllowanceAmountRange {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("FfiAllowanceAmountRange(<redacted>)")
+/// Inclusive per-payment amount range for Allowance Terms.
+///
+/// The object and values returned by its getters are sensitive. Its exported
+/// default string and debug output are redacted.
+#[uniffi::export(Debug, Display)]
+#[derive(uniffi::Object, Clone, PartialEq, Eq)]
+pub struct FfiAllowanceAmountRange {
+    range: paykit_lib::AllowanceAmountRange,
+}
+
+impl_redacted_formatting!(FfiAllowanceAmountRange, "AllowanceAmountRange");
+
+impl FfiAllowanceAmountRange {
+    pub(crate) fn from_validated_range(range: paykit_lib::AllowanceAmountRange) -> Self {
+        Self { range }
+    }
+
+    pub(crate) fn domain_range(&self) -> paykit_lib::AllowanceAmountRange {
+        self.range.clone()
+    }
+}
+
+#[uniffi::export]
+impl FfiAllowanceAmountRange {
+    /// Validate and create an inclusive per-payment amount range.
+    #[uniffi::constructor]
+    pub fn new(minimum: String, maximum: String) -> Result<Self, PaykitFfiError> {
+        conversions::parse_amount_range(minimum, maximum).map(Self::from_validated_range)
+    }
+
+    /// Return the minimum decimal wire spelling.
+    pub fn minimum(&self) -> String {
+        self.range.minimum().to_owned()
+    }
+
+    /// Return the maximum decimal wire spelling.
+    pub fn maximum(&self) -> String {
+        self.range.maximum().to_owned()
     }
 }
 
 /// Anchored or rolling period for an Allowance usage limit.
-#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+///
+/// The object and values returned by its getters are sensitive. Its exported
+/// default string and debug output are redacted.
+#[uniffi::export(Debug, Display)]
+#[derive(uniffi::Object, Clone, PartialEq, Eq)]
 pub struct FfiAllowancePeriod {
-    /// Canonical period kind: `anchored` or `rolling`.
-    pub kind: String,
-    /// Positive interval multiplier.
-    pub every: u64,
-    /// Canonical singular interval unit.
-    pub unit: String,
-    /// UTC anchor for an anchored period; absent for a rolling period.
-    pub anchor: Option<String>,
+    period: paykit_lib::AllowancePeriod,
 }
 
-impl fmt::Debug for FfiAllowancePeriod {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("FfiAllowancePeriod(<redacted>)")
+impl_redacted_formatting!(FfiAllowancePeriod, "AllowancePeriod");
+
+impl FfiAllowancePeriod {
+    pub(crate) fn from_validated_period(period: paykit_lib::AllowancePeriod) -> Self {
+        Self { period }
+    }
+
+    pub(crate) fn domain_period(&self) -> paykit_lib::AllowancePeriod {
+        self.period.clone()
+    }
+}
+
+#[uniffi::export]
+impl FfiAllowancePeriod {
+    /// Validate and create an anchored or rolling Allowance period.
+    #[uniffi::constructor]
+    pub fn new(
+        kind: String,
+        every: u64,
+        unit: String,
+        anchor: Option<String>,
+    ) -> Result<Self, PaykitFfiError> {
+        conversions::parse_period(kind, every, unit, anchor).map(Self::from_validated_period)
+    }
+
+    /// Return the canonical period kind: `anchored` or `rolling`.
+    pub fn kind(&self) -> String {
+        self.period.kind().as_str().to_owned()
+    }
+
+    /// Return the positive interval multiplier.
+    pub fn every(&self) -> u64 {
+        self.period.every()
+    }
+
+    /// Return the canonical singular interval unit.
+    pub fn unit(&self) -> String {
+        self.period.unit().as_str().to_owned()
+    }
+
+    /// Return the UTC anchor for an anchored period.
+    pub fn anchor(&self) -> Option<String> {
+        self.period.anchor().map(str::to_owned)
     }
 }
 
 /// Amount and/or payment-count ceiling applied over one Allowance period.
-#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+///
+/// The object and values returned by its getters are sensitive. Its exported
+/// default string and debug output are redacted.
+#[uniffi::export(Debug, Display)]
+#[derive(uniffi::Object, Clone, PartialEq, Eq)]
 pub struct FfiAllowancePeriodLimit {
-    /// Optional amount ceiling decimal spelling.
-    pub amount_limit: Option<String>,
-    /// Optional payment-count ceiling.
-    pub payment_count_limit: Option<u64>,
-    /// Period over which the ceilings apply.
-    pub period: FfiAllowancePeriod,
+    limit: paykit_lib::AllowancePeriodLimit,
 }
 
-impl fmt::Debug for FfiAllowancePeriodLimit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("FfiAllowancePeriodLimit(<redacted>)")
+impl_redacted_formatting!(FfiAllowancePeriodLimit, "AllowancePeriodLimit");
+
+impl FfiAllowancePeriodLimit {
+    pub(crate) fn from_validated_limit(limit: paykit_lib::AllowancePeriodLimit) -> Self {
+        Self { limit }
+    }
+
+    pub(crate) fn domain_limit(&self) -> paykit_lib::AllowancePeriodLimit {
+        self.limit.clone()
     }
 }
 
-/// Immutable private Allowance Terms with redacted debug output.
+#[uniffi::export]
+impl FfiAllowancePeriodLimit {
+    /// Validate and create an Allowance period limit.
+    #[uniffi::constructor]
+    pub fn new(
+        amount_limit: Option<String>,
+        payment_count_limit: Option<u64>,
+        period: Arc<FfiAllowancePeriod>,
+    ) -> Result<Self, PaykitFfiError> {
+        conversions::parse_period_limit(amount_limit, payment_count_limit, period.domain_period())
+            .map(Self::from_validated_limit)
+    }
+
+    /// Return the optional amount ceiling decimal spelling.
+    pub fn amount_limit(&self) -> Option<String> {
+        self.limit.amount_limit().map(str::to_owned)
+    }
+
+    /// Return the optional payment-count ceiling.
+    pub fn payment_count_limit(&self) -> Option<u64> {
+        self.limit.payment_count_limit()
+    }
+
+    /// Return the period over which the ceilings apply.
+    pub fn period(&self) -> Arc<FfiAllowancePeriod> {
+        Arc::new(FfiAllowancePeriod::from_validated_period(
+            self.limit.period().clone(),
+        ))
+    }
+}
+
+/// Immutable private Allowance Terms with redacted default formatting.
 ///
 /// Applications must treat the object and every value returned by its getters
 /// as sensitive. Do not include them in ordinary platform logs or diagnostics.
+#[uniffi::export(Debug, Display)]
 #[derive(uniffi::Object)]
 pub struct FfiAllowanceTerms {
     terms: AllowanceTerms,
 }
 
-impl fmt::Debug for FfiAllowanceTerms {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("FfiAllowanceTerms(<redacted>)")
-    }
-}
+impl_redacted_formatting!(FfiAllowanceTerms, "AllowanceTerms");
 
 impl FfiAllowanceTerms {
     pub(crate) fn from_validated_terms(terms: AllowanceTerms) -> Self {
@@ -136,8 +248,8 @@ impl FfiAllowanceTerms {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         asset: String,
-        per_payment_amount: Option<FfiAllowanceAmountRange>,
-        period_limits: Vec<FfiAllowancePeriodLimit>,
+        per_payment_amount: Option<Arc<FfiAllowanceAmountRange>>,
+        period_limits: Vec<Arc<FfiAllowancePeriodLimit>>,
         lifetime_amount_limit: Option<String>,
         active_from: Option<String>,
         expires_at: Option<String>,
@@ -161,13 +273,21 @@ impl FfiAllowanceTerms {
     }
 
     /// Return the optional inclusive per-payment amount range.
-    pub fn per_payment_amount(&self) -> Option<FfiAllowanceAmountRange> {
-        self.terms.per_payment_amount().map(Into::into)
+    pub fn per_payment_amount(&self) -> Option<Arc<FfiAllowanceAmountRange>> {
+        self.terms
+            .per_payment_amount()
+            .map(FfiAllowanceAmountRange::from)
+            .map(Arc::new)
     }
 
     /// Return every independently applicable period limit.
-    pub fn period_limits(&self) -> Vec<FfiAllowancePeriodLimit> {
-        self.terms.period_limits().iter().map(Into::into).collect()
+    pub fn period_limits(&self) -> Vec<Arc<FfiAllowancePeriodLimit>> {
+        self.terms
+            .period_limits()
+            .iter()
+            .map(FfiAllowancePeriodLimit::from)
+            .map(Arc::new)
+            .collect()
     }
 
     /// Return the optional lifetime amount ceiling decimal spelling.
