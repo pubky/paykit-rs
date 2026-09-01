@@ -65,6 +65,7 @@ xcrun --sdk iphonesimulator swiftc \
     -I "$IOS_BINDINGS_DIR" \
     "$IOS_BINDINGS_DIR/paykit.swift" \
     "$IOS_BINDINGS_DIR/PaykitPublicKeys.swift" \
+    ./src/swift/AllowanceBindingsCompile.swift \
     || { echo "Failed to type-check generated Swift bindings"; exit 1; }
 
 echo "Cleaning up existing XCFramework..."
