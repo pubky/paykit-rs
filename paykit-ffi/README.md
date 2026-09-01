@@ -153,8 +153,10 @@ statuses still indicate whether a queued event has been sent.
   stream.
 - `PaykitSdk.listAllowances` and `getAllowance` inspect SDK-derived Allowance
   records without reimplementing lifecycle derivation on the platform.
-- `AllowanceTerms` validates immutable Allowance authority before proposal and
-  exposes its fields only through explicit getters.
+- `AllowanceTerms` and its nested range, period, and limit objects validate
+  immutable Allowance authority before proposal and expose private fields only
+  through explicit getters. Their default Swift/Kotlin string and debug output
+  is redacted.
 
 Allowance Terms and every value returned by their getters are sensitive private
 state. Do not include them in ordinary Swift/Kotlin logs, reflection output, or

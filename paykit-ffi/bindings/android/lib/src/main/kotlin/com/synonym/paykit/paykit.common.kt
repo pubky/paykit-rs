@@ -106,7 +106,94 @@ public object NoPointer
 
 
 /**
- * Immutable private Allowance Terms with redacted debug output.
+ * Inclusive per-payment amount range for Allowance Terms.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public interface AllowanceAmountRangeInterface {
+
+    /**
+     * Return the maximum decimal wire spelling.
+     */
+    public fun `maximum`(): kotlin.String
+
+    /**
+     * Return the minimum decimal wire spelling.
+     */
+    public fun `minimum`(): kotlin.String
+
+    public companion object
+}
+
+
+
+
+/**
+ * Anchored or rolling period for an Allowance usage limit.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public interface AllowancePeriodInterface {
+
+    /**
+     * Return the UTC anchor for an anchored period.
+     */
+    public fun `anchor`(): kotlin.String?
+
+    /**
+     * Return the positive interval multiplier.
+     */
+    public fun `every`(): kotlin.ULong
+
+    /**
+     * Return the canonical period kind: `anchored` or `rolling`.
+     */
+    public fun `kind`(): kotlin.String
+
+    /**
+     * Return the canonical singular interval unit.
+     */
+    public fun `unit`(): kotlin.String
+
+    public companion object
+}
+
+
+
+
+/**
+ * Amount and/or payment-count ceiling applied over one Allowance period.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public interface AllowancePeriodLimitInterface {
+
+    /**
+     * Return the optional amount ceiling decimal spelling.
+     */
+    public fun `amountLimit`(): kotlin.String?
+
+    /**
+     * Return the optional payment-count ceiling.
+     */
+    public fun `paymentCountLimit`(): kotlin.ULong?
+
+    /**
+     * Return the period over which the ceilings apply.
+     */
+    public fun `period`(): AllowancePeriod
+
+    public companion object
+}
+
+
+
+
+/**
+ * Immutable private Allowance Terms with redacted default formatting.
  *
  * Applications must treat the object and every value returned by its getters
  * as sensitive. Do not include them in ordinary platform logs or diagnostics.
@@ -1117,25 +1204,6 @@ public interface SdkStateBlobStore {
 
 
 /**
- * Inclusive per-payment amount range for Allowance Terms.
- */
-@kotlinx.serialization.Serializable
-public data class AllowanceAmountRange (
-    /**
-     * Minimum decimal wire spelling.
-     */
-    val `minimum`: kotlin.String,
-    /**
-     * Maximum decimal wire spelling.
-     */
-    val `maximum`: kotlin.String
-) {
-    public companion object
-}
-
-
-
-/**
  * Filter for listing SDK-derived Allowances.
  */
 @kotlinx.serialization.Serializable
@@ -1156,56 +1224,6 @@ public data class AllowanceFilter (
      * Restrict results to lifecycle states. Empty means all states.
      */
     val `states`: List<AllowanceLifecycleState>
-) {
-    public companion object
-}
-
-
-
-/**
- * Anchored or rolling period for an Allowance usage limit.
- */
-@kotlinx.serialization.Serializable
-public data class AllowancePeriod (
-    /**
-     * Canonical period kind: `anchored` or `rolling`.
-     */
-    val `kind`: kotlin.String,
-    /**
-     * Positive interval multiplier.
-     */
-    val `every`: kotlin.ULong,
-    /**
-     * Canonical singular interval unit.
-     */
-    val `unit`: kotlin.String,
-    /**
-     * UTC anchor for an anchored period; absent for a rolling period.
-     */
-    val `anchor`: kotlin.String?
-) {
-    public companion object
-}
-
-
-
-/**
- * Amount and/or payment-count ceiling applied over one Allowance period.
- */
-@kotlinx.serialization.Serializable
-public data class AllowancePeriodLimit (
-    /**
-     * Optional amount ceiling decimal spelling.
-     */
-    val `amountLimit`: kotlin.String?,
-    /**
-     * Optional payment-count ceiling.
-     */
-    val `paymentCountLimit`: kotlin.ULong?,
-    /**
-     * Period over which the ceilings apply.
-     */
-    val `period`: AllowancePeriod
 ) {
     public companion object
 }
