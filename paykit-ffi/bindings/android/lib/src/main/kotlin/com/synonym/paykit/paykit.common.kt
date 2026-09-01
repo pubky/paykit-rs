@@ -106,9 +106,64 @@ public object NoPointer
 
 
 /**
+ * Immutable private Allowance Terms with redacted debug output.
+ *
+ * Applications must treat the object and every value returned by its getters
+ * as sensitive. Do not include them in ordinary platform logs or diagnostics.
+ */
+public interface AllowanceTermsInterface {
+
+    /**
+     * Return the optional inclusive first eligible instant.
+     */
+    public fun `activeFrom`(): kotlin.String?
+
+    /**
+     * Return the optional exact Payment Endpoint Identifier allowlist.
+     */
+    public fun `allowedPaymentEndpointIdentifiers`(): List<kotlin.String>?
+
+    /**
+     * Return the exact, case-sensitive asset.
+     */
+    public fun `asset`(): kotlin.String
+
+    /**
+     * Return the optional exclusive first ineligible instant.
+     */
+    public fun `expiresAt`(): kotlin.String?
+
+    /**
+     * Return the optional lifetime amount ceiling decimal spelling.
+     */
+    public fun `lifetimeAmountLimit`(): kotlin.String?
+
+    /**
+     * Return the optional inclusive per-payment amount range.
+     */
+    public fun `perPaymentAmount`(): AllowanceAmountRange?
+
+    /**
+     * Return every independently applicable period limit.
+     */
+    public fun `periodLimits`(): List<AllowancePeriodLimit>
+
+    public companion object
+}
+
+
+
+
+/**
  * Stateful Paykit SDK runtime handle.
  */
 public interface PaykitSdkInterface {
+
+    /**
+     * Queue acceptance for a received Allowance proposal.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `acceptAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord
 
     /**
      * Start an Encrypted Link Handshake as the responder.
@@ -212,6 +267,12 @@ public interface PaykitSdkInterface {
     public suspend fun `encryptedLinkRecoveryMarkerStatus`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): EncryptedLinkRecoveryMarkerReport?
 
     /**
+     * Queue a proposal withdrawal or unilateral End for accepted authority.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `endAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord
+
+    /**
      * Queue the current complete Private Payment List for one counterparty receiver.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -272,13 +333,10 @@ public interface PaykitSdkInterface {
     public suspend fun `fetchPubkyText`(`uri`: kotlin.String): kotlin.String?
 
     /**
-     * Clear local session access and SDK identity state without revoking the grant.
-     *
-     * Use this only when remote revocation cannot be reached and the app
-     * intentionally accepts that persisted copies of the grant remain valid.
+     * Return one Allowance from one exact authenticated Encrypted Link.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `forgetSessionAccess`(): IdentityStatus
+    public suspend fun `getAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord?
 
     /**
      * Return current identity status, when initialized.
@@ -321,6 +379,12 @@ public interface PaykitSdkInterface {
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `linkedPeers`(): List<LinkedPeerRecord>
+
+    /**
+     * Return Allowances matching a local SDK filter, newest first.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `listAllowances`(`filter`: AllowanceFilter): List<AllowanceRecord>
 
     /**
      * Return Payment Requests matching a local SDK filter.
@@ -396,6 +460,12 @@ public interface PaykitSdkInterface {
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `processReceiptIssuance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `receiptId`: kotlin.String): ReceiptIssuanceView
+
+    /**
+     * Queue a new Allowance proposal and return local derived state.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `proposeAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `localRole`: AllowanceLocalRole, `terms`: AllowanceTerms): AllowanceRecord
 
     /**
      * Queue a new Payment Request proposal and return local derived state.
@@ -500,6 +570,12 @@ public interface PaykitSdkInterface {
     public suspend fun `refreshContactPaykitProfile`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): ContactRecord?
 
     /**
+     * Queue rejection for a received Allowance proposal.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `rejectAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord
+
+    /**
      * Queue rejection for a received Payment Request and return local derived state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -582,7 +658,7 @@ public interface PaykitSdkInterface {
     public suspend fun `saveContact`(`update`: ContactUpdate): ContactRecord
 
     /**
-     * Revoke the current Pubky grant and clear local SDK identity state.
+     * Clear live Pubky session access and SDK-managed identity-scoped state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `signOut`(): IdentityStatus
@@ -745,45 +821,9 @@ public interface PubkyAuthRequestInterface {
 
     /**
      * Wait for auth approval using the receiver's persisted Noise key.
-     *
-     * Completion is one-shot, including when the async operation is cancelled
-     * or returns an error. `save_state` can restore an unapproved request
-     * while its relay inbox remains valid. Once completion fetches the
-     * approval, cancellation or a later exchange failure requires a new auth
-     * request.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
-
-    /**
-     * Export the sensitive state required to resume this pending request.
-     */
-    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `saveState`(): PubkyAuthRequestState
-
-    public companion object
-}
-
-
-
-
-/**
- * Sensitive state required to resume a pending Pubky grant auth request.
- *
- * Persist this only in secure, temporary platform storage. Delete it after
- * the request completes, expires, or is abandoned.
- */
-public interface PubkyAuthRequestStateInterface {
-
-    /**
-     * Export the secret-bearing authorization URL for secure persistence.
-     */
-    public fun `authorizationUrl`(): kotlin.String
-
-    /**
-     * Export the proof-of-possession key for secure persistence.
-     */
-    public fun `exportClientKeySecret`(): kotlin.ByteArray
 
     public companion object
 }
@@ -813,11 +853,6 @@ public interface PubkyLocalSecretKeyInterface {
 public interface PubkySessionAccessInterface {
 
     /**
-     * Return the application identifier recorded in the Pubky grant.
-     */
-    public fun `clientId`(): kotlin.String
-
-    /**
      * Export the local Pubky secret key, when available.
      */
     public fun `exportLocalSecretKey`(): PubkyLocalSecretKey?
@@ -828,7 +863,7 @@ public interface PubkySessionAccessInterface {
     public fun `exportReceiverNoiseSecretKey`(): ReceiverNoiseSecretKey
 
     /**
-     * Export the Pubky grant and proof-of-possession secret for secure storage.
+     * Export the Pubky session bearer secret for platform secure storage.
      */
     public fun `exportSessionSecret`(): kotlin.String
 
@@ -845,10 +880,6 @@ public interface PubkySessionBootstrapInterface {
 
     /**
      * Approve a Pubky auth URL with this local secret key.
-     *
-     * The request client ID must match this bootstrap's client ID.
-     * A signup request creates the identity on its requested homeserver before
-     * approving the application grant.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `approveAuth`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey)
@@ -858,25 +889,21 @@ public interface PubkySessionBootstrapInterface {
      *
      * This high-level operation owns validation, request-bound signing,
      * channel derivation, encryption, relay delivery, and approval ordering.
-     * The request client ID must match this bootstrap's client ID.
      */
     @Throws(PubkyAuthCompanionClaimApprovalException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: PubkyAuthCompanionClaim)
 
     /**
      * Import an exported Pubky session secret and its persisted receiver Noise key.
-     *
-     * The grant must belong to this bootstrap's client ID and cover every
-     * required capability.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
-     * Resume a short-lived grant auth flow from securely persisted state.
+     * Resume a short-lived auth flow from its authorization URL.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resumeAuth`(`state`: PubkyAuthRequestState, `expectedCapabilities`: kotlin.String): PubkyAuthRequest
+    public suspend fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): PubkyAuthRequest
 
     /**
      * Sign in with the receiver's persisted Noise key.
@@ -1036,9 +1063,7 @@ public interface SdkPubkySessionProvider {
     public fun `publicStorageAvailable`(): kotlin.Boolean
 
     /**
-     * Clear Pubky session access from local platform storage.
-     *
-     * Normal SDK sign-out revokes the live grant before invoking this callback.
+     * Clear platform session access during explicit SDK sign-out.
      */
     @Throws(PaykitException::class)
     public fun `clearSessionAccess`()
@@ -1088,6 +1113,237 @@ public interface SdkStateBlobStore {
     public companion object
 }
 
+
+
+
+/**
+ * Inclusive per-payment amount range for Allowance Terms.
+ */
+@kotlinx.serialization.Serializable
+public data class AllowanceAmountRange (
+    /**
+     * Minimum decimal wire spelling.
+     */
+    val `minimum`: kotlin.String,
+    /**
+     * Maximum decimal wire spelling.
+     */
+    val `maximum`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
+ * Filter for listing SDK-derived Allowances.
+ */
+@kotlinx.serialization.Serializable
+public data class AllowanceFilter (
+    /**
+     * Restrict results to one counterparty.
+     */
+    val `counterparty`: kotlin.String?,
+    /**
+     * Restrict results to one counterparty receiver/runtime folder.
+     */
+    val `counterpartyReceiverPath`: kotlin.String?,
+    /**
+     * Restrict results to one local Allowance role.
+     */
+    val `localRole`: AllowanceLocalRole?,
+    /**
+     * Restrict results to lifecycle states. Empty means all states.
+     */
+    val `states`: List<AllowanceLifecycleState>
+) {
+    public companion object
+}
+
+
+
+/**
+ * Anchored or rolling period for an Allowance usage limit.
+ */
+@kotlinx.serialization.Serializable
+public data class AllowancePeriod (
+    /**
+     * Canonical period kind: `anchored` or `rolling`.
+     */
+    val `kind`: kotlin.String,
+    /**
+     * Positive interval multiplier.
+     */
+    val `every`: kotlin.ULong,
+    /**
+     * Canonical singular interval unit.
+     */
+    val `unit`: kotlin.String,
+    /**
+     * UTC anchor for an anchored period; absent for a rolling period.
+     */
+    val `anchor`: kotlin.String?
+) {
+    public companion object
+}
+
+
+
+/**
+ * Amount and/or payment-count ceiling applied over one Allowance period.
+ */
+@kotlinx.serialization.Serializable
+public data class AllowancePeriodLimit (
+    /**
+     * Optional amount ceiling decimal spelling.
+     */
+    val `amountLimit`: kotlin.String?,
+    /**
+     * Optional payment-count ceiling.
+     */
+    val `paymentCountLimit`: kotlin.ULong?,
+    /**
+     * Period over which the ceilings apply.
+     */
+    val `period`: AllowancePeriod
+) {
+    public companion object
+}
+
+
+
+/**
+ * SDK-derived record for one Allowance on one exact Encrypted Link.
+ */
+
+public data class AllowanceRecord (
+    /**
+     * Counterparty associated with the authenticated private history.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Counterparty receiver/runtime folder associated with the history.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
+     * Stable Allowance ID.
+     */
+    val `allowanceId`: kotlin.String,
+    /**
+     * Local role derived from the authenticated proposal source.
+     */
+    val `localRole`: AllowanceLocalRole?,
+    /**
+     * Derived consent lifecycle state.
+     */
+    val `state`: AllowanceLifecycleState,
+    /**
+     * Health of the evidence used for derivation.
+     */
+    val `historyStatus`: AllowanceHistoryStatus,
+    /**
+     * Proposal Event ID.
+     */
+    val `proposalEventId`: kotlin.String?,
+    /**
+     * Immutable private proposed terms.
+     */
+    val `terms`: AllowanceTerms?,
+    /**
+     * Inbound stream item carrying the proposal, when received.
+     */
+    val `proposalStreamItemId`: kotlin.ULong?,
+    /**
+     * Outbound message carrying the proposal, when locally queued.
+     */
+    val `proposalOutboundMessageId`: kotlin.ULong?,
+    /**
+     * Local delivery status of an outbound proposal.
+     */
+    val `proposalOutboundStatus`: OutboundPrivateMessageStatus?,
+    /**
+     * Controlling Acceptance Event ID.
+     */
+    val `acceptanceEventId`: kotlin.String?,
+    /**
+     * Local delivery status of an outbound acceptance.
+     */
+    val `acceptanceOutboundStatus`: OutboundPrivateMessageStatus?,
+    /**
+     * Controlling Rejection Event ID.
+     */
+    val `rejectionEventId`: kotlin.String?,
+    /**
+     * Local delivery status of an outbound rejection.
+     */
+    val `rejectionOutboundStatus`: OutboundPrivateMessageStatus?,
+    /**
+     * Valid End Event ID retained by the SDK.
+     */
+    val `endEventId`: kotlin.String?,
+    /**
+     * Local delivery status of an outbound End.
+     */
+    val `endOutboundStatus`: OutboundPrivateMessageStatus?,
+    /**
+     * Causal Event IDs not yet present in durable history.
+     */
+    val `pendingCausalEventIds`: List<kotlin.String>,
+    /**
+     * Event IDs whose reuse or proposal collision taints this Allowance.
+     */
+    val `conflictEventIds`: List<kotlin.String>,
+    /**
+     * Last inbound stream item associated with this Allowance.
+     */
+    val `lastStreamItemId`: kotlin.ULong?,
+    /**
+     * Last outbound message associated with this Allowance.
+     */
+    val `lastOutboundMessageId`: kotlin.ULong?,
+    /**
+     * Delivery status of the last associated outbound message.
+     */
+    val `lastOutboundStatus`: OutboundPrivateMessageStatus?,
+    /**
+     * Latest local record time as RFC3339 text.
+     */
+    val `lastEventAt`: kotlin.String?,
+    /**
+     * Redaction-safe SDK reason for invalid history, when available.
+     */
+    val `invalidReason`: kotlin.String?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`counterpartyReceiverPath`,
+            this.`allowanceId`,
+            this.`localRole`,
+            this.`state`,
+            this.`historyStatus`,
+            this.`proposalEventId`,
+            this.`terms`,
+            this.`proposalStreamItemId`,
+            this.`proposalOutboundMessageId`,
+            this.`proposalOutboundStatus`,
+            this.`acceptanceEventId`,
+            this.`acceptanceOutboundStatus`,
+            this.`rejectionEventId`,
+            this.`rejectionOutboundStatus`,
+            this.`endEventId`,
+            this.`endOutboundStatus`,
+            this.`pendingCausalEventIds`,
+            this.`conflictEventIds`,
+            this.`lastStreamItemId`,
+            this.`lastOutboundMessageId`,
+            this.`lastOutboundStatus`,
+            this.`lastEventAt`,
+            this.`invalidReason`,
+        )
+    }
+    public companion object
+}
 
 
 
@@ -2747,7 +3003,7 @@ public data class PrivateStreamIntakeReport (
  *
  * The application serializes its protocol-specific unsigned payload. Paykit
  * validates the identifiers, creates the request-bound identity signature,
- * encrypts the signed payload, and delivers it before grant approval.
+ * encrypts the signed payload, and delivers it before normal Pubky Auth.
  *
  * Generated platform record descriptions may include the raw payload. Apps
  * must not log, interpolate, or otherwise stringify this record.
@@ -2801,15 +3057,11 @@ public data class PubkyAuthDetails (
     /**
      * Requested capabilities as canonical Pubky capability text.
      */
-    val `capabilities`: kotlin.String,
+    val `capabilities`: kotlin.String?,
     /**
      * Relay URL used by the auth flow.
      */
-    val `relayUrl`: kotlin.String,
-    /**
-     * Application identifier that will own the grant.
-     */
-    val `clientId`: kotlin.String,
+    val `relayUrl`: kotlin.String?,
     /**
      * Homeserver requested by a signup flow.
      */
@@ -2831,15 +3083,8 @@ public data class PubkyClientConfig (
     val `requestTimeoutSecs`: kotlin.ULong,
     /**
      * Host running local testnet services, or `None` to use the public Pubky network.
-     *
-     * Unless an explicit grant-auth relay overrides it, grant auth uses the
-     * standard local testnet relay at `http://<host>:15412/inbox/`.
      */
-    val `localTestnetHost`: kotlin.String?,
-    /**
-     * Explicit grant-auth relay inbox URL, or `None` to use Pubky's default.
-     */
-    val `authRelayUrl`: kotlin.String?
+    val `localTestnetHost`: kotlin.String?
 ) {
     public companion object
 }
@@ -3713,6 +3958,107 @@ public data class SdkStateBlobSnapshot (
 
 
 /**
+ * Health of the durable history used to derive one Allowance.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class AllowanceHistoryStatus {
+
+    /**
+     * All retained evidence is valid and causally resolved.
+     */
+    CONSISTENT,
+    /**
+     * A valid event references evidence that has not been loaded yet.
+     */
+    UNRESOLVED_REFERENCES,
+    /**
+     * Malformed, conflicting, or protocol-invalid evidence is present.
+     */
+    INVALID,
+    /**
+     * The exact Encrypted Link needs recovery before safe use.
+     */
+    RECOVERY_REQUIRED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * SDK-derived Allowance consent lifecycle state.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class AllowanceLifecycleState {
+
+    /**
+     * One proposal is known and has no controlling response.
+     */
+    PROPOSED,
+    /**
+     * The proposal recipient accepted the immutable terms.
+     */
+    ACCEPTED,
+    /**
+     * The proposal recipient rejected the proposal.
+     */
+    REJECTED,
+    /**
+     * A valid unilateral End is present.
+     */
+    ENDED,
+    /**
+     * Multiple distinct proposals reused the same Allowance ID.
+     */
+    CONFLICTED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Local party role for one Allowance.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class AllowanceLocalRole {
+
+    /**
+     * Local identity grants authority and remains the Payer.
+     */
+    ALLOWER,
+    /**
+     * Local identity may send qualifying Payment Requests.
+     */
+    ALLOWEE,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
  * Source used for a resolved contact profile.
  */
 
@@ -4138,7 +4484,7 @@ public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception()
     }
 
     /**
-     * Pubky grant approval failed after companion delivery succeeded.
+     * Normal Pubky Auth approval failed after companion delivery succeeded.
      */
     public class AuthorizationFailure(
         public val `reason`: kotlin.String,
@@ -4177,6 +4523,10 @@ public enum class PubkyAuthRequestKind {
      * Sign up on a Pubky homeserver.
      */
     SIGN_UP,
+    /**
+     * Export a secret from a signer.
+     */
+    SECRET_EXPORT,
     /**
      * SDK returned a value this binding version does not understand.
      */
