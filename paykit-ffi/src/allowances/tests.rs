@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use paykit_sdk::{
     AllowanceAmountRangeRecord, AllowanceFilter, AllowanceHistoryStatus, AllowanceLifecycleState,
@@ -14,16 +16,21 @@ fn public_key() -> PubkyPublicKey {
         .unwrap()
 }
 
-fn period_limit(kind: &str, unit: &str, anchor: Option<&str>) -> FfiAllowancePeriodLimit {
-    FfiAllowancePeriodLimit {
-        amount_limit: Some("100".into()),
-        payment_count_limit: Some(4),
-        period: FfiAllowancePeriod {
-            kind: kind.into(),
-            every: 1,
-            unit: unit.into(),
-            anchor: anchor.map(str::to_owned),
-        },
+fn period_limit(kind: &str, unit: &str, anchor: Option<&str>) -> Arc<FfiAllowancePeriodLimit> {
+    let period = Arc::new(
+        FfiAllowancePeriod::new(kind.into(), 1, unit.into(), anchor.map(str::to_owned)).unwrap(),
+    );
+    Arc::new(FfiAllowancePeriodLimit::new(Some("100".into()), Some(4), period).unwrap())
+}
+
+fn assert_validation_context<T>(result: Result<T, PaykitFfiError>, expected_context: &str) {
+    match result {
+        Err(PaykitFfiError::Protocol { code, context }) => {
+            assert_eq!(code, "validation");
+            assert_eq!(context, expected_context);
+        }
+        Err(other) => panic!("expected protocol validation error, got {other}"),
+        Ok(_) => panic!("expected validation failure"),
     }
 }
 
@@ -31,10 +38,9 @@ fn period_limit(kind: &str, unit: &str, anchor: Option<&str>) -> FfiAllowancePer
 fn test_allowance_terms_preserve_validated_platform_shape() {
     let terms = FfiAllowanceTerms::new(
         "btc".into(),
-        Some(FfiAllowanceAmountRange {
-            minimum: "0.1".into(),
-            maximum: "1.00".into(),
-        }),
+        Some(Arc::new(
+            FfiAllowanceAmountRange::new("0.1".into(), "1.00".into()).unwrap(),
+        )),
         vec![
             period_limit("anchored", "month", Some("2026-01-31T00:00:00Z")),
             period_limit("rolling", "day", None),
@@ -47,25 +53,20 @@ fn test_allowance_terms_preserve_validated_platform_shape() {
     .unwrap();
 
     assert_eq!(terms.asset(), "btc");
-    assert_eq!(
-        terms.per_payment_amount(),
-        Some(FfiAllowanceAmountRange {
-            minimum: "0.1".into(),
-            maximum: "1.00".into(),
-        })
-    );
+    assert_eq!(terms.per_payment_amount().unwrap().minimum(), "0.1");
+    assert_eq!(terms.per_payment_amount().unwrap().maximum(), "1.00");
     let limits = terms.period_limits();
-    assert_eq!(limits[0].amount_limit.as_deref(), Some("100"));
-    assert_eq!(limits[0].payment_count_limit, Some(4));
-    assert_eq!(limits[0].period.kind, "anchored");
-    assert_eq!(limits[0].period.unit, "month");
+    assert_eq!(limits[0].amount_limit().as_deref(), Some("100"));
+    assert_eq!(limits[0].payment_count_limit(), Some(4));
+    assert_eq!(limits[0].period().kind(), "anchored");
+    assert_eq!(limits[0].period().unit(), "month");
     assert_eq!(
-        limits[0].period.anchor.as_deref(),
+        limits[0].period().anchor().as_deref(),
         Some("2026-01-31T00:00:00Z")
     );
-    assert_eq!(limits[1].period.kind, "rolling");
-    assert_eq!(limits[1].period.unit, "day");
-    assert_eq!(limits[1].period.anchor, None);
+    assert_eq!(limits[1].period().kind(), "rolling");
+    assert_eq!(limits[1].period().unit(), "day");
+    assert_eq!(limits[1].period().anchor(), None);
     assert_eq!(terms.lifetime_amount_limit().as_deref(), Some("1000"));
     assert_eq!(terms.active_from().as_deref(), Some("2026-01-01T00:00:00Z"));
     assert_eq!(terms.expires_at().as_deref(), Some("2027-01-01T00:00:00Z"));
@@ -94,21 +95,90 @@ fn test_allowance_terms_empty_allowlist_is_not_treated_as_absent() {
 }
 
 #[test]
-fn test_allowance_terms_reject_anchored_period_without_anchor() {
-    let result = FfiAllowanceTerms::new(
-        "btc".into(),
-        None,
-        vec![period_limit("anchored", "month", None)],
-        None,
-        None,
-        None,
-        None,
+fn test_allowance_period_rejects_anchored_period_without_anchor() {
+    assert_validation_context(
+        FfiAllowancePeriod::new("anchored".into(), 1, "month".into(), None),
+        "anchored Allowance period requires an anchor",
+    );
+}
+
+#[test]
+fn test_allowance_nested_validation_errors_do_not_echo_private_input() {
+    assert_validation_context(
+        FfiAllowanceAmountRange::new("private-invalid-minimum".into(), "1".into()),
+        "Allowance per-payment amount range is invalid",
+    );
+    assert_validation_context(
+        FfiAllowancePeriod::new("private-period-kind".into(), 1, "day".into(), None),
+        "Allowance period kind is unsupported",
+    );
+    assert_validation_context(
+        FfiAllowancePeriod::new("rolling".into(), 1, "private-period-unit".into(), None),
+        "Allowance period unit is unsupported",
     );
 
-    assert!(matches!(
-        result,
-        Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"
-    ));
+    let period =
+        Arc::new(FfiAllowancePeriod::new("rolling".into(), 1, "day".into(), None).unwrap());
+    assert_validation_context(
+        FfiAllowancePeriodLimit::new(Some("private-invalid-limit".into()), None, period),
+        "Allowance period limit is invalid",
+    );
+}
+
+#[test]
+fn test_allowance_terms_validation_errors_do_not_echo_private_input() {
+    assert_validation_context(
+        FfiAllowanceTerms::new(
+            "private-invalid-asset\0".into(),
+            None,
+            Vec::new(),
+            Some("1".into()),
+            None,
+            None,
+            None,
+        ),
+        "Allowance Terms are invalid",
+    );
+
+    assert_validation_context(
+        FfiAllowanceTerms::new(
+            "btc".into(),
+            None,
+            Vec::new(),
+            Some("1".into()),
+            None,
+            None,
+            Some(vec!["private/invalid-endpoint".into()]),
+        ),
+        "Allowance Terms are invalid",
+    );
+}
+
+#[test]
+fn test_allowance_terms_record_conversion_uses_outer_redaction_barrier() {
+    let record = AllowanceTermsRecord {
+        asset: "btc".into(),
+        per_payment_amount: None,
+        period_limits: vec![AllowancePeriodLimitRecord {
+            amount_limit: Some("1".into()),
+            payment_count_limit: None,
+            period: AllowancePeriodRecord {
+                kind: "private-record-kind".into(),
+                every: 1,
+                unit: "day".into(),
+                anchor: None,
+            },
+        }],
+        lifetime_amount_limit: None,
+        active_from: None,
+        expires_at: None,
+        allowed_payment_endpoint_identifiers: None,
+    };
+
+    assert_validation_context(
+        FfiAllowanceTerms::try_from(record),
+        "Allowance Terms are invalid",
+    );
 }
 
 #[test]
@@ -233,7 +303,7 @@ fn test_allowance_record_conversion_preserves_lifecycle_evidence() {
         history_status: AllowanceHistoryStatus::RecoveryRequired,
         proposal_event_id: Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d201".into()),
         terms: Some(AllowanceTermsRecord {
-            asset: "btc".into(),
+            asset: "private-record-asset".into(),
             per_payment_amount: Some(AllowanceAmountRangeRecord {
                 minimum: "0.1".into(),
                 maximum: "1".into(),
@@ -333,20 +403,20 @@ fn test_allowance_record_conversion_preserves_lifecycle_evidence() {
         Some("2026-09-01T12:34:56+00:00")
     );
     assert_eq!(ffi.invalid_reason.as_deref(), Some("fixed SDK reason"));
-    assert_eq!(ffi.terms.unwrap().asset(), "btc");
+    let rendered = format!("{ffi:?}");
+    assert!(rendered.contains("AllowanceTerms(<redacted>)"));
+    assert!(!rendered.contains("private-record-asset"));
+    assert_eq!(ffi.terms.unwrap().asset(), "private-record-asset");
 }
 
 #[test]
-fn test_allowance_terms_debug_redacts_private_fields() {
-    let range = FfiAllowanceAmountRange {
-        minimum: "123.45".into(),
-        maximum: "678.90".into(),
-    };
+fn test_allowance_private_objects_redact_debug_and_display() {
+    let range = Arc::new(FfiAllowanceAmountRange::new("123.45".into(), "678.90".into()).unwrap());
     let limit = period_limit("anchored", "month", Some("2026-02-03T04:05:06Z"));
     let terms = FfiAllowanceTerms::new(
         "private-asset".into(),
-        Some(range.clone()),
-        vec![limit.clone()],
+        Some(Arc::clone(&range)),
+        vec![Arc::clone(&limit)],
         Some("987654".into()),
         None,
         None,
@@ -354,9 +424,16 @@ fn test_allowance_terms_debug_redacts_private_fields() {
     )
     .unwrap();
 
-    assert!(!format!("{terms:?}").contains("private-asset"));
-    assert!(!format!("{terms:?}").contains("987654"));
-    assert!(!format!("{range:?}").contains("123.45"));
-    assert!(!format!("{:?}", limit.period).contains("2026-02-03T04:05:06Z"));
-    assert!(!format!("{limit:?}").contains("100"));
+    for rendered in [format!("{terms:?}"), terms.to_string()] {
+        assert_eq!(rendered, "AllowanceTerms(<redacted>)");
+    }
+    for rendered in [format!("{range:?}"), range.to_string()] {
+        assert_eq!(rendered, "AllowanceAmountRange(<redacted>)");
+    }
+    for rendered in [format!("{:?}", limit.period()), limit.period().to_string()] {
+        assert_eq!(rendered, "AllowancePeriod(<redacted>)");
+    }
+    for rendered in [format!("{limit:?}"), limit.to_string()] {
+        assert_eq!(rendered, "AllowancePeriodLimit(<redacted>)");
+    }
 }

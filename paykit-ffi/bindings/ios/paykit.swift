@@ -522,7 +522,610 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
- * Immutable private Allowance Terms with redacted debug output.
+ * Inclusive per-payment amount range for Allowance Terms.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public protocol AllowanceAmountRangeProtocol: AnyObject, Sendable {
+
+    /**
+     * Return the maximum decimal wire spelling.
+     */
+    func maximum()  -> String
+
+    /**
+     * Return the minimum decimal wire spelling.
+     */
+    func minimum()  -> String
+
+}
+/**
+ * Inclusive per-payment amount range for Allowance Terms.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+open class AllowanceAmountRange: AllowanceAmountRangeProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffiallowanceamountrange(self.pointer, $0) }
+    }
+    /**
+     * Validate and create an inclusive per-payment amount range.
+     */
+public convenience init(minimum: String, maximum: String)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffiallowanceamountrange_new(
+        FfiConverterString.lower(minimum),
+        FfiConverterString.lower(maximum),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffiallowanceamountrange(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Return the maximum decimal wire spelling.
+     */
+open func maximum() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceamountrange_maximum(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the minimum decimal wire spelling.
+     */
+open func minimum() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceamountrange_minimum(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceamountrange_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceamountrange_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+
+}
+extension AllowanceAmountRange: CustomDebugStringConvertible {}
+extension AllowanceAmountRange: CustomStringConvertible {}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceAmountRange: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = AllowanceAmountRange
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowanceAmountRange {
+        return AllowanceAmountRange(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: AllowanceAmountRange) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceAmountRange {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: AllowanceAmountRange, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAmountRange_lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowanceAmountRange {
+    return try FfiConverterTypeAllowanceAmountRange.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAmountRange_lower(_ value: AllowanceAmountRange) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeAllowanceAmountRange.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Anchored or rolling period for an Allowance usage limit.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public protocol AllowancePeriodProtocol: AnyObject, Sendable {
+
+    /**
+     * Return the UTC anchor for an anchored period.
+     */
+    func anchor()  -> String?
+
+    /**
+     * Return the positive interval multiplier.
+     */
+    func every()  -> UInt64
+
+    /**
+     * Return the canonical period kind: `anchored` or `rolling`.
+     */
+    func kind()  -> String
+
+    /**
+     * Return the canonical singular interval unit.
+     */
+    func unit()  -> String
+
+}
+/**
+ * Anchored or rolling period for an Allowance usage limit.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+open class AllowancePeriod: AllowancePeriodProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffiallowanceperiod(self.pointer, $0) }
+    }
+    /**
+     * Validate and create an anchored or rolling Allowance period.
+     */
+public convenience init(kind: String, every: UInt64, unit: String, anchor: String?)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffiallowanceperiod_new(
+        FfiConverterString.lower(kind),
+        FfiConverterUInt64.lower(every),
+        FfiConverterString.lower(unit),
+        FfiConverterOptionString.lower(anchor),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffiallowanceperiod(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Return the UTC anchor for an anchored period.
+     */
+open func anchor() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_anchor(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the positive interval multiplier.
+     */
+open func every() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_every(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the canonical period kind: `anchored` or `rolling`.
+     */
+open func kind() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_kind(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the canonical singular interval unit.
+     */
+open func unit() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_unit(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+
+}
+extension AllowancePeriod: CustomDebugStringConvertible {}
+extension AllowancePeriod: CustomStringConvertible {}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowancePeriod: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = AllowancePeriod
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowancePeriod {
+        return AllowancePeriod(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: AllowancePeriod) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowancePeriod {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: AllowancePeriod, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowancePeriod_lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowancePeriod {
+    return try FfiConverterTypeAllowancePeriod.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowancePeriod_lower(_ value: AllowancePeriod) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeAllowancePeriod.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Amount and/or payment-count ceiling applied over one Allowance period.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public protocol AllowancePeriodLimitProtocol: AnyObject, Sendable {
+
+    /**
+     * Return the optional amount ceiling decimal spelling.
+     */
+    func amountLimit()  -> String?
+
+    /**
+     * Return the optional payment-count ceiling.
+     */
+    func paymentCountLimit()  -> UInt64?
+
+    /**
+     * Return the period over which the ceilings apply.
+     */
+    func period()  -> AllowancePeriod
+
+}
+/**
+ * Amount and/or payment-count ceiling applied over one Allowance period.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+open class AllowancePeriodLimit: AllowancePeriodLimitProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffiallowanceperiodlimit(self.pointer, $0) }
+    }
+    /**
+     * Validate and create an Allowance period limit.
+     */
+public convenience init(amountLimit: String?, paymentCountLimit: UInt64?, period: AllowancePeriod)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffiallowanceperiodlimit_new(
+        FfiConverterOptionString.lower(amountLimit),
+        FfiConverterOptionUInt64.lower(paymentCountLimit),
+        FfiConverterTypeAllowancePeriod_lower(period),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffiallowanceperiodlimit(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Return the optional amount ceiling decimal spelling.
+     */
+open func amountLimit() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiodlimit_amount_limit(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the optional payment-count ceiling.
+     */
+open func paymentCountLimit() -> UInt64?  {
+    return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiodlimit_payment_count_limit(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the period over which the ceilings apply.
+     */
+open func period() -> AllowancePeriod  {
+    return try!  FfiConverterTypeAllowancePeriod_lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiodlimit_period(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiodlimit_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiodlimit_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+
+}
+extension AllowancePeriodLimit: CustomDebugStringConvertible {}
+extension AllowancePeriodLimit: CustomStringConvertible {}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowancePeriodLimit: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = AllowancePeriodLimit
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowancePeriodLimit {
+        return AllowancePeriodLimit(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: AllowancePeriodLimit) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowancePeriodLimit {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: AllowancePeriodLimit, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowancePeriodLimit_lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowancePeriodLimit {
+    return try FfiConverterTypeAllowancePeriodLimit.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowancePeriodLimit_lower(_ value: AllowancePeriodLimit) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeAllowancePeriodLimit.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Immutable private Allowance Terms with redacted default formatting.
  *
  * Applications must treat the object and every value returned by its getters
  * as sensitive. Do not include them in ordinary platform logs or diagnostics.
@@ -566,7 +1169,7 @@ public protocol AllowanceTermsProtocol: AnyObject, Sendable {
 
 }
 /**
- * Immutable private Allowance Terms with redacted debug output.
+ * Immutable private Allowance Terms with redacted default formatting.
  *
  * Applications must treat the object and every value returned by its getters
  * as sensitive. Do not include them in ordinary platform logs or diagnostics.
@@ -710,8 +1313,26 @@ open func periodLimits() -> [AllowancePeriodLimit]  {
 })
 }
 
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
 
 }
+extension AllowanceTerms: CustomDebugStringConvertible {}
+extension AllowanceTerms: CustomStringConvertible {}
 
 
 #if swift(>=5.8)
@@ -6277,93 +6898,6 @@ public func FfiConverterTypeSdkStateBlobStore_lower(_ value: SdkStateBlobStore) 
 
 
 /**
- * Inclusive per-payment amount range for Allowance Terms.
- */
-public struct AllowanceAmountRange {
-    /**
-     * Minimum decimal wire spelling.
-     */
-    public var minimum: String
-    /**
-     * Maximum decimal wire spelling.
-     */
-    public var maximum: String
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * Minimum decimal wire spelling.
-         */minimum: String,
-        /**
-         * Maximum decimal wire spelling.
-         */maximum: String) {
-        self.minimum = minimum
-        self.maximum = maximum
-    }
-}
-
-#if compiler(>=6)
-extension AllowanceAmountRange: Sendable {}
-#endif
-
-
-extension AllowanceAmountRange: Equatable, Hashable {
-    public static func ==(lhs: AllowanceAmountRange, rhs: AllowanceAmountRange) -> Bool {
-        if lhs.minimum != rhs.minimum {
-            return false
-        }
-        if lhs.maximum != rhs.maximum {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(minimum)
-        hasher.combine(maximum)
-    }
-}
-
-extension AllowanceAmountRange: Codable {}
-
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeAllowanceAmountRange: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceAmountRange {
-        return
-            try AllowanceAmountRange(
-                minimum: FfiConverterString.read(from: &buf),
-                maximum: FfiConverterString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: AllowanceAmountRange, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.minimum, into: &buf)
-        FfiConverterString.write(value.maximum, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAllowanceAmountRange_lift(_ buf: RustBuffer) throws -> AllowanceAmountRange {
-    return try FfiConverterTypeAllowanceAmountRange.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAllowanceAmountRange_lower(_ value: AllowanceAmountRange) -> RustBuffer {
-    return FfiConverterTypeAllowanceAmountRange.lower(value)
-}
-
-
-/**
  * Filter for listing SDK-derived Allowances.
  */
 public struct AllowanceFilter {
@@ -6475,222 +7009,6 @@ public func FfiConverterTypeAllowanceFilter_lift(_ buf: RustBuffer) throws -> Al
 #endif
 public func FfiConverterTypeAllowanceFilter_lower(_ value: AllowanceFilter) -> RustBuffer {
     return FfiConverterTypeAllowanceFilter.lower(value)
-}
-
-
-/**
- * Anchored or rolling period for an Allowance usage limit.
- */
-public struct AllowancePeriod {
-    /**
-     * Canonical period kind: `anchored` or `rolling`.
-     */
-    public var kind: String
-    /**
-     * Positive interval multiplier.
-     */
-    public var every: UInt64
-    /**
-     * Canonical singular interval unit.
-     */
-    public var unit: String
-    /**
-     * UTC anchor for an anchored period; absent for a rolling period.
-     */
-    public var anchor: String?
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * Canonical period kind: `anchored` or `rolling`.
-         */kind: String,
-        /**
-         * Positive interval multiplier.
-         */every: UInt64,
-        /**
-         * Canonical singular interval unit.
-         */unit: String,
-        /**
-         * UTC anchor for an anchored period; absent for a rolling period.
-         */anchor: String?) {
-        self.kind = kind
-        self.every = every
-        self.unit = unit
-        self.anchor = anchor
-    }
-}
-
-#if compiler(>=6)
-extension AllowancePeriod: Sendable {}
-#endif
-
-
-extension AllowancePeriod: Equatable, Hashable {
-    public static func ==(lhs: AllowancePeriod, rhs: AllowancePeriod) -> Bool {
-        if lhs.kind != rhs.kind {
-            return false
-        }
-        if lhs.every != rhs.every {
-            return false
-        }
-        if lhs.unit != rhs.unit {
-            return false
-        }
-        if lhs.anchor != rhs.anchor {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(kind)
-        hasher.combine(every)
-        hasher.combine(unit)
-        hasher.combine(anchor)
-    }
-}
-
-extension AllowancePeriod: Codable {}
-
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeAllowancePeriod: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowancePeriod {
-        return
-            try AllowancePeriod(
-                kind: FfiConverterString.read(from: &buf),
-                every: FfiConverterUInt64.read(from: &buf),
-                unit: FfiConverterString.read(from: &buf),
-                anchor: FfiConverterOptionString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: AllowancePeriod, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.kind, into: &buf)
-        FfiConverterUInt64.write(value.every, into: &buf)
-        FfiConverterString.write(value.unit, into: &buf)
-        FfiConverterOptionString.write(value.anchor, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAllowancePeriod_lift(_ buf: RustBuffer) throws -> AllowancePeriod {
-    return try FfiConverterTypeAllowancePeriod.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAllowancePeriod_lower(_ value: AllowancePeriod) -> RustBuffer {
-    return FfiConverterTypeAllowancePeriod.lower(value)
-}
-
-
-/**
- * Amount and/or payment-count ceiling applied over one Allowance period.
- */
-public struct AllowancePeriodLimit {
-    /**
-     * Optional amount ceiling decimal spelling.
-     */
-    public var amountLimit: String?
-    /**
-     * Optional payment-count ceiling.
-     */
-    public var paymentCountLimit: UInt64?
-    /**
-     * Period over which the ceilings apply.
-     */
-    public var period: AllowancePeriod
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * Optional amount ceiling decimal spelling.
-         */amountLimit: String?,
-        /**
-         * Optional payment-count ceiling.
-         */paymentCountLimit: UInt64?,
-        /**
-         * Period over which the ceilings apply.
-         */period: AllowancePeriod) {
-        self.amountLimit = amountLimit
-        self.paymentCountLimit = paymentCountLimit
-        self.period = period
-    }
-}
-
-#if compiler(>=6)
-extension AllowancePeriodLimit: Sendable {}
-#endif
-
-
-extension AllowancePeriodLimit: Equatable, Hashable {
-    public static func ==(lhs: AllowancePeriodLimit, rhs: AllowancePeriodLimit) -> Bool {
-        if lhs.amountLimit != rhs.amountLimit {
-            return false
-        }
-        if lhs.paymentCountLimit != rhs.paymentCountLimit {
-            return false
-        }
-        if lhs.period != rhs.period {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(amountLimit)
-        hasher.combine(paymentCountLimit)
-        hasher.combine(period)
-    }
-}
-
-extension AllowancePeriodLimit: Codable {}
-
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeAllowancePeriodLimit: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowancePeriodLimit {
-        return
-            try AllowancePeriodLimit(
-                amountLimit: FfiConverterOptionString.read(from: &buf),
-                paymentCountLimit: FfiConverterOptionUInt64.read(from: &buf),
-                period: FfiConverterTypeAllowancePeriod.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: AllowancePeriodLimit, into buf: inout [UInt8]) {
-        FfiConverterOptionString.write(value.amountLimit, into: &buf)
-        FfiConverterOptionUInt64.write(value.paymentCountLimit, into: &buf)
-        FfiConverterTypeAllowancePeriod.write(value.period, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAllowancePeriodLimit_lift(_ buf: RustBuffer) throws -> AllowancePeriodLimit {
-    return try FfiConverterTypeAllowancePeriodLimit.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAllowancePeriodLimit_lower(_ value: AllowancePeriodLimit) -> RustBuffer {
-    return FfiConverterTypeAllowancePeriodLimit.lower(value)
 }
 
 
@@ -17601,6 +17919,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAllowanceAmountRange: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceAmountRange?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAllowanceAmountRange.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAllowanceAmountRange.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeAllowanceTerms: FfiConverterRustBuffer {
     typealias SwiftType = AllowanceTerms?
 
@@ -17689,30 +18031,6 @@ fileprivate struct FfiConverterOptionTypePubkySessionAccess: FfiConverterRustBuf
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypePubkySessionAccess.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterOptionTypeAllowanceAmountRange: FfiConverterRustBuffer {
-    typealias SwiftType = AllowanceAmountRange?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeAllowanceAmountRange.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeAllowanceAmountRange.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -19473,6 +19791,33 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_resolve_pubky_url() != 12085) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffiallowanceamountrange_maximum() != 52035) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceamountrange_minimum() != 15472) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiod_anchor() != 30631) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiod_every() != 60037) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiod_kind() != 12042) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiod_unit() != 49664) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiodlimit_amount_limit() != 22492) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiodlimit_payment_count_limit() != 8509) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiodlimit_period() != 36301) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffiallowanceterms_active_from() != 56693) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19488,10 +19833,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffiallowanceterms_lifetime_amount_limit() != 50133) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffiallowanceterms_per_payment_amount() != 64508) {
+    if (uniffi_paykit_checksum_method_ffiallowanceterms_per_payment_amount() != 32791) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffiallowanceterms_period_limits() != 52774) {
+    if (uniffi_paykit_checksum_method_ffiallowanceterms_period_limits() != 38146) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_allowance() != 19038) {
@@ -19887,7 +20232,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically() != 4172) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffiallowanceterms_new() != 23450) {
+    if (uniffi_paykit_checksum_constructor_ffiallowanceamountrange_new() != 19415) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffiallowanceperiod_new() != 5577) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffiallowanceperiodlimit_new() != 24867) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffiallowanceterms_new() != 52414) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_new() != 15447) {

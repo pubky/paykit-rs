@@ -42,6 +42,15 @@ internal suspend fun compileAllowanceBindingsSurface(
     val accepted: AllowanceRecord = sdk.acceptAllowance(counterparty, receiverPath, allowanceId)
     val rejected: AllowanceRecord = sdk.rejectAllowance(counterparty, receiverPath, allowanceId)
     val ended: AllowanceRecord = sdk.endAllowance(counterparty, receiverPath, allowanceId)
+    val amountRangeInterface: AllowanceAmountRangeInterface = amountRange
+    val periodInterface: AllowancePeriodInterface = period
+    val periodLimitInterface: AllowancePeriodLimitInterface = periodLimit
+    val privateGetters = listOf(
+        amountRange.minimum(),
+        period.kind(),
+        periodLimit.amountLimit(),
+        terms.asset(),
+    )
 
     return terms to AllowanceHistoryStatus.CONSISTENT
 }

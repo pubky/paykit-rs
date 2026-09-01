@@ -110,31 +110,19 @@ impl TryFrom<FfiAllowanceFilter> for AllowanceFilter {
 
 impl From<&AllowanceAmountRange> for FfiAllowanceAmountRange {
     fn from(value: &AllowanceAmountRange) -> Self {
-        Self {
-            minimum: value.minimum().to_owned(),
-            maximum: value.maximum().to_owned(),
-        }
+        Self::from_validated_range(value.clone())
     }
 }
 
 impl From<&AllowancePeriod> for FfiAllowancePeriod {
     fn from(value: &AllowancePeriod) -> Self {
-        Self {
-            kind: value.kind().as_str().to_owned(),
-            every: value.every(),
-            unit: value.unit().as_str().to_owned(),
-            anchor: value.anchor().map(str::to_owned),
-        }
+        Self::from_validated_period(value.clone())
     }
 }
 
 impl From<&AllowancePeriodLimit> for FfiAllowancePeriodLimit {
     fn from(value: &AllowancePeriodLimit) -> Self {
-        Self {
-            amount_limit: value.amount_limit().map(str::to_owned),
-            payment_count_limit: value.payment_count_limit(),
-            period: value.period().into(),
-        }
+        Self::from_validated_limit(value.clone())
     }
 }
 
@@ -142,28 +130,10 @@ impl TryFrom<AllowanceTermsRecord> for FfiAllowanceTerms {
     type Error = PaykitFfiError;
 
     fn try_from(value: AllowanceTermsRecord) -> Result<Self, Self::Error> {
-        parse_allowance_terms(
+        parse_allowance_terms_record(
             value.asset,
-            value
-                .per_payment_amount
-                .map(|range| FfiAllowanceAmountRange {
-                    minimum: range.minimum,
-                    maximum: range.maximum,
-                }),
-            value
-                .period_limits
-                .into_iter()
-                .map(|limit| FfiAllowancePeriodLimit {
-                    amount_limit: limit.amount_limit,
-                    payment_count_limit: limit.payment_count_limit,
-                    period: FfiAllowancePeriod {
-                        kind: limit.period.kind,
-                        every: limit.period.every,
-                        unit: limit.period.unit,
-                        anchor: limit.period.anchor,
-                    },
-                })
-                .collect(),
+            value.per_payment_amount,
+            value.period_limits,
             value.lifetime_amount_limit,
             value.active_from,
             value.expires_at,
@@ -213,8 +183,76 @@ impl TryFrom<AllowanceRecord> for FfiAllowanceRecord {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn parse_allowance_terms(
     asset: String,
-    per_payment_amount: Option<FfiAllowanceAmountRange>,
-    period_limits: Vec<FfiAllowancePeriodLimit>,
+    per_payment_amount: Option<Arc<FfiAllowanceAmountRange>>,
+    period_limits: Vec<Arc<FfiAllowancePeriodLimit>>,
+    lifetime_amount_limit: Option<String>,
+    active_from: Option<String>,
+    expires_at: Option<String>,
+    allowed_payment_endpoint_identifiers: Option<Vec<String>>,
+) -> Result<AllowanceTerms, PaykitFfiError> {
+    let result = build_allowance_terms(
+        asset,
+        per_payment_amount.map(|range| range.domain_range()),
+        period_limits
+            .into_iter()
+            .map(|limit| limit.domain_limit())
+            .collect(),
+        lifetime_amount_limit,
+        active_from,
+        expires_at,
+        allowed_payment_endpoint_identifiers,
+    );
+    result.map_err(|_| invalid_allowance_terms())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_allowance_terms_record(
+    asset: String,
+    per_payment_amount: Option<paykit_sdk::AllowanceAmountRangeRecord>,
+    period_limits: Vec<paykit_sdk::AllowancePeriodLimitRecord>,
+    lifetime_amount_limit: Option<String>,
+    active_from: Option<String>,
+    expires_at: Option<String>,
+    allowed_payment_endpoint_identifiers: Option<Vec<String>>,
+) -> Result<AllowanceTerms, PaykitFfiError> {
+    let result = (|| {
+        build_allowance_terms(
+            asset,
+            per_payment_amount
+                .map(|range| parse_amount_range(range.minimum, range.maximum))
+                .transpose()?,
+            period_limits
+                .into_iter()
+                .map(|limit| {
+                    parse_period(
+                        limit.period.kind,
+                        limit.period.every,
+                        limit.period.unit,
+                        limit.period.anchor,
+                    )
+                    .and_then(|period| {
+                        parse_period_limit(limit.amount_limit, limit.payment_count_limit, period)
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            lifetime_amount_limit,
+            active_from,
+            expires_at,
+            allowed_payment_endpoint_identifiers,
+        )
+    })();
+    result.map_err(|_| invalid_allowance_terms())
+}
+
+fn invalid_allowance_terms() -> PaykitFfiError {
+    validation_error("Allowance Terms are invalid")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_allowance_terms(
+    asset: String,
+    per_payment_amount: Option<AllowanceAmountRange>,
+    period_limits: Vec<AllowancePeriodLimit>,
     lifetime_amount_limit: Option<String>,
     active_from: Option<String>,
     expires_at: Option<String>,
@@ -222,14 +260,9 @@ pub(super) fn parse_allowance_terms(
 ) -> Result<AllowanceTerms, PaykitFfiError> {
     let mut builder = AllowanceTerms::builder(asset);
     if let Some(range) = per_payment_amount {
-        builder = builder.per_payment_amount(parse_amount_range(range)?);
+        builder = builder.per_payment_amount(range);
     }
-    builder = builder.period_limits(
-        period_limits
-            .into_iter()
-            .map(parse_period_limit)
-            .collect::<Result<Vec<_>, _>>()?,
-    );
+    builder = builder.period_limits(period_limits);
     if let Some(limit) = lifetime_amount_limit {
         builder = builder.lifetime_amount_limit(limit);
     }
@@ -243,38 +276,48 @@ pub(super) fn parse_allowance_terms(
         builder = builder.allowed_payment_endpoint_identifiers(
             identifiers
                 .into_iter()
-                .map(parse_endpoint_identifier)
+                .map(|identifier| {
+                    parse_endpoint_identifier(identifier).map_err(|_| {
+                        validation_error(
+                            "Allowance Terms Payment Endpoint Identifier allowlist is invalid",
+                        )
+                    })
+                })
                 .collect::<Result<Vec<_>, _>>()?,
         );
     }
     builder
         .build()
-        .map_err(|err| validation_error(err.to_string()))
+        .map_err(|_| validation_error("Allowance Terms are invalid"))
 }
 
-fn parse_amount_range(
-    value: FfiAllowanceAmountRange,
+pub(super) fn parse_amount_range(
+    minimum: String,
+    maximum: String,
 ) -> Result<AllowanceAmountRange, PaykitFfiError> {
-    AllowanceAmountRange::new(value.minimum, value.maximum)
-        .map_err(|err| validation_error(err.to_string()))
+    AllowanceAmountRange::new(minimum, maximum)
+        .map_err(|_| validation_error("Allowance per-payment amount range is invalid"))
 }
 
-fn parse_period_limit(
-    value: FfiAllowancePeriodLimit,
+pub(super) fn parse_period_limit(
+    amount_limit: Option<String>,
+    payment_count_limit: Option<u64>,
+    period: AllowancePeriod,
 ) -> Result<AllowancePeriodLimit, PaykitFfiError> {
-    AllowancePeriodLimit::new(
-        value.amount_limit,
-        value.payment_count_limit,
-        parse_period(value.period)?,
-    )
-    .map_err(|err| validation_error(err.to_string()))
+    AllowancePeriodLimit::new(amount_limit, payment_count_limit, period)
+        .map_err(|_| validation_error("Allowance period limit is invalid"))
 }
 
-fn parse_period(value: FfiAllowancePeriod) -> Result<AllowancePeriod, PaykitFfiError> {
-    let unit = parse_period_unit(&value.unit)?;
-    let result = match (value.kind.as_str(), value.anchor) {
-        ("anchored", Some(anchor)) => AllowancePeriod::anchored(value.every, unit, anchor),
-        ("rolling", None) => AllowancePeriod::rolling(value.every, unit),
+pub(super) fn parse_period(
+    kind: String,
+    every: u64,
+    unit: String,
+    anchor: Option<String>,
+) -> Result<AllowancePeriod, PaykitFfiError> {
+    let unit = parse_period_unit(&unit)?;
+    let result = match (kind.as_str(), anchor) {
+        ("anchored", Some(anchor)) => AllowancePeriod::anchored(every, unit, anchor),
+        ("rolling", None) => AllowancePeriod::rolling(every, unit),
         ("anchored", None) => {
             return Err(validation_error(
                 "anchored Allowance period requires an anchor",
@@ -285,14 +328,9 @@ fn parse_period(value: FfiAllowancePeriod) -> Result<AllowancePeriod, PaykitFfiE
                 "rolling Allowance period must not configure an anchor",
             ))
         }
-        _ => {
-            return Err(validation_error(format!(
-                "unsupported Allowance period kind '{}'",
-                value.kind
-            )))
-        }
+        _ => return Err(validation_error("Allowance period kind is unsupported")),
     };
-    result.map_err(|err| validation_error(err.to_string()))
+    result.map_err(|_| validation_error("Allowance period is invalid"))
 }
 
 fn parse_period_unit(value: &str) -> Result<AllowancePeriodUnit, PaykitFfiError> {
@@ -303,9 +341,7 @@ fn parse_period_unit(value: &str) -> Result<AllowancePeriodUnit, PaykitFfiError>
         "week" => Ok(AllowancePeriodUnit::Week),
         "month" => Ok(AllowancePeriodUnit::Month),
         "year" => Ok(AllowancePeriodUnit::Year),
-        _ => Err(validation_error(format!(
-            "unsupported Allowance period unit '{value}'"
-        ))),
+        _ => Err(validation_error("Allowance period unit is unsupported")),
     }
 }
 
