@@ -293,8 +293,9 @@ else
     sed -i '' "s/^version=.*/version=$CARGO_VERSION/" "$ANDROID_LIB_DIR/gradle.properties"
 fi
 
-echo "Testing android library publish to Maven Local..."
-"$ANDROID_LIB_DIR"/gradlew --project-dir "$ANDROID_LIB_DIR" clean publishToMavenLocal
+echo "Testing Android library publish and Allowance binding compilation..."
+"$ANDROID_LIB_DIR"/gradlew --project-dir "$ANDROID_LIB_DIR" \
+    clean publishToMavenLocal :lib:compileDebugUnitTestKotlin
 validate_android_aar_symbols
 
 echo "Android build process completed successfully!"
