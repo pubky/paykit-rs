@@ -146,6 +146,23 @@ outbound worker run after the link becomes `LINKED`.
 Returned records reflect local stream and outbound queue state. Outbound
 statuses still indicate whether a queued event has been sent.
 
+### Allowances
+
+- `PaykitSdk.proposeAllowance`, `acceptAllowance`, `rejectAllowance`, and
+  `endAllowance` queue Allowance lifecycle events through the SDK outbound
+  stream.
+- `PaykitSdk.listAllowances` and `getAllowance` inspect SDK-derived Allowance
+  records without reimplementing lifecycle derivation on the platform.
+- `AllowanceTerms` validates immutable Allowance authority before proposal and
+  exposes its fields only through explicit getters.
+
+Allowance Terms and every value returned by their getters are sensitive private
+state. Do not include them in ordinary Swift/Kotlin logs, reflection output, or
+diagnostics. Returned records describe consent-message state and history health;
+they do not determine payment eligibility or authorize payment execution.
+Existing Swift `PaykitSdkProtocol` mocks and Kotlin `PaykitSdkInterface`
+implementations must add the six Allowance methods when adopting these bindings.
+
 ### Receipts
 
 - `generateReceiptId` — create a caller-stable Receipt ID for retry-safe
