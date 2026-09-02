@@ -71,12 +71,21 @@ pub fn session_bootstrap(testnet: &EphemeralTestnet, client_id: &str) -> PubkySe
 #[derive(Clone)]
 pub struct TestnetSessionProvider {
     session: Arc<Mutex<Option<PubkySessionAccess>>>,
+    session_secret: Option<Arc<String>>,
 }
 
 impl TestnetSessionProvider {
     pub fn new(access: PubkySessionAccess) -> Self {
         Self {
             session: Arc::new(Mutex::new(Some(access))),
+            session_secret: None,
+        }
+    }
+
+    pub fn with_session_secret(access: PubkySessionAccess, session_secret: String) -> Self {
+        Self {
+            session: Arc::new(Mutex::new(Some(access))),
+            session_secret: Some(Arc::new(session_secret)),
         }
     }
 }
@@ -85,6 +94,19 @@ impl TestnetSessionProvider {
 impl PubkySessionProvider for TestnetSessionProvider {
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
         Ok(self.session.lock().expect("session lock poisoned").clone())
+    }
+
+    async fn revoke_session_access(&self, access: &PubkySessionAccess) -> Result<()> {
+        let session_secret =
+            self.session_secret
+                .as_ref()
+                .ok_or_else(|| paykit_sdk::PaykitSdkError::Identity {
+                    context: "test session provider has no grant restore material".into(),
+                    source: None,
+                })?;
+        PubkySessionBootstrap::with_pubky(access.outbox_client.clone(), TEST_CLIENT_ID)?
+            .revoke_grant(session_secret, access)
+            .await
     }
 
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
@@ -239,6 +261,7 @@ pub struct TestUser {
     pub access: PubkySessionAccess,
     pub public_key: PubkyPublicKey,
     pub app_id: PaykitAppId,
+    session_secret: String,
 }
 
 impl TestUser {
@@ -265,11 +288,17 @@ impl TestUser {
             )
             .await
             .expect("testnet sign-up should succeed");
+        let session_secret = result
+            .export_session_secret()
+            .await
+            .expect("test grant should export local restore material")
+            .into_inner();
         let access = result.access;
 
         let storage = InMemoryStorage::default();
         let adapter = TestnetPaymentAdapter::default();
-        let provider = TestnetSessionProvider::new(access.clone());
+        let provider =
+            TestnetSessionProvider::with_session_secret(access.clone(), session_secret.clone());
         let sdk = PaykitSdk::new(storage.clone(), provider, adapter.clone(), config);
 
         let report = sdk
@@ -302,6 +331,7 @@ impl TestUser {
             access,
             public_key: result.public_key,
             app_id,
+            session_secret,
         }
     }
 
@@ -309,7 +339,10 @@ impl TestUser {
     pub async fn additional_app(&self, app_id: PaykitAppId, display_name: &str) -> TestUser {
         let storage = self.storage.clone();
         let adapter = TestnetPaymentAdapter::default();
-        let provider = TestnetSessionProvider::new(self.access.clone());
+        let provider = TestnetSessionProvider::with_session_secret(
+            self.access.clone(),
+            self.session_secret.clone(),
+        );
         let sdk = PaykitSdk::new(
             storage.clone(),
             provider,
@@ -347,6 +380,7 @@ impl TestUser {
             access: self.access.clone(),
             public_key: self.public_key.clone(),
             app_id,
+            session_secret: self.session_secret.clone(),
         }
     }
 }

@@ -8,6 +8,7 @@ use paykit_sdk::{
     PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionProvider,
 };
 use pubky::{ClientId, Pubky, PubkyHttpClient};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AsyncMutex;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -319,15 +320,38 @@ pub trait FfiSdkPubkySessionProvider: Send + Sync {
     /// Report whether unauthenticated public Pubky storage can be used.
     fn public_storage_available(&self) -> Result<bool, PaykitFfiError>;
 
-    /// Clear platform session access during explicit SDK sign-out.
+    /// Clear Pubky session access from local platform storage.
+    ///
+    /// Normal SDK sign-out revokes the live grant before invoking this callback.
     fn clear_session_access(&self) -> Result<(), PaykitFfiError>;
+}
+
+struct CachedPubkySession {
+    session_secret_fingerprint: [u8; 32],
+    session: pubky::PubkySession,
 }
 
 #[derive(Clone)]
 pub(crate) struct FfiSdkPubkySessionProviderAdapter {
-    pub(crate) provider: Arc<dyn FfiSdkPubkySessionProvider>,
-    pub(crate) pubky: Pubky,
-    pub(crate) pubky_client: FfiPubkyClientConfig,
+    provider: Arc<dyn FfiSdkPubkySessionProvider>,
+    pubky: Pubky,
+    pubky_client: FfiPubkyClientConfig,
+    cached_session: Arc<AsyncMutex<Option<CachedPubkySession>>>,
+}
+
+impl FfiSdkPubkySessionProviderAdapter {
+    pub(crate) fn new(
+        provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        pubky: Pubky,
+        pubky_client: FfiPubkyClientConfig,
+    ) -> Self {
+        Self {
+            provider,
+            pubky,
+            pubky_client,
+            cached_session: Arc::new(AsyncMutex::new(None)),
+        }
+    }
 }
 
 #[async_trait]
@@ -338,6 +362,7 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
             .load_session_access()
             .map_err(|err| ffi_error_to_sdk(err, "load Pubky session access"))?
         else {
+            *self.cached_session.lock().await = None;
             return Ok(None);
         };
 
@@ -354,14 +379,34 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
             .transpose()
             .map_err(|err| ffi_error_to_sdk(err, "load Paykit identity secret key"))?;
 
+        let session_secret_fingerprint = Sha256::digest(access.session_secret.as_bytes()).into();
+        let mut cached_session = self.cached_session.lock().await;
+
         if access.live_client_config.as_ref() == Some(&self.pubky_client) {
             if let Some(live_access) = &access.live_access {
                 let mut live_access = live_access.clone();
                 validate_grant_session_client_id(&live_access.session, &access.client_id).await?;
                 live_access.local_secret_key = local_secret_key;
                 live_access.paykit_identity_secret_key = paykit_identity_secret_key;
+                *cached_session = Some(CachedPubkySession {
+                    session_secret_fingerprint,
+                    session: live_access.session.clone(),
+                });
                 return Ok(Some(live_access));
             }
+        }
+
+        if let Some(cached) = cached_session
+            .as_ref()
+            .filter(|cached| cached.session_secret_fingerprint == session_secret_fingerprint)
+        {
+            validate_grant_session_client_id(&cached.session, &access.client_id).await?;
+            return Ok(Some(PubkySessionAccess {
+                session: cached.session.clone(),
+                outbox_client: self.pubky.clone(),
+                local_secret_key,
+                paykit_identity_secret_key,
+            }));
         }
 
         let session_secret = Zeroizing::new(access.session_secret.clone());
@@ -374,6 +419,10 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
                 source: Some(err.into()),
             })?;
         validate_grant_session_client_id(&session, &access.client_id).await?;
+        *cached_session = Some(CachedPubkySession {
+            session_secret_fingerprint,
+            session: session.clone(),
+        });
 
         Ok(Some(PubkySessionAccess {
             session,
@@ -381,6 +430,26 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
             local_secret_key,
             paykit_identity_secret_key,
         }))
+    }
+
+    async fn revoke_session_access(&self, access: &PubkySessionAccess) -> paykit_sdk::Result<()> {
+        let provider_access = self
+            .provider
+            .load_session_access()
+            .map_err(|err| ffi_error_to_sdk(err, "load Pubky session access for revocation"))?
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context: "cannot revoke Pubky grant without persisted session access".into(),
+                source: None,
+            })?;
+        let bootstrap =
+            PubkySessionBootstrap::with_pubky(self.pubky.clone(), &provider_access.client_id)?;
+
+        let mut cached_session = self.cached_session.lock().await;
+        bootstrap
+            .revoke_grant(&provider_access.session_secret, access)
+            .await?;
+        *cached_session = None;
+        Ok(())
     }
 
     async fn load_public_storage(&self) -> paykit_sdk::Result<Option<pubky::PublicStorage>> {
@@ -394,7 +463,9 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
     async fn clear_session_access(&self) -> paykit_sdk::Result<()> {
         self.provider
             .clear_session_access()
-            .map_err(|err| ffi_error_to_sdk(err, "clear Pubky session access"))
+            .map_err(|err| ffi_error_to_sdk(err, "clear Pubky session access"))?;
+        *self.cached_session.lock().await = None;
+        Ok(())
     }
 }
 

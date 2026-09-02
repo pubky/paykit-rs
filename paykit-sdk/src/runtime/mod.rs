@@ -286,16 +286,17 @@ where
         ))
     }
 
-    /// Clear this application's live Pubky session access.
+    /// Revoke the current Pubky grant and clear this application's session access.
     ///
-    /// Stored Paykit state remains intact so the same identity can resume it
-    /// later and other applications are not affected. Session clearing is
-    /// still attempted if the stored identity status cannot be read.
+    /// Identity-wide Paykit state remains intact for other applications and a
+    /// later session. Missing access and identity mismatches fail before remote
+    /// revocation or local cleanup. Use [`Self::forget_session_access`] only
+    /// when local-only cleanup is explicitly intended.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
         let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
         let now = self.clock.now();
-        let state_result = self
+        let state = self
             .storage
             .transaction(move |tx| {
                 Ok(tx.load_identity_state().unwrap_or(IdentityState {
@@ -303,10 +304,52 @@ where
                     initialized_at: now,
                 }))
             })
-            .await;
-        let clear_result = self.pubky.clear_session_access().await;
-        clear_result?;
-        let state = state_result?;
+            .await?;
+        let session_access = self.pubky.load_session_access().await?;
+        if session_access.is_none() && state.public_key.is_some() {
+            return Err(PaykitSdkError::Identity {
+                context: "cannot revoke Pubky grant during sign-out without live session access"
+                    .into(),
+                source: None,
+            });
+        }
+        if let Some(access) = session_access {
+            access.validate()?;
+            if let Some(expected_public_key) = &state.public_key {
+                if access.public_key()? != *expected_public_key {
+                    return Err(PaykitSdkError::Identity {
+                        context:
+                            "cannot sign out because active Pubky session does not match initialized identity"
+                                .into(),
+                        source: None,
+                    });
+                }
+            }
+            self.pubky.revoke_session_access(&access).await?;
+        }
+        self.pubky.clear_session_access().await?;
+
+        Ok(IdentityStatus::from_state(&state, false, false))
+    }
+
+    /// Clear this application's session access without revoking the grant.
+    ///
+    /// Identity-wide Paykit state remains intact. A copied or separately
+    /// persisted grant remains valid until it expires or is revoked elsewhere.
+    pub async fn forget_session_access(&self) -> Result<IdentityStatus> {
+        let _identity_guard = self.claim_identity_operation("forget session access")?;
+        let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
+        let now = self.clock.now();
+        let state = self
+            .storage
+            .transaction(move |tx| {
+                Ok(tx.load_identity_state().unwrap_or(IdentityState {
+                    public_key: None,
+                    initialized_at: now,
+                }))
+            })
+            .await?;
+        self.pubky.clear_session_access().await?;
 
         Ok(IdentityStatus::from_state(&state, false, false))
     }

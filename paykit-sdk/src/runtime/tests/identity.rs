@@ -200,7 +200,7 @@ async fn test_identity_status_cached_capability_requires_live_session() {
 }
 
 #[tokio::test]
-async fn test_sign_out_preserves_identity_scoped_state() {
+async fn test_forget_session_access_preserves_identity_scoped_state() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -265,7 +265,7 @@ async fn test_sign_out_preserves_identity_scoped_state() {
         FixedClock,
     );
 
-    let status = sdk.sign_out().await.unwrap();
+    let status = sdk.forget_session_access().await.unwrap();
 
     assert_eq!(status.capability, PubkyIdentityCapability::SignedOut);
     let snapshot = storage.snapshot().unwrap();
@@ -334,14 +334,17 @@ async fn test_identity_status_holds_session_gate_until_provider_load_finishes() 
     struct BlockingSessionProvider {
         entered: Arc<Barrier>,
         release: Arc<Barrier>,
+        block_next_load: Arc<AtomicBool>,
         cleared: Arc<AtomicBool>,
     }
 
     #[async_trait]
     impl PubkySessionProvider for BlockingSessionProvider {
         async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
-            self.entered.wait().await;
-            self.release.wait().await;
+            if self.block_next_load.swap(false, Ordering::SeqCst) {
+                self.entered.wait().await;
+                self.release.wait().await;
+            }
             Ok(None)
         }
 
@@ -357,12 +360,14 @@ async fn test_identity_status_holds_session_gate_until_provider_load_finishes() 
 
     let entered = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));
+    let block_next_load = Arc::new(AtomicBool::new(true));
     let cleared = Arc::new(AtomicBool::new(false));
     let sdk = Arc::new(PaykitSdk::with_clock(
         InMemoryStorage::new(),
         BlockingSessionProvider {
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
+            block_next_load,
             cleared: Arc::clone(&cleared),
         },
         TestPaymentAdapter,
@@ -402,7 +407,7 @@ async fn test_sign_out_rejects_concurrent_identity_operation() {
 }
 
 #[tokio::test]
-async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
+async fn test_sign_out_without_live_session_preserves_identity_scoped_state() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -432,7 +437,7 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
         .unwrap();
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
-        FailingClearSessionProvider,
+        TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
         PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
@@ -440,14 +445,18 @@ async fn test_sign_out_provider_failure_preserves_identity_scoped_state() {
 
     let result = sdk.sign_out().await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert!(matches!(
+        result,
+        Err(PaykitSdkError::Identity { context, .. })
+            if context.contains("without live session access")
+    ));
     let snapshot = storage.snapshot().unwrap();
     assert!(snapshot.identity_state.is_some());
     assert_eq!(snapshot.contact_records.len(), 1);
 }
 
 #[tokio::test]
-async fn test_sign_out_clears_session_when_storage_is_unavailable() {
+async fn test_sign_out_preserves_session_when_storage_is_unavailable() {
     #[derive(Clone)]
     struct FailingStorage;
 
@@ -478,5 +487,5 @@ async fn test_sign_out_clears_session_when_storage_is_unavailable() {
     let result = sdk.sign_out().await;
 
     assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
-    assert!(cleared.load(Ordering::SeqCst));
+    assert!(!cleared.load(Ordering::SeqCst));
 }

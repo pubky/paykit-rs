@@ -2,14 +2,15 @@
 
 import PackageDescription
 
-let tag = "v0.1.0-rc49"
-let checksum = "6209d4d3e6947f3ebab2171c0a00efb24e23d086a95a195465f1263470f1ff9a"
+let tag = "v0.1.0-rc50"
+let checksum = "7a9108ca2dd492e698f046548ec49a107cd8dda1ed38013ea945fe1c0cb82ddc"
 let url = "https://github.com/pubky/paykit-rs/releases/download/\(tag)/Paykit.xcframework.zip"
 
 let package = Package(
     name: "paykit",
     platforms: [
         .iOS(.v15),
+        .macOS(.v12),
     ],
     products: [
         .library(
@@ -21,7 +22,7 @@ let package = Package(
             name: "Paykit",
             dependencies: ["PaykitFFI"],
             path: "./paykit-ffi/bindings/ios",
-            sources: ["paykit.swift", "PaykitPublicKeys.swift", "PaykitRedaction.swift"]
+            sources: ["paykit.swift", "PaykitPublicKeys.swift"]
         ),
         .binaryTarget(
             name: "PaykitFFI",

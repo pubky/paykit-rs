@@ -290,6 +290,7 @@ Required for loading live Pubky session access for the shared Paykit identity.
 ```rust
 pub trait PubkySessionProvider {
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>>;
+    async fn revoke_session_access(&self, access: &PubkySessionAccess) -> Result<()>;
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>>;
     async fn clear_session_access(&self) -> Result<()>;
 }
@@ -310,14 +311,18 @@ establish or advance Encrypted Links. The SDK derives and persists public
 If `load_session_access` returns `None`, no live session access is currently
 available. Ordinary refreshes must preserve the shared Paykit state and block
 Pubky-backed workflows until session access is available again. Explicit
-`sign_out` clears this application's live session access without deleting the
-identity's Paykit state. An application that should also withdraw its published
-payment capability calls `remove_paykit_app` while authenticated before
-signing out. Explicit app removal requires app-owned Payment Requests to be
-canceled or otherwise terminal and private financial events and Receipt Access
-delivery to be complete. Any previously shared Private Payment Lists must be
-cleared first. Unanswered identity-addressed requests are not owned by an app
-and remain available to other apps.
+`sign_out` validates the identity, revokes this application's live Pubky grant,
+and clears its local session access without deleting shared Paykit state. If
+live access or remote revocation is unavailable, it preserves local access so
+the operation can be retried. `forget_session_access` is the explicit local-only
+escape hatch and does not invalidate other persisted copies of the grant. An
+application that should also withdraw its published payment capability calls
+`remove_paykit_app` while authenticated before signing out. Explicit app
+removal requires app-owned Payment Requests to be canceled or otherwise
+terminal and private financial events and Receipt Access delivery to be
+complete. Any previously shared Private Payment Lists must be cleared first.
+Unanswered identity-addressed requests are not owned by an app and remain
+available to other apps.
 
 `load_public_storage` lets contact resolution fetch public Payment Endpoints
 without requiring authenticated session access. Implementations can reuse the
@@ -902,9 +907,9 @@ publishes the same ciphertext.
 
 The Rust SDK implementation provides storage-backed per-peer leases for
 Encrypted Link work and per-App leases for public endpoint sync and App
-removal. It also serializes `initialize` and `sign_out` calls on one runtime
-instance. Homeserver-backed shared storage extends the durable leases across
-devices and processes.
+removal. It also serializes `initialize`, `sign_out`, and
+`forget_session_access` calls on one runtime instance. Homeserver-backed shared
+storage extends the durable leases across devices and processes.
 
 ## Workflows
 

@@ -3268,13 +3268,14 @@ dependencies = [
 
 [[package]]
 name = "paykit-ffi"
-version = "0.1.0-rc49"
+version = "0.1.0-rc50"
 dependencies = [
  "android_logger",
  "anyhow",
  "async-trait",
  "chrono",
  "hex",
+ "http-relay",
  "jni",
  "log",
  "once_cell",
@@ -3282,6 +3283,7 @@ dependencies = [
  "paykit-sdk",
  "postcard",
  "pubky",
+ "pubky-testnet",
  "rustls-platform-verifier",
  "serde",
  "serde_json",
@@ -3296,7 +3298,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-lib"
-version = "0.1.0-rc49"
+version = "0.1.0-rc50"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3320,7 +3322,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-sdk"
-version = "0.1.0-rc49"
+version = "0.1.0-rc50"
 dependencies = [
  "anyhow",
  "async-trait",

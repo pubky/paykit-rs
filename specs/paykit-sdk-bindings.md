@@ -182,9 +182,13 @@ The platform session provider should return one of:
   private Paykit workflows are required
 
 `None` or `null` means no live session is currently available. Explicit
-sign-out is a separate SDK call that clears this application's session access
-without deleting the identity's shared Paykit state. Apps that should also
-withdraw their public Payment Endpoints call `removePaykitApp` before sign-out.
+sign-out is a separate SDK call that revokes this application's Pubky grant and
+clears its local session access without deleting the identity's shared Paykit
+state. If live access or remote revocation is unavailable, sign-out fails before
+local cleanup so the app can retry. Bindings also expose a distinctly named
+local-only forget operation; it must not be presented as remote revocation.
+Apps that should also withdraw their public Payment Endpoints call
+`removePaykitApp` before sign-out.
 
 The binding-level session API should not ask Swift or Kotlin to construct Rust
 `pubky::PubkySession` or `pubky::Pubky` values directly. For

@@ -240,10 +240,24 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Clear live Pubky session access without deleting shared Paykit state.
+    /// Revoke the current Pubky grant and clear local session access.
+    ///
+    /// Identity-wide Paykit state remains available to other applications.
     pub async fn sign_out(&self) -> Result<FfiIdentityStatus, PaykitFfiError> {
         self.runtime
             .sign_out()
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Clear local session access and SDK identity state without revoking the grant.
+    ///
+    /// Use this only when remote revocation cannot be reached and the app
+    /// intentionally accepts that persisted copies of the grant remain valid.
+    pub async fn forget_session_access(&self) -> Result<FfiIdentityStatus, PaykitFfiError> {
+        self.runtime
+            .forget_session_access()
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -293,11 +307,11 @@ fn ffi_session_provider(
     provider: Arc<dyn FfiSdkPubkySessionProvider>,
     pubky_client: FfiPubkyClientConfig,
 ) -> Result<FfiSdkPubkySessionProviderAdapter, PaykitFfiError> {
-    Ok(FfiSdkPubkySessionProviderAdapter {
+    Ok(FfiSdkPubkySessionProviderAdapter::new(
         provider,
-        pubky: pubky_from_config(&pubky_client)?,
+        pubky_from_config(&pubky_client)?,
         pubky_client,
-    })
+    ))
 }
 
 fn build_sdk(

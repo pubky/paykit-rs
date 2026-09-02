@@ -106,27 +106,6 @@ public object NoPointer
 
 
 /**
- * Rotatable identity-wide Paykit secret supplied by secure platform storage.
- */
-public interface PaykitIdentitySecretKeyInterface {
-
-    /**
-     * Export the secret bytes for secure platform storage or delegation.
-     */
-    public fun `exportBytes`(): kotlin.ByteArray
-
-    /**
-     * Return the key generation.
-     */
-    public fun `keyGeneration`(): kotlin.ULong
-
-    public companion object
-}
-
-
-
-
-/**
  * Stateful Paykit SDK runtime handle.
  */
 public interface PaykitSdkInterface {
@@ -135,19 +114,16 @@ public interface PaykitSdkInterface {
      * Start an Encrypted Link Handshake as the responder.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `acceptLinkWithPeer`(`counterparty`: kotlin.String): LinkedPeerHandshakeReport
+    public suspend fun `acceptLinkWithPeer`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): LinkedPeerHandshakeReport
 
     /**
      * Queue acceptance for a received Payment Request and return local derived state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `acceptPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String): PaymentRequestRecord
+    public suspend fun `acceptPaymentRequest`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `paymentRequestId`: kotlin.String): PaymentRequestRecord
 
     /**
-     * Return received Payment Requests that still need a payer response.
-     *
-     * A request's required Paykit App constrains the payee endpoint, not the
-     * payer app that responds.
+     * Return received Payment Requests that need a local payer response.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `actionableReceivedPaymentRequests`(): List<PaymentRequestRecord>
@@ -162,31 +138,31 @@ public interface PaykitSdkInterface {
      * Advance the stored Encrypted Link Handshake for one counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `advanceLinkHandshake`(`counterparty`: kotlin.String): LinkedPeerHandshakeReport
+    public suspend fun `advanceLinkHandshake`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): LinkedPeerHandshakeReport
 
     /**
      * Block a counterparty for local Paykit private workflows.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `blockPeer`(`counterparty`: kotlin.String): LinkedPeerRecord
+    public suspend fun `blockPeer`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): LinkedPeerRecord
 
     /**
      * Queue cancellation for a known non-terminal Payment Request.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `cancelPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): PaymentRequestRecord
+    public suspend fun `cancelPaymentRequest`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): PaymentRequestRecord
 
     /**
-     * Queue an empty Private Payment List for one counterparty.
+     * Queue an empty Private Payment List for one counterparty receiver.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `clearPrivatePaymentList`(`counterparty`: kotlin.String): QueuedPrivateMessage
+    public suspend fun `clearPrivatePaymentList`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): QueuedPrivateMessage
 
     /**
      * Queue an empty Private Payment List and process that counterparty's queue.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `clearPrivatePaymentListAndProcessOutbound`(`counterparty`: kotlin.String): PrivatePaymentListDeliveryReport
+    public suspend fun `clearPrivatePaymentListAndProcessOutbound`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): PrivatePaymentListDeliveryReport
 
     /**
      * Return this runtime's configuration.
@@ -194,31 +170,31 @@ public interface PaykitSdkInterface {
     public fun `config`(): PaykitSdkConfig
 
     /**
-     * Return one Contact Record.
+     * Return one local Contact Record.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `contactRecord`(`publicKey`: kotlin.String): ContactRecord?
 
     /**
-     * Return all Contact Records.
+     * Return all local Contact Records.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `contactRecords`(): List<ContactRecord>
 
     /**
-     * Return the latest valid Private Payment List views for a counterparty.
+     * Return the latest valid Private Payment List view for a counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `currentPrivatePaymentLists`(`counterparty`: kotlin.String): List<PrivatePaymentListView>
+    public suspend fun `currentPrivatePaymentList`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): PrivatePaymentListView?
 
     /**
      * Resolve this identity's public profile.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `currentProfile`(`allowPubkyProfileFallback`: kotlin.Boolean): ProfileResolution?
+    public suspend fun `currentProfile`(`allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
 
     /**
-     * Delete a blob by `pubky://` URI or identity-wide Paykit blob path.
+     * Delete a blob by `pubky://` URI or configured Paykit profile path.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `deletePaykitBlob`(`uriOrPath`: kotlin.String)
@@ -233,25 +209,25 @@ public interface PaykitSdkInterface {
      * Return tracked Encrypted Link recovery marker state for a counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `encryptedLinkRecoveryMarkerStatus`(`counterparty`: kotlin.String): EncryptedLinkRecoveryMarkerReport?
+    public suspend fun `encryptedLinkRecoveryMarkerStatus`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): EncryptedLinkRecoveryMarkerReport?
 
     /**
-     * Queue the current complete Private Payment List for one counterparty.
+     * Queue the current complete Private Payment List for one counterparty receiver.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `enqueuePrivatePaymentList`(`counterparty`: kotlin.String): QueuedPrivateMessage
+    public suspend fun `enqueuePrivatePaymentList`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): QueuedPrivateMessage
 
     /**
-     * Queue an explicit complete Private Payment List for one counterparty.
+     * Queue an explicit complete Private Payment List for one counterparty receiver.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `enqueuePrivatePaymentListWithReceivingDetails`(`counterparty`: kotlin.String, `receivingDetails`: List<PrivateReceivingDetail>): QueuedPrivateMessage
+    public suspend fun `enqueuePrivatePaymentListWithReceivingDetails`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `receivingDetails`: List<PrivateReceivingDetail>): QueuedPrivateMessage
 
     /**
      * Start or advance an Encrypted Link Handshake for one counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `ensureLinkWithPeer`(`counterparty`: kotlin.String, `maxAdvanceSteps`: kotlin.UInt): LinkedPeerHandshakeReport
+    public suspend fun `ensureLinkWithPeer`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `maxAdvanceSteps`: kotlin.UInt): LinkedPeerHandshakeReport
 
     /**
      * Export SDK-managed backup state as an opaque blob.
@@ -269,19 +245,19 @@ public interface PaykitSdkInterface {
      * Fetch a public Paykit Profile.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `fetchPaykitProfile`(`publicKey`: kotlin.String): PaykitProfileRecord?
+    public suspend fun `fetchPaykitProfile`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): PaykitProfileRecord?
 
     /**
-     * Fetch public Pubky file bytes up to `max_bytes`.
+     * Fetch public Pubky file bytes.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `fetchPubkyFile`(`uri`: kotlin.String, `maxBytes`: kotlin.ULong): kotlin.ByteArray?
+    public suspend fun `fetchPubkyFile`(`uri`: kotlin.String): kotlin.ByteArray?
 
     /**
-     * Fetch public Pubky app follows up to `max_entries`.
+     * Fetch public Pubky app follows.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `fetchPubkyFollows`(`publicKey`: kotlin.String, `maxEntries`: kotlin.ULong): List<kotlin.String>
+    public suspend fun `fetchPubkyFollows`(`publicKey`: kotlin.String): List<kotlin.String>
 
     /**
      * Fetch a public Pubky app profile.
@@ -290,10 +266,19 @@ public interface PaykitSdkInterface {
     public suspend fun `fetchPubkyProfile`(`publicKey`: kotlin.String): PubkyProfileRecord?
 
     /**
-     * Fetch a public Pubky UTF-8 text file up to `max_bytes`.
+     * Fetch a public Pubky UTF-8 text file.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `fetchPubkyText`(`uri`: kotlin.String, `maxBytes`: kotlin.ULong): kotlin.String?
+    public suspend fun `fetchPubkyText`(`uri`: kotlin.String): kotlin.String?
+
+    /**
+     * Clear local session access and SDK identity state without revoking the grant.
+     *
+     * Use this only when remote revocation cannot be reached and the app
+     * intentionally accepts that persisted copies of the grant remain valid.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `forgetSessionAccess`(): IdentityStatus
 
     /**
      * Return current identity status, when initialized.
@@ -305,19 +290,19 @@ public interface PaykitSdkInterface {
      * Initialize durable SDK identity state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `initialize`(): IdentityStatus
+    public suspend fun `initialize`(): InitializationReport
 
     /**
      * Start an Encrypted Link Handshake as the initiator.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `initiateLinkWithPeer`(`counterparty`: kotlin.String): LinkedPeerHandshakeReport
+    public suspend fun `initiateLinkWithPeer`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): LinkedPeerHandshakeReport
 
     /**
      * Prepare, store, and queue Receipt Access for private delivery.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `issueReceipt`(`counterparty`: kotlin.String, `draft`: ReceiptDraft): ReceiptIssuanceView
+    public suspend fun `issueReceipt`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `draft`: ReceiptDraft): ReceiptIssuanceView
 
     /**
      * List issued receipts across non-blocked counterparties, newest first.
@@ -329,7 +314,7 @@ public interface PaykitSdkInterface {
      * List issued receipts for one counterparty, newest first.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `issuedReceiptsTo`(`counterparty`: kotlin.String): List<ReceiptIssuanceView>
+    public suspend fun `issuedReceiptsTo`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): List<ReceiptIssuanceView>
 
     /**
      * List locally tracked Linked Peer records.
@@ -347,19 +332,19 @@ public interface PaykitSdkInterface {
      * Observe a counterparty's public recovery marker.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `observeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): EncryptedLinkRecoveryMarkerReport
+    public suspend fun `observeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): EncryptedLinkRecoveryMarkerReport
 
     /**
-     * Fetch the public Paykit application registry for an identity.
+     * Fetch one public Paykit receiver marker, if present.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `paykitAppRegistry`(`publicKey`: kotlin.String): PaykitAppRegistry?
+    public suspend fun `paykitReceiverMarker`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): PaykitReceiverMarker?
 
     /**
-     * Report work that must finish before this application can be removed.
+     * List public Paykit receiver paths for a Pubky identity.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `paykitAppRemovalBlockers`(): PaykitAppRemovalBlockers
+    public suspend fun `paykitReceiverPaths`(`publicKey`: kotlin.String): List<kotlin.String>
 
     /**
      * Return all Payment Requests across non-blocked counterparties.
@@ -371,13 +356,13 @@ public interface PaykitSdkInterface {
      * Return Payment Requests involving one counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `paymentRequestsWith`(`counterparty`: kotlin.String): List<PaymentRequestRecord>
+    public suspend fun `paymentRequestsWith`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): List<PaymentRequestRecord>
 
     /**
      * List counterparties with queued private messages ready for retry.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `pendingOutboundPrivateCounterparties`(): List<kotlin.String>
+    public suspend fun `pendingOutboundPrivateCounterparties`(): List<CounterpartyReceiver>
 
     /**
      * Prepare private contact state, then resolve private endpoints.
@@ -386,25 +371,19 @@ public interface PaykitSdkInterface {
      * List after private messages have been refreshed.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `prepareAndResolvePrivateContactPayment`(`counterparty`: kotlin.String, `amount`: PaymentAmountContext?, `afterPrivatePaymentListVersion`: kotlin.ULong?, `maxAdvanceSteps`: kotlin.UInt): PreparedPrivateContactPayment
-
-    /**
-     * Prepare private state, then resolve endpoints allowed by a Payment Request.
-     */
-    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `prepareAndResolvePrivatePaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `afterPrivatePaymentListVersion`: kotlin.ULong?, `maxAdvanceSteps`: kotlin.UInt): PreparedPrivateContactPayment
+    public suspend fun `prepareAndResolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `afterPrivatePaymentListVersion`: kotlin.ULong?, `maxAdvanceSteps`: kotlin.UInt): PreparedPrivateContactPayment
 
     /**
      * Prepare a receipt issuance and persist it before network side effects.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `prepareReceiptIssuance`(`counterparty`: kotlin.String, `draft`: ReceiptDraft): ReceiptIssuanceView
+    public suspend fun `prepareReceiptIssuance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `draft`: ReceiptDraft): ReceiptIssuanceView
 
     /**
      * Send queued outbound private messages for one counterparty in order.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `processOutboundPrivateMessages`(`counterparty`: kotlin.String): OutboundPrivateSendReport
+    public suspend fun `processOutboundPrivateMessages`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): OutboundPrivateSendReport
 
     /**
      * Process queued outbound private messages for every pending counterparty.
@@ -416,31 +395,22 @@ public interface PaykitSdkInterface {
      * Continue storage and Receipt Access queueing for a prepared issuance.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `processReceiptIssuance`(`counterparty`: kotlin.String, `receiptId`: kotlin.String): ReceiptIssuanceView
+    public suspend fun `processReceiptIssuance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `receiptId`: kotlin.String): ReceiptIssuanceView
 
     /**
      * Queue a new Payment Request proposal and return local derived state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `proposePaymentRequest`(`counterparty`: kotlin.String, `terms`: PaymentRequestTerms): PaymentRequestRecord
+    public suspend fun `proposePaymentRequest`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `terms`: PaymentRequestTerms): PaymentRequestRecord
 
     /**
      * Publish a minimal local recovery marker for a counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `publishEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): EncryptedLinkRecoveryMarkerReport
+    public suspend fun `publishEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): EncryptedLinkRecoveryMarkerReport
 
     /**
-     * Add or replace this application in the identity-wide registry.
-     *
-     * Serialize registry mutations across SDK instances until Pubky supports
-     * conditional registry writes.
-     */
-    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `publishPaykitApp`(`displayName`: kotlin.String, `capabilities`: PaykitAppCapabilities): PaykitAppRegistry
-
-    /**
-     * Publish a blob under this identity's Paykit blob path.
+     * Publish a blob under this identity's Paykit profile namespace.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `publishPaykitBlob`(`blobName`: kotlin.String, `bytes`: kotlin.ByteArray): PaykitBlobRecord
@@ -452,10 +422,16 @@ public interface PaykitSdkInterface {
     public suspend fun `publishPaykitProfile`(`profile`: PaykitProfile): PaykitProfileRecord
 
     /**
-     * Publish a public Contact Marker for a Contact Record.
+     * Publish the configured local receiver marker.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `publishPublicContact`(`publicKey`: kotlin.String): ContactRecord
+    public suspend fun `publishPaykitReceiverMarker`(`capabilities`: PaykitReceiverCapabilities): PaykitReceiverMarker
+
+    /**
+     * Publish a public Contact Marker for a local Contact Record.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `publishPublicContact`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): ContactRecord
 
     /**
      * List Receipt Access across non-blocked counterparties, newest first.
@@ -467,25 +443,25 @@ public interface PaykitSdkInterface {
      * List Receipt Access received from one counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptAccessFrom`(`counterparty`: kotlin.String): List<ReceiptAccessView>
+    public suspend fun `receiptAccessFrom`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): List<ReceiptAccessView>
 
     /**
      * List indexed Receipt Access records for one counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptAccessRecords`(`counterparty`: kotlin.String): List<ReceiptAccessView>
+    public suspend fun `receiptAccessRecords`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): List<ReceiptAccessView>
 
     /**
      * List local receipt issuance records for one counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptIssuanceRecords`(`counterparty`: kotlin.String): List<ReceiptIssuanceView>
+    public suspend fun `receiptIssuanceRecords`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): List<ReceiptIssuanceView>
 
     /**
      * List decrypted Receipt records for one issuer, newest first.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptRecords`(`issuer`: kotlin.String): List<ReceiptRecord>
+    public suspend fun `receiptRecords`(`issuer`: kotlin.String, `issuerReceiverPath`: kotlin.String): List<ReceiptRecord>
 
     /**
      * List decrypted receipts across non-blocked issuers, newest first.
@@ -497,13 +473,13 @@ public interface PaykitSdkInterface {
      * List decrypted receipts from one issuer, newest first.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receiptsFrom`(`issuer`: kotlin.String): List<ReceiptRecord>
+    public suspend fun `receiptsFrom`(`issuer`: kotlin.String, `issuerReceiverPath`: kotlin.String): List<ReceiptRecord>
 
     /**
      * Receive and durably persist available private messages.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receivePrivateMessages`(`counterparty`: kotlin.String): PrivateStreamIntakeReport
+    public suspend fun `receivePrivateMessages`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): PrivateStreamIntakeReport
 
     /**
      * Receive private messages from every locally linked counterparty.
@@ -515,22 +491,22 @@ public interface PaykitSdkInterface {
      * Return inbound Payment Requests received from one counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `receivedPaymentRequestsFrom`(`counterparty`: kotlin.String): List<PaymentRequestRecord>
+    public suspend fun `receivedPaymentRequestsFrom`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): List<PaymentRequestRecord>
 
     /**
-     * Refresh the cached Paykit Profile for a Contact Record.
+     * Refresh the cached Paykit Profile for a local Contact Record.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `refreshContactPaykitProfile`(`publicKey`: kotlin.String): ContactRecord?
+    public suspend fun `refreshContactPaykitProfile`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): ContactRecord?
 
     /**
      * Queue rejection for a received Payment Request and return local derived state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `rejectPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): PaymentRequestRecord
+    public suspend fun `rejectPaymentRequest`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `paymentRequestId`: kotlin.String, `reason`: kotlin.String?): PaymentRequestRecord
 
     /**
-     * Remove a Contact Record when it has no public marker to clean up.
+     * Remove a local Contact Record when it has no public marker to clean up.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `removeContact`(`publicKey`: kotlin.String): ContactRecord?
@@ -539,26 +515,25 @@ public interface PaykitSdkInterface {
      * Remove the local public recovery marker for a counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `removeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String): EncryptedLinkRecoveryMarkerReport
+    public suspend fun `removeEncryptedLinkRecoveryMarker`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): EncryptedLinkRecoveryMarkerReport
 
     /**
-     * Remove this application's public Payment Endpoints and registry entry.
-     *
-     * Active app-owned Payment Requests, undelivered private events, and
-     * incomplete Receipt issuance must be finished, and shared Private Payment
-     * Lists must be cleared, before removal.
-     *
-     * Serialize registry mutations across SDK instances until Pubky supports
-     * conditional registry writes.
+     * Remove the configured local receiver marker.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `removePaykitApp`(): PaykitAppRegistry
+    public suspend fun `removePaykitReceiverMarker`()
 
     /**
      * Remove a public Contact Marker.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `removePublicContact`(`publicKey`: kotlin.String): ContactRecord?
+    public suspend fun `removePublicContact`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): ContactRecord?
+
+    /**
+     * Resolve display metadata for a contact.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `resolveContactProfile`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
 
     /**
      * Resolve payable private endpoints for one counterparty.
@@ -568,31 +543,19 @@ public interface PaykitSdkInterface {
      * snapshot.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `amount`: PaymentAmountContext?, `afterPrivatePaymentListVersion`: kotlin.ULong?): PrivateContactPaymentResolution
-
-    /**
-     * Resolve private endpoints allowed by an actionable received Payment Request.
-     */
-    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolvePrivatePaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `afterPrivatePaymentListVersion`: kotlin.ULong?): PrivateContactPaymentResolution
+    public suspend fun `resolvePrivateContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?, `afterPrivatePaymentListVersion`: kotlin.ULong?): PrivateContactPaymentResolution
 
     /**
      * Resolve public profile metadata, preferring Paykit Profile.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolveProfile`(`publicKey`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ProfileResolution?
+    public suspend fun `resolveProfile`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String, `allowPubkyProfileFallback`: kotlin.Boolean): ContactProfileResolution?
 
     /**
      * Resolve payable public Payment Endpoints for one counterparty.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolvePublicContactPayment`(`counterparty`: kotlin.String, `amount`: PaymentAmountContext?): PublicContactPaymentResolution
-
-    /**
-     * Resolve public endpoints allowed by an actionable received Payment Request.
-     */
-    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resolvePublicPaymentRequest`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String): PublicContactPaymentResolution
+    public suspend fun `resolvePublicContactPayment`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `amount`: PaymentAmountContext?): PublicContactPaymentResolution
 
     /**
      * Restore SDK-managed backup state from an opaque blob.
@@ -610,49 +573,22 @@ public interface PaykitSdkInterface {
      * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `retrieveReceipt`(`counterparty`: kotlin.String, `receiptId`: kotlin.String): ReceiptRecord
+    public suspend fun `retrieveReceipt`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `receiptId`: kotlin.String): ReceiptRecord
 
     /**
-     * Rotate identity-wide Paykit key material to the next generation.
-     *
-     * Persist and distribute the replacement key to remaining authorized
-     * applications before private Paykit operations resume.
-     */
-    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `rotatePaykitIdentityKey`(`replacementKey`: PaykitIdentitySecretKey): PaykitAppRegistry
-
-    /**
-     * Save or update a Contact Record.
+     * Save or update a local Contact Record.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `saveContact`(`update`: ContactUpdate): ContactRecord
 
     /**
-     * Set or clear the identity-wide default Paykit application.
-     *
-     * Serialize registry mutations across SDK instances until Pubky supports
-     * conditional registry writes.
-     */
-    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `setDefaultPaykitApp`(`appId`: kotlin.String?): PaykitAppRegistry
-
-    /**
-     * Set or clear the default Paykit application for one endpoint identifier.
-     *
-     * Serialize registry mutations across SDK instances until Pubky supports
-     * conditional registry writes.
-     */
-    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `setDefaultPaykitAppForEndpoint`(`identifier`: kotlin.String, `appId`: kotlin.String?): PaykitAppRegistry
-
-    /**
-     * Clear live Pubky session access without deleting shared Paykit state.
+     * Revoke the current Pubky grant and clear local SDK identity state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `signOut`(): IdentityStatus
 
     /**
-     * Return the latest observed SDK state revision, when one exists.
+     * Return the current platform SDK state revision, when a state blob exists.
      */
     @Throws(PaykitException::class)
     public fun `stateRevision`(): kotlin.String?
@@ -661,10 +597,10 @@ public interface PaykitSdkInterface {
      * Queue a Payment Proof for an accepted Payment Request.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `submitPaymentProof`(`counterparty`: kotlin.String, `paymentRequestId`: kotlin.String, `proof`: PaymentProofSubmission): PaymentRequestRecord
+    public suspend fun `submitPaymentProof`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `paymentRequestId`: kotlin.String, `proof`: PaymentProofSubmission): PaymentRequestRecord
 
     /**
-     * Queue Private Payment List updates for saved contacts.
+     * Queue Private Payment List updates for saved local contacts.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `syncContactPrivatePaymentLists`(`clearUnlistedLinkedPeers`: kotlin.Boolean): PrivatePaymentListSyncReport
@@ -703,7 +639,7 @@ public interface PaykitSdkInterface {
      * Remove a local peer block and return the peer to NotLinked.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `unblockPeer`(`counterparty`: kotlin.String): LinkedPeerRecord
+    public suspend fun `unblockPeer`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): LinkedPeerRecord
 
     /**
      * Upload profile avatar bytes and return the published blob record.
@@ -719,9 +655,6 @@ public interface PaykitSdkInterface {
 
 /**
  * Payment adapter payload text with redacted debug output.
- *
- * Android callback implementations should export callback-supplied payloads
- * and close their generated native wrappers before returning.
  */
 public interface PaymentPayloadInterface {
 
@@ -811,7 +744,7 @@ public interface PubkyAuthRequestInterface {
     public suspend fun `authorizationUrl`(): kotlin.String
 
     /**
-     * Wait for auth approval and validate the resulting session capabilities.
+     * Wait for auth approval using the receiver's persisted Noise key.
      *
      * Completion is one-shot, including when the async operation is cancelled
      * or returns an error. `save_state` can restore an unapproved request
@@ -820,7 +753,7 @@ public interface PubkyAuthRequestInterface {
      * request.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
      * Export the sensitive state required to resume this pending request.
@@ -864,12 +797,6 @@ public interface PubkyAuthRequestStateInterface {
 public interface PubkyLocalSecretKeyInterface {
 
     /**
-     * Derive one generation of the identity-wide Paykit secret.
-     */
-    @Throws(PaykitException::class)
-    public fun `derivePaykitIdentitySecretKey`(`keyGeneration`: kotlin.ULong): PaykitIdentitySecretKey
-
-    /**
      * Export the raw bytes for platform secure storage.
      */
     public fun `exportBytes`(): kotlin.ByteArray
@@ -896,9 +823,9 @@ public interface PubkySessionAccessInterface {
     public fun `exportLocalSecretKey`(): PubkyLocalSecretKey?
 
     /**
-     * Export the delegated Paykit identity secret, when supplied separately.
+     * Export the receiver Noise secret key for platform secure storage.
      */
-    public fun `exportPaykitIdentitySecretKey`(): PaykitIdentitySecretKey?
+    public fun `exportReceiverNoiseSecretKey`(): ReceiverNoiseSecretKey
 
     /**
      * Export the Pubky grant and proof-of-possession secret for secure storage.
@@ -937,13 +864,13 @@ public interface PubkySessionBootstrapInterface {
     public suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: PubkyAuthCompanionClaim)
 
     /**
-     * Import an exported Pubky grant session secret.
+     * Import an exported Pubky session secret and its persisted receiver Noise key.
      *
      * The grant must belong to this bootstrap's client ID and cover every
      * required capability.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
      * Resume a short-lived grant auth flow from securely persisted state.
@@ -952,16 +879,16 @@ public interface PubkySessionBootstrapInterface {
     public suspend fun `resumeAuth`(`state`: PubkyAuthRequestState, `expectedCapabilities`: kotlin.String): PubkyAuthRequest
 
     /**
-     * Sign in with a local Pubky secret key and return session access material.
+     * Sign in with the receiver's persisted Noise key.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `signIn`(`localSecretKey`: PubkyLocalSecretKey, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
-     * Sign up on a homeserver and return session access material.
+     * Sign up on a homeserver with the receiver-owned Noise key.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+    public suspend fun `signUp`(`localSecretKey`: PubkyLocalSecretKey, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `homeserverPublicKey`: kotlin.String, `signupCode`: kotlin.String?, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
      * Start a sign-in auth flow for an external signer.
@@ -982,10 +909,23 @@ public interface PubkySessionBootstrapInterface {
 
 
 /**
+ * Receiver-scoped Noise secret key bytes supplied by platform secure storage.
+ */
+public interface ReceiverNoiseSecretKeyInterface {
+
+    /**
+     * Export the raw bytes for platform secure storage.
+     */
+    public fun `exportBytes`(): kotlin.ByteArray
+
+    public companion object
+}
+
+
+
+
+/**
  * Reservation attribution metadata with redacted debug output.
- *
- * Android callback implementations should export callback-supplied metadata
- * and close its generated native wrapper before returning.
  */
 public interface ReservationAttributionInterface {
 
@@ -1021,9 +961,6 @@ public interface SdkBackupBlobInterface {
  *
  * Public callbacks never receive private values, and private callbacks never
  * receive public values.
- *
- * Callbacks must not synchronously call back into the same SDK handle while
- * the originating SDK call is waiting for them.
  */
 public interface SdkPaymentAdapter {
 
@@ -1037,13 +974,13 @@ public interface SdkPaymentAdapter {
      * Return receiving details for one counterparty's Private Payment List.
      */
     @Throws(PaykitException::class)
-    public fun `currentPrivateReceivingDetails`(`counterparty`: kotlin.String): List<PrivateReceivingDetail>
+    public fun `currentPrivateReceivingDetails`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): List<PrivateReceivingDetail>
 
     /**
      * Reserve receiving details for a counterparty's Private Payment List.
      */
     @Throws(PaykitException::class)
-    public fun `reservePrivateReceivingDetails`(`counterparty`: kotlin.String): PrivateReceivingDetailReservationResponse
+    public fun `reservePrivateReceivingDetails`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): PrivateReceivingDetailReservationResponse
 
     /**
      * Cancel a previously reserved receiving detail.
@@ -1083,9 +1020,6 @@ public interface SdkPaymentAdapter {
 
 /**
  * Platform-owned Pubky session provider.
- *
- * Callbacks must not synchronously call back into the same SDK handle. Session
- * workflows may hold that handle's session-operation gate while invoking them.
  */
 public interface SdkPubkySessionProvider {
 
@@ -1102,7 +1036,9 @@ public interface SdkPubkySessionProvider {
     public fun `publicStorageAvailable`(): kotlin.Boolean
 
     /**
-     * Clear platform session access during explicit SDK sign-out.
+     * Clear Pubky session access from local platform storage.
+     *
+     * Normal SDK sign-out revokes the live grant before invoking this callback.
      */
     @Throws(PaykitException::class)
     public fun `clearSessionAccess`()
@@ -1114,10 +1050,7 @@ public interface SdkPubkySessionProvider {
 
 
 /**
- * Identity-wide SDK state blob owned by the configured storage boundary.
- *
- * Android storage callbacks should export callback-supplied blob bytes and
- * close the generated native wrapper before returning.
+ * SDK state blob owned by platform storage.
  */
 public interface SdkStateBlobInterface {
 
@@ -1134,10 +1067,6 @@ public interface SdkStateBlobInterface {
 
 /**
  * Platform-owned durable blob store for SDK state.
- *
- * The SDK invokes these callbacks while holding its per-handle storage lock.
- * Implementations must not call back into the same SDK handle from either
- * callback because doing so would deadlock.
  */
 public interface SdkStateBlobStore {
 
@@ -1152,9 +1081,6 @@ public interface SdkStateBlobStore {
      *
      * `expected_revision` is `None` when no previous blob was loaded. The
      * platform store should reject the write if the stored revision changed.
-     * A successful changed write must return a non-empty, globally unique
-     * revision that has never represented an earlier state blob. Reusing a
-     * revision permits an ABA stale write to overwrite newer state.
      */
     @Throws(PaykitException::class)
     public fun `saveStateBlobAtomically`(`blob`: SdkStateBlob, `expectedRevision`: kotlin.String?): kotlin.String
@@ -1185,9 +1111,46 @@ public data class BillingPeriod (
 
 
 /**
+ * Contact display profile resolved by trying Paykit Profile first.
+ */
+@kotlinx.serialization.Serializable
+public data class ContactProfileResolution (
+    /**
+     * Profile owner.
+     */
+    val `publicKey`: kotlin.String,
+    /**
+     * Source that produced this profile.
+     */
+    val `source`: ContactProfileSource,
+    /**
+     * Normalized display name for app contact lists.
+     */
+    val `displayName`: kotlin.String?,
+    /**
+     * Normalized image pointer for app contact lists.
+     */
+    val `imageUri`: kotlin.String?,
+    /**
+     * Paykit Profile payload when the source is Paykit Profile.
+     */
+    val `paykitProfile`: PaykitProfile?,
+    /**
+     * Pubky Profile payload when the source is Pubky Profile.
+     */
+    val `pubkyProfile`: PubkyProfile?,
+    /**
+     * Local observation time as RFC3339 text.
+     */
+    val `fetchedAt`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
  * Local SDK contact record.
- *
- * Generated platform record descriptions redact the record contents.
  */
 @kotlinx.serialization.Serializable
 public data class ContactRecord (
@@ -1195,6 +1158,10 @@ public data class ContactRecord (
      * Contact public key.
      */
     val `publicKey`: kotlin.String,
+    /**
+     * Contact Paykit receiver paths.
+     */
+    val `receiverPaths`: List<kotlin.String>,
     /**
      * Optional local display label.
      */
@@ -1212,13 +1179,17 @@ public data class ContactRecord (
      */
     val `createdAt`: kotlin.String,
     /**
-     * Time the Contact Record last changed as RFC3339 text.
+     * Time the local contact record last changed as RFC3339 text.
      */
     val `updatedAt`: kotlin.String,
     /**
      * Public Contact Marker publication state.
      */
     val `publicContactMarkerStatus`: PublicationStatus,
+    /**
+     * Receiver path for the current public contact marker state.
+     */
+    val `publicContactMarkerReceiverPath`: kotlin.String?,
     /**
      * Time the contact was last published publicly as RFC3339 text.
      */
@@ -1232,8 +1203,6 @@ public data class ContactRecord (
      */
     val `publicContactLastError`: kotlin.String?
 ) {
-    override fun toString(): kotlin.String = "ContactRecord(<redacted>)"
-
     public companion object
 }
 
@@ -1249,12 +1218,33 @@ public data class ContactUpdate (
      */
     val `publicKey`: kotlin.String,
     /**
+     * Contact Paykit receiver paths.
+     */
+    val `receiverPaths`: List<kotlin.String>,
+    /**
      * Optional local display label.
      */
     val `label`: kotlin.String?
 ) {
-    override fun toString(): kotlin.String = "ContactUpdate(<redacted>)"
+    public companion object
+}
 
+
+
+/**
+ * Counterparty plus the Paykit receiver path used for private workflows.
+ */
+@kotlinx.serialization.Serializable
+public data class CounterpartyReceiver (
+    /**
+     * Counterparty public key.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String
+) {
     public companion object
 }
 
@@ -1269,6 +1259,10 @@ public data class EncryptedLinkRecoveryMarkerReport (
      * Counterparty public key.
      */
     val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Current Linked Peer state.
      */
@@ -1301,6 +1295,7 @@ public data class EncryptedLinkRecoveryMarkerReport (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
+            this.`counterpartyReceiverPath`,
             this.`state`,
             this.`localAttemptId`,
             this.`localMarkerCreatedAt`,
@@ -1390,13 +1385,28 @@ public data class EventIdConflict (
 @kotlinx.serialization.Serializable
 public data class IdentityStatus (
     /**
-     * Last initialized public key, when known.
+     * Persisted local public key, or `None` after explicit sign-out.
      */
     val `publicKey`: kotlin.String?,
     /**
-     * Current Pubky capability.
+     * Whether live Pubky session access is available for this identity.
      */
-    val `capability`: PubkyIdentityCapability
+    val `liveSessionAvailable`: kotlin.Boolean
+) {
+    public companion object
+}
+
+
+
+/**
+ * Initialization report returned after SDK startup.
+ */
+@kotlinx.serialization.Serializable
+public data class InitializationReport (
+    /**
+     * Last persisted identity status.
+     */
+    val `identity`: IdentityStatus
 ) {
     public companion object
 }
@@ -1412,6 +1422,10 @@ public data class LinkedPeerHandshakeReport (
      * Counterparty public key.
      */
     val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Current Linked Peer state after the operation.
      */
@@ -1439,6 +1453,10 @@ public data class LinkedPeerRecord (
      * Counterparty public key.
      */
     val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Current local relationship/link state.
      */
@@ -1479,6 +1497,7 @@ public data class LinkedPeerRecord (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
+            this.`counterpartyReceiverPath`,
             this.`state`,
             this.`lastSyncAt`,
             this.`lastPrivateReceiveAt`,
@@ -1505,6 +1524,10 @@ public data class OutboundPrivateCounterpartySendReport (
      */
     val `counterparty`: kotlin.String,
     /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
      * Successful send report, when processing completed.
      */
     val `report`: OutboundPrivateSendReport?,
@@ -1516,6 +1539,7 @@ public data class OutboundPrivateCounterpartySendReport (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
+            this.`counterpartyReceiverPath`,
             this.`report`,
             this.`error`,
         )
@@ -1591,118 +1615,7 @@ public data class OutboundPrivateSendReport (
 
 
 /**
- * One application registered under a Paykit identity.
- */
-@kotlinx.serialization.Serializable
-public data class PaykitApp (
-    /**
-     * Stable application identifier.
-     */
-    val `appId`: kotlin.String,
-    /**
-     * User-readable application name.
-     */
-    val `displayName`: kotlin.String,
-    /**
-     * Public application capabilities.
-     */
-    val `capabilities`: PaykitAppCapabilities
-) {
-    public companion object
-}
-
-
-
-/**
- * Public capabilities advertised by one Paykit application.
- */
-@kotlinx.serialization.Serializable
-public data class PaykitAppCapabilities (
-    /**
-     * Application can participate in private Paykit payment workflows.
-     */
-    val `privatePayments`: kotlin.Boolean,
-    /**
-     * Application can send or receive Payment Request messages.
-     */
-    val `paymentRequests`: kotlin.Boolean,
-    /**
-     * Application can issue or retrieve Paykit Receipts.
-     */
-    val `receipts`: kotlin.Boolean,
-    /**
-     * Application can execute outgoing payments itself.
-     */
-    val `outgoingPayments`: kotlin.Boolean
-) {
-    public companion object
-}
-
-
-
-/**
- * Public application registry for one Paykit identity.
- */
-@kotlinx.serialization.Serializable
-public data class PaykitAppRegistry (
-    /**
-     * Generation of the identity-wide Paykit key material.
-     */
-    val `keyGeneration`: kotlin.ULong,
-    /**
-     * Identity-wide Noise public key as raw z32 text, when initialized.
-     *
-     * Public-only registries may omit this value. This is not a Pubky identity
-     * key and must not be passed through Pubky public-key normalization helpers.
-     */
-    val `noisePublicKey`: kotlin.String?,
-    /**
-     * Registered applications in App ID order.
-     */
-    val `apps`: List<PaykitApp>,
-    /**
-     * Default application for generic payment routing.
-     */
-    val `defaultAppId`: kotlin.String?,
-    /**
-     * Per-endpoint default applications.
-     */
-    val `defaultAppsByEndpoint`: Map<kotlin.String, kotlin.String>
-) {
-    public companion object
-}
-
-
-
-/**
- * Work that prevents safe removal of this Paykit application.
- */
-@kotlinx.serialization.Serializable
-public data class PaykitAppRemovalBlockers (
-    /**
-     * Active app-owned Payment Requests.
-     */
-    val `activePaymentRequests`: kotlin.ULong,
-    /**
-     * App-owned private event messages that have not been delivered.
-     */
-    val `undeliveredPrivateEvents`: kotlin.ULong,
-    /**
-     * Receipt issuance records whose Receipt Access was not delivered.
-     */
-    val `incompleteReceiptIssuances`: kotlin.ULong,
-    /**
-     * Counterparties that still have a non-empty app-owned Private Payment List.
-     */
-    val `sharedPrivatePaymentLists`: kotlin.ULong
-) {
-    public companion object
-}
-
-
-
-/**
- * Public blob published under the identity-wide Paykit namespace.
+ * Public blob published under the configured Paykit namespace.
  */
 @kotlinx.serialization.Serializable
 public data class PaykitBlobRecord (
@@ -1783,22 +1696,92 @@ public data class PaykitProfileRecord (
 
 
 /**
+ * Public capabilities advertised by a Paykit receiver marker.
+ */
+@kotlinx.serialization.Serializable
+public data class PaykitReceiverCapabilities (
+    /**
+     * Receiver can participate in private Paykit payment workflows.
+     */
+    val `privatePayments`: kotlin.Boolean,
+    /**
+     * Receiver can send or receive Payment Request messages.
+     */
+    val `paymentRequests`: kotlin.Boolean,
+    /**
+     * Receiver can issue or retrieve Paykit Receipts.
+     */
+    val `receipts`: kotlin.Boolean,
+    /**
+     * Receiver can execute outgoing payments itself.
+     */
+    val `outgoingPayments`: kotlin.Boolean
+) {
+    public companion object
+}
+
+
+
+/**
+ * Lightweight public marker for one Paykit receiver path.
+ */
+@kotlinx.serialization.Serializable
+public data class PaykitReceiverMarker (
+    /**
+     * Receiver path this marker belongs to.
+     */
+    val `receiverPath`: kotlin.String,
+    /**
+     * Public receiver capabilities.
+     */
+    val `capabilities`: PaykitReceiverCapabilities,
+    /**
+     * Receiver-scoped public key used for Encrypted Links.
+     */
+    val `noisePublicKey`: kotlin.String
+) {
+    public companion object
+}
+
+
+
+/**
  * Runtime configuration for Paykit SDK bindings.
  */
 @kotlinx.serialization.Serializable
 public data class PaykitSdkConfig (
     /**
-     * Stable identifier for this application within the Paykit identity.
+     * Receiver folder for this app/runtime under `/pub/paykit/v0/{app}/{wallet|server}`.
      */
-    val `appId`: kotlin.String,
+    val `receiverPath`: kotlin.String,
+    /**
+     * Namespace segment for SDK profile/contact public data under `/pub/`.
+     */
+    val `profileNamespace`: kotlin.String,
     /**
      * Public endpoint management scope.
      */
     val `endpointManagementScope`: EndpointManagementScope,
     /**
+     * Public recovery marker behavior.
+     */
+    val `encryptedLinkRecoveryMarkers`: EncryptedLinkRecoveryMarkerPolicy,
+    /**
      * Public contact marker behavior.
      */
-    val `publicContactSharing`: PublicContactSharingPolicy
+    val `publicContactSharing`: PublicContactSharingPolicy,
+    /**
+     * Peer link operation lease timeout in seconds.
+     */
+    val `peerLinkOperationLeaseTimeoutSecs`: kotlin.ULong,
+    /**
+     * Outbound private send lease timeout in seconds.
+     */
+    val `outboundPrivateSendLeaseTimeoutSecs`: kotlin.ULong,
+    /**
+     * Minimum delay before retrying a failed outbound private send in seconds.
+     */
+    val `outboundPrivateRetryBackoffSecs`: kotlin.ULong
 ) {
     public companion object
 }
@@ -1819,8 +1802,6 @@ public data class PaymentAmountContext (
      */
     val `asset`: kotlin.String
 ) {
-    override fun toString(): kotlin.String = "PaymentAmountContext(<redacted>)"
-
     public companion object
 }
 
@@ -1856,10 +1837,6 @@ public data class PaymentProofRecord (
      */
     val `billingPeriod`: BillingPeriod?,
     /**
-     * Application whose endpoint was used for the payment.
-     */
-    val `paymentAppId`: kotlin.String,
-    /**
      * Payment Endpoint Identifier used for payment.
      */
     val `paymentEndpointIdentifier`: kotlin.String,
@@ -1880,7 +1857,6 @@ public data class PaymentProofRecord (
             this.`streamItemId`,
             this.`paymentReference`,
             this.`billingPeriod`,
-            this.`paymentAppId`,
             this.`paymentEndpointIdentifier`,
             this.`proof`,
             this.`recordedAt`,
@@ -1901,10 +1877,6 @@ public data class PaymentProofSubmission (
      */
     val `billingPeriod`: BillingPeriod?,
     /**
-     * Application whose endpoint was used for the payment.
-     */
-    val `paymentAppId`: kotlin.String,
-    /**
      * Payment Endpoint Identifier used for payment.
      */
     val `paymentEndpointIdentifier`: kotlin.String,
@@ -1916,7 +1888,6 @@ public data class PaymentProofSubmission (
     override fun destroy() {
         Disposable.destroy(
             this.`billingPeriod`,
-            this.`paymentAppId`,
             this.`paymentEndpointIdentifier`,
             this.`proof`,
         )
@@ -1955,6 +1926,10 @@ public data class PaymentRequestFilter (
      */
     val `counterparty`: kotlin.String?,
     /**
+     * Restrict results to one counterparty receiver/runtime folder.
+     */
+    val `counterpartyReceiverPath`: kotlin.String?,
+    /**
      * Restrict results to one local role.
      */
     val `localRole`: PaymentRequestLocalRole?,
@@ -1986,6 +1961,10 @@ public data class PaymentRequestRecord (
      */
     val `counterparty`: kotlin.String,
     /**
+     * Counterparty receiver/runtime folder associated with the private stream.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
      * Stable Payment Request ID.
      */
     val `paymentRequestId`: kotlin.String,
@@ -2013,14 +1992,6 @@ public data class PaymentRequestRecord (
      * Proposal Event ID.
      */
     val `proposalEventId`: kotlin.String?,
-    /**
-     * Application that created the proposal.
-     */
-    val `proposalAppId`: kotlin.String?,
-    /**
-     * Payer application that first accepted the proposal.
-     */
-    val `payerAppId`: kotlin.String?,
     /**
      * Immutable terms from the proposal.
      */
@@ -2077,6 +2048,7 @@ public data class PaymentRequestRecord (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
+            this.`counterpartyReceiverPath`,
             this.`paymentRequestId`,
             this.`localRole`,
             this.`state`,
@@ -2084,8 +2056,6 @@ public data class PaymentRequestRecord (
             this.`proposalOutboundMessageId`,
             this.`proposalOutboundStatus`,
             this.`proposalEventId`,
-            this.`proposalAppId`,
-            this.`payerAppId`,
             this.`terms`,
             this.`acceptedEventId`,
             this.`acceptedOutboundStatus`,
@@ -2164,10 +2134,6 @@ public data class PaymentRequestTerms (
      */
     val `acceptedPaymentEndpointIdentifiers`: List<kotlin.String>,
     /**
-     * Application that must handle this payment, when constrained.
-     */
-    val `requiredAppId`: kotlin.String?,
-    /**
      * Application-specific metadata encoded as a JSON object.
      */
     val `metadata`: PrivateJsonObject
@@ -2179,12 +2145,9 @@ public data class PaymentRequestTerms (
             this.`proposalExpiresAt`,
             this.`recurrence`,
             this.`acceptedPaymentEndpointIdentifiers`,
-            this.`requiredAppId`,
             this.`metadata`,
         )
     }
-    override fun toString(): kotlin.String = "PaymentRequestTerms(<redacted>)"
-
     public companion object
 }
 
@@ -2205,8 +2168,6 @@ public data class PaymentTarget (
             this.`payload`,
         )
     }
-    override fun toString(): kotlin.String = "PaymentTarget(<redacted>)"
-
     public companion object
 }
 
@@ -2242,8 +2203,6 @@ public data class PreparedPrivateContactPayment (
             this.`outboundReport`,
         )
     }
-    override fun toString(): kotlin.String = "PreparedPrivateContactPayment(<redacted>)"
-
     public companion object
 }
 
@@ -2279,8 +2238,6 @@ public data class PrivateContactPaymentResolution (
             this.`payableEndpoints`,
         )
     }
-    override fun toString(): kotlin.String = "PrivateContactPaymentResolution(<redacted>)"
-
     public companion object
 }
 
@@ -2300,9 +2257,9 @@ public data class PrivatePaymentEndpointCandidate (
      */
     val `counterparty`: kotlin.String,
     /**
-     * Application that privately shared the endpoint.
+     * Counterparty Paykit receiver path.
      */
-    val `appId`: kotlin.String,
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Payment Endpoint Identifier string.
      */
@@ -2316,13 +2273,11 @@ public data class PrivatePaymentEndpointCandidate (
         Disposable.destroy(
             this.`candidateId`,
             this.`counterparty`,
-            this.`appId`,
+            this.`counterpartyReceiverPath`,
             this.`identifier`,
             this.`payload`,
         )
     }
-    override fun toString(): kotlin.String = "PrivatePaymentEndpointCandidate(<redacted>)"
-
     public companion object
 }
 
@@ -2358,8 +2313,6 @@ public data class PrivatePaymentEndpointReservation (
             this.`attribution`,
         )
     }
-    override fun toString(): kotlin.String = "PrivatePaymentEndpointReservation(<redacted>)"
-
     public companion object
 }
 
@@ -2379,6 +2332,10 @@ public data class PrivatePaymentEndpointReservationCancellation (
      */
     val `counterparty`: kotlin.String,
     /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
      * Payment Endpoint Identifier.
      */
     val `identifier`: kotlin.String,
@@ -2395,13 +2352,12 @@ public data class PrivatePaymentEndpointReservationCancellation (
         Disposable.destroy(
             this.`reservationId`,
             this.`counterparty`,
+            this.`counterpartyReceiverPath`,
             this.`identifier`,
             this.`payloadHash`,
             this.`attribution`,
         )
     }
-    override fun toString(): kotlin.String = "PrivatePaymentEndpointReservationCancellation(<redacted>)"
-
     public companion object
 }
 
@@ -2409,9 +2365,6 @@ public data class PrivatePaymentEndpointReservationCancellation (
 
 /**
  * Plain reservation input for one Payment Endpoint.
- *
- * Endpoint payloads and attribution can contain private payment material.
- * Generated platform descriptions redact the complete record.
  */
 @kotlinx.serialization.Serializable
 public data class PrivatePaymentEndpointReservationInput (
@@ -2436,8 +2389,6 @@ public data class PrivatePaymentEndpointReservationInput (
      */
     val `attribution`: Map<kotlin.String, kotlin.String>
 ) {
-    override fun toString(): kotlin.String = "PrivatePaymentEndpointReservationInput(<redacted>)"
-
     public companion object
 }
 
@@ -2453,6 +2404,10 @@ public data class PrivatePaymentEndpointSelectionRequest (
      */
     val `counterparty`: kotlin.String,
     /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
      * Optional amount context.
      */
     val `amount`: PaymentAmountContext?,
@@ -2464,12 +2419,11 @@ public data class PrivatePaymentEndpointSelectionRequest (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
+            this.`counterpartyReceiverPath`,
             this.`amount`,
             this.`candidates`,
         )
     }
-    override fun toString(): kotlin.String = "PrivatePaymentEndpointSelectionRequest(<redacted>)"
-
     public companion object
 }
 
@@ -2484,6 +2438,10 @@ public data class PrivatePaymentListDeliveryFailure (
      * Counterparty whose outbound delivery failed.
      */
     val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Outbound message id, when the failure is tied to one message.
      */
@@ -2500,13 +2458,12 @@ public data class PrivatePaymentListDeliveryFailure (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
+            this.`counterpartyReceiverPath`,
             this.`outboundMessageId`,
             this.`reservationId`,
             this.`error`,
         )
     }
-    override fun toString(): kotlin.String = "PrivatePaymentListDeliveryFailure(<redacted>)"
-
     public companion object
 }
 
@@ -2518,19 +2475,19 @@ public data class PrivatePaymentListDeliveryFailure (
 
 public data class PrivatePaymentListDeliveryReport (
     /**
-     * Counterparties that had a non-empty Private Payment List queued.
+     * Counterparty receivers that had a non-empty Private Payment List queued.
      */
     val `queued`: List<PrivatePaymentListSyncChange>,
     /**
-     * Counterparties that had an empty Private Payment List queued.
+     * Counterparty receivers that had an empty Private Payment List queued.
      */
     val `cleared`: List<PrivatePaymentListSyncChange>,
     /**
-     * Counterparties that could not be queued or cleared.
+     * Counterparty receivers that could not be queued or cleared.
      */
     val `failedToQueue`: List<PrivatePaymentListSyncChange>,
     /**
-     * Counterparties queued successfully but failed during outbound delivery.
+     * Counterparty receivers queued successfully but failed during outbound delivery.
      */
     val `failedToDeliver`: List<PrivatePaymentListDeliveryFailure>
 ) : Disposable {
@@ -2573,7 +2530,7 @@ public data class PrivatePaymentListEndpoint (
 
 
 /**
- * Reservation-backed Private Payment List input for one counterparty.
+ * Reservation-backed Private Payment List input for one counterparty receiver.
  */
 @kotlinx.serialization.Serializable
 public data class PrivatePaymentListReservationUpdateInput (
@@ -2581,6 +2538,10 @@ public data class PrivatePaymentListReservationUpdateInput (
      * Counterparty that should receive the Private Payment List.
      */
     val `counterparty`: kotlin.String,
+    /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Complete reserved receiving details to share with this counterparty.
      *
@@ -2594,76 +2555,60 @@ public data class PrivatePaymentListReservationUpdateInput (
 
 
 /**
- * One counterparty result from a Private Payment List sync.
+ * One counterparty receiver result from a Private Payment List sync.
  */
-
+@kotlinx.serialization.Serializable
 public data class PrivatePaymentListSyncChange (
     /**
      * Counterparty affected by the sync.
      */
     val `counterparty`: kotlin.String,
     /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
      * Queued outbound message id, when queueing succeeded.
      */
     val `outboundMessageId`: kotlin.ULong?,
     /**
-     * Queueing error, when queueing failed.
+     * Error text, when queueing failed.
      */
-    val `error`: PrivateOperationError?
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`counterparty`,
-            this.`outboundMessageId`,
-            this.`error`,
-        )
-    }
-    override fun toString(): kotlin.String = "PrivatePaymentListSyncChange(<redacted>)"
-
+    val `error`: kotlin.String?
+) {
     public companion object
 }
 
 
 
 /**
- * Report from syncing Private Payment Lists for saved contacts.
+ * Report from syncing Private Payment Lists for local contact receivers.
  */
-
+@kotlinx.serialization.Serializable
 public data class PrivatePaymentListSyncReport (
     /**
-     * Counterparties that had a current Private Payment List queued.
+     * Counterparty receivers that had a current Private Payment List queued.
      */
     val `queued`: List<PrivatePaymentListSyncChange>,
     /**
-     * Counterparties that had an empty Private Payment List queued.
+     * Counterparty receivers that had an empty Private Payment List queued.
      */
     val `cleared`: List<PrivatePaymentListSyncChange>,
     /**
-     * Counterparties that could not be queued or cleared.
+     * Counterparty receivers that could not be queued or cleared.
      */
     val `failed`: List<PrivatePaymentListSyncChange>
-) : Disposable {
-    override fun destroy() {
-        Disposable.destroy(
-            this.`queued`,
-            this.`cleared`,
-            this.`failed`,
-        )
-    }
+) {
     public companion object
 }
 
 
 
 /**
- * Latest valid Private Payment List view from one counterparty application.
+ * Latest valid Private Payment List view for one counterparty receiver.
  */
 
 public data class PrivatePaymentListView (
-    /**
-     * Application that published the list.
-     */
-    val `appId`: kotlin.String,
     /**
      * Stream item id of the latest valid list.
      */
@@ -2679,7 +2624,6 @@ public data class PrivatePaymentListView (
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
-            this.`appId`,
             this.`latestStreamItemId`,
             this.`paymentEndpoints`,
             this.`lastRefreshAt`,
@@ -2710,8 +2654,6 @@ public data class PrivateReceivingDetail (
             this.`payload`,
         )
     }
-    override fun toString(): kotlin.String = "PrivateReceivingDetail(<redacted>)"
-
     public companion object
 }
 
@@ -2737,8 +2679,6 @@ public data class PrivateReceivingDetailReservationResponse (
             this.`reservations`,
         )
     }
-    override fun toString(): kotlin.String = "PrivateReceivingDetailReservationResponse(<redacted>)"
-
     public companion object
 }
 
@@ -2754,6 +2694,10 @@ public data class PrivateStreamCounterpartyIntakeReport (
      */
     val `counterparty`: kotlin.String,
     /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
      * Successful intake report, when receive completed.
      */
     val `report`: PrivateStreamIntakeReport?,
@@ -2765,6 +2709,7 @@ public data class PrivateStreamCounterpartyIntakeReport (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
+            this.`counterpartyReceiverPath`,
             this.`report`,
             this.`error`,
         )
@@ -2798,55 +2743,14 @@ public data class PrivateStreamIntakeReport (
 
 
 /**
- * Public profile resolved by trying Paykit Profile first.
- */
-@kotlinx.serialization.Serializable
-public data class ProfileResolution (
-    /**
-     * Profile owner.
-     */
-    val `publicKey`: kotlin.String,
-    /**
-     * Source that produced this profile.
-     */
-    val `source`: ProfileSource,
-    /**
-     * Normalized display name for app contact lists.
-     */
-    val `displayName`: kotlin.String?,
-    /**
-     * Normalized image pointer for app contact lists.
-     */
-    val `imageUri`: kotlin.String?,
-    /**
-     * Paykit Profile payload when the source is Paykit Profile.
-     */
-    val `paykitProfile`: PaykitProfile?,
-    /**
-     * Pubky Profile payload when the source is Pubky Profile.
-     */
-    val `pubkyProfile`: PubkyProfile?,
-    /**
-     * Local observation time as RFC3339 text.
-     */
-    val `fetchedAt`: kotlin.String
-) {
-    override fun toString(): kotlin.String = "ProfileResolution(<redacted>)"
-
-    public companion object
-}
-
-
-
-/**
  * Application-defined input for a Pubky Auth companion claim.
  *
  * The application serializes its protocol-specific unsigned payload. Paykit
  * validates the identifiers, creates the request-bound identity signature,
  * encrypts the signed payload, and delivers it before grant approval.
  *
- * Generated platform record descriptions redact the record contents. Apps
- * must still treat the payload as sensitive and avoid logging it directly.
+ * Generated platform record descriptions may include the raw payload. Apps
+ * must not log, interpolate, or otherwise stringify this record.
  */
 @kotlinx.serialization.Serializable
 public data class PubkyAuthCompanionClaim (
@@ -2880,8 +2784,6 @@ public data class PubkyAuthCompanionClaim (
         result = 31 * result + `unsignedPayload`.contentHashCode()
         return result
     }
-    override fun toString(): kotlin.String = "PubkyAuthCompanionClaim(<redacted>)"
-
     public companion object
 }
 
@@ -3056,17 +2958,12 @@ public data class PubkySessionBootstrapResult (
     /**
      * Local Pubky public key.
      */
-    val `publicKey`: kotlin.String,
-    /**
-     * Capability implied by the session and optional local secret key.
-     */
-    val `capability`: PubkyIdentityCapability
+    val `publicKey`: kotlin.String
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
             this.`sessionAccess`,
             this.`publicKey`,
-            this.`capability`,
         )
     }
     public companion object
@@ -3086,21 +2983,14 @@ public data class PublicContactPaymentResolution (
     /**
      * Payable public Payment Endpoints in adapter-preferred order.
      */
-    val `payableEndpoints`: List<ResolvedPublicPaymentEndpoint>,
-    /**
-     * Registered apps whose endpoint lists could not be loaded.
-     */
-    val `failures`: List<PublicPaymentEndpointLoadFailure>
+    val `payableEndpoints`: List<ResolvedPublicPaymentEndpoint>
 ) : Disposable {
     override fun destroy() {
         Disposable.destroy(
             this.`status`,
             this.`payableEndpoints`,
-            this.`failures`,
         )
     }
-    override fun toString(): kotlin.String = "PublicContactPaymentResolution(<redacted>)"
-
     public companion object
 }
 
@@ -3120,9 +3010,9 @@ public data class PublicPaymentEndpointCandidate (
      */
     val `counterparty`: kotlin.String,
     /**
-     * Application that published the endpoint.
+     * Counterparty Paykit receiver path.
      */
-    val `appId`: kotlin.String,
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Payment Endpoint Identifier string.
      */
@@ -3136,38 +3026,11 @@ public data class PublicPaymentEndpointCandidate (
         Disposable.destroy(
             this.`candidateId`,
             this.`counterparty`,
-            this.`appId`,
+            this.`counterpartyReceiverPath`,
             this.`identifier`,
             this.`payload`,
         )
     }
-    override fun toString(): kotlin.String = "PublicPaymentEndpointCandidate(<redacted>)"
-
-    public companion object
-}
-
-
-
-/**
- * Failure to load one registered app's public Payment Endpoints.
- */
-@kotlinx.serialization.Serializable
-public data class PublicPaymentEndpointLoadFailure (
-    /**
-     * App whose endpoint list could not be loaded.
-     */
-    val `appId`: kotlin.String,
-    /**
-     * Stable failure category for application handling.
-     */
-    val `kind`: PublicPaymentEndpointLoadFailureKind,
-    /**
-     * Human-readable context without an underlying transport cause.
-     */
-    val `context`: kotlin.String
-) {
-    override fun toString(): kotlin.String = "PublicPaymentEndpointLoadFailure(<redacted>)"
-
     public companion object
 }
 
@@ -3183,6 +3046,10 @@ public data class PublicPaymentEndpointSelectionRequest (
      */
     val `counterparty`: kotlin.String,
     /**
+     * Counterparty Paykit receiver path.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
      * Optional amount context.
      */
     val `amount`: PaymentAmountContext?,
@@ -3194,12 +3061,11 @@ public data class PublicPaymentEndpointSelectionRequest (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
+            this.`counterpartyReceiverPath`,
             this.`amount`,
             this.`candidates`,
         )
     }
-    override fun toString(): kotlin.String = "PublicPaymentEndpointSelectionRequest(<redacted>)"
-
     public companion object
 }
 
@@ -3225,8 +3091,6 @@ public data class PublicReceivingDetail (
             this.`payload`,
         )
     }
-    override fun toString(): kotlin.String = "PublicReceivingDetail(<redacted>)"
-
     public companion object
 }
 
@@ -3246,9 +3110,9 @@ public data class QueuedPrivateMessage (
      */
     val `counterparty`: kotlin.String,
     /**
-     * Local application that queued the message.
+     * Counterparty Paykit receiver path.
      */
-    val `appId`: kotlin.String,
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Private Message Kind string.
      */
@@ -3286,7 +3150,7 @@ public data class QueuedPrivateMessage (
         Disposable.destroy(
             this.`outboundMessageId`,
             this.`counterparty`,
-            this.`appId`,
+            this.`counterpartyReceiverPath`,
             this.`kind`,
             this.`status`,
             this.`attemptCount`,
@@ -3312,9 +3176,9 @@ public data class ReceiptAccessView (
      */
     val `counterparty`: kotlin.String,
     /**
-     * Application that sent the Receipt Access event.
+     * Counterparty Paykit receiver path.
      */
-    val `appId`: kotlin.String,
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Receipt Access Event ID.
      */
@@ -3355,7 +3219,7 @@ public data class ReceiptAccessView (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
-            this.`appId`,
+            this.`counterpartyReceiverPath`,
             this.`eventId`,
             this.`receiptId`,
             this.`paymentReference`,
@@ -3436,8 +3300,6 @@ public data class ReceiptDraft (
             this.`metadata`,
         )
     }
-    override fun toString(): kotlin.String = "ReceiptDraft(<redacted>)"
-
     public companion object
 }
 
@@ -3453,9 +3315,9 @@ public data class ReceiptIssuanceView (
      */
     val `counterparty`: kotlin.String,
     /**
-     * Application issuing the Receipt.
+     * Counterparty Paykit receiver path.
      */
-    val `appId`: kotlin.String,
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Receipt ID.
      */
@@ -3512,7 +3374,7 @@ public data class ReceiptIssuanceView (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
-            this.`appId`,
+            this.`counterpartyReceiverPath`,
             this.`receiptId`,
             this.`receiptAccessEventId`,
             this.`paymentReference`,
@@ -3528,8 +3390,6 @@ public data class ReceiptIssuanceView (
             this.`accessQueuedAt`,
         )
     }
-    override fun toString(): kotlin.String = "ReceiptIssuanceView(<redacted>)"
-
     public companion object
 }
 
@@ -3545,9 +3405,9 @@ public data class ReceiptRecord (
      */
     val `issuer`: kotlin.String,
     /**
-     * Application that issued the Receipt Access event.
+     * Issuer Paykit receiver path.
      */
-    val `appId`: kotlin.String,
+    val `issuerReceiverPath`: kotlin.String,
     /**
      * Receipt Access Event ID used for retrieval.
      */
@@ -3592,7 +3452,7 @@ public data class ReceiptRecord (
     override fun destroy() {
         Disposable.destroy(
             this.`issuer`,
-            this.`appId`,
+            this.`issuerReceiverPath`,
             this.`receiptAccessEventId`,
             this.`receiptId`,
             this.`paymentReference`,
@@ -3605,8 +3465,6 @@ public data class ReceiptRecord (
             this.`retrievedAt`,
         )
     }
-    override fun toString(): kotlin.String = "ReceiptRecord(<redacted>)"
-
     public companion object
 }
 
@@ -3657,8 +3515,6 @@ public data class ReservationCleanupFailure (
             this.`error`,
         )
     }
-    override fun toString(): kotlin.String = "ReservationCleanupFailure(<redacted>)"
-
     public companion object
 }
 
@@ -3674,9 +3530,9 @@ public data class ResolvedPrivatePaymentEndpoint (
      */
     val `counterparty`: kotlin.String,
     /**
-     * Application that privately shared the endpoint.
+     * Counterparty Paykit receiver path.
      */
-    val `appId`: kotlin.String,
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Payment Endpoint Identifier string.
      */
@@ -3693,14 +3549,12 @@ public data class ResolvedPrivatePaymentEndpoint (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
-            this.`appId`,
+            this.`counterpartyReceiverPath`,
             this.`identifier`,
             this.`payload`,
             this.`target`,
         )
     }
-    override fun toString(): kotlin.String = "ResolvedPrivatePaymentEndpoint(<redacted>)"
-
     public companion object
 }
 
@@ -3716,9 +3570,9 @@ public data class ResolvedPublicPaymentEndpoint (
      */
     val `counterparty`: kotlin.String,
     /**
-     * Application that published the endpoint.
+     * Counterparty Paykit receiver path.
      */
-    val `appId`: kotlin.String,
+    val `counterpartyReceiverPath`: kotlin.String,
     /**
      * Payment Endpoint Identifier string.
      */
@@ -3735,14 +3589,31 @@ public data class ResolvedPublicPaymentEndpoint (
     override fun destroy() {
         Disposable.destroy(
             this.`counterparty`,
-            this.`appId`,
+            this.`counterpartyReceiverPath`,
             this.`identifier`,
             this.`payload`,
             this.`target`,
         )
     }
-    override fun toString(): kotlin.String = "ResolvedPublicPaymentEndpoint(<redacted>)"
+    public companion object
+}
 
+
+
+/**
+ * Receiver-scoped peer restored as recovery-required.
+ */
+@kotlinx.serialization.Serializable
+public data class RestoreRecoveryRequiredPeer (
+    /**
+     * Counterparty app public key.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Counterparty receiver/runtime folder.
+     */
+    val `counterpartyReceiverPath`: kotlin.String
+) {
     public companion object
 }
 
@@ -3766,7 +3637,7 @@ public data class RestoreReport (
      */
     val `linkedPeers`: kotlin.ULong,
     /**
-     * Number of restored Contact Records.
+     * Number of restored local contact records.
      */
     val `contactRecords`: kotlin.ULong,
     /**
@@ -3806,9 +3677,9 @@ public data class RestoreReport (
      */
     val `receiptIssuanceRecords`: kotlin.ULong,
     /**
-     * Counterparties restored as recovery-required.
+     * Receiver-scoped peers restored as recovery-required.
      */
-    val `recoveryRequiredPeers`: List<kotlin.String>
+    val `recoveryRequiredPeers`: List<RestoreRecoveryRequiredPeer>
 ) {
     public companion object
 }
@@ -3842,6 +3713,33 @@ public data class SdkStateBlobSnapshot (
 
 
 /**
+ * Source used for a resolved contact profile.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class ContactProfileSource {
+
+    /**
+     * Resolved from the configured Paykit Profile path.
+     */
+    PAYKIT_PROFILE,
+    /**
+     * Resolved from the Pubky app profile path.
+     */
+    PUBKY_PROFILE,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
  * Local role for an in-progress Encrypted Link Handshake.
  */
 
@@ -3869,6 +3767,33 @@ public enum class EncryptedLinkHandshakeRole {
 
 
 /**
+ * SDK policy for public Encrypted Link recovery markers.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class EncryptedLinkRecoveryMarkerPolicy {
+
+    /**
+     * Publish and observe recovery markers.
+     */
+    ENABLED,
+    /**
+     * Do not use recovery markers.
+     */
+    DISABLED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
  * SDK policy for public Payment Endpoint cleanup.
  */
 
@@ -3880,9 +3805,9 @@ public enum class EndpointManagementScope {
      */
     MANAGED_ONLY,
     /**
-     * Manage the configured application's full public endpoint namespace.
+     * Manage the full local Paykit public namespace.
      */
-    FULL_APP_ENDPOINT_NAMESPACE,
+    FULL_PAYKIT_NAMESPACE,
     /**
      * SDK returned a value this binding version does not understand.
      */
@@ -4156,33 +4081,6 @@ public enum class PrivateReceivingDetailReservationResponseKind {
 
 
 
-/**
- * Source used for a resolved contact profile.
- */
-
-@kotlinx.serialization.Serializable
-public enum class ProfileSource {
-
-    /**
-     * Resolved from the identity-wide Paykit Profile path.
-     */
-    PAYKIT_PROFILE,
-    /**
-     * Resolved from the Pubky app profile path.
-     */
-    PUBKY_PROFILE,
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    UNKNOWN;
-    public companion object
-}
-
-
-
-
-
-
 
 /**
  * Failure returned while approving Pubky Auth with a companion claim.
@@ -4193,9 +4091,6 @@ public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception()
      * The URL, claim type, secret, relay, or capability request is invalid.
      */
     public class InvalidAuthUrl(
-        /**
-         * Redacted validation reason.
-         */
         public val `reason`: kotlin.String,
     ) : PubkyAuthCompanionClaimApprovalException() {
         override val message: String
@@ -4206,9 +4101,6 @@ public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception()
      * The companion claim description is invalid.
      */
     public class InvalidClaim(
-        /**
-         * Redacted validation reason.
-         */
         public val `reason`: kotlin.String,
     ) : PubkyAuthCompanionClaimApprovalException() {
         override val message: String
@@ -4219,9 +4111,6 @@ public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception()
      * The supplied local Pubky identity key is invalid.
      */
     public class InvalidLocalSecretKey(
-        /**
-         * Redacted validation reason.
-         */
         public val `reason`: kotlin.String,
     ) : PubkyAuthCompanionClaimApprovalException() {
         override val message: String
@@ -4232,9 +4121,6 @@ public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception()
      * XSalsa20-Poly1305 encryption failed before relay delivery.
      */
     public class EncryptionFailure(
-        /**
-         * Redacted failure reason.
-         */
         public val `reason`: kotlin.String,
     ) : PubkyAuthCompanionClaimApprovalException() {
         override val message: String
@@ -4245,9 +4131,6 @@ public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception()
      * The encrypted companion claim could not be delivered to its relay channel.
      */
     public class RelayDeliveryFailure(
-        /**
-         * Redacted failure reason.
-         */
         public val `reason`: kotlin.String,
     ) : PubkyAuthCompanionClaimApprovalException() {
         override val message: String
@@ -4258,9 +4141,6 @@ public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception()
      * Pubky grant approval failed after companion delivery succeeded.
      */
     public class AuthorizationFailure(
-        /**
-         * Redacted failure reason.
-         */
         public val `reason`: kotlin.String,
     ) : PubkyAuthCompanionClaimApprovalException() {
         override val message: String
@@ -4271,9 +4151,6 @@ public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception()
      * An unknown SDK failure occurred; no claim-delivery state is implied.
      */
     public class Unexpected(
-        /**
-         * Redacted failure reason.
-         */
         public val `reason`: kotlin.String,
     ) : PubkyAuthCompanionClaimApprovalException() {
         override val message: String
@@ -4313,37 +4190,6 @@ public enum class PubkyAuthRequestKind {
 
 
 /**
- * Pubky capability state for an identity-wide Paykit runtime.
- */
-
-@kotlinx.serialization.Serializable
-public enum class PubkyIdentityCapability {
-
-    /**
-     * No Pubky identity is initialized, or explicit sign-out completed.
-     */
-    SIGNED_OUT,
-    /**
-     * Public Pubky operations may work, but private links cannot be established.
-     */
-    PUBLIC_ONLY,
-    /**
-     * Public operations and Encrypted Links can work.
-     */
-    PRIVATE_LINK_CAPABLE,
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    UNKNOWN;
-    public companion object
-}
-
-
-
-
-
-
-/**
  * SDK policy for public contact marker publication.
  */
 
@@ -4351,44 +4197,13 @@ public enum class PubkyIdentityCapability {
 public enum class PublicContactSharingPolicy {
 
     /**
-     * Keep saved contacts only in private SDK state.
+     * Keep saved contacts only in local SDK storage.
      */
-    PRIVATE_ONLY,
+    LOCAL_ONLY,
     /**
-     * Allow explicit public contact marker publication.
+     * Allow explicit public contact marker publication in the configured namespace.
      */
-    ENABLED,
-    /**
-     * SDK returned a value this binding version does not understand.
-     */
-    UNKNOWN;
-    public companion object
-}
-
-
-
-
-
-
-/**
- * Category of an app-specific public Payment Endpoint load failure.
- */
-
-@kotlinx.serialization.Serializable
-public enum class PublicPaymentEndpointLoadFailureKind {
-
-    /**
-     * Pubky storage could not be reached or read.
-     */
-    TRANSPORT,
-    /**
-     * The app's published endpoint data was invalid.
-     */
-    INVALID_DATA,
-    /**
-     * The bounded aggregate could not include this app's endpoint list.
-     */
-    RESOURCE_LIMIT,
+    CONFIGURED_PUBLIC_NAMESPACE,
     /**
      * SDK returned a value this binding version does not understand.
      */
@@ -4420,10 +4235,6 @@ public enum class PublicPaymentResolutionStatus {
      * Public Payment Endpoints exist but are unsupported.
      */
     UNSUPPORTED_ENDPOINT,
-    /**
-     * Registered apps were found, but none of their endpoint lists could be loaded.
-     */
-    UNAVAILABLE,
     /**
      * SDK returned a value this binding version does not understand.
      */
@@ -4559,13 +4370,7 @@ public sealed class PaykitException: kotlin.Exception() {
      * Durable storage failed.
      */
     public class Storage(
-        /**
-         * Stable machine-readable error code.
-         */
         public val `code`: kotlin.String,
-        /**
-         * Redacted human-readable error context.
-         */
         public val `context`: kotlin.String,
     ) : PaykitException() {
         override val message: String
@@ -4576,13 +4381,7 @@ public sealed class PaykitException: kotlin.Exception() {
      * Pubky identity, session, or key capability failed.
      */
     public class Identity(
-        /**
-         * Stable machine-readable error code.
-         */
         public val `code`: kotlin.String,
-        /**
-         * Redacted human-readable error context.
-         */
         public val `context`: kotlin.String,
     ) : PaykitException() {
         override val message: String
@@ -4593,13 +4392,7 @@ public sealed class PaykitException: kotlin.Exception() {
      * Pubky or Encrypted Link transport failed.
      */
     public class Transport(
-        /**
-         * Stable machine-readable error code.
-         */
         public val `code`: kotlin.String,
-        /**
-         * Redacted human-readable error context.
-         */
         public val `context`: kotlin.String,
     ) : PaykitException() {
         override val message: String
@@ -4610,13 +4403,7 @@ public sealed class PaykitException: kotlin.Exception() {
      * Requested Paykit or Pubky resource was not found.
      */
     public class NotFound(
-        /**
-         * Stable machine-readable error code.
-         */
         public val `code`: kotlin.String,
-        /**
-         * Redacted human-readable error context.
-         */
         public val `context`: kotlin.String,
     ) : PaykitException() {
         override val message: String
@@ -4627,13 +4414,7 @@ public sealed class PaykitException: kotlin.Exception() {
      * Paykit protocol data is invalid, conflicting, or unsupported.
      */
     public class Protocol(
-        /**
-         * Stable machine-readable error code.
-         */
         public val `code`: kotlin.String,
-        /**
-         * Redacted human-readable error context.
-         */
         public val `context`: kotlin.String,
     ) : PaykitException() {
         override val message: String
@@ -4644,13 +4425,7 @@ public sealed class PaykitException: kotlin.Exception() {
      * Operation is blocked by configured SDK policy.
      */
     public class Policy(
-        /**
-         * Stable machine-readable error code.
-         */
         public val `code`: kotlin.String,
-        /**
-         * Redacted human-readable error context.
-         */
         public val `context`: kotlin.String,
     ) : PaykitException() {
         override val message: String
@@ -4661,13 +4436,7 @@ public sealed class PaykitException: kotlin.Exception() {
      * Payment adapter failed.
      */
     public class PaymentAdapter(
-        /**
-         * Stable machine-readable error code.
-         */
         public val `code`: kotlin.String,
-        /**
-         * Redacted human-readable error context.
-         */
         public val `context`: kotlin.String,
     ) : PaykitException() {
         override val message: String
@@ -4678,13 +4447,7 @@ public sealed class PaykitException: kotlin.Exception() {
      * Local state needs explicit recovery before automation can continue.
      */
     public class RecoveryRequired(
-        /**
-         * Stable machine-readable error code.
-         */
         public val `code`: kotlin.String,
-        /**
-         * Redacted human-readable error context.
-         */
         public val `context`: kotlin.String,
     ) : PaykitException() {
         override val message: String
