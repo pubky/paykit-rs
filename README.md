@@ -252,9 +252,10 @@ before executing a payment through their existing infrastructure.
 `paykit-sdk` is the Rust runtime layer for SDK-managed local
 state such as endpoint sync, Encrypted Link snapshots, private stream intake,
 Private Payment Lists, Paykit Profiles, Paykit Blob helpers, read-only Pubky
-app profile/follows helpers, local Contact Records, and contact payment resolution. Payment
-execution, settlement detection, product UI, and platform session storage
-remain with the integrating application and its adapters.
+app profile/follows helpers, local Contact Records, contact payment resolution,
+Payment Requests, and Allowance lifecycle views. Payment execution, Allowance
+matching and usage, settlement detection, product UI, and platform session
+storage remain with the integrating application and its adapters.
 
 Since `0.1.0-rc55`, `PubkySessionBootstrap::republish_identity(public_key)`
 (`republishIdentity(publicKey)` in Swift and Kotlin) can rebroadcast an existing
