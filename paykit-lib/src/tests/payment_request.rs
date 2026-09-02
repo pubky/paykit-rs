@@ -13,6 +13,7 @@ fn receipt_access_json(access: &ReceiptAccess) -> String {
     json!({
         "version": access.version,
         "kind": "paykit.receipt_access",
+        "app_id": test_app_id().as_str(),
         "event_id": access.event_id.as_str(),
         "receipt_id": access.receipt_id.as_str(),
         "payment_reference": access.payment_reference.as_str(),
@@ -39,6 +40,7 @@ fn payment_request_terms() -> PaymentRequestTerms {
             "btc-lightning-bolt11",
         )
         .unwrap()],
+        required_app_id: None,
         metadata: object(json!({"label": "test invoice"})),
     }
 }
@@ -74,6 +76,7 @@ fn payment_proof() -> PaymentProof {
         request_id(),
         PaymentReference::new("invoice-2026-0001").unwrap(),
         None,
+        test_app_id(),
         PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         object(json!({
             "type": "bitcoin-bolt11-preimage",
@@ -91,6 +94,7 @@ fn recurring_payment_proof() -> PaymentProof {
             starts_at: "2026-06-01T00:00:00Z".to_string(),
             ends_at: "2026-07-01T00:00:00Z".to_string(),
         }),
+        test_app_id(),
         PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         object(json!({
             "type": "bitcoin-bolt11-preimage",
@@ -106,6 +110,7 @@ fn private_application_message(
     PrivateApplicationMessage {
         version: Some(1),
         kind: Some(kind.as_str().to_string()),
+        app_id: Some(test_app_id().as_str().to_string()),
         raw_json: raw_json.to_string(),
     }
 }
@@ -138,19 +143,19 @@ async fn payment_request_events_are_global_fifo() {
         Some("user_requested".to_string()),
     );
 
-    send_payment_request(&mut setup.sender_link, &request)
+    send_payment_request(&mut setup.sender_link, &test_app_id(), &request)
         .await
         .unwrap();
-    send_payment_request_acceptance(&mut setup.sender_link, &acceptance)
+    send_payment_request_acceptance(&mut setup.sender_link, &test_app_id(), &acceptance)
         .await
         .unwrap();
-    send_payment_request_rejection(&mut setup.sender_link, &rejection)
+    send_payment_request_rejection(&mut setup.sender_link, &test_app_id(), &rejection)
         .await
         .unwrap();
-    send_payment_proof(&mut setup.sender_link, &proof)
+    send_payment_proof(&mut setup.sender_link, &test_app_id(), &proof)
         .await
         .unwrap();
-    send_payment_request_cancellation(&mut setup.sender_link, &cancellation)
+    send_payment_request_cancellation(&mut setup.sender_link, &test_app_id(), &cancellation)
         .await
         .unwrap();
 
@@ -208,11 +213,13 @@ fn payment_request_events_return_exact_raw_payload() {
     let raw = r#"{
         "kind": "paykit.payment_request",
         "version": 1,
+        "app_id": "test-app",
         "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
         "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
         "request": {
             "metadata": { "note": "preserve raw formatting" },
             "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
+            "required_app_id": null,
             "recurrence": null,
             "proposal_expires_at": null,
             "payment_reference": "invoice-2026-raw",
@@ -234,7 +241,7 @@ fn payment_request_event_serialization_supports_outbound_idempotency() {
     let request = payment_request();
     let event = PaymentRequestEvent::Request(request.clone());
 
-    let serialized = serialize_payment_request_event(&event).unwrap();
+    let serialized = serialize_payment_request_event(&test_app_id(), &event).unwrap();
     let parsed = parse_payment_request_raw(PrivateMessageKind::PaymentRequest, &serialized);
 
     assert_eq!(parsed.parsed_event(), Some(&event));
@@ -245,8 +252,11 @@ fn payment_request_event_serialization_supports_outbound_idempotency() {
 #[test]
 fn payment_request_event_parser_uses_raw_json_kind() {
     let request = payment_request();
-    let serialized =
-        serialize_payment_request_event(&PaymentRequestEvent::Request(request.clone())).unwrap();
+    let serialized = serialize_payment_request_event(
+        &test_app_id(),
+        &PaymentRequestEvent::Request(request.clone()),
+    )
+    .unwrap();
     let stale_message = private_application_message(PrivateMessageKind::ReceiptAccess, &serialized);
 
     let parsed = parse_payment_request_event_message(&stale_message)
@@ -261,7 +271,7 @@ fn payment_request_event_parser_uses_raw_json_kind() {
 
 #[test]
 fn payment_request_events_return_malformed_recognized_events_for_persistence() {
-    let malformed = r#"{"version":1,"kind":"paykit.payment_request","event_id":"not-a-uuid","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{"amount":{"value":"0.001","asset":"btc"},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{}}}"#;
+    let malformed = r#"{"version":1,"kind":"paykit.payment_request","app_id":"test-app","event_id":"not-a-uuid","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{"amount":{"value":"0.001","asset":"btc"},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{}}}"#;
     let acceptance = PaymentRequestAcceptance::new(
         EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102").unwrap(),
         request_id(),
@@ -271,6 +281,7 @@ fn payment_request_events_return_malformed_recognized_events_for_persistence() {
     let acceptance_raw = json!({
         "version": 1,
         "kind": "paykit.payment_request_acceptance",
+        "app_id": test_app_id().as_str(),
         "event_id": acceptance.event_id.as_str(),
         "payment_request_id": acceptance.payment_request_id.as_str(),
     })
@@ -297,7 +308,7 @@ fn payment_request_events_return_malformed_recognized_events_for_persistence() {
 
 #[test]
 fn payment_request_events_keep_valid_ids_when_body_is_invalid() {
-    let malformed = r#"{"version":1,"kind":"paykit.payment_request","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{"amount":{"value":"ten","asset":"btc"},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{}}}"#;
+    let malformed = r#"{"version":1,"kind":"paykit.payment_request","app_id":"test-app","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{"amount":{"value":"ten","asset":"btc"},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{}}}"#;
 
     let event = parse_payment_request_raw(PrivateMessageKind::PaymentRequest, malformed);
 
@@ -319,8 +330,8 @@ fn payment_request_events_keep_valid_ids_when_body_is_invalid() {
 
 #[test]
 fn payment_request_events_surface_conflicts_for_caller_dedupe() {
-    let first = r#"{"version":1,"kind":"paykit.payment_request","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{"amount":{"value":"0.001","asset":"btc"},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{}}}"#;
-    let conflicting = r#"{"version":1,"kind":"paykit.payment_request","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{"amount":{"value":"0.002","asset":"btc"},"payment_reference":"invoice-2026-0002","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{}}}"#;
+    let first = r#"{"version":1,"kind":"paykit.payment_request","app_id":"test-app","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{"amount":{"value":"0.001","asset":"btc"},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{}}}"#;
+    let conflicting = r#"{"version":1,"kind":"paykit.payment_request","app_id":"test-app","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{"amount":{"value":"0.002","asset":"btc"},"payment_reference":"invoice-2026-0002","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{}}}"#;
 
     let first_event = parse_payment_request_raw(PrivateMessageKind::PaymentRequest, first);
     let conflicting_event =
@@ -344,7 +355,7 @@ async fn payment_request_events_share_ordered_stream_with_other_private_lanes() 
         payment_reference: PaymentReference::new("receipt-reference").unwrap(),
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location(&receiver_path(), &receipt_id),
+        location: ReceiptAccess::location_for(&receipt_id),
         key: ReceiptDecryptionKey::generate(),
     };
     let request = payment_request();
@@ -358,7 +369,7 @@ async fn payment_request_events_share_ordered_stream_with_other_private_lanes() 
         &receipt_access_json(&receipt_access),
     )
     .await;
-    send_payment_request(&mut setup.sender_link, &request)
+    send_payment_request(&mut setup.sender_link, &test_app_id(), &request)
         .await
         .unwrap();
     set_private_payment_list(&mut setup.sender_link, &private_list)
@@ -401,10 +412,10 @@ async fn recurring_payment_request_and_proof_with_billing_period_round_trip() {
     let request = recurring_payment_request();
     let proof = recurring_payment_proof();
 
-    send_payment_request(&mut setup.sender_link, &request)
+    send_payment_request(&mut setup.sender_link, &test_app_id(), &request)
         .await
         .unwrap();
-    send_payment_proof(&mut setup.sender_link, &proof)
+    send_payment_proof(&mut setup.sender_link, &test_app_id(), &proof)
         .await
         .unwrap();
 

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use paykit_sdk::{IdentityStatus, InitializationReport, PaykitSdk, RestoreReport};
+use paykit_sdk::{IdentityStatus, PaykitSdk, PubkySharedStateStorage, RestoreReport};
 
 use crate::config::{default_pubky_client_config, FfiPaykitSdkConfig, FfiPubkyClientConfig};
 use crate::errors::{validation_error, PaykitFfiError};
@@ -9,27 +9,21 @@ use crate::payment_adapter::{
 };
 use crate::secrets::FfiSdkBackupBlob;
 use crate::session::{
-    app_public_key, pubky_from_config, FfiSdkPubkySessionProvider,
+    app_public_key, pubky_from_config, FfiPubkyIdentityCapability, FfiSdkPubkySessionProvider,
     FfiSdkPubkySessionProviderAdapter,
 };
 use crate::storage::{
     decode_backup_state, encode_backup_state, FfiSdkStateBlobStore, FfiSdkStorage,
+    FfiSdkStorageAdapter,
 };
 
 /// Current identity status returned to apps.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiIdentityStatus {
-    /// Persisted local public key, or `None` after explicit sign-out.
+    /// Last initialized public key, when known.
     pub public_key: Option<String>,
-    /// Whether live Pubky session access is available for this identity.
-    pub live_session_available: bool,
-}
-
-/// Initialization report returned after SDK startup.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct FfiInitializationReport {
-    /// Last persisted identity status.
-    pub identity: FfiIdentityStatus,
+    /// Current Pubky capability.
+    pub capability: FfiPubkyIdentityCapability,
 }
 
 /// Report returned after restoring SDK-managed backup state.
@@ -41,7 +35,7 @@ pub struct FfiRestoreReport {
     pub restored_identity: bool,
     /// Number of restored Linked Peer records.
     pub linked_peers: u64,
-    /// Number of restored local contact records.
+    /// Number of restored Contact Records.
     pub contact_records: u64,
     /// Number of restored public Payment Endpoint records.
     pub public_endpoint_records: u64,
@@ -61,27 +55,18 @@ pub struct FfiRestoreReport {
     pub receipt_records: u64,
     /// Number of restored local receipt issuance records.
     pub receipt_issuance_records: u64,
-    /// Receiver-scoped peers restored as recovery-required.
-    pub recovery_required_peers: Vec<FfiRestoreRecoveryRequiredPeer>,
-}
-
-/// Receiver-scoped peer restored as recovery-required.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct FfiRestoreRecoveryRequiredPeer {
-    /// Counterparty app public key.
-    pub counterparty: String,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: String,
+    /// Counterparties restored as recovery-required.
+    pub recovery_required_peers: Vec<String>,
 }
 
 pub(crate) type FfiSdkRuntime =
-    PaykitSdk<FfiSdkStorage, FfiSdkPubkySessionProviderAdapter, FfiSdkPaymentAdapterAdapter>;
+    PaykitSdk<FfiSdkStorageAdapter, FfiSdkPubkySessionProviderAdapter, FfiSdkPaymentAdapterAdapter>;
 
 /// Stateful Paykit SDK runtime handle.
 #[derive(uniffi::Object)]
 pub struct FfiPaykitSdk {
     pub(crate) runtime: FfiSdkRuntime,
-    state_store: Arc<dyn FfiSdkStateBlobStore>,
+    storage: FfiSdkStorageAdapter,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -144,26 +129,87 @@ impl FfiPaykitSdk {
         config: FfiPaykitSdkConfig,
         pubky_client: FfiPubkyClientConfig,
     ) -> Result<Self, PaykitFfiError> {
-        let pubky = pubky_from_config(&pubky_client)?;
-        let state_store_for_runtime = state_store.clone();
-        let storage = FfiSdkStorage {
-            store: state_store_for_runtime,
+        let session_provider = ffi_session_provider(session_provider, pubky_client)?;
+        let storage = FfiSdkStorageAdapter::Callback(FfiSdkStorage {
+            store: state_store,
             transaction_lock: Arc::new(Mutex::new(())),
-        };
-        let session_provider = FfiSdkPubkySessionProviderAdapter::new(session_provider, pubky);
-        let payment_adapter = FfiSdkPaymentAdapterAdapter {
-            adapter: payment_adapter,
-        };
-        let runtime = PaykitSdk::new(
-            storage,
+        });
+        build_sdk(storage, session_provider, payment_adapter, config)
+    }
+
+    /// Create an SDK runtime with encrypted identity-wide state stored in Pubky.
+    ///
+    /// Every operation requires active session access with the matching local
+    /// identity secret and `required_session_capabilities()`. Homeserver ETag
+    /// preconditions reject stale writes from independent runtimes; callers may
+    /// retry the complete SDK operation after a shared-state conflict.
+    #[uniffi::constructor]
+    pub fn with_pubky_shared_state(
+        session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        config: FfiPaykitSdkConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        Self::with_pubky_shared_state_and_client_config(
+            session_provider,
+            config,
+            default_pubky_client_config(),
+        )
+    }
+
+    /// Create a Pubky shared-state runtime with explicit client configuration.
+    ///
+    /// Requires active session access with current Paykit identity key material
+    /// and `required_session_capabilities()`. Homeserver ETag preconditions
+    /// reject stale writes from independent runtimes.
+    #[uniffi::constructor]
+    pub fn with_pubky_shared_state_and_client_config(
+        session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        config: FfiPaykitSdkConfig,
+        pubky_client: FfiPubkyClientConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        Self::with_payment_adapter_and_pubky_shared_state_and_client_config(
+            session_provider,
+            Arc::new(FfiNoopSdkPaymentAdapter),
+            config,
+            pubky_client,
+        )
+    }
+
+    /// Create a Pubky shared-state runtime with payment adapter callbacks.
+    ///
+    /// Requires active session access with current Paykit identity key material
+    /// and `required_session_capabilities()`. Homeserver ETag preconditions
+    /// reject stale writes from independent runtimes.
+    #[uniffi::constructor]
+    pub fn with_payment_adapter_and_pubky_shared_state(
+        session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        payment_adapter: Arc<dyn FfiSdkPaymentAdapter>,
+        config: FfiPaykitSdkConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        Self::with_payment_adapter_and_pubky_shared_state_and_client_config(
             session_provider,
             payment_adapter,
-            config.try_into()?,
-        )?;
-        Ok(Self {
-            runtime,
-            state_store,
-        })
+            config,
+            default_pubky_client_config(),
+        )
+    }
+
+    /// Create a Pubky shared-state runtime with payment and client configuration.
+    ///
+    /// Requires active session access with current Paykit identity key material
+    /// and `required_session_capabilities()`. Homeserver ETag preconditions
+    /// reject stale writes from independent runtimes.
+    #[uniffi::constructor]
+    pub fn with_payment_adapter_and_pubky_shared_state_and_client_config(
+        session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        payment_adapter: Arc<dyn FfiSdkPaymentAdapter>,
+        config: FfiPaykitSdkConfig,
+        pubky_client: FfiPubkyClientConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        let session_provider = ffi_session_provider(session_provider, pubky_client)?;
+        let storage = FfiSdkStorageAdapter::PubkyShared(PubkySharedStateStorage::new(
+            session_provider.clone(),
+        ));
+        build_sdk(storage, session_provider, payment_adapter, config)
     }
 
     /// Return this runtime's configuration.
@@ -171,15 +217,13 @@ impl FfiPaykitSdk {
         self.runtime.config().clone().into()
     }
 
-    /// Return the current platform SDK state revision, when a state blob exists.
+    /// Return the latest observed SDK state revision, when one exists.
     pub fn state_revision(&self) -> Result<Option<String>, PaykitFfiError> {
-        self.state_store
-            .load_state_blob()
-            .map(|snapshot| snapshot.map(|snapshot| snapshot.revision))
+        self.storage.state_revision()
     }
 
     /// Initialize durable SDK identity state.
-    pub async fn initialize(&self) -> Result<FfiInitializationReport, PaykitFfiError> {
+    pub async fn initialize(&self) -> Result<FfiIdentityStatus, PaykitFfiError> {
         self.runtime
             .initialize()
             .await
@@ -196,7 +240,9 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Revoke the current Pubky grant and clear local SDK identity state.
+    /// Revoke the current Pubky grant and clear local session access.
+    ///
+    /// Identity-wide Paykit state remains available to other applications.
     pub async fn sign_out(&self) -> Result<FfiIdentityStatus, PaykitFfiError> {
         self.runtime
             .sign_out()
@@ -257,19 +303,39 @@ impl FfiPaykitSdk {
     }
 }
 
+fn ffi_session_provider(
+    provider: Arc<dyn FfiSdkPubkySessionProvider>,
+    pubky_client: FfiPubkyClientConfig,
+) -> Result<FfiSdkPubkySessionProviderAdapter, PaykitFfiError> {
+    Ok(FfiSdkPubkySessionProviderAdapter::new(
+        provider,
+        pubky_from_config(&pubky_client)?,
+        pubky_client,
+    ))
+}
+
+fn build_sdk(
+    storage: FfiSdkStorageAdapter,
+    session_provider: FfiSdkPubkySessionProviderAdapter,
+    payment_adapter: Arc<dyn FfiSdkPaymentAdapter>,
+    config: FfiPaykitSdkConfig,
+) -> Result<FfiPaykitSdk, PaykitFfiError> {
+    let runtime = PaykitSdk::new(
+        storage.clone(),
+        session_provider,
+        FfiSdkPaymentAdapterAdapter {
+            adapter: payment_adapter,
+        },
+        config.try_into()?,
+    );
+    Ok(FfiPaykitSdk { runtime, storage })
+}
+
 impl From<IdentityStatus> for FfiIdentityStatus {
     fn from(value: IdentityStatus) -> Self {
         Self {
             public_key: value.public_key.map(|key| app_public_key(&key)),
-            live_session_available: value.live_session_available,
-        }
-    }
-}
-
-impl From<InitializationReport> for FfiInitializationReport {
-    fn from(value: InitializationReport) -> Self {
-        Self {
-            identity: value.identity.into(),
+            capability: value.capability.into(),
         }
     }
 }
@@ -293,10 +359,7 @@ impl From<RestoreReport> for FfiRestoreReport {
             recovery_required_peers: value
                 .recovery_required_peers
                 .into_iter()
-                .map(|peer| FfiRestoreRecoveryRequiredPeer {
-                    counterparty: app_public_key(&peer.counterparty),
-                    counterparty_receiver_path: peer.counterparty_receiver_path.to_string(),
-                })
+                .map(|key| app_public_key(&key))
                 .collect(),
         }
     }

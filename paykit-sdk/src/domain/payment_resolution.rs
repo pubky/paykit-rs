@@ -21,6 +21,31 @@ pub enum PublicPaymentResolutionStatus {
     NoEndpoint,
     /// Public Payment Endpoints exist but are unsupported.
     UnsupportedEndpoint,
+    /// Registered apps were found, but none of their endpoint lists could be loaded.
+    Unavailable,
+}
+
+/// Category of an app-specific public Payment Endpoint load failure.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum PublicPaymentEndpointLoadFailureKind {
+    /// Pubky storage could not be reached or read.
+    Transport,
+    /// The app's published endpoint data was invalid.
+    InvalidData,
+    /// The bounded aggregate could not include this app's endpoint list.
+    ResourceLimit,
+}
+
+/// Failure to load one registered app's public Payment Endpoints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicPaymentEndpointLoadFailure {
+    /// App whose endpoint list could not be loaded.
+    pub app_id: paykit_lib::PaykitAppId,
+    /// Stable failure category for application handling.
+    pub kind: PublicPaymentEndpointLoadFailureKind,
+    /// Human-readable context without an underlying transport cause.
+    pub context: String,
 }
 
 /// Result category for private Payment Endpoint resolution.
@@ -92,6 +117,8 @@ pub struct PublicContactPaymentResolution {
     pub status: PublicPaymentResolutionStatus,
     /// Payable public Payment Endpoints in adapter-preferred order.
     pub payable_endpoints: Vec<ResolvedPublicPaymentEndpoint>,
+    /// Registered apps whose endpoint lists could not be loaded.
+    pub failures: Vec<PublicPaymentEndpointLoadFailure>,
 }
 
 impl fmt::Debug for PublicContactPaymentResolution {
@@ -99,6 +126,7 @@ impl fmt::Debug for PublicContactPaymentResolution {
         f.debug_struct("PublicContactPaymentResolution")
             .field("status", &self.status)
             .field("payable_endpoints", &self.payable_endpoints)
+            .field("failures", &self.failures)
             .finish()
     }
 }
@@ -112,9 +140,8 @@ pub struct PrivateContactPaymentResolution {
     pub state: PrivatePaymentResolutionState,
     /// Local stream version of the Private Payment List used for this result.
     ///
-    /// Treat this value as an opaque freshness token scoped to this SDK state,
-    /// counterparty, and counterparty receiver path. A payable result always
-    /// includes a version.
+    /// Treat this value as an opaque freshness token scoped to this SDK state
+    /// and counterparty. A payable result always includes a version.
     pub private_payment_list_version: Option<u64>,
     /// Payable private Payment Endpoints in adapter-preferred order.
     pub payable_endpoints: Vec<ResolvedPrivatePaymentEndpoint>,

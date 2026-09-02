@@ -2,14 +2,17 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use super::*;
 use super::{
     payment_resolution::{
-        private_payable_from_batch, public_payable_from_batch, PrivateRecoveryOutcome,
+        private_candidate_batch, private_payable_from_batch, public_payable_from_batch,
+        PrivateRecoveryOutcome,
     },
     recovery::{local_recovery_marker_belongs_to_current_episode, RecoveryRequiredUpdate},
 };
@@ -24,7 +27,7 @@ use crate::{
     domain::private_stream::persist_private_stream_batch,
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
-        NewOutboundPrivateMessage, PublicEndpointRecord,
+        NewOutboundPrivateMessage, PreparedOutboundPrivateSend, PublicEndpointRecord,
     },
     EventIdConflict, OutboundPrivateMessageStatus, PubkySessionAccess,
 };
@@ -75,6 +78,27 @@ impl PubkySessionProvider for TestPubkySessionProvider {
     }
 }
 
+#[derive(Clone)]
+struct RecordingClearSessionProvider {
+    cleared: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl PubkySessionProvider for RecordingClearSessionProvider {
+    async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
+        Ok(None)
+    }
+
+    async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+        Ok(None)
+    }
+
+    async fn clear_session_access(&self) -> Result<()> {
+        self.cleared.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 struct TestPaymentAdapter;
 
 #[async_trait]
@@ -86,7 +110,6 @@ impl PaymentAdapter for TestPaymentAdapter {
     async fn current_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PrivateReceivingDetail>> {
         Ok(Vec::new())
     }
@@ -131,7 +154,6 @@ impl PaymentAdapter for PrivateListPaymentAdapter {
     async fn current_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PrivateReceivingDetail>> {
         Ok(vec![PrivateReceivingDetail {
             identifier: "btc-lightning-bolt11".into(),
@@ -154,7 +176,6 @@ impl PaymentAdapter for ReservedPrivateListPaymentAdapter {
     async fn reserve_private_receiving_details(
         &self,
         counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>> {
         assert!(!counterparty.as_str().is_empty());
         Ok(Some(vec![PrivatePaymentEndpointReservation {
@@ -185,7 +206,6 @@ impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
     async fn reserve_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>> {
         Ok(Some(vec![
             PrivatePaymentEndpointReservation {
@@ -254,10 +274,9 @@ impl PaymentAdapter for LeaseChangingCancellationPaymentAdapter {
                 move |tx| {
                     let _ = tx.claim_peer_link_operation(
                         &counterparty,
-                        &receiver_path(),
                         FixedClock.now() + ChronoDuration::seconds(11),
                         FixedClock.now() + ChronoDuration::seconds(71),
-                    );
+                    )?;
                     Ok(())
                 }
             })
@@ -281,7 +300,6 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
     async fn reserve_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>> {
         self.storage
             .transaction({
@@ -289,10 +307,9 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
                 move |tx| {
                     let _ = tx.claim_peer_link_operation(
                         &counterparty,
-                        &receiver_path(),
                         FixedClock.now() + ChronoDuration::seconds(61),
                         FixedClock.now() + ChronoDuration::seconds(121),
-                    );
+                    )?;
                     Ok(())
                 }
             })
@@ -340,7 +357,6 @@ impl PaymentAdapter for MixedExistingReservedPrivateListPaymentAdapter {
     async fn reserve_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>> {
         Ok(Some(vec![
             PrivatePaymentEndpointReservation {
@@ -380,20 +396,43 @@ fn private_list_message(payload: &str) -> PrivateApplicationMessage {
     PrivateApplicationMessage {
         version: Some(1),
         kind: Some("paykit.private_payment_list".into()),
+        app_id: Some("bitkit".into()),
         raw_json: format!(
-            r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"btc-lightning-bolt11":"{payload}"}}}}"#
+            r#"{{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{{"btc-lightning-bolt11":"{payload}"}}}}"#
         ),
     }
 }
 
 fn private_list_json() -> String {
-    r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#.into()
+    r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{}}"#
+        .into()
+}
+
+fn save_authorized_paykit_app(
+    tx: &mut dyn StorageTransaction,
+    counterparty: PubkyPublicKey,
+    app_id: paykit_lib::PaykitAppId,
+    capabilities: paykit_lib::PaykitAppCapabilities,
+) {
+    let mut apps = tx.authorized_paykit_apps(&counterparty).unwrap_or_default();
+    apps.insert(app_id, capabilities);
+    tx.save_authorized_paykit_apps(counterparty, apps);
+}
+
+fn private_app_capabilities() -> paykit_lib::PaykitAppCapabilities {
+    paykit_lib::PaykitAppCapabilities {
+        private_payments: true,
+        payment_requests: true,
+        receipts: true,
+        outgoing_payments: false,
+    }
 }
 
 fn receipt_access_record(counterparty: PubkyPublicKey, receipt_id: &str) -> ReceiptAccessRecord {
     ReceiptAccessRecord {
         counterparty,
-        counterparty_receiver_path: receiver_path(),
+        app_id: app_id(),
+        app_authorized: false,
         stream_item_id: 1,
         receive_batch_id: 1,
         event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
@@ -401,7 +440,7 @@ fn receipt_access_record(counterparty: PubkyPublicKey, receipt_id: &str) -> Rece
         payment_reference: "invoice-2026-0001".into(),
         payment_request_id: None,
         billing_period: None,
-        location: format!("/pub/paykit/v0/private/bitkit/wallet/receipts/{receipt_id}"),
+        location: format!("/pub/paykit/v0/private/receipts/{receipt_id}"),
         key: "receipt-secret-key".into(),
         retrieval_status: ReceiptRetrievalStatus::Pending,
         retrieval_attempted_at: None,
@@ -411,6 +450,34 @@ fn receipt_access_record(counterparty: PubkyPublicKey, receipt_id: &str) -> Rece
     }
 }
 
+fn save_authorized_receipt_access(
+    tx: &mut dyn StorageTransaction,
+    mut record: ReceiptAccessRecord,
+) {
+    save_authorized_paykit_app(
+        tx,
+        record.counterparty.clone(),
+        record.app_id.clone(),
+        private_app_capabilities(),
+    );
+    record.app_authorized = true;
+    tx.save_receipt_access_record(record);
+}
+
+fn save_retrieved_authorized_receipt_access(
+    tx: &mut dyn StorageTransaction,
+    mut record: ReceiptAccessRecord,
+) {
+    save_authorized_paykit_app(
+        tx,
+        record.counterparty.clone(),
+        record.app_id.clone(),
+        private_app_capabilities(),
+    );
+    record.app_authorized = true;
+    tx.save_receipt_access_record(record.mark_retrieved(FixedClock.now()));
+}
+
 fn receipt_record(
     issuer: PubkyPublicKey,
     receipt_id: &str,
@@ -418,9 +485,11 @@ fn receipt_record(
 ) -> ReceiptRecord {
     ReceiptRecord {
         issuer,
-        issuer_receiver_path: receiver_path(),
+        app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
         receipt_access_event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
-        receipt_access_key_hash: "receipt-access-key-hash".into(),
+        receipt_access_key_hash: crate::domain::receipts::receipt_access_key_hash(
+            "receipt-secret-key",
+        ),
         receipt_id: receipt_id.into(),
         payment_reference: "invoice-2026-0001".into(),
         payment_request_id: None,
@@ -429,7 +498,7 @@ fn receipt_record(
         payment_endpoint_identifier: None,
         amount: None,
         metadata: JsonMap::new(),
-        location: format!("/pub/paykit/v0/private/bitkit/wallet/receipts/{receipt_id}"),
+        location: format!("/pub/paykit/v0/private/receipts/{receipt_id}"),
         retrieved_at: FixedClock.now(),
     }
 }
@@ -437,7 +506,6 @@ fn receipt_record(
 fn conflicted_event_dedup_record(access: &ReceiptAccessRecord) -> EventDedupRecord {
     EventDedupRecord {
         counterparty: access.counterparty.clone(),
-        counterparty_receiver_path: access.counterparty_receiver_path.clone(),
         event_id: access.event_id.clone(),
         event_kind: "paykit.receipt_access".into(),
         payload_hash: "sha256:first".into(),
@@ -450,7 +518,7 @@ fn conflicted_event_dedup_record(access: &ReceiptAccessRecord) -> EventDedupReco
 fn private_endpoint_candidate(payload: &str) -> PrivatePaymentEndpointCandidate {
     PrivatePaymentEndpointCandidate {
         counterparty: PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
-        counterparty_receiver_path: receiver_path(),
+        app_id: app_id(),
         identifier: "btc-lightning-bolt11".into(),
         payload: payload.into(),
     }
@@ -459,7 +527,7 @@ fn private_endpoint_candidate(payload: &str) -> PrivatePaymentEndpointCandidate 
 fn public_endpoint_candidate(payload: &str) -> PublicPaymentEndpointCandidate {
     PublicPaymentEndpointCandidate {
         counterparty: PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
-        counterparty_receiver_path: receiver_path(),
+        app_id: app_id(),
         identifier: "btc-lightning-bolt11".into(),
         payload: payload.into(),
     }
@@ -476,36 +544,35 @@ fn payment_request_message(
     PrivateApplicationMessage {
         version: Some(1),
         kind: Some("paykit.payment_request".into()),
+        app_id: Some("bitkit".into()),
         raw_json: format!(
-            r#"{{"version":1,"kind":"paykit.payment_request","event_id":"{event_id}","payment_request_id":"{request_id}","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":{expiry},"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{{}}}}}}"#
+            r#"{{"version":1,"kind":"paykit.payment_request","app_id":"bitkit","event_id":"{event_id}","payment_request_id":"{request_id}","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":{expiry},"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{{}}}}}}"#
         ),
     }
 }
 
-fn receiver_path() -> PaykitReceiverPath {
-    PaykitReceiverPath::new("bitkit/wallet").unwrap()
+fn app_id() -> paykit_lib::PaykitAppId {
+    paykit_lib::PaykitAppId::new("bitkit").unwrap()
 }
 
-fn other_receiver_path() -> PaykitReceiverPath {
-    PaykitReceiverPath::new("tether/wallet").unwrap()
+fn registered_test_storage() -> InMemoryStorage {
+    InMemoryStorage::with_registered_apps(
+        ["bitkit", "test-app", "first-app", "other-app", "server"]
+            .into_iter()
+            .map(|app_id| paykit_lib::PaykitAppId::new(app_id).unwrap()),
+    )
 }
 
-fn receiver_noise_public_key() -> PubkyPublicKey {
-    PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[7; 32]).public_key())
-}
-
-async fn seed_initialized_identity_and_link(
+async fn seed_private_capable_identity_and_link(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,
 ) {
     storage
         .save_identity_state(IdentityState {
-            local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
+            public_key: Some(PubkyPublicKey::from_public_key(
                 &pubky::Keypair::random().public_key(),
             )),
-            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
-            sign_out_generation: 0,
         })
         .await
         .unwrap();
@@ -513,7 +580,6 @@ async fn seed_initialized_identity_and_link(
         .transaction(move |tx| {
             tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                 counterparty,
-                counterparty_receiver_path: receiver_path(),
                 link_snapshot: Some(vec![1, 2, 3]),
                 handshake_snapshot: None,
                 handshake_role: None,
@@ -526,18 +592,16 @@ async fn seed_initialized_identity_and_link(
         .unwrap();
 }
 
-async fn seed_initialized_identity_and_handshake(
+async fn seed_private_capable_identity_and_handshake(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,
 ) {
     storage
         .save_identity_state(IdentityState {
-            local_pubky_public_key: Some(PubkyPublicKey::from_public_key(
+            public_key: Some(PubkyPublicKey::from_public_key(
                 &pubky::Keypair::random().public_key(),
             )),
-            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
             initialized_at: FixedClock.now(),
-            sign_out_generation: 0,
         })
         .await
         .unwrap();
@@ -545,7 +609,6 @@ async fn seed_initialized_identity_and_handshake(
         .transaction(move |tx| {
             tx.save_linked_peer(LinkedPeerRecord {
                 counterparty: counterparty.clone(),
-                counterparty_receiver_path: receiver_path(),
                 state: LinkedPeerState::Linking,
                 last_sync_at: Some(FixedClock.now()),
                 last_private_receive_at: None,
@@ -558,7 +621,6 @@ async fn seed_initialized_identity_and_handshake(
             });
             tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                 counterparty,
-                counterparty_receiver_path: receiver_path(),
                 link_snapshot: None,
                 handshake_snapshot: Some(vec![1, 2, 3]),
                 handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
@@ -571,10 +633,12 @@ async fn seed_initialized_identity_and_handshake(
         .unwrap();
 }
 
+mod app_registry;
 mod backup;
 mod contacts;
 mod encrypted_links;
 mod identity;
+mod key_rotation;
 mod linked_peers;
 mod not_found_classifier;
 mod outbound_private;

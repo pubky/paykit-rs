@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
+use paykit_lib::{PaykitAppId, PaymentEndpointIdentifier, PaymentEndpointPayload};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -69,11 +69,13 @@ where
 }
 
 pub(crate) fn published_record(
+    app_id: &PaykitAppId,
     identifier: &PaymentEndpointIdentifier,
     payload: &PaymentEndpointPayload,
     now: DateTime<Utc>,
 ) -> PublicEndpointRecord {
     PublicEndpointRecord {
+        app_id: app_id.clone(),
         identifier: identifier.as_str().to_owned(),
         payload: Some(payload.as_str().to_owned()),
         status: PublicationStatus::Published,
@@ -83,11 +85,13 @@ pub(crate) fn published_record(
 }
 
 pub(crate) fn pending_publication_record(
+    app_id: &PaykitAppId,
     identifier: &PaymentEndpointIdentifier,
     payload: &PaymentEndpointPayload,
     now: DateTime<Utc>,
 ) -> PublicEndpointRecord {
     PublicEndpointRecord {
+        app_id: app_id.clone(),
         identifier: identifier.as_str().to_owned(),
         payload: Some(payload.as_str().to_owned()),
         status: PublicationStatus::PendingPublication,
@@ -97,11 +101,13 @@ pub(crate) fn pending_publication_record(
 }
 
 pub(crate) fn pending_removal_record(
+    app_id: &PaykitAppId,
     identifier: String,
     payload: Option<String>,
     now: DateTime<Utc>,
 ) -> PublicEndpointRecord {
     PublicEndpointRecord {
+        app_id: app_id.clone(),
         identifier,
         payload,
         status: PublicationStatus::PendingRemoval,
@@ -110,8 +116,13 @@ pub(crate) fn pending_removal_record(
     }
 }
 
-pub(crate) fn removed_record(identifier: String, now: DateTime<Utc>) -> PublicEndpointRecord {
+pub(crate) fn removed_record(
+    app_id: &PaykitAppId,
+    identifier: String,
+    now: DateTime<Utc>,
+) -> PublicEndpointRecord {
     PublicEndpointRecord {
+        app_id: app_id.clone(),
         identifier,
         payload: None,
         status: PublicationStatus::Removed,
@@ -121,12 +132,14 @@ pub(crate) fn removed_record(identifier: String, now: DateTime<Utc>) -> PublicEn
 }
 
 pub(crate) fn failed_record(
+    app_id: &PaykitAppId,
     identifier: String,
     payload: Option<String>,
     error: String,
     now: DateTime<Utc>,
 ) -> PublicEndpointRecord {
     PublicEndpointRecord {
+        app_id: app_id.clone(),
         identifier,
         payload,
         status: PublicationStatus::Failed,

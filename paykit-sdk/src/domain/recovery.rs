@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::linked_peers::LinkedPeerState,
     storage::{LinkedPeerRecord, StorageAdapter},
-    PaykitReceiverPath, PubkyPublicKey, Result,
+    PubkyPublicKey, Result,
 };
 
 /// Public recovery marker state tracked for one Linked Peer.
@@ -21,8 +21,6 @@ use crate::{
 pub struct EncryptedLinkRecoveryMarkerReport {
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Current Linked Peer state.
     pub state: LinkedPeerState,
     /// Locally published recovery attempt id.
@@ -43,10 +41,6 @@ impl fmt::Debug for EncryptedLinkRecoveryMarkerReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EncryptedLinkRecoveryMarkerReport")
             .field("counterparty", &self.counterparty)
-            .field(
-                "counterparty_receiver_path",
-                &self.counterparty_receiver_path,
-            )
             .field("state", &self.state)
             .field("local_attempt_id", &self.local_attempt_id)
             .field("local_marker_created_at", &self.local_marker_created_at)
@@ -68,7 +62,6 @@ impl EncryptedLinkRecoveryMarkerReport {
     pub(crate) fn from_peer(peer: &LinkedPeerRecord, remote_marker_changed: bool) -> Self {
         Self {
             counterparty: peer.counterparty.clone(),
-            counterparty_receiver_path: peer.counterparty_receiver_path.clone(),
             state: peer.state.clone(),
             local_attempt_id: peer.local_recovery_attempt_id.clone(),
             local_marker_created_at: peer.local_recovery_marker_created_at,
@@ -83,7 +76,6 @@ impl EncryptedLinkRecoveryMarkerReport {
 pub(crate) async fn recovery_marker_report<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Result<Option<EncryptedLinkRecoveryMarkerReport>>
 where
     S: StorageAdapter,
@@ -91,7 +83,7 @@ where
     storage
         .transaction(|tx| {
             Ok(tx
-                .linked_peer(counterparty, counterparty_receiver_path)
+                .linked_peer(counterparty)
                 .as_ref()
                 .map(|peer| EncryptedLinkRecoveryMarkerReport::from_peer(peer, false)))
         })
@@ -106,10 +98,6 @@ mod tests {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
     }
 
-    fn receiver_path() -> PaykitReceiverPath {
-        PaykitReceiverPath::new("bitkit/wallet").unwrap()
-    }
-
     #[test]
     fn test_recovery_marker_report_debug_redacts_local_marker_error() {
         // The sentinel stands in for a raw publish/remove failure string that may
@@ -118,7 +106,6 @@ mod tests {
         let sentinel = "recovery-marker-error-secret";
         let peer = LinkedPeerRecord {
             counterparty: counterparty(),
-            counterparty_receiver_path: receiver_path(),
             state: LinkedPeerState::Linked,
             last_sync_at: None,
             last_private_receive_at: None,

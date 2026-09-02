@@ -142,9 +142,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arc-swap"
@@ -1247,19 +1247,6 @@ dependencies = [
  "uuid",
  "xml-rs",
  "xmltree",
-]
-
-[[package]]
-name = "dav-server-opendalfs"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5305e1e00d258d119aae1e1fbdee3a704cf66b632b4f1a6d384d65531d84c35c"
-dependencies = [
- "anyhow",
- "bytes",
- "dav-server",
- "futures",
- "opendal",
 ]
 
 [[package]]
@@ -3315,17 +3302,20 @@ version = "0.1.0-rc50"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "blake3",
  "chacha20poly1305",
  "chrono",
  "proptest",
  "pubky",
  "pubky-noise",
  "pubky-testnet",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "zeroize",
 ]
@@ -3339,13 +3329,17 @@ dependencies = [
  "base64 0.22.1",
  "bip39",
  "blake3",
+ "chacha20poly1305",
  "chrono",
  "crypto_secretbox",
  "hex",
  "http-relay",
  "paykit-lib",
+ "postcard",
  "pubky",
+ "pubky-noise",
  "pubky-testnet",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3757,11 +3751,10 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 [[package]]
 name = "pubky"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15a7b191157d57d5095f1577c8064aeda85f96606957fcf4c0a6f4b675adb96d"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=dcf1b4f462e8a082a44f50acacfaf67f4a9441fb#dcf1b4f462e8a082a44f50acacfaf67f4a9441fb"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "cookie",
  "eventsource-stream",
  "flume 0.11.1",
@@ -3769,6 +3762,7 @@ dependencies = [
  "futures-util",
  "httpdate",
  "log",
+ "lru 0.18.2",
  "percent-encoding",
  "pkarr",
  "pubky-common",
@@ -3788,11 +3782,10 @@ dependencies = [
 [[package]]
 name = "pubky-common"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ee26f4cf7d9d11a300180b351f1ea0efebf17ec66f0e615a8867f8aba47dc5f"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=dcf1b4f462e8a082a44f50acacfaf67f4a9441fb#dcf1b4f462e8a082a44f50acacfaf67f4a9441fb"
 dependencies = [
  "argon2",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "crypto_secretbox",
  "ed25519-dalek",
@@ -3810,8 +3803,7 @@ dependencies = [
 [[package]]
 name = "pubky-homeserver"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e210ee709295cbf68144be479103cf41b43531cc95f00b0c85af01405fca83b"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=dcf1b4f462e8a082a44f50acacfaf67f4a9441fb#dcf1b4f462e8a082a44f50acacfaf67f4a9441fb"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3821,13 +3813,12 @@ dependencies = [
  "axum-server",
  "backon",
  "base32",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "clap",
  "dashmap",
  "dav-server",
- "dav-server-opendalfs",
  "dirs",
  "dyn-clone",
  "fast-glob",
@@ -3838,6 +3829,7 @@ dependencies = [
  "httpdate",
  "infer",
  "jsonwebtoken",
+ "lru 0.14.0",
  "mime_guess",
  "opendal",
  "opentelemetry",
@@ -3873,9 +3865,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-noise"
-version = "0.1.0-rc7"
+version = "0.1.0-rc8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a0fcffa2792342caf099107604fe1bd4c99a5f92fd3584306b678cc0ad744da"
+checksum = "d506939a2d151814267bc94a1e70f6406d98bda0322da33a014a249edd307eea"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "ed25519-dalek",
@@ -3890,8 +3882,7 @@ dependencies = [
 [[package]]
 name = "pubky-testnet"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef139c01e3f3bdbd9b05b2397cfe912c43c7e81e6a3e2b1c07ee9bb516196a87"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=dcf1b4f462e8a082a44f50acacfaf67f4a9441fb#dcf1b4f462e8a082a44f50acacfaf67f4a9441fb"
 dependencies = [
  "anyhow",
  "clap",
@@ -3931,8 +3922,7 @@ dependencies = [
 [[package]]
 name = "pubky_test_utils"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cbd737dac148da5c734b4abd7f34d4cf64dfc4441cc253dfc05acedb203d7e5"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=dcf1b4f462e8a082a44f50acacfaf67f4a9441fb#dcf1b4f462e8a082a44f50acacfaf67f4a9441fb"
 dependencies = [
  "pubky_test_utils_drop_db_helper",
  "pubky_test_utils_macro",
@@ -3941,8 +3931,7 @@ dependencies = [
 [[package]]
 name = "pubky_test_utils_drop_db_helper"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b556c3800e017f2229115713ba1a0d05796ec0724185c6ad7f865eee9b030d2"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=dcf1b4f462e8a082a44f50acacfaf67f4a9441fb#dcf1b4f462e8a082a44f50acacfaf67f4a9441fb"
 dependencies = [
  "sqlx",
 ]
@@ -3950,8 +3939,7 @@ dependencies = [
 [[package]]
 name = "pubky_test_utils_macro"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1714113e8be46e6fe799d6997a22b3beaa1efcde6d9e24527795fbeec5a81bb7"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=dcf1b4f462e8a082a44f50acacfaf67f4a9441fb#dcf1b4f462e8a082a44f50acacfaf67f4a9441fb"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

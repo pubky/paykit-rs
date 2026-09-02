@@ -1,6 +1,8 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+const MAX_PUBLIC_PROFILE_BYTES: usize = 256 * 1024;
+
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
     S: StorageAdapter,
@@ -10,11 +12,15 @@ where
 {
     /// Publish the local public Paykit profile.
     ///
-    /// This writes only the configured Paykit Profile path. Use Paykit Blob
-    /// helpers for profile files stored under the configured blob prefix.
+    /// This writes the identity-wide Paykit Profile path. Use Paykit Blob
+    /// helpers for profile files stored under the Paykit blob prefix. Pass
+    /// `None` to create the first profile, or the revision returned by a prior
+    /// fetch/publication to replace that exact version. A stale revision
+    /// returns [`PaykitSdkError::ConcurrentUpdate`].
     pub async fn publish_paykit_profile(
         &self,
         profile: PaykitProfile,
+        expected_revision: Option<String>,
     ) -> Result<PaykitProfileRecord> {
         let json = profile_json(&profile)?;
         let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
@@ -22,17 +28,45 @@ where
             context: "no Pubky session available for profile publication".into(),
             source: None,
         })?;
-        let path = self.config.paykit_profile_path();
-        session_access
-            .session
-            .storage()
-            .put(path.as_str(), json)
-            .await
-            .map_err(|err| map_pubky_transport_error("publish Paykit profile", err))?;
+        let path = PAYKIT_PROFILE_PATH;
+        let write = match expected_revision.as_deref() {
+            Some(revision) => {
+                session_access
+                    .session
+                    .storage()
+                    .put_if_match(path, json, revision)
+                    .await
+            }
+            None => {
+                session_access
+                    .session
+                    .storage()
+                    .put_if_absent(path, json)
+                    .await
+            }
+        };
+        let response = match write {
+            Ok(response) => response,
+            Err(err) if is_pubky_precondition_failed(&err) => {
+                return Err(PaykitSdkError::ConcurrentUpdate {
+                    context: "Paykit profile changed; reload it before saving again".into(),
+                    source: Some(err.into()),
+                });
+            }
+            Err(err) => return Err(map_pubky_transport_error("publish Paykit profile", err)),
+        };
+        let revision = pubky::ResourceStats::from_headers(response.headers())
+            .etag
+            .filter(|etag| !etag.starts_with("W/\"") && !etag.is_empty())
+            .ok_or_else(|| PaykitSdkError::Transport {
+                context: "publish Paykit profile: response is missing a strong ETag".into(),
+                source: None,
+            })?;
         Ok(PaykitProfileRecord {
             public_key: session_access.public_key()?,
             profile,
-            path,
+            path: path.to_owned(),
+            revision,
             updated_at: self.clock.now(),
         })
     }
@@ -41,7 +75,6 @@ where
     pub async fn fetch_paykit_profile(
         &self,
         public_key: PubkyPublicKey,
-        receiver_path: PaykitReceiverPath,
     ) -> Result<Option<PaykitProfileRecord>> {
         let public_storage =
             self.pubky
@@ -51,48 +84,69 @@ where
                     context: "no Pubky public storage available for profile lookup".into(),
                     source: None,
                 })?;
-        let path = self.config.paykit_profile_path_for_receiver(&receiver_path);
-        let Some(raw_json) =
-            fetch_public_text(&public_storage, &public_key, &path, "fetch profile").await?
+        let path = PAYKIT_PROFILE_PATH;
+        let Some((raw_json, revision)) = fetch_public_text_with_revision(
+            &public_storage,
+            &public_key,
+            path,
+            "fetch profile",
+            MAX_PUBLIC_PROFILE_BYTES,
+        )
+        .await?
         else {
             return Ok(None);
         };
         Ok(Some(PaykitProfileRecord {
             public_key,
             profile: parse_profile_json(&raw_json)?,
-            path,
+            path: path.to_owned(),
+            revision,
             updated_at: self.clock.now(),
         }))
     }
 
-    /// Delete the local public Paykit profile.
-    pub async fn delete_paykit_profile(&self) -> Result<()> {
+    /// Delete the local public Paykit profile at the supplied revision.
+    pub async fn delete_paykit_profile(&self, expected_revision: String) -> Result<()> {
         let session_access = self
             .load_session_access_for_initialized_identity("delete Paykit profile")
             .await?;
-        let path = self.config.paykit_profile_path();
-        session_access
+        let path = PAYKIT_PROFILE_PATH;
+        let result = session_access
             .session
             .storage()
-            .delete(path.as_str())
-            .await
-            .map(|_| ())
-            .or_else(|err| {
-                if is_pubky_not_found(&err) {
+            .delete_if_match(path, &expected_revision)
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(err) if is_pubky_precondition_failed(&err) => {
+                let current = fetch_public_text_with_revision(
+                    &session_access.outbox_client.public_storage(),
+                    &session_access.public_key()?,
+                    path,
+                    "fetch profile after conditional delete",
+                    MAX_PUBLIC_PROFILE_BYTES,
+                )
+                .await?;
+                if current.is_none() {
                     Ok(())
                 } else {
-                    Err(map_pubky_transport_error("delete Paykit profile", err))
+                    Err(PaykitSdkError::ConcurrentUpdate {
+                        context: "Paykit profile changed; reload it before deleting".into(),
+                        source: Some(err.into()),
+                    })
                 }
-            })
+            }
+            Err(err) => Err(map_pubky_transport_error("delete Paykit profile", err)),
+        }
     }
 
-    /// Publish a public blob under the configured Paykit blob prefix.
+    /// Publish a public blob under the identity-wide Paykit blob prefix.
     pub async fn publish_paykit_blob(
         &self,
         blob_name: String,
         bytes: Vec<u8>,
     ) -> Result<PaykitBlobRecord> {
-        let path = paykit_blob_path(&self.config.paykit_profile_blob_path_prefix(), &blob_name)?;
+        let path = paykit_blob_path(PAYKIT_PROFILE_BLOB_PATH_PREFIX, &blob_name)?;
         let size_bytes = bytes.len() as u64;
         let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
@@ -116,7 +170,7 @@ where
         })
     }
 
-    /// Upload profile avatar bytes under the configured Paykit blob prefix.
+    /// Upload profile avatar bytes under the identity-wide Paykit blob prefix.
     ///
     /// The blob name is derived from the content hash and image content type.
     pub async fn upload_profile_avatar(
@@ -136,7 +190,7 @@ where
         self.publish_paykit_blob(blob_name, bytes).await
     }
 
-    /// Delete a public blob from the configured Paykit blob prefix.
+    /// Delete a public blob from the identity-wide Paykit blob prefix.
     pub async fn delete_paykit_blob(&self, uri_or_path: &str) -> Result<()> {
         let session_access = self
             .load_session_access_for_initialized_identity("delete Paykit blob")
@@ -144,7 +198,7 @@ where
         let public_key = session_access.public_key()?;
         let path = paykit_blob_path_from_uri_or_path(
             &public_key,
-            &self.config.paykit_profile_blob_path_prefix(),
+            PAYKIT_PROFILE_BLOB_PATH_PREFIX,
             uri_or_path,
         )?;
         session_access
@@ -163,7 +217,8 @@ where
     }
 
     /// Fetch a public `pubky://` file referenced by profile metadata.
-    pub async fn fetch_pubky_file(&self, uri: &str) -> Result<Option<Vec<u8>>> {
+    pub async fn fetch_pubky_file(&self, uri: &str, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        require_response_size_within_limit(None, max_bytes, "fetch Pubky file")?;
         let public_storage =
             self.pubky
                 .load_public_storage()
@@ -172,12 +227,13 @@ where
                     context: "no Pubky public storage available for Pubky file fetch".into(),
                     source: None,
                 })?;
-        fetch_public_file_uri(&public_storage, uri, "fetch Pubky file").await
+        fetch_public_file_uri(&public_storage, uri, "fetch Pubky file", max_bytes).await
     }
 
     /// Fetch a public `pubky://` text file referenced by profile metadata.
-    pub async fn fetch_pubky_text(&self, uri: &str) -> Result<Option<String>> {
-        let Some(bytes) = self.fetch_pubky_file(uri).await? else {
+    pub async fn fetch_pubky_text(&self, uri: &str, max_bytes: usize) -> Result<Option<String>> {
+        require_response_size_within_limit(None, max_bytes, "fetch Pubky text")?;
+        let Some(bytes) = self.fetch_pubky_file(uri, max_bytes).await? else {
             return Ok(None);
         };
         String::from_utf8(bytes)
@@ -206,6 +262,7 @@ where
             &public_key,
             PUBKY_PROFILE_PATH,
             "fetch Pubky profile",
+            MAX_PUBLIC_PROFILE_BYTES,
         )
         .await?
         else {
@@ -223,6 +280,7 @@ where
     pub async fn fetch_pubky_follows(
         &self,
         public_key: PubkyPublicKey,
+        max_entries: usize,
     ) -> Result<Vec<PubkyPublicKey>> {
         let public_storage =
             self.pubky
@@ -237,58 +295,40 @@ where
             &public_key,
             PUBKY_FOLLOWS_PATH_PREFIX,
             "fetch Pubky follows",
+            max_entries,
         )
         .await?;
         Ok(pubky_follow_keys_from_follow_entries(entries))
-    }
-
-    /// Resolve a contact display profile, preferring Paykit Profile.
-    pub async fn resolve_contact_profile(
-        &self,
-        public_key: PubkyPublicKey,
-        receiver_path: PaykitReceiverPath,
-        allow_pubky_profile_fallback: bool,
-    ) -> Result<Option<ContactProfileResolution>> {
-        if let Some(record) = self
-            .fetch_paykit_profile(public_key.clone(), receiver_path)
-            .await?
-        {
-            return Ok(Some(ContactProfileResolution::from_paykit(record)));
-        }
-        if allow_pubky_profile_fallback {
-            return self
-                .fetch_pubky_profile(public_key)
-                .await
-                .map(|record| record.map(ContactProfileResolution::from_pubky));
-        }
-        Ok(None)
     }
 
     /// Resolve a public profile, preferring Paykit Profile.
     pub async fn resolve_profile(
         &self,
         public_key: PubkyPublicKey,
-        receiver_path: PaykitReceiverPath,
         allow_pubky_profile_fallback: bool,
-    ) -> Result<Option<ContactProfileResolution>> {
-        self.resolve_contact_profile(public_key, receiver_path, allow_pubky_profile_fallback)
-            .await
+    ) -> Result<Option<ProfileResolution>> {
+        if let Some(record) = self.fetch_paykit_profile(public_key.clone()).await? {
+            return Ok(Some(ProfileResolution::from_paykit(record)));
+        }
+        if allow_pubky_profile_fallback {
+            return self
+                .fetch_pubky_profile(public_key)
+                .await
+                .map(|record| record.map(ProfileResolution::from_pubky));
+        }
+        Ok(None)
     }
 
     /// Resolve this identity's public profile.
     pub async fn current_profile(
         &self,
         allow_pubky_profile_fallback: bool,
-    ) -> Result<Option<ContactProfileResolution>> {
+    ) -> Result<Option<ProfileResolution>> {
         let public_key = self
             .require_initialized_identity("resolve current profile")
             .await?;
-        self.resolve_profile(
-            public_key,
-            self.config.receiver_path.clone(),
-            allow_pubky_profile_fallback,
-        )
-        .await
+        self.resolve_profile(public_key, allow_pubky_profile_fallback)
+            .await
     }
 }
 

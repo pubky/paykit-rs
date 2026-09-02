@@ -33,6 +33,7 @@ fn test_payment_request_terms_parse_protocol_inputs() {
             ends_at: None,
         }),
         accepted_payment_endpoint_identifiers: vec!["btc-lightning-bolt11".into()],
+        required_app_id: Some("bitkit".into()),
         metadata: Arc::new(FfiPrivateJsonObject::new(r#"{"order":"123"}"#.into()).unwrap()),
     };
 
@@ -65,7 +66,6 @@ fn test_payment_reference_debug_redacts_text() {
 fn test_payment_request_filter_rejects_unknown_state() {
     let filter = FfiPaymentRequestFilter {
         counterparty: None,
-        counterparty_receiver_path: None,
         local_role: None,
         states: vec![FfiPaymentRequestLifecycleState::Unknown],
         recurring: None,
@@ -87,7 +87,6 @@ fn test_payment_request_record_conversion_redacts_references() {
 
     let record = PaymentRequestRecord {
         counterparty: public_key(),
-        counterparty_receiver_path: paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
         payment_request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
         local_role: Some(PaymentRequestLocalRole::Payer),
         state: PaymentRequestLifecycleState::Accepted,
@@ -95,6 +94,9 @@ fn test_payment_request_record_conversion_redacts_references() {
         proposal_outbound_message_id: None,
         proposal_outbound_status: None,
         proposal_event_id: Some("650e8400-e29b-41d4-a716-446655440000".into()),
+        proposal_app_id: Some(paykit_sdk::PaykitAppId::new("bitkit").unwrap()),
+        payer_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
+        execution_claim_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
         terms: Some(PaymentRequestTermsRecord {
             amount: AmountRecord {
                 value: "10".into(),
@@ -104,6 +106,7 @@ fn test_payment_request_record_conversion_redacts_references() {
             proposal_expires_at: None,
             recurrence: None,
             accepted_payment_endpoint_identifiers: vec!["btc-lightning-bolt11".into()],
+            required_app_id: Some(paykit_sdk::PaykitAppId::new("bitkit").unwrap()),
             metadata,
         }),
         accepted_event_id: None,
@@ -122,6 +125,7 @@ fn test_payment_request_record_conversion_redacts_references() {
                 starts_at: "2026-06-01T00:00:00Z".into(),
                 ends_at: "2026-07-01T00:00:00Z".into(),
             }),
+            payment_app_id: paykit_sdk::PaykitAppId::new("bitkit").unwrap(),
             payment_endpoint_identifier: "btc-lightning-bolt11".into(),
             proof,
             recorded_at: Utc::now(),
@@ -136,6 +140,9 @@ fn test_payment_request_record_conversion_redacts_references() {
     let ffi = FfiPaymentRequestRecord::try_from(record).unwrap();
 
     assert_eq!(ffi.state, FfiPaymentRequestLifecycleState::Accepted);
+    assert_eq!(ffi.payer_app_id.as_deref(), Some("wallet"));
+    assert_eq!(ffi.execution_claim_app_id.as_deref(), Some("wallet"));
+    assert_eq!(ffi.proposal_app_id.as_deref(), Some("bitkit"));
     assert_eq!(
         ffi.terms.as_ref().unwrap().payment_reference.export_text(),
         "invoice secret"
@@ -152,6 +159,7 @@ fn test_payment_request_record_conversion_redacts_references() {
 fn test_payment_proof_submission_rejects_non_object_proof() {
     let submission = FfiPaymentProofSubmission {
         billing_period: None,
+        payment_app_id: "bitkit".into(),
         payment_endpoint_identifier: "btc-lightning-bolt11".into(),
         proof: Arc::new(FfiPrivateJsonObject::from_unchecked_text("[]".into())),
     };

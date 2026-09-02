@@ -1,17 +1,4 @@
-use serde::{Deserialize, Serialize};
-
-use crate::{PaykitError, PaykitReceiverPath, PublicKey, Result};
-
-const SNAPSHOT_WIRE_VERSION: u32 = 1;
-
-#[derive(Serialize, Deserialize)]
-struct SnapshotWire {
-    version: u32,
-    local_receiver_path: PaykitReceiverPath,
-    remote_receiver_path: PaykitReceiverPath,
-    remote_noise_public_key: PublicKey,
-    state: Vec<u8>,
-}
+use crate::{PaykitError, PublicKey, Result};
 
 /// Serializable snapshot of an established [`EncryptedLink`](crate::EncryptedLink).
 ///
@@ -23,12 +10,8 @@ pub struct EncryptedLinkSnapshot {
     state: pubky_noise::serializer::PubkyNoiseSessionState,
     /// The counterparty's public key (derived from `state.endpoint_pubkey`).
     recipient: PublicKey,
-    /// Counterparty receiver Noise public key used for path derivation.
+    /// The counterparty's identity-wide Noise public key.
     remote_noise_public_key: PublicKey,
-    /// Local receiver path used by this link.
-    local_receiver_path: PaykitReceiverPath,
-    /// Counterparty receiver path used by this link.
-    remote_receiver_path: PaykitReceiverPath,
 }
 
 fn recipient_from_snapshot_state(
@@ -47,13 +30,51 @@ fn recipient_from_snapshot_state(
     Ok(PublicKey::from(pkarr_pk))
 }
 
+fn public_key_from_bytes(bytes: &[u8], context: &'static str) -> Result<PublicKey> {
+    let pkarr_pk =
+        pubky::pkarr::PublicKey::try_from(bytes).map_err(|err| PaykitError::InvalidData {
+            context: format!("failed to reconstruct {context}: {err}"),
+            source: Some(err.into()),
+        })?;
+    Ok(PublicKey::from(pkarr_pk))
+}
+
+fn serialize_snapshot(
+    state: &pubky_noise::serializer::PubkyNoiseSessionState,
+    remote_noise_public_key: &PublicKey,
+) -> Vec<u8> {
+    let mut bytes = state.serialize();
+    bytes.extend_from_slice(&remote_noise_public_key.to_bytes());
+    bytes
+}
+
+fn deserialize_snapshot(
+    bytes: &[u8],
+    snapshot_kind: &'static str,
+) -> Result<(pubky_noise::serializer::PubkyNoiseSessionState, PublicKey)> {
+    let Some(state_len) = bytes.len().checked_sub(32) else {
+        return Err(PaykitError::InvalidData {
+            context: format!("{snapshot_kind} is too short"),
+            source: None,
+        });
+    };
+    let state = deserialize_noise_state(&bytes[..state_len], snapshot_kind)?;
+    if state.serialize().len() != state_len {
+        return Err(PaykitError::InvalidData {
+            context: format!("{snapshot_kind} has an invalid length"),
+            source: None,
+        });
+    }
+    let remote_noise_public_key =
+        public_key_from_bytes(&bytes[state_len..], "remote Noise public key")?;
+    Ok((state, remote_noise_public_key))
+}
+
 impl std::fmt::Debug for EncryptedLinkSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptedLinkSnapshot")
             .field("recipient", &self.recipient)
             .field("remote_noise_public_key", &self.remote_noise_public_key)
-            .field("local_receiver_path", &self.local_receiver_path)
-            .field("remote_receiver_path", &self.remote_receiver_path)
             .finish_non_exhaustive()
     }
 }
@@ -63,15 +84,11 @@ impl EncryptedLinkSnapshot {
         state: pubky_noise::serializer::PubkyNoiseSessionState,
         recipient: PublicKey,
         remote_noise_public_key: PublicKey,
-        local_receiver_path: PaykitReceiverPath,
-        remote_receiver_path: PaykitReceiverPath,
     ) -> Self {
         Self {
             state,
             recipient,
             remote_noise_public_key,
-            local_receiver_path,
-            remote_receiver_path,
         }
     }
 
@@ -83,19 +100,12 @@ impl EncryptedLinkSnapshot {
         self.state
     }
 
-    /// Serialize to the receiver-scoped snapshot wire format for durable storage.
+    /// Serialize to a compact binary format for durable storage.
     ///
-    /// The output contains the Noise session state plus the local and remote
-    /// receiver paths needed to restore it into the same Paykit folders.
+    /// The output contains the `pubky-noise` session state followed by the
+    /// counterparty's 32-byte identity-wide Noise public key.
     pub fn serialize(&self) -> Vec<u8> {
-        let wire = SnapshotWire {
-            version: SNAPSHOT_WIRE_VERSION,
-            local_receiver_path: self.local_receiver_path.clone(),
-            remote_receiver_path: self.remote_receiver_path.clone(),
-            remote_noise_public_key: self.remote_noise_public_key.clone(),
-            state: self.state.serialize(),
-        };
-        serde_json::to_vec(&wire).expect("Encrypted Link snapshot wire serialization is infallible")
+        serialize_snapshot(&self.state, &self.remote_noise_public_key)
     }
 
     /// Deserialize from bytes previously produced by [`serialize`](Self::serialize).
@@ -103,17 +113,14 @@ impl EncryptedLinkSnapshot {
     /// Returns [`PaykitError::InvalidData`] if the bytes are malformed or the
     /// embedded public key cannot be reconstructed.
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
-        let wire = deserialize_snapshot_wire(bytes, "Encrypted Link snapshot")?;
-        let state = deserialize_noise_state(&wire.state, "Encrypted Link snapshot")?;
-
+        let (state, remote_noise_public_key) =
+            deserialize_snapshot(bytes, "Encrypted Link snapshot")?;
         let recipient = recipient_from_snapshot_state(&state, "Encrypted Link snapshot")?;
 
         Ok(Self {
             state,
             recipient,
-            remote_noise_public_key: wire.remote_noise_public_key,
-            local_receiver_path: wire.local_receiver_path,
-            remote_receiver_path: wire.remote_receiver_path,
+            remote_noise_public_key,
         })
     }
 
@@ -122,52 +129,10 @@ impl EncryptedLinkSnapshot {
         &self.recipient
     }
 
-    /// Access the counterparty receiver Noise public key embedded in the snapshot.
+    /// Access the counterparty's identity-wide Noise public key.
     pub fn remote_noise_public_key(&self) -> &PublicKey {
         &self.remote_noise_public_key
     }
-
-    /// Access the local receiver path embedded in the snapshot.
-    pub fn local_receiver_path(&self) -> &PaykitReceiverPath {
-        &self.local_receiver_path
-    }
-
-    /// Access the remote receiver path embedded in the snapshot.
-    pub fn remote_receiver_path(&self) -> &PaykitReceiverPath {
-        &self.remote_receiver_path
-    }
-
-    pub(super) fn validate_receiver_scope(
-        &self,
-        local_receiver_path: &PaykitReceiverPath,
-        remote_receiver_path: &PaykitReceiverPath,
-    ) -> Result<()> {
-        validate_receiver_scope(
-            "Encrypted Link snapshot",
-            &self.local_receiver_path,
-            &self.remote_receiver_path,
-            local_receiver_path,
-            remote_receiver_path,
-        )
-    }
-}
-
-fn deserialize_snapshot_wire(bytes: &[u8], snapshot_kind: &'static str) -> Result<SnapshotWire> {
-    let wire: SnapshotWire =
-        serde_json::from_slice(bytes).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to deserialize {snapshot_kind}: {err}"),
-            source: Some(err.into()),
-        })?;
-    if wire.version != SNAPSHOT_WIRE_VERSION {
-        return Err(PaykitError::InvalidData {
-            context: format!(
-                "unsupported {snapshot_kind} version {}, expected {SNAPSHOT_WIRE_VERSION}",
-                wire.version
-            ),
-            source: None,
-        });
-    }
-    Ok(wire)
 }
 
 fn deserialize_noise_state(
@@ -193,12 +158,8 @@ pub struct EncryptedLinkHandshakeSnapshot {
     state: pubky_noise::serializer::PubkyNoiseSessionState,
     /// The counterparty's public key (derived from `state.endpoint_pubkey`).
     recipient: PublicKey,
-    /// Counterparty receiver Noise public key used for path derivation.
+    /// The counterparty's identity-wide Noise public key.
     remote_noise_public_key: PublicKey,
-    /// Local receiver path used by this handshake.
-    local_receiver_path: PaykitReceiverPath,
-    /// Counterparty receiver path used by this handshake.
-    remote_receiver_path: PaykitReceiverPath,
 }
 
 impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
@@ -206,8 +167,6 @@ impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
         f.debug_struct("EncryptedLinkHandshakeSnapshot")
             .field("recipient", &self.recipient)
             .field("remote_noise_public_key", &self.remote_noise_public_key)
-            .field("local_receiver_path", &self.local_receiver_path)
-            .field("remote_receiver_path", &self.remote_receiver_path)
             .finish_non_exhaustive()
     }
 }
@@ -217,15 +176,11 @@ impl EncryptedLinkHandshakeSnapshot {
         state: pubky_noise::serializer::PubkyNoiseSessionState,
         recipient: PublicKey,
         remote_noise_public_key: PublicKey,
-        local_receiver_path: PaykitReceiverPath,
-        remote_receiver_path: PaykitReceiverPath,
     ) -> Self {
         Self {
             state,
             recipient,
             remote_noise_public_key,
-            local_receiver_path,
-            remote_receiver_path,
         }
     }
 
@@ -237,20 +192,12 @@ impl EncryptedLinkHandshakeSnapshot {
         self.state
     }
 
-    /// Serialize to the receiver-scoped snapshot wire format for durable storage.
+    /// Serialize to a compact binary format for durable storage.
     ///
-    /// The output contains the Noise session state plus the local and remote
-    /// receiver paths needed to restore it into the same Paykit folders.
+    /// The output contains the `pubky-noise` session state followed by the
+    /// counterparty's 32-byte identity-wide Noise public key.
     pub fn serialize(&self) -> Vec<u8> {
-        let wire = SnapshotWire {
-            version: SNAPSHOT_WIRE_VERSION,
-            local_receiver_path: self.local_receiver_path.clone(),
-            remote_receiver_path: self.remote_receiver_path.clone(),
-            remote_noise_public_key: self.remote_noise_public_key.clone(),
-            state: self.state.serialize(),
-        };
-        serde_json::to_vec(&wire)
-            .expect("Encrypted Link Handshake snapshot wire serialization is infallible")
+        serialize_snapshot(&self.state, &self.remote_noise_public_key)
     }
 
     /// Deserialize from bytes previously produced by [`serialize`](Self::serialize).
@@ -258,17 +205,15 @@ impl EncryptedLinkHandshakeSnapshot {
     /// Returns [`PaykitError::InvalidData`] if the bytes are malformed or the
     /// embedded public key cannot be reconstructed.
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
-        let wire = deserialize_snapshot_wire(bytes, "Encrypted Link Handshake snapshot")?;
-        let state = deserialize_noise_state(&wire.state, "Encrypted Link Handshake snapshot")?;
+        let (state, remote_noise_public_key) =
+            deserialize_snapshot(bytes, "Encrypted Link Handshake snapshot")?;
 
         let recipient = recipient_from_snapshot_state(&state, "Encrypted Link Handshake snapshot")?;
 
         Ok(Self {
             state,
             recipient,
-            remote_noise_public_key: wire.remote_noise_public_key,
-            local_receiver_path: wire.local_receiver_path,
-            remote_receiver_path: wire.remote_receiver_path,
+            remote_noise_public_key,
         })
     }
 
@@ -277,47 +222,8 @@ impl EncryptedLinkHandshakeSnapshot {
         &self.recipient
     }
 
-    /// Access the counterparty receiver Noise public key embedded in the snapshot.
+    /// Access the counterparty's identity-wide Noise public key.
     pub fn remote_noise_public_key(&self) -> &PublicKey {
         &self.remote_noise_public_key
     }
-
-    /// Access the local receiver path embedded in the snapshot.
-    pub fn local_receiver_path(&self) -> &PaykitReceiverPath {
-        &self.local_receiver_path
-    }
-
-    /// Access the remote receiver path embedded in the snapshot.
-    pub fn remote_receiver_path(&self) -> &PaykitReceiverPath {
-        &self.remote_receiver_path
-    }
-
-    pub(super) fn validate_receiver_scope(
-        &self,
-        local_receiver_path: &PaykitReceiverPath,
-        remote_receiver_path: &PaykitReceiverPath,
-    ) -> Result<()> {
-        validate_receiver_scope(
-            "Encrypted Link Handshake snapshot",
-            &self.local_receiver_path,
-            &self.remote_receiver_path,
-            local_receiver_path,
-            remote_receiver_path,
-        )
-    }
-}
-
-fn validate_receiver_scope(
-    snapshot_kind: &'static str,
-    snapshot_local: &PaykitReceiverPath,
-    snapshot_remote: &PaykitReceiverPath,
-    restore_local: &PaykitReceiverPath,
-    restore_remote: &PaykitReceiverPath,
-) -> Result<()> {
-    if snapshot_local != restore_local || snapshot_remote != restore_remote {
-        return Err(PaykitError::Validation(format!(
-            "{snapshot_kind} receiver scope mismatch (restore local={restore_local}, remote={restore_remote}; snapshot local={snapshot_local}, remote={snapshot_remote})"
-        )));
-    }
-    Ok(())
 }

@@ -1,22 +1,23 @@
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
+    ops::Deref,
     sync::{Arc, Mutex},
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use paykit_lib::{
-    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaykitReceiverCapabilities,
-    PaykitReceiverMarker, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
-    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestId,
-    PaymentRequestRejection, PaymentRequestTerms, PrivateMessageKind, ReceiptDraft,
+    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaymentEndpointIdentifier, PaymentProof,
+    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
+    PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms, PrivateMessageKind,
+    ReceiptDraft,
 };
 use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
-use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
 #[cfg(test)]
-use paykit_lib::PaymentRequestEvent;
+use crate::domain::payment_requests::enqueue_payment_request_event as enqueue_payment_request_response_message;
 
 use crate::{
     backup::{
@@ -24,16 +25,14 @@ use crate::{
         restore_backup_state_with_identity as restore_sdk_backup_state, RestoreReport,
         SdkBackupState,
     },
-    config::{
-        EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
-        PublicContactSharingPolicy,
-    },
+    config::{EndpointManagementScope, PaykitSdkConfig, PublicContactSharingPolicy},
     domain::contacts::{
         parse_profile_json, parse_pubky_profile_json, paykit_blob_path,
         paykit_blob_path_from_uri_or_path, paykit_blob_uri, profile_json,
-        pubky_follow_keys_from_follow_entries, public_contact_json, ContactProfileResolution,
+        pubky_follow_keys_from_follow_entries, public_contact_json, public_contact_path,
         ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
-        PubkyProfileRecord, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+        ProfileResolution, PubkyProfileRecord, PAYKIT_PROFILE_BLOB_PATH_PREFIX,
+        PAYKIT_PROFILE_PATH, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
     },
     domain::endpoint_reservations::{
         expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
@@ -49,6 +48,7 @@ use crate::{
     domain::linked_peers::{
         default_linked_peer, mark_recovery_required_for_marker_in_transaction,
         mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
+        requeue_recovery_required_outbound_messages,
         save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
         save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
         EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
@@ -62,32 +62,33 @@ use crate::{
         ReservationCleanupFailure,
     },
     domain::payment_requests::{
-        enqueue_payment_proof as enqueue_payment_proof_message,
+        claim_payment_request_execution, enqueue_checked_payment_request_action,
         enqueue_payment_request as enqueue_payment_request_message,
-        enqueue_payment_request_acceptance as enqueue_payment_request_acceptance_message,
-        enqueue_payment_request_cancellation as enqueue_payment_request_cancellation_message,
-        enqueue_payment_request_rejection as enqueue_payment_request_rejection_message,
+        payment_request_record_blocks_app_removal,
         payment_request_records as derive_payment_request_records,
         received_payment_request_records as derive_received_payment_request_records,
-        request_from_record, PaymentRequestFilter, PaymentRequestLifecycleState,
-        PaymentRequestLocalRole, PaymentRequestRecord,
+        release_payment_request_execution_claim, request_from_record, PaymentRequestFilter,
+        PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
+        PaymentRequestTermsRecord,
     },
     domain::payment_resolution::{
         PreparedPrivateContactPayment, PrivateContactPaymentResolution,
         PrivatePaymentResolutionState, PrivatePaymentResolutionStatus,
-        PublicContactPaymentResolution, PublicPaymentResolutionStatus,
+        PublicContactPaymentResolution, PublicPaymentEndpointLoadFailure,
+        PublicPaymentEndpointLoadFailureKind, PublicPaymentResolutionStatus,
         ResolvedPrivatePaymentEndpoint, ResolvedPublicPaymentEndpoint,
     },
     domain::private_lists::{
-        current_private_payment_list as load_current_private_payment_list,
+        counterparties_with_shared_private_payment_lists,
+        current_private_payment_lists as load_current_private_payment_lists,
         enqueue_private_payment_list_with_link_lease as enqueue_private_payment_list_message_with_link_lease,
         PrivatePaymentListDeliveryFailure, PrivatePaymentListDeliveryReport,
         PrivatePaymentListReservationUpdate, PrivatePaymentListSyncChange,
         PrivatePaymentListSyncReport,
     },
     domain::private_stream::{
-        persist_private_stream_batch_with_link_lease, PrivateStreamCounterpartyIntakeReport,
-        PrivateStreamIntakeReport,
+        persist_private_stream_batch_with_link_lease, persist_private_stream_batch_write,
+        PrivateStreamBatchWrite, PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,
     },
     domain::publication::PublicationStatus,
     domain::receipts::{
@@ -102,21 +103,34 @@ use crate::{
         ReceiptRetrievalStatus,
     },
     domain::recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
-    identity::{IdentityState, IdentityStatus},
+    identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
     storage::{
-        outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
-        OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
+        outbound_private_queue_head_is_claimable,
+        retry_storage_transaction as retry_storage_transaction_with_adapter,
+        EncryptedLinkStateRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
+        PaykitAppOperationLease, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
-    PaykitReceiverPath, PaykitSdkError, PaymentAdapter, PrivatePaymentEndpointCandidate,
+    PaykitSdkError, PaymentAdapter, PrivatePaymentEndpointCandidate,
     PrivatePaymentEndpointReservation, PrivatePaymentEndpointReservationCancellation,
     PrivatePaymentEndpointSelectionRequest, PrivatePaymentListView, PrivateReceivingDetail,
     PubkyPublicKey, PubkySessionAccess, PubkySessionProvider, PublicPaymentEndpointCandidate,
     PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
+    PAYKIT_SESSION_CAPABILITIES,
 };
 
+const PEER_LINK_OPERATION_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const PAYKIT_APP_OPERATION_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const OUTBOUND_PRIVATE_SEND_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const OUTBOUND_PRIVATE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+const RESERVATION_CANCELLATION_CLAIM_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+mod app_registry;
+mod app_removal;
 mod backup;
 mod contacts;
 mod encrypted_links;
+mod key_rotation;
 mod outbound_private;
 mod payment_requests;
 mod payment_resolution;
@@ -126,6 +140,9 @@ mod profiles;
 mod public_endpoints;
 mod receipts;
 mod recovery;
+mod reservation_cleanup;
+
+pub use app_removal::PaykitAppRemovalBlockers;
 
 /// Clock abstraction used by SDK workflows and tests.
 pub trait Clock: Clone + Send + Sync + 'static {
@@ -143,14 +160,7 @@ impl Clock for SystemClock {
     }
 }
 
-/// Initialization report returned after SDK startup.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InitializationReport {
-    /// Last persisted identity status.
-    pub identity: IdentityStatus,
-}
-
-/// Stateful Paykit SDK runtime for one app-owned local Paykit runtime.
+/// Stateful SDK runtime for one application participating in a Paykit identity.
 pub struct PaykitSdk<S, K, P, C = SystemClock> {
     storage: S,
     pubky: K,
@@ -158,6 +168,9 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     config: PaykitSdkConfig,
     clock: C,
     identity_operation_in_progress: Arc<Mutex<bool>>,
+    // Session-backed workflows hold a read guard; sign-out waits for all of
+    // them before clearing access under the write guard.
+    session_operation_gate: Arc<RwLock<()>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,6 +181,19 @@ enum PrivateQueueReadiness {
 
 struct RuntimeOperationGuard {
     in_progress: Arc<Mutex<bool>>,
+}
+
+struct GuardedSessionAccess {
+    access: PubkySessionAccess,
+    _guard: OwnedRwLockReadGuard<()>,
+}
+
+impl Deref for GuardedSessionAccess {
+    type Target = PubkySessionAccess;
+
+    fn deref(&self) -> &Self::Target {
+        &self.access
+    }
 }
 
 impl Drop for RuntimeOperationGuard {
@@ -185,13 +211,8 @@ where
     P: PaymentAdapter,
 {
     /// Create an SDK runtime with the system clock.
-    pub fn new(storage: S, pubky: K, payment: P, config: PaykitSdkConfig) -> Result<Self> {
-        Self::try_with_clock(storage, pubky, payment, config, SystemClock)
-    }
-
-    /// Fallible alias for [`Self::new`].
-    pub fn try_new(storage: S, pubky: K, payment: P, config: PaykitSdkConfig) -> Result<Self> {
-        Self::new(storage, pubky, payment, config)
+    pub fn new(storage: S, pubky: K, payment: P, config: PaykitSdkConfig) -> Self {
+        Self::with_clock(storage, pubky, payment, config, SystemClock)
     }
 }
 
@@ -203,22 +224,16 @@ where
     C: Clock,
 {
     /// Create an SDK runtime with an explicit clock.
-    pub fn try_with_clock(
-        storage: S,
-        pubky: K,
-        payment: P,
-        config: PaykitSdkConfig,
-        clock: C,
-    ) -> Result<Self> {
-        config.validate()?;
-        Ok(Self {
+    pub fn with_clock(storage: S, pubky: K, payment: P, config: PaykitSdkConfig, clock: C) -> Self {
+        Self {
             storage,
             pubky,
             payment,
             config,
             clock,
             identity_operation_in_progress: Arc::new(Mutex::new(false)),
-        })
+            session_operation_gate: Arc::new(RwLock::new(())),
+        }
     }
 
     fn claim_identity_operation(&self, context: &str) -> Result<RuntimeOperationGuard> {
@@ -243,44 +258,55 @@ where
         })
     }
 
-    #[cfg(test)]
-    fn with_clock(storage: S, pubky: K, payment: P, config: PaykitSdkConfig, clock: C) -> Self {
-        Self::try_with_clock(storage, pubky, payment, config, clock)
-            .expect("test PaykitSdkConfig must be valid")
+    async fn retry_storage_transaction<T, F, O>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnMut() -> O,
+        O: FnOnce(&mut dyn StorageTransaction) -> Result<T> + Send,
+    {
+        retry_storage_transaction_with_adapter(&self.storage, operation).await
     }
 
     /// Initialize durable SDK identity state.
-    pub async fn initialize(&self) -> Result<InitializationReport> {
+    pub async fn initialize(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("initialize")?;
         let (session, state) = self.load_session_access_and_refresh_identity().await?;
         let live_session_available = session.is_some();
+        let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
+        let private_link_capable = session
+            .as_ref()
+            .map(|session| session.private_link_capable_for_capabilities(required_capabilities))
+            .transpose()?
+            .unwrap_or(false);
 
-        Ok(InitializationReport {
-            identity: IdentityStatus::from_state(&state, live_session_available),
-        })
+        Ok(IdentityStatus::from_state(
+            &state,
+            live_session_available,
+            private_link_capable,
+        ))
     }
 
-    /// Revoke the current Pubky grant and clear SDK-managed identity state.
+    /// Revoke the current Pubky grant and clear this application's session access.
     ///
-    /// This is an explicit destructive sign-out. Apps that want to restore the
-    /// same user's private Paykit state later should export and persist an SDK
-    /// backup before calling this method.
-    ///
-    /// Missing live session access should be represented by
-    /// [`PubkySessionProvider::load_session_access`] returning `None`; that
-    /// preserves stored SDK state and causes sign-out to fail until revocation
-    /// can be attempted. Access for a different identity is also rejected
-    /// before revocation. Use [`Self::forget_session_access`] only for explicit
-    /// local-only cleanup.
+    /// Identity-wide Paykit state remains intact for other applications and a
+    /// later session. Missing access and identity mismatches fail before remote
+    /// revocation or local cleanup. Use [`Self::forget_session_access`] only
+    /// when local-only cleanup is explicitly intended.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
-        let initialized_public_key = self
+        let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
+        let now = self.clock.now();
+        let state = self
             .storage
-            .load_identity_state()
-            .await?
-            .and_then(|state| state.local_pubky_public_key);
+            .transaction(move |tx| {
+                Ok(tx.load_identity_state().unwrap_or(IdentityState {
+                    public_key: None,
+                    initialized_at: now,
+                }))
+            })
+            .await?;
         let session_access = self.pubky.load_session_access().await?;
-        if session_access.is_none() && initialized_public_key.is_some() {
+        if session_access.is_none() && state.public_key.is_some() {
             return Err(PaykitSdkError::Identity {
                 context: "cannot revoke Pubky grant during sign-out without live session access"
                     .into(),
@@ -289,8 +315,8 @@ where
         }
         if let Some(access) = session_access {
             access.validate()?;
-            if let Some(expected_public_key) = initialized_public_key {
-                if access.public_key()? != expected_public_key {
+            if let Some(expected_public_key) = &state.public_key {
+                if access.public_key()? != *expected_public_key {
                     return Err(PaykitSdkError::Identity {
                         context:
                             "cannot sign out because active Pubky session does not match initialized identity"
@@ -301,61 +327,41 @@ where
             }
             self.pubky.revoke_session_access(&access).await?;
         }
-        self.clear_local_identity_state().await
+        self.pubky.clear_session_access().await?;
+
+        Ok(IdentityStatus::from_state(&state, false, false))
     }
 
-    /// Clear local session access and SDK identity state without revoking the grant.
+    /// Clear this application's session access without revoking the grant.
     ///
-    /// This is an offline recovery escape hatch. A copied or separately
+    /// Identity-wide Paykit state remains intact. A copied or separately
     /// persisted grant remains valid until it expires or is revoked elsewhere.
     pub async fn forget_session_access(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("forget session access")?;
-        self.clear_local_identity_state().await
-    }
-
-    async fn clear_local_identity_state(&self) -> Result<IdentityStatus> {
-        self.pubky.clear_session_access().await?;
-
+        let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
         let now = self.clock.now();
         let state = self
             .storage
             .transaction(move |tx| {
-                let previous = tx.load_identity_state();
-                let previous_generation = previous
-                    .as_ref()
-                    .map(|state| state.sign_out_generation)
-                    .unwrap_or_default();
-                let was_signed_in = previous
-                    .as_ref()
-                    .is_some_and(|state| state.local_pubky_public_key.is_some());
-                let generation = if was_signed_in {
-                    previous_generation.saturating_add(1)
-                } else {
-                    previous_generation
-                };
-
-                tx.clear_identity_scoped_state();
-                let state = IdentityState {
-                    local_pubky_public_key: None,
-                    local_receiver_noise_public_key: None,
+                Ok(tx.load_identity_state().unwrap_or(IdentityState {
+                    public_key: None,
                     initialized_at: now,
-                    sign_out_generation: generation,
-                };
-                tx.save_identity_state(state.clone());
-                Ok(state)
+                }))
             })
             .await?;
+        self.pubky.clear_session_access().await?;
 
-        Ok(IdentityStatus::from_state(&state, false))
+        Ok(IdentityStatus::from_state(&state, false, false))
     }
 
     async fn load_session_access_and_refresh_identity(
         &self,
-    ) -> Result<(Option<PubkySessionAccess>, IdentityState)> {
+    ) -> Result<(Option<GuardedSessionAccess>, IdentityState)> {
+        let session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
         let session = self.pubky.load_session_access().await?;
         let now = self.clock.now();
 
-        let Some(session_access) = session.as_ref() else {
+        let Some(session_access) = session else {
             let state = self
                 .storage
                 .transaction(move |tx| {
@@ -364,38 +370,39 @@ where
                     }
 
                     let state = IdentityState {
-                        local_pubky_public_key: None,
-                        local_receiver_noise_public_key: None,
+                        public_key: None,
                         initialized_at: now,
-                        sign_out_generation: 0,
                     };
                     tx.save_identity_state(state.clone());
                     Ok(state)
                 })
                 .await?;
 
-            return Ok((session, state));
+            return Ok((None, state));
         };
 
-        let required_capabilities = self.config.required_session_capabilities();
-        let active_identity = ActiveReceiverIdentity {
-            local_pubky_public_key: session_access.public_key()?,
-            local_receiver_noise_public_key: session_access.receiver_noise_public_key(),
-        };
-        session_access.validate_for_capabilities(&required_capabilities)?;
+        let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
+        let public_key = session_access.public_key()?;
+        session_access.capability_for_capabilities(required_capabilities)?;
         let state = self
             .storage
-            .transaction(move |tx| Ok(refresh_active_identity(tx, active_identity, now)))
+            .transaction(move |tx| bind_storage_to_identity(tx, public_key, now))
             .await?;
 
-        Ok((session, state))
+        Ok((
+            Some(GuardedSessionAccess {
+                access: session_access,
+                _guard: session_guard,
+            }),
+            state,
+        ))
     }
 
     async fn require_initialized_identity(&self, context: &str) -> Result<PubkyPublicKey> {
         self.storage
             .transaction(|tx| {
                 tx.load_identity_state()
-                    .and_then(|state| state.local_pubky_public_key)
+                    .and_then(|state| state.public_key)
                     .ok_or_else(|| PaykitSdkError::Identity {
                         context: format!("cannot {context} without an initialized Pubky identity"),
                         source: None,
@@ -407,7 +414,8 @@ where
     async fn load_session_access_for_initialized_identity(
         &self,
         context: &str,
-    ) -> Result<PubkySessionAccess> {
+    ) -> Result<GuardedSessionAccess> {
+        let session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
         let expected_public_key = self.require_initialized_identity(context).await?;
         let session_access =
             self.pubky
@@ -426,12 +434,16 @@ where
                 source: None,
             });
         }
-        session_access.validate_for_capabilities(&self.config.required_session_capabilities())?;
-        Ok(session_access)
+        session_access.validate_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
+        Ok(GuardedSessionAccess {
+            access: session_access,
+            _guard: session_guard,
+        })
     }
 
     /// Return the last persisted identity status, if initialized.
     pub async fn identity_status(&self) -> Result<Option<IdentityStatus>> {
+        let _session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
         let session = self.pubky.load_session_access().await?;
         let Some(state) = self.storage.load_identity_state().await? else {
             return Ok(None);
@@ -439,16 +451,18 @@ where
         if let Some(session) = &session {
             session.validate()?;
         }
-        let required_capabilities = self.config.required_session_capabilities();
-        let matching_session = session.as_ref().filter(|session| {
-            session.public_key().ok().as_ref() == state.local_pubky_public_key.as_ref()
-        });
-        if let Some(session) = matching_session {
-            session.validate_for_capabilities(&required_capabilities)?;
-        }
+        let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
+        let matching_session = session
+            .as_ref()
+            .filter(|session| session.public_key().ok().as_ref() == state.public_key.as_ref());
+        let private_link_capable = matching_session
+            .map(|session| session.private_link_capable_for_capabilities(required_capabilities))
+            .transpose()?
+            .unwrap_or(false);
         Ok(Some(IdentityStatus::from_state(
             &state,
             matching_session.is_some(),
+            private_link_capable,
         )))
     }
 
@@ -467,98 +481,41 @@ where
                     .into_values()
                     .collect::<Vec<_>>();
                 records.sort_by(|left, right| {
-                    left.counterparty
-                        .as_str()
-                        .cmp(right.counterparty.as_str())
-                        .then_with(|| {
-                            left.counterparty_receiver_path
-                                .as_str()
-                                .cmp(right.counterparty_receiver_path.as_str())
-                        })
+                    left.counterparty.as_str().cmp(right.counterparty.as_str())
                 });
                 Ok(records)
             })
             .await
     }
-
-    fn ensure_recovery_marker_publishing_enabled(&self) -> Result<()> {
-        if self.config.encrypted_link_recovery_markers
-            == EncryptedLinkRecoveryMarkerPolicy::Disabled
-        {
-            Err(PaykitSdkError::Policy {
-                context: "Encrypted Link recovery marker publishing is disabled".into(),
-                source: None,
-            })
-        } else {
-            Ok(())
-        }
-    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ActiveReceiverIdentity {
-    local_pubky_public_key: PubkyPublicKey,
-    local_receiver_noise_public_key: PubkyPublicKey,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IdentityTransition {
-    Initial,
-    PubkyIdentityChanged,
-    ReceiverNoiseKeyChanged,
-    Unchanged,
-}
-
-fn refresh_active_identity(
+fn bind_storage_to_identity(
     tx: &mut dyn StorageTransaction,
-    active: ActiveReceiverIdentity,
+    public_key: PubkyPublicKey,
     initialized_at: DateTime<Utc>,
-) -> IdentityState {
-    let previous = tx.load_identity_state();
-    let transition = identity_transition(previous.as_ref(), &active);
-    let previous_generation = previous
-        .as_ref()
-        .map(|state| state.sign_out_generation)
-        .unwrap_or_default();
-
-    match transition {
-        IdentityTransition::Initial | IdentityTransition::PubkyIdentityChanged => {
-            tx.clear_identity_scoped_state();
+) -> Result<IdentityState> {
+    if let Some(state) = tx.load_identity_state() {
+        if state
+            .public_key
+            .as_ref()
+            .is_some_and(|stored| stored != &public_key)
+        {
+            return Err(PaykitSdkError::Identity {
+                context: "active Pubky session does not match this SDK state backing".into(),
+                source: None,
+            });
         }
-        IdentityTransition::ReceiverNoiseKeyChanged => tx.clear_private_identity_scoped_state(),
-        IdentityTransition::Unchanged => {}
+        if state.public_key.is_some() {
+            return Ok(state);
+        }
     }
 
-    let sign_out_generation = match transition {
-        IdentityTransition::PubkyIdentityChanged => previous_generation.saturating_add(1),
-        _ => previous_generation,
-    };
     let state = IdentityState {
-        local_pubky_public_key: Some(active.local_pubky_public_key),
-        local_receiver_noise_public_key: Some(active.local_receiver_noise_public_key),
+        public_key: Some(public_key),
         initialized_at,
-        sign_out_generation,
     };
     tx.save_identity_state(state.clone());
-    state
-}
-
-fn identity_transition(
-    previous: Option<&IdentityState>,
-    active: &ActiveReceiverIdentity,
-) -> IdentityTransition {
-    let Some(previous) = previous else {
-        return IdentityTransition::Initial;
-    };
-    if previous.local_pubky_public_key.as_ref() != Some(&active.local_pubky_public_key) {
-        return IdentityTransition::PubkyIdentityChanged;
-    }
-    if previous.local_receiver_noise_public_key.as_ref()
-        != Some(&active.local_receiver_noise_public_key)
-    {
-        return IdentityTransition::ReceiverNoiseKeyChanged;
-    }
-    IdentityTransition::Unchanged
+    Ok(state)
 }
 
 async fn fetch_public_text(
@@ -566,23 +523,69 @@ async fn fetch_public_text(
     public_key: &PubkyPublicKey,
     path: &str,
     context: &'static str,
+    max_bytes: usize,
 ) -> Result<Option<String>> {
     let addr = public_resource_uri(public_key, path);
     match storage.get(addr).await {
-        Ok(resp) => {
-            let bytes = resp
-                .bytes()
+        Ok(mut resp) => {
+            require_response_size_within_limit(resp.content_length(), max_bytes, context)?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
                 .await
                 .map_err(|err| PaykitSdkError::Transport {
                     context: context.into(),
                     source: Some(err.into()),
-                })?;
-            String::from_utf8(bytes.to_vec())
+                })?
+            {
+                append_response_chunk(&mut bytes, &chunk, max_bytes, context)?;
+            }
+            String::from_utf8(bytes)
                 .map(Some)
-                .map_err(|err| PaykitSdkError::Protocol {
-                    context: format!("{context}: invalid UTF-8: {err}"),
+                .map_err(|_| PaykitSdkError::Protocol {
+                    context: format!("{context}: response is not valid UTF-8"),
                     source: None,
                 })
+        }
+        Err(err) if is_pubky_not_found(&err) => Ok(None),
+        Err(err) => Err(map_pubky_transport_error(context, err)),
+    }
+}
+
+async fn fetch_public_text_with_revision(
+    storage: &pubky::PublicStorage,
+    public_key: &PubkyPublicKey,
+    path: &str,
+    context: &'static str,
+    max_bytes: usize,
+) -> Result<Option<(String, String)>> {
+    let addr = public_resource_uri(public_key, path);
+    match storage.get(addr).await {
+        Ok(mut resp) => {
+            require_response_size_within_limit(resp.content_length(), max_bytes, context)?;
+            let revision = pubky::ResourceStats::from_headers(resp.headers())
+                .etag
+                .filter(|etag| !etag.starts_with("W/\"") && !etag.is_empty())
+                .ok_or_else(|| PaykitSdkError::Transport {
+                    context: format!("{context}: response is missing a strong ETag"),
+                    source: None,
+                })?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|err| PaykitSdkError::Transport {
+                    context: context.into(),
+                    source: Some(err.into()),
+                })?
+            {
+                append_response_chunk(&mut bytes, &chunk, max_bytes, context)?;
+            }
+            let text = String::from_utf8(bytes).map_err(|_| PaykitSdkError::Protocol {
+                context: format!("{context}: response is not valid UTF-8"),
+                source: None,
+            })?;
+            Ok(Some((text, revision)))
         }
         Err(err) if is_pubky_not_found(&err) => Ok(None),
         Err(err) => Err(map_pubky_transport_error(context, err)),
@@ -593,6 +596,7 @@ async fn fetch_public_file_uri(
     storage: &pubky::PublicStorage,
     uri: &str,
     context: &'static str,
+    max_bytes: usize,
 ) -> Result<Option<Vec<u8>>> {
     let resource = uri
         .parse::<pubky::PubkyResource>()
@@ -601,17 +605,60 @@ async fn fetch_public_file_uri(
             source: None,
         })?;
     match storage.get(resource).await {
-        Ok(resp) => resp
-            .bytes()
-            .await
-            .map(|bytes| Some(bytes.to_vec()))
-            .map_err(|err| PaykitSdkError::Transport {
-                context: context.into(),
-                source: Some(err.into()),
-            }),
+        Ok(mut resp) => {
+            require_response_size_within_limit(resp.content_length(), max_bytes, context)?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|err| PaykitSdkError::Transport {
+                    context: context.into(),
+                    source: Some(err.into()),
+                })?
+            {
+                append_response_chunk(&mut bytes, &chunk, max_bytes, context)?;
+            }
+            Ok(Some(bytes))
+        }
         Err(err) if is_pubky_not_found(&err) => Ok(None),
         Err(err) => Err(map_pubky_transport_error(context, err)),
     }
+}
+
+fn require_response_size_within_limit(
+    content_length: Option<u64>,
+    max_bytes: usize,
+    context: &'static str,
+) -> Result<()> {
+    if max_bytes == 0 {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: byte limit must be greater than zero"),
+            source: None,
+        });
+    }
+    if content_length.is_some_and(|length| length > max_bytes as u64) {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: response exceeds the {max_bytes}-byte limit"),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+fn append_response_chunk(
+    bytes: &mut Vec<u8>,
+    chunk: &[u8],
+    max_bytes: usize,
+    context: &'static str,
+) -> Result<()> {
+    if bytes.len().saturating_add(chunk.len()) > max_bytes {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: response exceeds the {max_bytes}-byte limit"),
+            source: None,
+        });
+    }
+    bytes.extend_from_slice(chunk);
+    Ok(())
 }
 
 async fn list_public_resources(
@@ -619,9 +666,11 @@ async fn list_public_resources(
     public_key: &PubkyPublicKey,
     path: &str,
     context: &'static str,
+    max_entries: usize,
 ) -> Result<Vec<pubky::PubkyResource>> {
     const LIST_PAGE_LIMIT: u16 = 100;
 
+    require_public_resource_entry_limit(max_entries, context)?;
     let addr = public_resource_uri(public_key, path);
     let mut entries = Vec::new();
     let mut cursor = None::<String>;
@@ -643,15 +692,59 @@ async fn list_public_resources(
             break;
         }
         let page_len = page.len();
-        cursor = page
-            .last()
-            .map(|entry| format!("{}{}", entry.owner.z32(), entry.path.as_str()));
+        cursor = Some(next_public_resource_cursor(
+            entries.len(),
+            &page,
+            cursor.as_deref(),
+            max_entries,
+            context,
+        )?);
         entries.extend(page);
         if page_len < LIST_PAGE_LIMIT as usize {
             break;
         }
     }
     Ok(entries)
+}
+
+fn next_public_resource_cursor(
+    existing_entries: usize,
+    page: &[pubky::PubkyResource],
+    previous_cursor: Option<&str>,
+    max_entries: usize,
+    context: &'static str,
+) -> Result<String> {
+    require_public_resource_entry_limit(max_entries, context)?;
+    if existing_entries.saturating_add(page.len()) > max_entries {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: directory exceeds the {max_entries}-entry limit"),
+            source: None,
+        });
+    }
+    let next_cursor = page
+        .last()
+        .map(|entry| format!("{}{}", entry.owner.z32(), entry.path.as_str()))
+        .ok_or_else(|| PaykitSdkError::Protocol {
+            context: format!("{context}: non-empty page has no cursor resource"),
+            source: None,
+        })?;
+    if previous_cursor.is_some_and(|previous| next_cursor.as_str() <= previous) {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: directory cursor did not advance"),
+            source: None,
+        });
+    }
+    Ok(next_cursor)
+}
+
+fn require_public_resource_entry_limit(max_entries: usize, context: &'static str) -> Result<()> {
+    if max_entries == 0 {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: entry limit must be greater than zero"),
+            source: None,
+        });
+    }
+    Ok(())
 }
 
 fn map_pubky_transport_error(context: &'static str, err: PubkyError) -> PaykitSdkError {
@@ -666,6 +759,14 @@ fn is_pubky_not_found(err: &PubkyError) -> bool {
         err,
         PubkyError::Request(RequestError::Server { status, .. })
             if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
+    )
+}
+
+fn is_pubky_precondition_failed(err: &PubkyError) -> bool {
+    matches!(
+        err,
+        PubkyError::Request(RequestError::Server { status, .. })
+            if *status == StatusCode::PRECONDITION_FAILED
     )
 }
 

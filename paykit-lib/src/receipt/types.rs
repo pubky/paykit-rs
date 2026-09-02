@@ -12,6 +12,8 @@ use crate::{
 };
 
 pub(crate) const RECEIPT_ENCRYPTION_ALGORITHM: &str = "XChaCha20Poly1305";
+/// Maximum encoded size of one stored Encrypted Receipt.
+pub const ENCRYPTED_RECEIPT_MAX_BYTES: usize = 256 * 1024;
 
 /// UUID-v4 identifier for one stored Receipt artifact.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -316,6 +318,8 @@ impl fmt::Debug for ReceiptAccess {
 pub struct ReceiptAccessEventMessage {
     /// Private message kind selected from the message header.
     pub kind: PrivateMessageKind,
+    /// Application that issued this Receipt Access event.
+    pub app_id: Option<crate::PaykitAppId>,
     /// Parsed top-level Event ID when present and valid.
     pub event_id: Option<EventId>,
     /// Parsed top-level Receipt ID when present and valid.
@@ -331,6 +335,7 @@ impl fmt::Debug for ReceiptAccessEventMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReceiptAccessEventMessage")
             .field("kind", &self.kind)
+            .field("app_id", &self.app_id)
             .field("event_id", &self.event_id)
             .field("receipt_id", &self.receipt_id)
             .field(
@@ -347,6 +352,11 @@ impl ReceiptAccessEventMessage {
     /// Return the Private Message Kind for this event message.
     pub fn kind(&self) -> PrivateMessageKind {
         self.kind
+    }
+
+    /// Return the application that issued this event, when valid.
+    pub fn app_id(&self) -> Option<&crate::PaykitAppId> {
+        self.app_id.as_ref()
     }
 
     /// Whether the recognized event message parsed successfully.
@@ -431,10 +441,6 @@ impl ReceiptAccess {
 mod tests {
     use super::*;
 
-    fn receiver_path() -> crate::PaykitReceiverPath {
-        crate::PaykitReceiverPath::new("bitkit/wallet").unwrap()
-    }
-
     #[test]
     fn receipt_debug_redacts_payment_reference() {
         let payment_reference = PaymentReference::new("invoice-secret-123").unwrap();
@@ -474,7 +480,7 @@ mod tests {
             payment_reference: receipt.payment_reference.clone(),
             payment_request_id: receipt.payment_request_id.clone(),
             billing_period: None,
-            location: ReceiptAccess::location(&receiver_path(), &receipt.receipt_id),
+            location: ReceiptAccess::location_for(&receipt.receipt_id),
             key: ReceiptDecryptionKey::generate(),
         };
         let prepared = PreparedReceipt {

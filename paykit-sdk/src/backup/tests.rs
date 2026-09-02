@@ -3,7 +3,8 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     domain::outbound_private::OutboundPrivateMessageStatus,
-    domain::private_stream::PrivateStreamParseStatus, storage::InMemoryStorage,
+    domain::private_stream::PrivateStreamParseStatus,
+    storage::{InMemoryStorage, NewOutboundPrivateMessage},
 };
 
 fn timestamp() -> chrono::DateTime<Utc> {
@@ -14,67 +15,58 @@ fn public_key() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
-fn receiver_noise_public_key() -> PubkyPublicKey {
-    PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[7; 32]).public_key())
+fn app_id() -> paykit_lib::PaykitAppId {
+    paykit_lib::PaykitAppId::new("bitkit").unwrap()
 }
 
-fn receiver_path() -> paykit_lib::PaykitReceiverPath {
-    paykit_lib::PaykitReceiverPath::new("bitkit/wallet").unwrap()
-}
-
-fn other_receiver_path() -> paykit_lib::PaykitReceiverPath {
-    paykit_lib::PaykitReceiverPath::new("tether/wallet").unwrap()
-}
-
-fn peer_key(public_key: &PubkyPublicKey) -> (PubkyPublicKey, paykit_lib::PaykitReceiverPath) {
-    (public_key.clone(), receiver_path())
-}
-
-fn recovery_required_peer(public_key: &PubkyPublicKey) -> RestoreRecoveryRequiredPeer {
-    RestoreRecoveryRequiredPeer {
-        counterparty: public_key.clone(),
-        counterparty_receiver_path: receiver_path(),
-    }
-}
-
-fn identity(local_pubky_public_key: PubkyPublicKey) -> IdentityState {
+fn identity(public_key: PubkyPublicKey) -> IdentityState {
     IdentityState {
-        local_pubky_public_key: Some(local_pubky_public_key),
-        local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+        public_key: Some(public_key),
         initialized_at: timestamp(),
-        sign_out_generation: 0,
-    }
-}
-
-fn signed_out_identity(sign_out_generation: u64) -> IdentityState {
-    IdentityState {
-        local_pubky_public_key: None,
-        local_receiver_noise_public_key: None,
-        initialized_at: timestamp(),
-        sign_out_generation,
     }
 }
 
 fn contact_record(public_key: PubkyPublicKey) -> ContactRecord {
     ContactRecord {
         public_key,
-        receiver_paths: vec![receiver_path()],
         label: Some("Alice".into()),
         profile: None,
         profile_fetched_at: None,
         created_at: timestamp(),
         updated_at: timestamp(),
         public_contact_marker_status: crate::PublicationStatus::NotPublished,
-        public_contact_marker_receiver_path: None,
         public_contact_published_at: None,
         public_contact_removed_at: None,
         public_contact_last_error: None,
     }
 }
 
+fn empty_backup(identity_state: IdentityState) -> SdkBackupState {
+    SdkBackupState {
+        version: SDK_BACKUP_VERSION,
+        identity_state: Some(identity_state),
+        linked_peers: Vec::new(),
+        contact_records: Vec::new(),
+        retired_paykit_apps: Vec::new(),
+        public_endpoint_records: Vec::new(),
+        payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
+        encrypted_link_states: Vec::new(),
+        outbound_private_messages: Vec::new(),
+        private_stream_items: Vec::new(),
+        event_dedup_records: Vec::new(),
+        receipt_access_records: Vec::new(),
+        receipt_records: Vec::new(),
+        receipt_issuance_records: Vec::new(),
+        next_outbound_private_message_id: 0,
+        next_receive_batch_id: 0,
+        next_private_stream_item_id: 0,
+    }
+}
+
 fn payment_request_json(event_id: &str) -> String {
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_request","event_id":"{event_id}","payment_request_id":"550e8400-e29b-41d4-a716-446655440000","request":{{"amount":{{"value":"1","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{{}}}}}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request","app_id":"bitkit","event_id":"{event_id}","payment_request_id":"550e8400-e29b-41d4-a716-446655440000","request":{{"amount":{{"value":"1","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{{}}}}}}"#
     )
 }
 
@@ -86,10 +78,10 @@ fn private_payment_list_outbound(
     OutboundPrivateMessageRecord {
         outbound_message_id,
         counterparty,
-        counterparty_receiver_path: receiver_path(),
+        app_id: app_id(),
         kind: PrivateMessageKind::PrivatePaymentList.as_str().into(),
         raw_json: format!(
-            r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"btc-lightning-bolt11":"{payload}"}}}}"#
+            r#"{{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{{"btc-lightning-bolt11":"{payload}"}}}}"#
         ),
         status: OutboundPrivateMessageStatus::Pending,
         attempt_count: 0,
@@ -98,6 +90,7 @@ fn private_payment_list_outbound(
         last_attempt_at: None,
         sent_at: None,
         last_error: None,
+        prepared_send: None,
     }
 }
 
@@ -107,12 +100,13 @@ async fn assert_restore_rejects_outbound_record(record: OutboundPrivateMessageRe
     let next_id = record.outbound_message_id.saturating_add(1);
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
-        local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
+        retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: vec![record],
         private_stream_items: Vec::new(),
@@ -138,12 +132,12 @@ fn receipt_access_raw_with_context(
     billing_period: &BillingPeriodRecord,
 ) -> (String, String, String) {
     let receipt_id = ReceiptId::new(receipt_id).unwrap();
-    let location = paykit_lib::ReceiptAccess::location(&receiver_path(), &receipt_id);
+    let location = paykit_lib::ReceiptAccess::location_for(&receipt_id);
     let key = paykit_lib::ReceiptDecryptionKey::generate()
         .as_str()
         .to_owned();
     let raw_json = format!(
-        r#"{{"version":1,"kind":"paykit.receipt_access","event_id":"{event_id}","receipt_id":"{}","payment_reference":"{payment_reference}","payment_request_id":"{payment_request_id}","billing_period":{{"starts_at":"{}","ends_at":"{}"}},"location":"{location}","key":"{key}"}}"#,
+        r#"{{"version":1,"kind":"paykit.receipt_access","app_id":"bitkit","event_id":"{event_id}","receipt_id":"{}","payment_reference":"{payment_reference}","payment_request_id":"{payment_request_id}","billing_period":{{"starts_at":"{}","ends_at":"{}"}},"location":"{location}","key":"{key}"}}"#,
         receipt_id.as_str(),
         billing_period.starts_at,
         billing_period.ends_at

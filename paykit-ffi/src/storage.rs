@@ -5,14 +5,18 @@ use std::{
 
 use async_trait::async_trait;
 use paykit_sdk::storage::{
-    run_storage_state_transaction, StorageAdapter, StorageState, StorageTransactionCallback,
+    decode_storage_state_blob, encode_storage_state_blob, run_storage_state_transaction,
+    PubkySharedStateStorage, StorageAdapter, StorageState, StorageTransactionCallback,
 };
-use paykit_sdk::{PaykitSdkError, SdkBackupState};
+use paykit_sdk::{validate_storage_state, PaykitSdkError, SdkBackupState};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{ffi_error_to_sdk, storage_error, PaykitFfiError};
 use crate::secrets::FfiSdkStateBlob;
 use crate::{SDK_BACKUP_BLOB_VERSION, SDK_STATE_BLOB_VERSION};
+
+const INVALID_STATE_BLOB_CODE: &str = "invalid_state_blob";
+const INVALID_STATE_BLOB_CONTEXT: &str = "SDK state blob failed validation";
 
 /// Current SDK state blob with its platform storage revision.
 #[derive(uniffi::Record, Clone, Debug)]
@@ -24,6 +28,10 @@ pub struct FfiSdkStateBlobSnapshot {
 }
 
 /// Platform-owned durable blob store for SDK state.
+///
+/// The SDK invokes these callbacks while holding its per-handle storage lock.
+/// Implementations must not call back into the same SDK handle from either
+/// callback because doing so would deadlock.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkStateBlobStore: Send + Sync {
     /// Load the current SDK state blob, when one exists.
@@ -33,6 +41,9 @@ pub trait FfiSdkStateBlobStore: Send + Sync {
     ///
     /// `expected_revision` is `None` when no previous blob was loaded. The
     /// platform store should reject the write if the stored revision changed.
+    /// A successful changed write must return a non-empty, globally unique
+    /// revision that has never represented an earlier state blob. Reusing a
+    /// revision permits an ABA stale write to overwrite newer state.
     fn save_state_blob_atomically(
         &self,
         blob: Arc<FfiSdkStateBlob>,
@@ -44,6 +55,63 @@ pub trait FfiSdkStateBlobStore: Send + Sync {
 pub(crate) struct FfiSdkStorage {
     pub(crate) store: Arc<dyn FfiSdkStateBlobStore>,
     pub(crate) transaction_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Clone)]
+pub(crate) enum FfiSdkStorageAdapter {
+    Callback(FfiSdkStorage),
+    PubkyShared(PubkySharedStateStorage),
+}
+
+impl FfiSdkStorageAdapter {
+    pub(crate) fn state_revision(&self) -> Result<Option<String>, PaykitFfiError> {
+        match self {
+            Self::Callback(storage) => storage.state_revision(),
+            Self::PubkyShared(storage) => storage.last_revision().map_err(Into::into),
+        }
+    }
+}
+
+#[async_trait]
+impl StorageAdapter for FfiSdkStorageAdapter {
+    async fn transaction_erased<'a>(
+        &self,
+        f: StorageTransactionCallback<'a>,
+    ) -> paykit_sdk::Result<Box<dyn Any + Send>> {
+        match self {
+            Self::Callback(storage) => storage.transaction_erased(f).await,
+            Self::PubkyShared(storage) => storage.transaction_erased(f).await,
+        }
+    }
+}
+
+impl FfiSdkStorage {
+    fn load_validated_state(&self) -> paykit_sdk::Result<Option<(String, StorageState)>> {
+        let snapshot = self
+            .store
+            .load_state_blob()
+            .map_err(|err| ffi_error_to_sdk(err, "load SDK state blob"))?;
+        snapshot
+            .map(|snapshot| {
+                let state =
+                    decode_state_blob_snapshot(&snapshot.revision, &snapshot.blob.export_bytes())
+                        .map_err(|err| ffi_error_to_sdk(err, "load SDK state blob"))?;
+                Ok((snapshot.revision, state))
+            })
+            .transpose()
+    }
+
+    pub(crate) fn state_revision(&self) -> Result<Option<String>, PaykitFfiError> {
+        let _guard = self.transaction_lock.lock().map_err(|_| {
+            storage_error(
+                "state_transaction_lock_poisoned",
+                "SDK state transaction lock poisoned",
+            )
+        })?;
+        self.load_validated_state()
+            .map(|snapshot| snapshot.map(|(revision, _)| revision))
+            .map_err(Into::into)
+    }
 }
 
 #[async_trait]
@@ -59,36 +127,43 @@ impl StorageAdapter for FfiSdkStorage {
                 context: "SDK state transaction lock poisoned".into(),
                 source: None,
             })?;
-        let snapshot = self
-            .store
-            .load_state_blob()
-            .map_err(|err| ffi_error_to_sdk(err, "load SDK state blob"))?;
-        let expected_revision = snapshot.as_ref().map(|snapshot| snapshot.revision.clone());
-        let initial_state = snapshot
-            .map(|snapshot| decode_storage_state(&snapshot.blob.export_bytes()))
-            .transpose()?
-            .unwrap_or_default();
+        let snapshot = self.load_validated_state()?;
+        let (expected_revision, initial_state) = match snapshot {
+            Some((revision, state)) => (Some(revision), state),
+            None => (None, StorageState::default()),
+        };
 
         let (updated_state, result) = run_storage_state_transaction(initial_state.clone(), f)?;
 
         if updated_state != initial_state {
+            drop(initial_state);
+            validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
+                context: INVALID_STATE_BLOB_CONTEXT.into(),
+                source: None,
+            })?;
             let blob = Arc::new(FfiSdkStateBlob::new(
                 encode_storage_state(&updated_state)
                     .map_err(|err| ffi_error_to_sdk(err, "encode SDK state blob"))?,
             ));
-            self.store
+            let previous_revision = expected_revision.clone();
+            let new_revision = self
+                .store
                 .save_state_blob_atomically(blob, expected_revision)
                 .map_err(|err| ffi_error_to_sdk(err, "save SDK state blob"))?;
+            if new_revision.is_empty()
+                || previous_revision.as_deref() == Some(new_revision.as_str())
+            {
+                return Err(PaykitSdkError::Storage {
+                    context:
+                        "state blob store returned an unchanged or empty revision after a write"
+                            .into(),
+                    source: None,
+                });
+            }
         }
 
         Ok(result)
     }
-}
-
-#[derive(Serialize, Deserialize)]
-struct StorageStateEnvelope {
-    version: u32,
-    state: StorageState,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,29 +180,22 @@ struct StateBlobSnapshotEnvelope {
 }
 
 pub(crate) fn encode_storage_state(state: &StorageState) -> Result<Vec<u8>, PaykitFfiError> {
-    postcard::to_allocvec(&StorageStateEnvelope {
-        version: SDK_STATE_BLOB_VERSION,
-        state: state.clone(),
-    })
-    .map_err(|err| storage_error("encode_state_blob", format!("encode SDK state blob: {err}")))
+    encode_storage_state_blob(state).map_err(Into::into)
 }
 
-pub(crate) fn decode_storage_state(bytes: &[u8]) -> paykit_sdk::Result<StorageState> {
-    let envelope: StorageStateEnvelope =
-        postcard::from_bytes(bytes).map_err(|err| PaykitSdkError::Storage {
-            context: format!("decode SDK state blob: {err}"),
-            source: None,
-        })?;
-    if envelope.version != SDK_STATE_BLOB_VERSION {
-        return Err(PaykitSdkError::Storage {
-            context: format!(
-                "unsupported SDK state blob version {}, expected {}",
-                envelope.version, SDK_STATE_BLOB_VERSION
-            ),
-            source: None,
-        });
+pub(crate) fn decode_storage_state(bytes: &[u8]) -> Result<StorageState, PaykitFfiError> {
+    decode_storage_state_blob(bytes).map_err(|_| invalid_state_blob_error())
+}
+
+fn decode_state_blob_snapshot(revision: &str, blob: &[u8]) -> Result<StorageState, PaykitFfiError> {
+    if revision.is_empty() {
+        return Err(invalid_state_blob_error());
     }
-    Ok(envelope.state)
+    decode_storage_state(blob)
+}
+
+fn invalid_state_blob_error() -> PaykitFfiError {
+    storage_error(INVALID_STATE_BLOB_CODE, INVALID_STATE_BLOB_CONTEXT)
 }
 
 pub(crate) fn encode_backup_state(backup: &SdkBackupState) -> Result<Vec<u8>, PaykitFfiError> {
@@ -167,6 +235,9 @@ pub(crate) fn decode_backup_state(bytes: &[u8]) -> Result<SdkBackupState, Paykit
 pub fn encode_sdk_state_blob_snapshot(
     snapshot: FfiSdkStateBlobSnapshot,
 ) -> Result<Vec<u8>, PaykitFfiError> {
+    if snapshot.revision.is_empty() {
+        return Err(invalid_state_blob_error());
+    }
     postcard::to_allocvec(&StateBlobSnapshotEnvelope {
         version: SDK_STATE_BLOB_VERSION,
         revision: snapshot.revision,
@@ -200,6 +271,7 @@ pub fn decode_sdk_state_blob_snapshot(
             ),
         ));
     }
+    decode_state_blob_snapshot(&envelope.revision, &envelope.blob)?;
     Ok(FfiSdkStateBlobSnapshot {
         blob: Arc::new(FfiSdkStateBlob::new(envelope.blob)),
         revision: envelope.revision,

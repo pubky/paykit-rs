@@ -1,10 +1,18 @@
 use std::sync::{Arc, Mutex};
 
 use super::queue::{
-    is_claimable_outbound_private_message, supersede_outdated_private_payment_lists,
+    inactive_outbound_private_message_blocks_queue, is_claimable_outbound_private_message,
+    supersede_outdated_private_payment_lists,
 };
 use super::*;
 use crate::OutboundPrivateMessageStatus;
+
+fn storage_id_exhausted() -> PaykitSdkError {
+    PaykitSdkError::Storage {
+        context: "SDK storage id space is exhausted".into(),
+        source: None,
+    }
+}
 
 /// In-memory SDK storage implementation for tests and examples.
 ///
@@ -18,6 +26,33 @@ impl InMemoryStorage {
     /// Create empty in-memory storage.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create in-memory storage from an existing logical state for tests.
+    pub fn from_state(state: StorageState) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(state)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_registered_apps(
+        app_ids: impl IntoIterator<Item = paykit_lib::PaykitAppId>,
+    ) -> Self {
+        let mut state = StorageState::default();
+        for app_id in app_ids {
+            state.registered_paykit_apps.insert(app_id.clone());
+            state.registered_paykit_app_capabilities.insert(
+                app_id,
+                paykit_lib::PaykitAppCapabilities {
+                    private_payments: true,
+                    payment_requests: true,
+                    receipts: true,
+                    outgoing_payments: true,
+                },
+            );
+        }
+        Self::from_state(state)
     }
 
     /// Return a copy of the current storage state.
@@ -80,44 +115,14 @@ impl StorageTransaction for StorageStateTransaction {
         self.state.identity_state = Some(state);
     }
 
-    fn clear_identity_scoped_state(&mut self) {
-        self.clear_private_identity_scoped_state();
-        self.state.contact_records.clear();
-        self.state.public_endpoint_records.clear();
-    }
-
-    fn clear_private_identity_scoped_state(&mut self) {
-        self.state.linked_peers.clear();
-        self.state.encrypted_link_states.clear();
-        self.state.peer_link_operation_leases.clear();
-        self.state.payment_endpoint_reservations.clear();
-        self.state.outbound_private_messages.clear();
-        self.state.private_stream_items.clear();
-        self.state.event_dedup_records.clear();
-        self.state.receipt_access_records.clear();
-        self.state.receipt_records.clear();
-        self.state.receipt_issuance_records.clear();
-    }
-
-    fn linked_peer(
-        &self,
-        counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Option<LinkedPeerRecord> {
-        self.state
-            .linked_peers
-            .get(&(counterparty.clone(), counterparty_receiver_path.clone()))
-            .cloned()
+    fn linked_peer(&self, counterparty: &PubkyPublicKey) -> Option<LinkedPeerRecord> {
+        self.state.linked_peers.get(counterparty).cloned()
     }
 
     fn save_linked_peer(&mut self, record: LinkedPeerRecord) {
-        self.state.linked_peers.insert(
-            (
-                record.counterparty.clone(),
-                record.counterparty_receiver_path.clone(),
-            ),
-            record,
-        );
+        self.state
+            .linked_peers
+            .insert(record.counterparty.clone(), record);
     }
 
     fn contact_records(&self) -> Vec<ContactRecord> {
@@ -145,6 +150,59 @@ impl StorageTransaction for StorageStateTransaction {
         self.state.contact_records.remove(public_key)
     }
 
+    fn authorized_paykit_apps(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Option<HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>> {
+        self.state.authorized_paykit_apps.get(counterparty).cloned()
+    }
+
+    fn save_authorized_paykit_apps(
+        &mut self,
+        counterparty: PubkyPublicKey,
+        apps: HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
+    ) {
+        self.state.authorized_paykit_apps.insert(counterparty, apps);
+    }
+
+    fn paykit_app_is_registered(&self, app_id: &paykit_lib::PaykitAppId) -> bool {
+        self.state.registered_paykit_apps.contains(app_id)
+    }
+
+    fn paykit_app_capabilities(
+        &self,
+        app_id: &paykit_lib::PaykitAppId,
+    ) -> Option<paykit_lib::PaykitAppCapabilities> {
+        self.state
+            .registered_paykit_app_capabilities
+            .get(app_id)
+            .copied()
+    }
+
+    fn paykit_app_is_retired(&self, app_id: &paykit_lib::PaykitAppId) -> bool {
+        self.state.retired_paykit_apps.contains(app_id)
+    }
+
+    fn retire_paykit_app(&mut self, app_id: paykit_lib::PaykitAppId) {
+        self.state.registered_paykit_apps.remove(&app_id);
+        self.state.retired_paykit_apps.insert(app_id);
+    }
+
+    fn save_paykit_app_capabilities(
+        &mut self,
+        app_id: &paykit_lib::PaykitAppId,
+        capabilities: paykit_lib::PaykitAppCapabilities,
+    ) {
+        self.state
+            .registered_paykit_app_capabilities
+            .insert(app_id.clone(), capabilities);
+    }
+
+    fn activate_paykit_app(&mut self, app_id: &paykit_lib::PaykitAppId) {
+        self.state.registered_paykit_apps.insert(app_id.clone());
+        self.state.retired_paykit_apps.remove(app_id);
+    }
+
     fn public_endpoint_records(&self) -> Vec<PublicEndpointRecord> {
         let mut records = self
             .state
@@ -152,29 +210,30 @@ impl StorageTransaction for StorageStateTransaction {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        records.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+        records.sort_by(|left, right| {
+            left.app_id
+                .as_str()
+                .cmp(right.app_id.as_str())
+                .then_with(|| left.identifier.cmp(&right.identifier))
+        });
         records
     }
 
     fn save_public_endpoint_record(&mut self, record: PublicEndpointRecord) {
         self.state
             .public_endpoint_records
-            .insert(record.identifier.clone(), record);
+            .insert((record.app_id.clone(), record.identifier.clone()), record);
     }
 
     fn payment_endpoint_reservations(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Vec<PaymentEndpointReservationRecord> {
         let mut records = self
             .state
             .payment_endpoint_reservations
             .values()
-            .filter(|record| {
-                &record.counterparty == counterparty
-                    && &record.counterparty_receiver_path == counterparty_receiver_path
-            })
+            .filter(|record| &record.counterparty == counterparty)
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| record.created_at);
@@ -184,14 +243,14 @@ impl StorageTransaction for StorageStateTransaction {
     fn payment_endpoint_reservation(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
+        app_id: &paykit_lib::PaykitAppId,
         reservation_id: &str,
     ) -> Option<PaymentEndpointReservationRecord> {
         self.state
             .payment_endpoint_reservations
             .get(&(
                 counterparty.clone(),
-                counterparty_receiver_path.clone(),
+                app_id.clone(),
                 reservation_id.to_owned(),
             ))
             .cloned()
@@ -201,7 +260,7 @@ impl StorageTransaction for StorageStateTransaction {
         self.state.payment_endpoint_reservations.insert(
             (
                 record.counterparty.clone(),
-                record.counterparty_receiver_path.clone(),
+                record.app_id.clone(),
                 record.reservation_id.clone(),
             ),
             record,
@@ -211,12 +270,12 @@ impl StorageTransaction for StorageStateTransaction {
     fn remove_payment_endpoint_reservation(
         &mut self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
+        app_id: &paykit_lib::PaykitAppId,
         reservation_id: &str,
     ) -> Option<PaymentEndpointReservationRecord> {
         self.state.payment_endpoint_reservations.remove(&(
             counterparty.clone(),
-            counterparty_receiver_path.clone(),
+            app_id.clone(),
             reservation_id.to_owned(),
         ))
     }
@@ -224,95 +283,161 @@ impl StorageTransaction for StorageStateTransaction {
     fn encrypted_link_state(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Option<EncryptedLinkStateRecord> {
-        self.state
-            .encrypted_link_states
-            .get(&(counterparty.clone(), counterparty_receiver_path.clone()))
-            .cloned()
+        self.state.encrypted_link_states.get(counterparty).cloned()
     }
 
     fn save_encrypted_link_state(&mut self, record: EncryptedLinkStateRecord) {
-        self.state.encrypted_link_states.insert(
-            (
-                record.counterparty.clone(),
-                record.counterparty_receiver_path.clone(),
-            ),
-            record,
-        );
+        self.state
+            .encrypted_link_states
+            .insert(record.counterparty.clone(), record);
     }
 
     fn claim_peer_link_operation(
         &mut self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
         now: DateTime<Utc>,
         expires_at: DateTime<Utc>,
-    ) -> Option<PeerLinkOperationLease> {
-        let key = (counterparty.clone(), counterparty_receiver_path.clone());
-        if let Some(existing) = self.state.peer_link_operation_leases.get(&key) {
+    ) -> Result<Option<PeerLinkOperationLease>> {
+        if let Some(existing) = self.state.peer_link_operation_leases.get(counterparty) {
             if existing.expires_at > now {
-                return None;
+                return Ok(None);
             }
         }
 
+        let next_lease_id = self
+            .state
+            .next_peer_link_operation_lease_id
+            .checked_add(1)
+            .ok_or_else(storage_id_exhausted)?;
         let lease = PeerLinkOperationLease {
             counterparty: counterparty.clone(),
-            counterparty_receiver_path: counterparty_receiver_path.clone(),
             lease_id: self.state.next_peer_link_operation_lease_id,
             claimed_at: now,
             expires_at,
         };
-        self.state.next_peer_link_operation_lease_id += 1;
+        self.state.next_peer_link_operation_lease_id = next_lease_id;
         self.state
             .peer_link_operation_leases
-            .insert(key, lease.clone());
-        Some(lease)
+            .insert(counterparty.clone(), lease.clone());
+        Ok(Some(lease))
     }
 
     fn peer_link_operation_lease(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Option<PeerLinkOperationLease> {
         self.state
             .peer_link_operation_leases
-            .get(&(counterparty.clone(), counterparty_receiver_path.clone()))
+            .get(counterparty)
             .cloned()
     }
 
-    fn release_peer_link_operation(
-        &mut self,
-        counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
-        lease_id: u64,
-    ) {
-        let key = (counterparty.clone(), counterparty_receiver_path.clone());
+    fn release_peer_link_operation(&mut self, counterparty: &PubkyPublicKey, lease_id: u64) {
         if self
             .state
             .peer_link_operation_leases
-            .get(&key)
+            .get(counterparty)
             .is_some_and(|lease| lease.lease_id == lease_id)
         {
-            self.state.peer_link_operation_leases.remove(&key);
+            self.state.peer_link_operation_leases.remove(counterparty);
         }
+    }
+
+    fn claim_paykit_app_operation(
+        &mut self,
+        app_id: &paykit_lib::PaykitAppId,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Option<PaykitAppOperationLease>> {
+        if self
+            .state
+            .paykit_app_operation_leases
+            .get(app_id)
+            .is_some_and(|existing| existing.expires_at > now)
+        {
+            return Ok(None);
+        }
+        let next_lease_id = self
+            .state
+            .next_paykit_app_operation_lease_id
+            .checked_add(1)
+            .ok_or_else(storage_id_exhausted)?;
+        let lease = PaykitAppOperationLease {
+            app_id: app_id.clone(),
+            lease_id: self.state.next_paykit_app_operation_lease_id,
+            claimed_at: now,
+            expires_at,
+        };
+        self.state.next_paykit_app_operation_lease_id = next_lease_id;
+        self.state
+            .paykit_app_operation_leases
+            .insert(app_id.clone(), lease.clone());
+        Ok(Some(lease))
+    }
+
+    fn paykit_app_operation_lease(
+        &self,
+        app_id: &paykit_lib::PaykitAppId,
+    ) -> Option<PaykitAppOperationLease> {
+        self.state.paykit_app_operation_leases.get(app_id).cloned()
+    }
+
+    fn release_paykit_app_operation(&mut self, app_id: &paykit_lib::PaykitAppId, lease_id: u64) {
+        if self
+            .state
+            .paykit_app_operation_leases
+            .get(app_id)
+            .is_some_and(|lease| lease.lease_id == lease_id)
+        {
+            self.state.paykit_app_operation_leases.remove(app_id);
+        }
+    }
+
+    fn payment_request_execution_claim(
+        &self,
+        counterparty: &PubkyPublicKey,
+        payment_request_id: &str,
+    ) -> Option<PaymentRequestExecutionClaim> {
+        self.state
+            .payment_request_execution_claims
+            .get(&(counterparty.clone(), payment_request_id.to_owned()))
+            .cloned()
+    }
+
+    fn save_payment_request_execution_claim(&mut self, claim: PaymentRequestExecutionClaim) {
+        self.state.payment_request_execution_claims.insert(
+            (claim.counterparty.clone(), claim.payment_request_id.clone()),
+            claim,
+        );
+    }
+
+    fn remove_payment_request_execution_claim(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        payment_request_id: &str,
+    ) -> Option<PaymentRequestExecutionClaim> {
+        self.state
+            .payment_request_execution_claims
+            .remove(&(counterparty.clone(), payment_request_id.to_owned()))
     }
 
     fn insert_outbound_private_message(
         &mut self,
         message: NewOutboundPrivateMessage,
-    ) -> OutboundPrivateMessageRecord {
+    ) -> Result<OutboundPrivateMessageRecord> {
         let outbound_message_id = self.state.next_outbound_private_message_id;
-        self.state.next_outbound_private_message_id += 1;
+        self.state.next_outbound_private_message_id = outbound_message_id
+            .checked_add(1)
+            .ok_or_else(storage_id_exhausted)?;
         let record = OutboundPrivateMessageRecord::from_new(outbound_message_id, message);
         self.state.outbound_private_messages.push(record.clone());
-        record
+        Ok(record)
     }
 
     fn queued_outbound_private_messages(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Vec<OutboundPrivateMessageRecord> {
         let mut messages = self
             .state
@@ -320,7 +445,6 @@ impl StorageTransaction for StorageStateTransaction {
             .iter()
             .filter(|message| {
                 &message.counterparty == counterparty
-                    && &message.counterparty_receiver_path == counterparty_receiver_path
                     && matches!(
                         message.status,
                         OutboundPrivateMessageStatus::Pending
@@ -337,16 +461,12 @@ impl StorageTransaction for StorageStateTransaction {
     fn outbound_private_messages(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Vec<OutboundPrivateMessageRecord> {
         let mut messages = self
             .state
             .outbound_private_messages
             .iter()
-            .filter(|message| {
-                &message.counterparty == counterparty
-                    && &message.counterparty_receiver_path == counterparty_receiver_path
-            })
+            .filter(|message| &message.counterparty == counterparty)
             .cloned()
             .collect::<Vec<_>>();
         messages.sort_by_key(|message| message.outbound_message_id);
@@ -356,19 +476,11 @@ impl StorageTransaction for StorageStateTransaction {
     fn claim_next_outbound_private_message(
         &mut self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
         failed_retry_after: DateTime<Utc>,
     ) -> Option<OutboundPrivateMessageRecord> {
-        supersede_outdated_private_payment_lists(
-            &mut self.state,
-            counterparty,
-            counterparty_receiver_path,
-            now,
-            stale_before,
-            failed_retry_after,
-        );
+        supersede_outdated_private_payment_lists(&mut self.state, counterparty, now);
 
         let mut indexes = self
             .state
@@ -377,7 +489,6 @@ impl StorageTransaction for StorageStateTransaction {
             .enumerate()
             .filter(|(_, message)| {
                 &message.counterparty == counterparty
-                    && &message.counterparty_receiver_path == counterparty_receiver_path
                     && !matches!(
                         message.status,
                         OutboundPrivateMessageStatus::Sent
@@ -390,8 +501,25 @@ impl StorageTransaction for StorageStateTransaction {
             .collect::<Vec<_>>();
         indexes.sort_by_key(|(_, outbound_message_id)| *outbound_message_id);
 
-        let (index, _) = indexes.first().copied()?;
+        let index = indexes.into_iter().find_map(|(index, _)| {
+            let message = &self.state.outbound_private_messages[index];
+            if !self.state.registered_paykit_apps.contains(&message.app_id)
+                && !inactive_outbound_private_message_blocks_queue(
+                    message,
+                    &self.state.retired_paykit_apps,
+                )
+            {
+                None
+            } else {
+                Some(index)
+            }
+        })?;
         let message = &mut self.state.outbound_private_messages[index];
+        if !self.state.registered_paykit_apps.contains(&message.app_id)
+            || self.state.retired_paykit_apps.contains(&message.app_id)
+        {
+            return None;
+        }
         if !is_claimable_outbound_private_message(message, stale_before, failed_retry_after) {
             return None;
         }
@@ -427,33 +555,30 @@ impl StorageTransaction for StorageStateTransaction {
         }
     }
 
-    fn allocate_receive_batch_id(&mut self) -> u64 {
+    fn allocate_receive_batch_id(&mut self) -> Result<u64> {
         let receive_batch_id = self.state.next_receive_batch_id;
-        self.state.next_receive_batch_id += 1;
-        receive_batch_id
+        self.state.next_receive_batch_id = receive_batch_id
+            .checked_add(1)
+            .ok_or_else(storage_id_exhausted)?;
+        Ok(receive_batch_id)
     }
 
-    fn insert_private_stream_item(&mut self, item: NewPrivateStreamItem) -> u64 {
+    fn insert_private_stream_item(&mut self, item: NewPrivateStreamItem) -> Result<u64> {
         let stream_item_id = self.state.next_private_stream_item_id;
-        self.state.next_private_stream_item_id += 1;
+        self.state.next_private_stream_item_id = stream_item_id
+            .checked_add(1)
+            .ok_or_else(storage_id_exhausted)?;
         self.state
             .private_stream_items
             .push(PrivateStreamItemRecord::from_new(stream_item_id, item));
-        stream_item_id
+        Ok(stream_item_id)
     }
 
-    fn private_stream_items(
-        &self,
-        counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Vec<PrivateStreamItemRecord> {
+    fn private_stream_items(&self, counterparty: &PubkyPublicKey) -> Vec<PrivateStreamItemRecord> {
         self.state
             .private_stream_items
             .iter()
-            .filter(|item| {
-                &item.counterparty == counterparty
-                    && &item.counterparty_receiver_path == counterparty_receiver_path
-            })
+            .filter(|item| &item.counterparty == counterparty)
             .cloned()
             .collect()
     }
@@ -461,54 +586,34 @@ impl StorageTransaction for StorageStateTransaction {
     fn event_dedup_record(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
         event_id: &str,
     ) -> Option<EventDedupRecord> {
         self.state
             .event_dedup_records
-            .get(&(
-                counterparty.clone(),
-                counterparty_receiver_path.clone(),
-                event_id.to_owned(),
-            ))
+            .get(&(counterparty.clone(), event_id.to_owned()))
             .cloned()
     }
 
     fn save_event_dedup_record(&mut self, record: EventDedupRecord) {
         self.state.event_dedup_records.insert(
-            (
-                record.counterparty.clone(),
-                record.counterparty_receiver_path.clone(),
-                record.event_id.clone(),
-            ),
+            (record.counterparty.clone(), record.event_id.clone()),
             record,
         );
     }
 
     fn save_receipt_access_record(&mut self, record: ReceiptAccessRecord) {
         self.state.receipt_access_records.insert(
-            (
-                record.counterparty.clone(),
-                record.counterparty_receiver_path.clone(),
-                record.event_id.clone(),
-            ),
+            (record.counterparty.clone(), record.event_id.clone()),
             record,
         );
     }
 
-    fn receipt_access_records(
-        &self,
-        counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Vec<ReceiptAccessRecord> {
+    fn receipt_access_records(&self, counterparty: &PubkyPublicKey) -> Vec<ReceiptAccessRecord> {
         let mut records = self
             .state
             .receipt_access_records
             .values()
-            .filter(|record| {
-                &record.counterparty == counterparty
-                    && &record.counterparty_receiver_path == counterparty_receiver_path
-            })
+            .filter(|record| &record.counterparty == counterparty)
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| record.stream_item_id);
@@ -518,55 +623,34 @@ impl StorageTransaction for StorageStateTransaction {
     fn receipt_access_record_by_receipt_id(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
         receipt_id: &str,
     ) -> Option<ReceiptAccessRecord> {
         self.state
             .receipt_access_records
             .values()
             .filter(|record| {
-                &record.counterparty == counterparty
-                    && &record.counterparty_receiver_path == counterparty_receiver_path
-                    && record.receipt_id == receipt_id
+                &record.counterparty == counterparty && record.receipt_id == receipt_id
             })
             .max_by_key(|record| record.stream_item_id)
             .cloned()
     }
 
     fn save_receipt_record(&mut self, record: ReceiptRecord) {
-        self.state.receipt_records.insert(
-            (
-                record.issuer.clone(),
-                record.issuer_receiver_path.clone(),
-                record.receipt_id.clone(),
-            ),
-            record,
-        );
-    }
-
-    fn receipt_record(
-        &self,
-        issuer: &PubkyPublicKey,
-        issuer_receiver_path: &PaykitReceiverPath,
-        receipt_id: &str,
-    ) -> Option<ReceiptRecord> {
         self.state
             .receipt_records
-            .get(&(
-                issuer.clone(),
-                issuer_receiver_path.clone(),
-                receipt_id.to_owned(),
-            ))
+            .insert((record.issuer.clone(), record.receipt_id.clone()), record);
+    }
+
+    fn receipt_record(&self, issuer: &PubkyPublicKey, receipt_id: &str) -> Option<ReceiptRecord> {
+        self.state
+            .receipt_records
+            .get(&(issuer.clone(), receipt_id.to_owned()))
             .cloned()
     }
 
     fn save_receipt_issuance_record(&mut self, record: ReceiptIssuanceRecord) {
         self.state.receipt_issuance_records.insert(
-            (
-                record.counterparty.clone(),
-                record.counterparty_receiver_path.clone(),
-                record.receipt_id.clone(),
-            ),
+            (record.counterparty.clone(), record.receipt_id.clone()),
             record,
         );
     }
@@ -574,16 +658,12 @@ impl StorageTransaction for StorageStateTransaction {
     fn receipt_issuance_records(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Vec<ReceiptIssuanceRecord> {
         let mut records = self
             .state
             .receipt_issuance_records
             .values()
-            .filter(|record| {
-                &record.counterparty == counterparty
-                    && &record.counterparty_receiver_path == counterparty_receiver_path
-            })
+            .filter(|record| &record.counterparty == counterparty)
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| record.created_at);
@@ -593,16 +673,11 @@ impl StorageTransaction for StorageStateTransaction {
     fn receipt_issuance_record(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
         receipt_id: &str,
     ) -> Option<ReceiptIssuanceRecord> {
         self.state
             .receipt_issuance_records
-            .get(&(
-                counterparty.clone(),
-                counterparty_receiver_path.clone(),
-                receipt_id.to_owned(),
-            ))
+            .get(&(counterparty.clone(), receipt_id.to_owned()))
             .cloned()
     }
 

@@ -15,9 +15,12 @@ use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    identity::{PubkyLocalSecretKey, PubkyPublicKey},
+    identity::{PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey},
     PaykitSdkError, Result,
 };
+
+/// Default Pubky capabilities needed for Paykit public storage writes.
+pub const PAYKIT_SESSION_CAPABILITIES: &str = "/pub/paykit/:rw";
 
 const GRANT_REVOCATION_MAX_ATTEMPTS: usize = 4;
 
@@ -114,6 +117,8 @@ pub struct PubkySessionBootstrapResult {
     pub public_key: PubkyPublicKey,
     /// Application identifier recorded in the grant.
     pub client_id: String,
+    /// Capability implied by the session and optional local secret key.
+    pub capability: PubkyIdentityCapability,
 }
 
 impl fmt::Debug for PubkySessionBootstrapResult {
@@ -122,6 +127,7 @@ impl fmt::Debug for PubkySessionBootstrapResult {
             .field("access", &"<redacted>")
             .field("public_key", &self.public_key)
             .field("client_id", &self.client_id)
+            .field("capability", &self.capability)
             .finish()
     }
 }
@@ -229,10 +235,6 @@ impl PubkyAuthRequest {
 
     /// Wait for auth approval and validate the resulting session capabilities.
     ///
-    /// Reuse the receiver's persisted Noise key when reauthenticating. Passing
-    /// a new key rotates its public marker key and invalidates existing private
-    /// path and Encrypted Link state.
-    ///
     /// This consumes the request even when approval is cancelled or fails.
     /// [`Self::save_state`] can restore an unapproved request while its relay
     /// inbox remains valid. Once a completion attempt fetches the approval,
@@ -240,7 +242,6 @@ impl PubkyAuthRequest {
     pub async fn complete(
         self,
         local_secret_key: Option<PubkyLocalSecretKey>,
-        receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         validate_auth_url_capabilities(&self.authorization_url, required_capabilities)?;
@@ -255,7 +256,6 @@ impl PubkyAuthRequest {
             session,
             self.pubky,
             local_secret_key,
-            receiver_noise_secret_key,
             required_capabilities,
             &client_id,
         )
@@ -338,13 +338,9 @@ impl PubkySessionBootstrap {
     /// After creating the account, this uses Pubky grant auth to issue a
     /// session with exactly `required_capabilities`. The auth relay must be
     /// reachable.
-    ///
-    /// Generate the receiver Noise key once for this receiver and persist it
-    /// with the returned session access.
     pub async fn sign_up(
         &self,
         secret_key: &PubkyLocalSecretKey,
-        receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
         homeserver_public_key: &PubkyPublicKey,
         signup_code: Option<&str>,
         required_capabilities: &str,
@@ -352,8 +348,7 @@ impl PubkySessionBootstrap {
         let homeserver = homeserver_public_key.to_public_key()?;
         let signer = self.pubky.signer(secret_key.keypair());
         ensure_pubky_account(&signer, &homeserver, signup_code).await?;
-        self.sign_in(secret_key, receiver_noise_secret_key, required_capabilities)
-            .await
+        self.sign_in(secret_key, required_capabilities).await
     }
 
     /// Sign in with a local Pubky secret key and return validated session access.
@@ -361,14 +356,9 @@ impl PubkySessionBootstrap {
     /// This self-approves a standard Pubky grant-auth request so the returned
     /// session has exactly `required_capabilities`. The auth relay must be
     /// reachable.
-    ///
-    /// Reuse the receiver's persisted Noise key when reauthenticating. Passing
-    /// a new key rotates its public marker key and invalidates existing private
-    /// path and Encrypted Link state.
     pub async fn sign_in(
         &self,
         secret_key: &PubkyLocalSecretKey,
-        receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         let request = self.start_sign_in_auth(required_capabilities).await?;
@@ -379,26 +369,18 @@ impl PubkySessionBootstrap {
         )
         .await?;
         request
-            .complete(
-                Some(secret_key.clone()),
-                receiver_noise_secret_key,
-                required_capabilities,
-            )
+            .complete(Some(secret_key.clone()), required_capabilities)
             .await
     }
 
     /// Restore an exported Pubky grant-session secret and validate its access.
     ///
-    /// Pass the same persisted receiver Noise key returned with the original
-    /// session access. Generating a replacement rotates the public key and
-    /// invalidates existing private path and Encrypted Link state.
     /// The grant must belong to this bootstrap's client ID and cover every
     /// capability in `required_capabilities`.
     pub async fn import_session(
         &self,
         session_secret: &str,
         local_secret_key: Option<PubkyLocalSecretKey>,
-        receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
         let session = self
@@ -410,7 +392,6 @@ impl PubkySessionBootstrap {
             session,
             self.pubky.clone(),
             local_secret_key,
-            receiver_noise_secret_key,
             required_capabilities,
             &self.client_id,
         )
@@ -663,7 +644,6 @@ async fn session_result(
     session: PubkySession,
     outbox_client: Pubky,
     local_secret_key: Option<PubkyLocalSecretKey>,
-    receiver_noise_secret_key: crate::ReceiverNoiseSecretKey,
     required_capabilities: &str,
     expected_client_id: &ClientId,
 ) -> Result<PubkySessionBootstrapResult> {
@@ -673,14 +653,15 @@ async fn session_result(
         session,
         outbox_client,
         local_secret_key,
-        receiver_noise_secret_key,
+        paykit_identity_secret_key: None,
     };
     let public_key = access.public_key()?;
-    access.validate_for_capabilities(required_capabilities)?;
+    let capability = access.capability_for_capabilities(required_capabilities)?;
     Ok(PubkySessionBootstrapResult {
         access,
         public_key,
         client_id: expected_client_id.to_string(),
+        capability,
     })
 }
 

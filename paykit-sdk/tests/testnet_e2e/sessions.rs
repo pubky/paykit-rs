@@ -1,6 +1,6 @@
 use paykit_sdk::{
-    PaykitReceiverPath, PaykitSdk, PaykitSdkConfig, PubkyLocalSecretKey, PubkyPublicKey,
-    PubkySessionAccess, ReceiverNoiseSecretKey, StorageAdapter,
+    PaykitSdk, PaykitSdkConfig, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
+    StorageAdapter, PAYKIT_SESSION_CAPABILITIES,
 };
 use pubky_testnet::pubky::Keypair;
 
@@ -23,24 +23,16 @@ async fn test_external_grant_signup_retries_after_account_creation() {
         .await
         .expect("account setup should succeed before the retried grant flow");
     let bootstrap = session_bootstrap(&testnet, TEST_CLIENT_ID);
-    let capabilities = PaykitSdkConfig::new(
-        PaykitReceiverPath::new("bitkit/wallet").expect("test receiver path should be valid"),
-    )
-    .required_session_capabilities();
-    let receiver_noise_secret = ReceiverNoiseSecretKey::random();
+    let capabilities = PAYKIT_SESSION_CAPABILITIES;
 
     let request = bootstrap
-        .start_sign_up_auth(&capabilities, &homeserver, None)
+        .start_sign_up_auth(capabilities, &homeserver, None)
         .await
         .expect("grant signup request should start");
     let authorization_url = request.authorization_url().to_owned();
     let (completed, approved) = tokio::join!(
-        request.complete(
-            Some(identity_secret.clone()),
-            receiver_noise_secret,
-            &capabilities,
-        ),
-        bootstrap.approve_auth(&authorization_url, &capabilities, &identity_secret),
+        request.complete(Some(identity_secret.clone()), capabilities),
+        bootstrap.approve_auth(&authorization_url, capabilities, &identity_secret),
     );
     approved.expect("grant signup request should be approved");
     let completed = completed.expect("grant signup request should complete");
@@ -56,25 +48,15 @@ async fn test_pending_grant_auth_survives_secure_state_restore() {
     let identity_secret = PubkyLocalSecretKey::new(Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let bootstrap = session_bootstrap(&testnet, TEST_CLIENT_ID);
-    let capabilities = PaykitSdkConfig::new(
-        PaykitReceiverPath::new("bitkit/wallet").expect("test receiver path should be valid"),
-    )
-    .required_session_capabilities();
-    let receiver_noise_secret = ReceiverNoiseSecretKey::random();
+    let capabilities = PAYKIT_SESSION_CAPABILITIES;
 
     bootstrap
-        .sign_up(
-            &identity_secret,
-            receiver_noise_secret.clone(),
-            &homeserver,
-            None,
-            &capabilities,
-        )
+        .sign_up(&identity_secret, &homeserver, None, capabilities)
         .await
         .expect("grant signup should succeed");
 
     let request = bootstrap
-        .start_sign_in_auth(&capabilities)
+        .start_sign_in_auth(capabilities)
         .await
         .expect("grant auth request should start");
     let state = request
@@ -84,16 +66,12 @@ async fn test_pending_grant_auth_survives_secure_state_restore() {
     drop(request);
 
     let resumed = bootstrap
-        .resume_auth(&state, &capabilities)
+        .resume_auth(&state, capabilities)
         .await
         .expect("pending grant state should restore");
     let (completed, approved) = tokio::join!(
-        resumed.complete(
-            Some(identity_secret.clone()),
-            receiver_noise_secret,
-            &capabilities,
-        ),
-        bootstrap.approve_auth(&authorization_url, &capabilities, &identity_secret),
+        resumed.complete(Some(identity_secret.clone()), capabilities),
+        bootstrap.approve_auth(&authorization_url, capabilities, &identity_secret),
     );
     approved.expect("grant auth request should be approved");
     let completed = completed.expect("restored grant auth request should complete");
@@ -111,20 +89,10 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
     let identity_secret = PubkyLocalSecretKey::new(identity_keypair.secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let bootstrap = session_bootstrap(&testnet, TEST_CLIENT_ID);
-    let capabilities = PaykitSdkConfig::new(
-        PaykitReceiverPath::new("bitkit/wallet").expect("test receiver path should be valid"),
-    )
-    .required_session_capabilities();
-    let receiver_noise_secret = ReceiverNoiseSecretKey::random();
+    let capabilities = PAYKIT_SESSION_CAPABILITIES;
 
     let signed_up = bootstrap
-        .sign_up(
-            &identity_secret,
-            receiver_noise_secret.clone(),
-            &homeserver,
-            None,
-            &capabilities,
-        )
+        .sign_up(&identity_secret, &homeserver, None, capabilities)
         .await
         .expect("grant signup should succeed");
     assert!(signed_up.access.session.as_grant().is_some());
@@ -134,11 +102,7 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
     );
 
     let signed_in = bootstrap
-        .sign_in(
-            &identity_secret,
-            receiver_noise_secret.clone(),
-            &capabilities,
-        )
+        .sign_in(&identity_secret, capabilities)
         .await
         .expect("scoped local grant signin should succeed");
     assert_eq!(
@@ -154,8 +118,7 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
         .import_session(
             exported.as_str(),
             Some(identity_secret.clone()),
-            receiver_noise_secret.clone(),
-            &capabilities,
+            capabilities,
         )
         .await
         .expect("exported grant session should restore");
@@ -168,18 +131,25 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
         .import_session(
             exported.as_str(),
             Some(identity_secret.clone()),
-            receiver_noise_secret.clone(),
-            &capabilities,
+            capabilities,
         )
         .await
         .expect_err("a grant issued to another client ID must be rejected");
     assert!(wrong_client_error.to_string().contains("grant client ID"));
 
+    #[allow(
+        deprecated,
+        reason = "the rejection test needs a legacy non-grant session"
+    )]
     let cookie_session = pubky
         .signer(identity_keypair)
         .signin_cookie()
         .await
         .expect("non-grant signin should succeed for the rejection test");
+    #[allow(
+        deprecated,
+        reason = "the rejection test needs a legacy non-grant session"
+    )]
     let cookie_secret = cookie_session
         .as_cookie()
         .and_then(|cookie| cookie.export_secret())
@@ -188,7 +158,7 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
         session: cookie_session,
         outbox_client: pubky,
         local_secret_key: Some(identity_secret.clone()),
-        receiver_noise_secret_key: receiver_noise_secret.clone(),
+        paykit_identity_secret_key: None,
     };
     let validation_error = cookie_access
         .validate()
@@ -196,12 +166,7 @@ async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
     assert!(validation_error.to_string().contains("grant-backed"));
 
     let error = bootstrap
-        .import_session(
-            &cookie_secret,
-            Some(identity_secret),
-            receiver_noise_secret,
-            &capabilities,
-        )
+        .import_session(&cookie_secret, Some(identity_secret), capabilities)
         .await
         .expect_err("non-grant sessions must be rejected");
 
@@ -261,15 +226,16 @@ async fn test_sdk_sign_out_rejects_session_for_different_identity() {
         .export_local_secret()
         .await
         .expect("test grant should export local restore material");
-    let provider =
-        TestnetSessionProvider::new(active_user.access.clone(), active_session_secret.clone());
+    let provider = TestnetSessionProvider::with_session_secret(
+        active_user.access.clone(),
+        active_session_secret.clone(),
+    );
     let sdk = PaykitSdk::new(
         initialized_user.storage.clone(),
         provider,
         TestnetPaymentAdapter::default(),
-        PaykitSdkConfig::new(initialized_user.receiver_path.clone()),
-    )
-    .expect("SDK construction should succeed");
+        PaykitSdkConfig::new(initialized_user.app_id.clone()).unwrap(),
+    );
 
     let error = sdk
         .sign_out()
@@ -285,7 +251,7 @@ async fn test_sdk_sign_out_rejects_session_for_different_identity() {
             .load_identity_state()
             .await
             .unwrap()
-            .and_then(|state| state.local_pubky_public_key),
+            .and_then(|state| state.public_key),
         Some(initialized_user.public_key)
     );
     testnet
