@@ -76,6 +76,20 @@ async fn test_save_linked_peer_link_state_clears_pending_handshake() {
     assert_eq!(link_state.link_snapshot, Some(vec![4, 5, 6]));
     assert!(link_state.handshake_snapshot.is_none());
     assert!(link_state.handshake_role.is_none());
+
+    let peer = load_linked_peer(&storage, &counterparty)
+        .await
+        .unwrap()
+        .unwrap();
+    let unchanged = save_linked_peer_state(
+        &storage,
+        counterparty,
+        LinkedPeerState::Linked,
+        timestamp() + chrono::Duration::minutes(2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unchanged, peer);
 }
 
 #[tokio::test]

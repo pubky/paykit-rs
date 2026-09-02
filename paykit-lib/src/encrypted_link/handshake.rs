@@ -68,7 +68,7 @@ impl EncryptedLinkHandshake {
 
     /// Serialize the current handshake state to bytes for persistence.
     ///
-    /// Convenience method equivalent to `self.snapshot().serialize()`.
+    /// Convenience method equivalent to `self.snapshot()?.serialize()`.
     pub fn serialize(&self) -> Result<Vec<u8>> {
         Ok(self.snapshot()?.serialize())
     }

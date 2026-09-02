@@ -170,7 +170,7 @@ impl EncryptedLink {
 
     /// Serialize the current link state to bytes for persistence.
     ///
-    /// Convenience method equivalent to `self.snapshot().serialize()`.
+    /// Convenience method equivalent to `self.snapshot()?.serialize()`.
     pub fn serialize(&self) -> Result<Vec<u8>> {
         Ok(self.snapshot()?.serialize())
     }
@@ -263,6 +263,17 @@ impl EncryptedLink {
     ///
     /// Higher-level callers should persist the exact JSON before sending when
     /// retrying the same message matters.
+    ///
+    /// Transient outbox write failures are retried up to the configured budget.
+    /// If every attempt fails, the prepared packet is retained and blocks
+    /// further sends, receives, and snapshots on this link until it is
+    /// republished with [`retry_pending_send`](Self::retry_pending_send).
+    ///
+    /// Do not restore an older snapshot to recover from a failed send: the
+    /// failed write may still have reached the homeserver, and rolling back
+    /// the sending nonce and slot would reuse the transport key and nonce for
+    /// the next plaintext. Only the identical prepared packet may be
+    /// republished; otherwise establish a fresh link.
     pub async fn send_private_application_message_json(&mut self, raw_json: &str) -> Result<()> {
         validate_private_application_message_json(raw_json)?;
         self.send_private_application_message_with_context(
@@ -270,6 +281,24 @@ impl EncryptedLink {
             "Private Application Message",
         )
         .await
+    }
+
+    /// Republish the prepared packet retained after a failed convenience send.
+    ///
+    /// Until the identical packet is republished, sends, receives, and snapshots
+    /// remain blocked. Never restore an older snapshot to retry with different
+    /// plaintext: an ambiguous write may already have used that key and nonce.
+    /// SDK callers using staged sends should instead publish their durably
+    /// persisted ciphertext with [`publish_prepared_private_application_message`](Self::publish_prepared_private_application_message).
+    #[allow(deprecated)]
+    pub async fn retry_pending_send(&mut self) -> Result<()> {
+        self.encryptor
+            .retry_pending_send()
+            .await
+            .map_err(|err| PaykitError::Transport {
+                context: format!("retry pending private send: {err:?}"),
+                source: anyhow::anyhow!("pubky-noise retry_pending_send failed: {err:?}"),
+            })
     }
 
     /// Prepare one raw JSON Private Application Message for durable handoff.
@@ -331,7 +360,7 @@ impl EncryptedLink {
                 "prepared private send destination does not belong to this Encrypted Link".into(),
             ));
         }
-        if ciphertext.len() != pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 2 {
+        if ciphertext.len() != pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN {
             return Err(PaykitError::InvalidData {
                 context: "prepared private send ciphertext has an invalid length".into(),
                 source: None,
@@ -400,13 +429,13 @@ impl EncryptedLink {
                 })
             }
         };
-        let ciphertext = response
-            .bytes()
-            .await
-            .map_err(|err| PaykitError::Transport {
-                context: "read next Private Application Message ciphertext".into(),
-                source: err.into(),
-            })?;
+        // Bound hostile outbox bodies before buffering or authenticating them.
+        let ciphertext = crate::pubky_routing::read_bounded_body(
+            response,
+            pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN,
+            "read next Private Application Message ciphertext",
+        )
+        .await?;
         let prepared =
             self.encryptor
                 .prepare_receive(&ciphertext)
@@ -451,6 +480,26 @@ impl EncryptedLink {
             "raw test Private Application Message",
         )
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_receive_path_for_test(&self) -> Result<String> {
+        self.encryptor
+            .next_receive_path()
+            .map_err(|err| PaykitError::Transport {
+                context: format!("next_receive_path: {err:?}"),
+                source: anyhow::anyhow!("pubky-noise next_receive_path failed: {err:?}"),
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_write_failure_for_test(&mut self) {
+        self.encryptor.test_enable_write_failure();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disable_write_failure_for_test(&mut self) {
+        self.encryptor.test_disable_write_failure();
     }
 
     /// Receive a bounded batch of available Private Application Messages in

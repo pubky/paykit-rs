@@ -23,7 +23,7 @@ pub struct LinkedPeerRecord {
     pub counterparty: PubkyPublicKey,
     /// Current local relationship/link state.
     pub state: LinkedPeerState,
-    /// Last successful sync time.
+    /// Last time sync changed local link state.
     pub last_sync_at: Option<DateTime<Utc>>,
     /// Last private receive time.
     pub last_private_receive_at: Option<DateTime<Utc>>,

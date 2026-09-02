@@ -4,8 +4,10 @@ use serde::{de, Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use crate::{
-    error::map_error, validation::invalid_data, EncryptedLink, PaykitAppId,
-    PaymentEndpointIdentifier, PaymentEndpointPayload, PrivateMessageKind, Result,
+    error::map_error,
+    validation::{invalid_data, invalid_plaintext_json},
+    EncryptedLink, PaykitAppId, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    PrivateMessageKind, Result,
 };
 
 /// Versioned Private Payment List sent over an established Encrypted Link.
@@ -136,40 +138,33 @@ where
 
 /// Parse a versioned Private Payment List JSON message.
 pub fn parse_private_payment_list_json(json: &str) -> Result<PrivatePaymentList> {
-    let wire: PrivatePaymentListWire = serde_json::from_str(json).map_err(|err| {
-        invalid_data(
-            format!("failed to parse Private Payment List JSON: {err}"),
-            Some(err.into()),
-        )
-    })?;
+    // SECURITY / REDACTION: this parses decrypted private-message plaintext,
+    // and serde_json errors can embed document fragments. Keep the context
+    // static so field values never reach error chains, logs, or FFI text.
+    let wire: PrivatePaymentListWire = serde_json::from_str(json)
+        .map_err(|_| invalid_plaintext_json("failed to parse Private Payment List JSON"))?;
     if wire.version != 1 {
         return Err(invalid_data(
-            format!("unsupported Private Payment List version {}", wire.version),
+            "unsupported Private Payment List version",
             None,
         ));
     }
     if wire.kind != PrivateMessageKind::PrivatePaymentList.as_str() {
-        return Err(invalid_data(
-            format!("unsupported Private Payment List kind '{}'", wire.kind),
-            None,
-        ));
+        return Err(invalid_data("unsupported Private Payment List kind", None));
     }
     let app_id = PaykitAppId::new(&wire.app_id).map_err(|err| {
         invalid_data(
-            format!(
-                "Private Payment List contains invalid App ID '{}'",
-                wire.app_id
-            ),
+            "Private Payment List contains invalid App ID",
             Some(err.into()),
         )
     })?;
     let mut payment_endpoints = HashMap::new();
     for (key, value) in wire.payment_endpoints {
         let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&key).map_err(|err| {
+            // SECURITY / REDACTION: `key` is decrypted private-message
+            // plaintext.
             invalid_data(
-                format!(
-                    "Private Payment List contains invalid Payment Endpoint Identifier '{key}'"
-                ),
+                "Private Payment List contains an invalid Payment Endpoint Identifier",
                 Some(err.into()),
             )
         })?;
@@ -277,7 +272,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported Private Payment List version 2")),
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context == "unsupported Private Payment List version"),
             "expected unsupported version error, got: {err}"
         );
     }
@@ -300,10 +295,13 @@ mod tests {
             r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","reference":"invoice-2026-0001","payment_endpoints":{}}"#,
         )
         .unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field") && context.contains("reference")),
-            "expected unknown reference field error, got: {err}"
-        );
+        let context = match err {
+            PaykitError::InvalidData { context, .. } => context,
+            other => panic!("expected InvalidData for a reference field, got: {other:?}"),
+        };
+        assert_eq!(context, "failed to parse Private Payment List JSON");
+        assert!(!context.contains("reference"));
+        assert!(!context.contains("invoice-2026-0001"));
     }
 
     // ── parse_private_payment_list_json tests ───────────────────────────────
@@ -373,10 +371,53 @@ mod tests {
             r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{"lightning":"ln-one","lightning":"ln-two"}}"#,
         )
         .unwrap_err();
-        assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("duplicate Payment Endpoint identifier")),
-            "expected InvalidData for duplicate identifiers, got: {err}"
+        let context = match err {
+            PaykitError::InvalidData { context, .. } => context,
+            other => panic!("expected InvalidData for duplicate identifiers, got: {other:?}"),
+        };
+        assert_eq!(context, "failed to parse Private Payment List JSON");
+        assert!(!context.contains("lightning"));
+        assert!(!context.contains("ln-one"));
+    }
+
+    #[test]
+    fn test_parse_private_payment_list_json_error_does_not_embed_plaintext() {
+        let sentinel = "sentinel-private-payload";
+        let json = format!(
+            r#"{{"version":"{sentinel}","kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{{}}}}"#
         );
+
+        let err = parse_private_payment_list_json(&json).unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to parse Private Payment List JSON"),
+            "expected static parse error, got: {message}"
+        );
+        assert!(
+            !message.contains(sentinel),
+            "decrypted plaintext must not appear in errors, got: {message}"
+        );
+    }
+
+    #[test]
+    fn test_private_payment_list_invalid_header_does_not_embed_plaintext() {
+        let sentinel = "SENTINEL_PRIVATE_HEADER";
+        for field in ["kind", "app_id"] {
+            let mut json = serde_json::json!({
+                "version": 1,
+                "kind": "paykit.private_payment_list",
+                "app_id": "test-app",
+                "payment_endpoints": {},
+            });
+            json[field] = sentinel.into();
+
+            let error = parse_private_payment_list_json(&json.to_string()).unwrap_err();
+
+            assert!(matches!(error, PaykitError::InvalidData { .. }));
+            assert!(!format!("{error:?}").contains(sentinel));
+            assert!(!error.to_string().contains(sentinel));
+        }
     }
 
     #[test]

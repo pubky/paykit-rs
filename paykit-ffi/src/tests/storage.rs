@@ -715,10 +715,36 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
         }
     }
 
+    struct NoSessionProvider;
+
+    impl FfiSdkPubkySessionProvider for NoSessionProvider {
+        fn load_session_access(
+            &self,
+        ) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError> {
+            Ok(None)
+        }
+
+        fn public_storage_available(&self) -> Result<bool, PaykitFfiError> {
+            Ok(false)
+        }
+
+        fn clear_session_access(&self) -> Result<(), PaykitFfiError> {
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(EncodedSnapshotStore::default());
+    let sdk = FfiPaykitSdk::new(
+        store.clone(),
+        Arc::new(NoSessionProvider),
+        default_config("bitkit".into()).unwrap(),
+    )
+    .unwrap();
     let storage = FfiSdkStorage {
-        store: Arc::new(EncodedSnapshotStore::default()),
+        store,
         transaction_lock: Arc::new(Mutex::new(())),
     };
+    let before = sdk.backup_state_revision().await.unwrap();
 
     storage
         .transaction_erased(Box::new(|tx| {
@@ -727,13 +753,33 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
         }))
         .await
         .unwrap();
+    assert_ne!(sdk.backup_state_revision().await.unwrap(), before);
+    let before = sdk.backup_state_revision().await.unwrap();
+    let revision = sdk.state_revision().unwrap();
+    let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let lease = storage
+        .transaction(|tx| {
+            tx.claim_peer_link_operation(
+                &peer,
+                Utc::now(),
+                Utc::now() + chrono::Duration::seconds(30),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(sdk.state_revision().unwrap(), revision);
+    assert_eq!(sdk.backup_state_revision().await.unwrap(), before);
     storage
-        .transaction_erased(Box::new(|tx| {
-            tx.allocate_receive_batch_id()?;
-            Ok(Box::new(()) as Box<dyn Any + Send>)
-        }))
+        .transaction(|tx| {
+            tx.release_peer_link_operation(&peer, lease.lease_id);
+            Ok(())
+        })
         .await
         .unwrap();
+    for _ in 0..3 {
+        assert_eq!(sdk.backup_state_revision().await.unwrap(), before);
+    }
 }
 
 #[tokio::test]

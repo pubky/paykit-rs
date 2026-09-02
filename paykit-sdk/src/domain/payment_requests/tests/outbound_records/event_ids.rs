@@ -384,6 +384,13 @@ async fn test_payment_request_records_keep_malformed_inbound_audit_position() {
     let storage = registered_storage();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    let sentinel = "sentinel-private-cancellation-reason";
+    let mut malformed: serde_json::Value = serde_json::from_str(&malformed_cancellation_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
+        request_id,
+    ))
+    .unwrap();
+    malformed["reason"] = serde_json::json!({ "token": sentinel });
     persist_messages(
         &storage,
         counterparty.clone(),
@@ -395,7 +402,7 @@ async fn test_payment_request_records_keep_malformed_inbound_audit_position() {
                 None,
                 None,
             ),
-            malformed_cancellation_raw("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104", request_id),
+            serde_json::to_string(&malformed).unwrap(),
         ],
     )
     .await;
@@ -409,8 +416,7 @@ async fn test_payment_request_records_keep_malformed_inbound_audit_position() {
         PaymentRequestLifecycleState::InvalidConflict
     );
     assert_eq!(records[0].last_stream_item_id, Some(1));
-    assert!(records[0]
-        .invalid_reason
-        .as_ref()
-        .is_some_and(|reason| reason.contains("reason must be a string")));
+    let reason = records[0].invalid_reason.as_ref().unwrap();
+    assert!(reason.contains("failed to parse Payment Request Cancellation JSON"));
+    assert!(!reason.contains(sentinel));
 }

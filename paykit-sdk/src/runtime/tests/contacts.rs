@@ -31,7 +31,8 @@ fn test_public_resource_page_respects_entry_limit() {
 
 #[test]
 fn test_public_response_size_is_bounded_with_and_without_content_length() {
-    assert!(require_response_size_within_limit(None, 0, "fetch profile").is_err());
+    assert!(require_positive_response_limit(0, "fetch profile").is_err());
+    assert!(require_response_size_within_limit(Some(0), 0, "fetch profile").is_ok());
     assert!(require_response_size_within_limit(Some(5), 4, "fetch profile").is_err());
     assert!(require_response_size_within_limit(None, 4, "fetch profile").is_ok());
 

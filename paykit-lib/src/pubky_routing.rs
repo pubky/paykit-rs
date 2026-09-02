@@ -13,9 +13,9 @@ use pubky::{
 use tracing::{debug, error, instrument, trace};
 
 use crate::{
-    parse_paykit_app_registry_json, serialize_paykit_app_registry, PaykitAppId, PaykitAppRegistry,
-    PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList, Result,
-    PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES, PAYMENT_LIST_MAX_ENDPOINTS,
+    parse_paykit_app_registry_json, serialize_paykit_app_registry, validation::invalid_data,
+    PaykitAppId, PaykitAppRegistry, PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    PaymentList, Result, PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES, PAYMENT_LIST_MAX_ENDPOINTS,
 };
 
 /// Conventional prefix for public Paykit data hosted on Pubky storage.
@@ -44,6 +44,16 @@ pub const PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX: &str =
     "/pub/paykit/v0/encrypted-link-recovery";
 
 const LIST_PAGE_LIMIT: u16 = 100;
+const LIST_MAX_PAGES: usize = 100;
+
+/// Maximum accepted size for a public Paykit document (Payment Endpoint
+/// payloads, the Paykit App Registry, and recovery markers).
+///
+/// Public objects are served by other users' homeservers and must not be
+/// trusted to fit in memory; an unbounded read lets a hostile publisher
+/// exhaust the client. 64 KiB is far above any legitimate descriptor
+/// (LNURL, BOLT11 invoice, JSON endpoint payload).
+pub(crate) const MAX_PUBLIC_RESOURCE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Payment List exceeds caller-supplied limits")]
@@ -493,12 +503,22 @@ pub(crate) async fn fetch_text(
     }
 }
 
-async fn read_text_response(
+/// Read a response with a hard streaming bound, including when Content-Length
+/// is absent or inaccurate. Outbox bodies are also untrusted homeserver data.
+pub(crate) async fn read_bounded_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
+    read_response_body(&mut response, label, max_bytes).await
+}
+
+async fn read_response_body(
     response: &mut reqwest::Response,
     label: &str,
-    max_bytes: Option<usize>,
-) -> Result<Option<String>> {
-    if let (Some(max_bytes), Some(content_length)) = (max_bytes, response.content_length()) {
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    if let Some(content_length) = response.content_length() {
         if content_length > max_bytes as u64 {
             return Err(PaykitError::InvalidData {
                 context: format!("{label}: response exceeds the {max_bytes}-byte limit"),
@@ -514,16 +534,28 @@ async fn read_text_response(
             source: err.into(),
         }
     })? {
-        if let Some(max_bytes) = max_bytes {
-            if bytes.len().saturating_add(chunk.len()) > max_bytes {
-                return Err(PaykitError::InvalidData {
-                    context: format!("{label}: response exceeds the {max_bytes}-byte limit"),
-                    source: Some(ResponseSizeLimitExceeded.into()),
-                });
-            }
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(PaykitError::InvalidData {
+                context: format!("{label}: response exceeds the {max_bytes}-byte limit"),
+                source: Some(ResponseSizeLimitExceeded.into()),
+            });
         }
         bytes.extend_from_slice(&chunk);
     }
+    Ok(bytes)
+}
+
+async fn read_text_response(
+    response: &mut reqwest::Response,
+    label: &str,
+    max_bytes: Option<usize>,
+) -> Result<Option<String>> {
+    let bytes = read_response_body(
+        response,
+        label,
+        max_bytes.unwrap_or(MAX_PUBLIC_RESOURCE_BYTES),
+    )
+    .await?;
     if bytes.is_empty() {
         debug!("resource is empty, returning None");
         return Ok(None);
@@ -552,6 +584,7 @@ async fn list_resources(
     trace!("listing directory resources");
     let mut resources = Vec::new();
     let mut cursor = None::<String>;
+    let mut pages = 0usize;
 
     loop {
         let mut builder = match storage.list(&addr) {
@@ -590,6 +623,14 @@ async fn list_resources(
 
         if page.is_empty() {
             break;
+        }
+
+        pages += 1;
+        if pages > LIST_MAX_PAGES {
+            return Err(invalid_data(
+                format!("{label}: listing exceeded {LIST_MAX_PAGES} pages"),
+                None,
+            ));
         }
 
         let page_len = page.len();
@@ -636,3 +677,6 @@ fn is_not_found(err: &PubkyError) -> bool {
             if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
     )
 }
+
+#[cfg(test)]
+mod tests;

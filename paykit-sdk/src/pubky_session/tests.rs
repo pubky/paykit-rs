@@ -189,3 +189,46 @@ fn test_pubky_auth_request_state_rejects_mismatched_client_key() {
 
     assert!(PubkyAuthRequestState::new(auth_url, [43; 32]).is_err());
 }
+
+#[test]
+fn test_confirmed_inactive_grant_error_accepts_only_explicit_revocation_or_expiry() {
+    for message in [
+        "Grant has been revoked",
+        "Grant has expired",
+        "Invalid grant: grant has expired",
+    ] {
+        let error = pubky_server_error(401, message);
+        assert!(is_confirmed_inactive_grant_error(&error));
+    }
+
+    assert!(!is_confirmed_inactive_grant_error(&pubky_server_error(
+        404,
+        "Grant not found",
+    )));
+
+    assert!(!is_confirmed_inactive_grant_error(
+        &pubky::Error::Authentication(pubky::errors::AuthError::Validation(
+            "stored grant credential has expired".into(),
+        )),
+    ));
+}
+
+#[test]
+fn test_confirmed_inactive_grant_error_rejects_clock_skew_and_invalid_pop() {
+    for message in [
+        "Invalid PoP proof: PoP timestamp out of range",
+        "Invalid PoP proof: invalid PoP signature",
+        "PoP nonce already used",
+        "Unauthorized",
+    ] {
+        let error = pubky_server_error(401, message);
+        assert!(!is_confirmed_inactive_grant_error(&error));
+    }
+}
+
+fn pubky_server_error(status: u16, message: &str) -> pubky::Error {
+    pubky::Error::Request(pubky::errors::RequestError::Server {
+        status: status.try_into().unwrap(),
+        message: message.into(),
+    })
+}

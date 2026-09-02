@@ -190,6 +190,16 @@ fn test_private_application_message_keeps_invalid_json() {
 }
 
 #[test]
+fn test_decode_private_application_message_preserves_authenticated_body() {
+    let raw = b"{}\0";
+
+    let message = decode_private_application_message(raw).unwrap();
+
+    assert_eq!(message.raw_json.as_bytes(), raw);
+    assert!(serde_json::from_str::<serde_json::Value>(&message.raw_json).is_err());
+}
+
+#[test]
 fn test_decode_private_application_message_retains_invalid_utf8_marker() {
     let mut raw = [0u8; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN];
     raw[0] = 0xff;

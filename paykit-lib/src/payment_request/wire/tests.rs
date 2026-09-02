@@ -4,6 +4,28 @@ fn app_id() -> PaykitAppId {
     PaykitAppId::new("test-app").unwrap()
 }
 
+#[test]
+fn test_private_event_parse_errors_redact_plaintext() {
+    let sentinel = "SENTINEL_PRIVATE_EVENT";
+    let json = format!(r#"{{"version":"{sentinel}","app_id":"test-app"}}"#);
+    let errors = [
+        parse_payment_request_json(&json).unwrap_err(),
+        parse_acceptance_json(&json).unwrap_err(),
+        parse_rejection_json(&json).unwrap_err(),
+        parse_cancellation_json(&json).unwrap_err(),
+        parse_payment_proof_json(&json).unwrap_err(),
+    ];
+
+    for error in errors {
+        assert!(matches!(
+            error,
+            PaykitError::InvalidData { source: None, .. }
+        ));
+        assert!(!format!("{error:?}").contains(sentinel));
+        assert!(!error.to_string().contains(sentinel));
+    }
+}
+
 fn request_terms() -> PaymentRequestTerms {
     PaymentRequestTerms {
         amount: PaymentAmount {
@@ -89,7 +111,7 @@ fn payment_request_requires_explicit_nullable_fields() {
 
     let err = parse_payment_request_json(json).unwrap_err();
     assert!(
-        matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("missing field"))
+        matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Payment Request JSON")
     );
 }
 
@@ -115,7 +137,7 @@ fn payment_request_rejects_unknown_top_level_field() {
 
     let err = parse_payment_request_json(json).unwrap_err();
     assert!(
-        matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field"))
+        matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Payment Request JSON")
     );
 }
 
@@ -141,7 +163,7 @@ fn payment_request_rejects_unknown_request_field() {
 
     let err = parse_payment_request_json(json).unwrap_err();
     assert!(
-        matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field"))
+        matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Payment Request JSON")
     );
 }
 
@@ -166,7 +188,7 @@ fn payment_request_rejects_unknown_amount_field() {
 
     let err = parse_payment_request_json(json).unwrap_err();
     assert!(
-        matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field"))
+        matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Payment Request JSON")
     );
 }
 
@@ -231,7 +253,7 @@ fn payment_proof_requires_explicit_billing_period() {
 
     let err = parse_payment_proof_json(json).unwrap_err();
     assert!(
-        matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("missing field"))
+        matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Payment Proof JSON")
     );
 }
 
@@ -303,7 +325,7 @@ fn payment_request_recurrence_requires_explicit_ends_at() {
 
     let err = parse_payment_request_json(json).unwrap_err();
     assert!(
-        matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("missing field"))
+        matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Payment Request JSON")
     );
 }
 
@@ -402,7 +424,7 @@ fn acceptance_rejects_wrong_kind_payment_reference_field() {
 
     let err = parse_acceptance_json(json).unwrap_err();
     assert!(
-        matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unknown field"))
+        matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Payment Request Acceptance JSON")
     );
 }
 
@@ -419,7 +441,7 @@ fn rejection_reason_null_is_invalid_when_present() {
 
     let err = parse_rejection_json(json).unwrap_err();
     assert!(
-        matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("reason must be a string"))
+        matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Payment Request Rejection JSON")
     );
 }
 
@@ -436,7 +458,7 @@ fn cancellation_reason_null_is_invalid_when_present() {
 
     let err = parse_cancellation_json(json).unwrap_err();
     assert!(
-        matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("reason must be a string"))
+        matches!(err, PaykitError::InvalidData { ref context, .. } if context == "failed to parse Payment Request Cancellation JSON")
     );
 }
 

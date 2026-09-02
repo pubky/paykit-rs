@@ -130,14 +130,16 @@ impl PubkyLocalSecretKey {
     /// Parse a 32-byte secret key from hex text.
     pub fn from_hex(value: &str) -> crate::Result<Self> {
         let mut bytes = [0; 32];
-        hex::decode_to_slice(value, &mut bytes).map_err(|err| {
+        hex::decode_to_slice(value, &mut bytes).map_err(|_err| {
+            // The hex error embeds the offending character and offset; the
+            // input is secret key material, so keep the context static.
             let context = if value.len() != 64 {
-                "Pubky secret key hex must decode to 32 bytes".into()
+                "Pubky secret key hex must decode to 32 bytes"
             } else {
-                format!("invalid Pubky secret key hex: {err}")
+                "Pubky secret key hex contains an invalid character"
             };
             crate::PaykitSdkError::Identity {
-                context,
+                context: context.into(),
                 source: None,
             }
         })?;
@@ -146,7 +148,7 @@ impl PubkyLocalSecretKey {
 
     /// Derive a local Pubky secret key from a 64-byte BIP39 seed.
     ///
-    /// This matches Pubky Core and Pubky Ring: the Pubky secret key is the
+    /// This matches Pubky and Pubky Ring: the Pubky secret key is the
     /// first 32 bytes of the BIP39 seed produced with an empty passphrase.
     pub fn from_bip39_seed(seed: &[u8]) -> crate::Result<Self> {
         if seed.len() != BIP39_SEED_BYTES {
@@ -499,7 +501,7 @@ impl fmt::Debug for PubkySessionAccess {
 pub struct IdentityState {
     /// Last initialized public key, when known.
     pub public_key: Option<PubkyPublicKey>,
-    /// Last successful initialization time.
+    /// Time the identity was initialized; unchanged initialization preserves it.
     pub initialized_at: DateTime<Utc>,
 }
 

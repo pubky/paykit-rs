@@ -38,7 +38,7 @@ use crate::{
         expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
         queue_private_payment_list_with_reservations_with_link_lease, reservation_payload_hash,
         unattempted_superseded_reservation_cancellations,
-        PaymentEndpointReservationCancellationRecord,
+        PaymentEndpointReservationCancellationRecord, PrivatePaymentListQueuePolicy,
     },
     domain::endpoints::{
         failed_record, normalize_receiving_details, pending_publication_record,
@@ -46,9 +46,9 @@ use crate::{
         EndpointSyncReport,
     },
     domain::linked_peers::{
-        default_linked_peer, mark_recovery_required_for_marker_in_transaction,
-        mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
-        requeue_recovery_required_outbound_messages,
+        default_linked_peer, load_encrypted_link_state,
+        mark_recovery_required_for_marker_in_transaction, mark_recovery_required_in_transaction,
+        mark_recovery_required_with_lease, requeue_recovery_required_outbound_messages,
         save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
         save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
         EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
@@ -171,6 +171,15 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     // Session-backed workflows hold a read guard; sign-out waits for all of
     // them before clearing access under the write guard.
     session_operation_gate: Arc<RwLock<()>>,
+    // Runtime-local delivery witnesses are reusable only on the same Noise link
+    // and for the same App. Restarting conservatively republishes each list.
+    private_payment_list_publications:
+        Mutex<HashMap<(PubkyPublicKey, paykit_lib::PaykitAppId), PrivatePaymentListPublication>>,
+}
+
+struct PrivatePaymentListPublication {
+    link_id: [u8; 32],
+    outbound_message_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,6 +242,7 @@ where
             clock,
             identity_operation_in_progress: Arc::new(Mutex::new(false)),
             session_operation_gate: Arc::new(RwLock::new(())),
+            private_payment_list_publications: Mutex::new(HashMap::new()),
         }
     }
 
@@ -286,16 +296,17 @@ where
         ))
     }
 
-    /// Clear this application's live Pubky session access.
+    /// Revoke the current Pubky grant and clear this application's session access.
     ///
-    /// Stored Paykit state remains intact so the same identity can resume it
-    /// later and other applications are not affected. Session clearing is
-    /// still attempted if the stored identity status cannot be read.
+    /// Identity-wide Paykit state remains intact for other applications and a
+    /// later session. Missing access and identity mismatches fail before remote
+    /// revocation or local cleanup. Use [`Self::forget_session_access`] only
+    /// when local-only cleanup is explicitly intended.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
         let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
         let now = self.clock.now();
-        let state_result = self
+        let state = self
             .storage
             .transaction(move |tx| {
                 Ok(tx.load_identity_state().unwrap_or(IdentityState {
@@ -303,10 +314,52 @@ where
                     initialized_at: now,
                 }))
             })
-            .await;
-        let clear_result = self.pubky.clear_session_access().await;
-        clear_result?;
-        let state = state_result?;
+            .await?;
+        let session_access = self.pubky.load_session_access().await?;
+        if session_access.is_none() && state.public_key.is_some() {
+            return Err(PaykitSdkError::Identity {
+                context: "cannot revoke Pubky grant during sign-out without live session access"
+                    .into(),
+                source: None,
+            });
+        }
+        if let Some(access) = session_access {
+            access.validate()?;
+            if let Some(expected_public_key) = &state.public_key {
+                if access.public_key()? != *expected_public_key {
+                    return Err(PaykitSdkError::Identity {
+                        context:
+                            "cannot sign out because active Pubky session does not match initialized identity"
+                                .into(),
+                        source: None,
+                    });
+                }
+            }
+            self.pubky.revoke_session_access(&access).await?;
+        }
+        self.pubky.clear_session_access().await?;
+
+        Ok(IdentityStatus::from_state(&state, false, false))
+    }
+
+    /// Clear this application's session access without revoking the grant.
+    ///
+    /// Identity-wide Paykit state remains intact. A copied or separately
+    /// persisted grant remains valid until it expires or is revoked elsewhere.
+    pub async fn forget_session_access(&self) -> Result<IdentityStatus> {
+        let _identity_guard = self.claim_identity_operation("forget session access")?;
+        let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
+        let now = self.clock.now();
+        let state = self
+            .storage
+            .transaction(move |tx| {
+                Ok(tx.load_identity_state().unwrap_or(IdentityState {
+                    public_key: None,
+                    initialized_at: now,
+                }))
+            })
+            .await?;
+        self.pubky.clear_session_access().await?;
 
         Ok(IdentityStatus::from_state(&state, false, false))
     }
@@ -484,19 +537,10 @@ async fn fetch_public_text(
 ) -> Result<Option<String>> {
     let addr = public_resource_uri(public_key, path);
     match storage.get(addr).await {
-        Ok(mut resp) => {
-            require_response_size_within_limit(resp.content_length(), max_bytes, context)?;
-            let mut bytes = Vec::new();
-            while let Some(chunk) = resp
-                .chunk()
-                .await
-                .map_err(|err| PaykitSdkError::Transport {
-                    context: context.into(),
-                    source: Some(err.into()),
-                })?
-            {
-                append_response_chunk(&mut bytes, &chunk, max_bytes, context)?;
-            }
+        Ok(resp) => {
+            let Some(bytes) = read_public_response(resp, max_bytes, context).await? else {
+                return Ok(None);
+            };
             String::from_utf8(bytes)
                 .map(Some)
                 .map_err(|_| PaykitSdkError::Protocol {
@@ -518,26 +562,17 @@ async fn fetch_public_text_with_revision(
 ) -> Result<Option<(String, String)>> {
     let addr = public_resource_uri(public_key, path);
     match storage.get(addr).await {
-        Ok(mut resp) => {
-            require_response_size_within_limit(resp.content_length(), max_bytes, context)?;
+        Ok(resp) => {
             let revision = pubky::ResourceStats::from_headers(resp.headers())
                 .etag
-                .filter(|etag| !etag.starts_with("W/\"") && !etag.is_empty())
-                .ok_or_else(|| PaykitSdkError::Transport {
-                    context: format!("{context}: response is missing a strong ETag"),
-                    source: None,
-                })?;
-            let mut bytes = Vec::new();
-            while let Some(chunk) = resp
-                .chunk()
-                .await
-                .map_err(|err| PaykitSdkError::Transport {
-                    context: context.into(),
-                    source: Some(err.into()),
-                })?
-            {
-                append_response_chunk(&mut bytes, &chunk, max_bytes, context)?;
-            }
+                .filter(|etag| !etag.starts_with("W/\"") && !etag.is_empty());
+            let Some(bytes) = read_public_response(resp, max_bytes, context).await? else {
+                return Ok(None);
+            };
+            let revision = revision.ok_or_else(|| PaykitSdkError::Transport {
+                context: format!("{context}: response is missing a strong ETag"),
+                source: None,
+            })?;
             let text = String::from_utf8(bytes).map_err(|_| PaykitSdkError::Protocol {
                 context: format!("{context}: response is not valid UTF-8"),
                 source: None,
@@ -562,24 +597,51 @@ async fn fetch_public_file_uri(
             source: None,
         })?;
     match storage.get(resource).await {
-        Ok(mut resp) => {
-            require_response_size_within_limit(resp.content_length(), max_bytes, context)?;
-            let mut bytes = Vec::new();
-            while let Some(chunk) = resp
-                .chunk()
-                .await
-                .map_err(|err| PaykitSdkError::Transport {
-                    context: context.into(),
-                    source: Some(err.into()),
-                })?
-            {
-                append_response_chunk(&mut bytes, &chunk, max_bytes, context)?;
-            }
-            Ok(Some(bytes))
-        }
+        Ok(resp) => read_public_response(resp, max_bytes, context).await,
         Err(err) if is_pubky_not_found(&err) => Ok(None),
         Err(err) => Err(map_pubky_transport_error(context, err)),
     }
+}
+
+async fn read_public_response(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    context: &'static str,
+) -> Result<Option<Vec<u8>>> {
+    let status = response.status();
+    if status == StatusCode::NOT_FOUND || status == StatusCode::GONE {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        // Do not read or retain an attacker-controlled HTTP error body.
+        return Err(PaykitSdkError::Transport {
+            context: format!("{context}: HTTP {status}"),
+            source: None,
+        });
+    }
+    require_response_size_within_limit(response.content_length(), max_bytes, context)?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| PaykitSdkError::Transport {
+            context: context.into(),
+            source: Some(err.into()),
+        })?
+    {
+        append_response_chunk(&mut bytes, &chunk, max_bytes, context)?;
+    }
+    Ok(Some(bytes))
+}
+
+fn require_positive_response_limit(max_bytes: usize, context: &'static str) -> Result<()> {
+    if max_bytes == 0 {
+        return Err(PaykitSdkError::Protocol {
+            context: format!("{context}: byte limit must be greater than zero"),
+            source: None,
+        });
+    }
+    Ok(())
 }
 
 fn require_response_size_within_limit(
@@ -587,12 +649,6 @@ fn require_response_size_within_limit(
     max_bytes: usize,
     context: &'static str,
 ) -> Result<()> {
-    if max_bytes == 0 {
-        return Err(PaykitSdkError::Protocol {
-            context: format!("{context}: byte limit must be greater than zero"),
-            source: None,
-        });
-    }
     if content_length.is_some_and(|length| length > max_bytes as u64) {
         return Err(PaykitSdkError::Protocol {
             context: format!("{context}: response exceeds the {max_bytes}-byte limit"),
@@ -626,11 +682,13 @@ async fn list_public_resources(
     max_entries: usize,
 ) -> Result<Vec<pubky::PubkyResource>> {
     const LIST_PAGE_LIMIT: u16 = 100;
+    const LIST_MAX_PAGES: usize = 100;
 
     require_public_resource_entry_limit(max_entries, context)?;
     let addr = public_resource_uri(public_key, path);
     let mut entries = Vec::new();
     let mut cursor = None::<String>;
+    let mut pages = 0usize;
     loop {
         let mut builder = storage
             .list(&addr)
@@ -647,6 +705,13 @@ async fn list_public_resources(
         };
         if page.is_empty() {
             break;
+        }
+        pages += 1;
+        if pages > LIST_MAX_PAGES {
+            return Err(PaykitSdkError::Protocol {
+                context: format!("{context}: listing exceeded {LIST_MAX_PAGES} pages"),
+                source: None,
+            });
         }
         let page_len = page.len();
         cursor = Some(next_public_resource_cursor(

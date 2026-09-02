@@ -7,6 +7,55 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc54] - 2026-09-14
+
+### Added
+- Expose `PaykitSdk.backupStateRevision` in Swift and Kotlin to detect backup-content changes without treating transient operation leases as wallet changes.
+- Allow callers to set a smaller public-file download limit through the SDK and platform bindings.
+
+### Fixed
+- Avoid unnecessary SDK writes for empty private receives and unchanged identity or established-link checks.
+- Reuse unchanged reservation-backed Private Payment Lists during routine synchronization while preserving outbound retries and conservative republication after restart or relink.
+
+### Changed
+- Make `PrivateStreamIntakeReport.receive_batch_id` optional because an empty receive no longer allocates a batch.
+
+## [0.1.0-rc52] - 2026-09-10
+
+### Security
+- Bound public response reads while streaming (JSON documents, profile files, Encrypted Receipts, and Encrypted Link recovery markers) and cap directory listing pagination, rejecting non-advancing cursors.
+- Keep decrypted private-message plaintext out of parse errors and zeroize FFI auth URL inputs.
+- Fail identity refresh and identity-scoped receipt writes when the sign-out generation changed, so concurrent sign-outs cannot cross-write identity state.
+- Refuse to supersede a Private Payment List whose send outcome is unknown, preventing transport key/nonce reuse after a failed publish.
+- Update `rustls-webpki` to 0.103.15, patching certificate-validation advisories.
+
+### Fixed
+- Update `pubky-noise` to 0.1.0-rc8, which rejects malformed outbox packets instead of panicking, and republish the retained prepared packet on send retries.
+- Reject Encrypted Receipts above the shared 256 KiB limit at issuance so they cannot be created unretrievable.
+
+### Changed
+- `EncryptedLink`/`EncryptedLinkHandshake::snapshot` and `serialize` now return `Result`; `EncryptedLink::retry_pending_send` recovers a retained prepared send.
+- Export `MAX_ENCRYPTED_RECEIPT_BYTES`.
+
+## [0.1.0-rc51] - 2026-09-04
+
+### Fixed
+- Preserved Payment Request history and payer/payee roles when inbound and
+  outbound request lifecycles interleave.
+
+## [0.1.0-rc50] - 2026-08-31
+
+### Added
+- Added explicit local-only session forgetting for offline recovery without
+  implying remote grant revocation.
+
+### Fixed
+- Cached restored Pubky grant sessions so repeated or concurrent SDK calls do
+  not rotate and invalidate each other's bearer credentials after restart.
+- Normal SDK sign-out now revokes the Pubky grant before clearing local session
+  access and identity-scoped state, and preserves local state when live access
+  is unavailable so revocation can be retried.
+
 ## [0.1.0-rc49] - 2026-08-28
 
 ### Added
@@ -247,7 +296,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [0.1.0-rc25] - 2026-07-02
 
 ### Changed
-- Pubky secret key derivation now matches Pubky Core/Ring BIP39 behavior:
+- Pubky secret key derivation now matches Pubky/Ring BIP39 behavior:
   SDK and FFI helpers derive from a BIP39 seed or mnemonic by using the first
   32 bytes of the BIP39 seed with an empty passphrase, instead of Paykit
   runtime-label HMAC derivation.
@@ -430,7 +479,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc49...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc51...HEAD
+[0.1.0-rc51]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc50...v0.1.0-rc51
+[0.1.0-rc50]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc49...v0.1.0-rc50
 [0.1.0-rc49]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc48...v0.1.0-rc49
 [0.1.0-rc48]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc47...v0.1.0-rc48
 [0.1.0-rc47]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc46...v0.1.0-rc47

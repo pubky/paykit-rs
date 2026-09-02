@@ -1,6 +1,73 @@
 use super::super::*;
 
 #[tokio::test]
+async fn test_payment_request_records_keep_interleaved_bidirectional_requests() {
+    let storage = registered_storage();
+    let counterparty = counterparty();
+    let received_request_id = "550e8400-e29b-41d4-a716-446655440101";
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![request_raw(
+            "650e8400-e29b-41d4-a716-446655440101",
+            received_request_id,
+            "received-request",
+            None,
+            None,
+        )],
+    )
+    .await;
+    enqueue_untyped_private_message(
+        &storage,
+        counterparty.clone(),
+        acceptance_raw("650e8400-e29b-41d4-a716-446655440102", received_request_id),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let sent_request_id = "750e8400-e29b-41d4-a716-446655440101";
+    enqueue_untyped_private_message(
+        &storage,
+        counterparty.clone(),
+        request_raw(
+            "750e8400-e29b-41d4-a716-446655440102",
+            sent_request_id,
+            "sent-request",
+            None,
+            None,
+        ),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![acceptance_raw(
+            "750e8400-e29b-41d4-a716-446655440103",
+            sent_request_id,
+        )],
+    )
+    .await;
+
+    let records = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
+    let sent_request = records
+        .iter()
+        .find(|record| record.payment_request_id == sent_request_id)
+        .unwrap();
+
+    assert_eq!(
+        sent_request.local_role,
+        Some(PaymentRequestLocalRole::Payee)
+    );
+    assert_eq!(sent_request.state, PaymentRequestLifecycleState::Accepted);
+    assert!(sent_request.invalid_reason.is_none());
+}
+
+#[tokio::test]
 async fn test_payment_request_records_preserve_outbound_fifo_when_clock_moves_backward() {
     let storage = registered_storage();
     let counterparty = counterparty();

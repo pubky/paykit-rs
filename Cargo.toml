@@ -3,8 +3,9 @@ resolver = "2"
 members = ["paykit-lib", "paykit-ffi", "paykit-sdk"]
 
 [patch.crates-io]
-pubky = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f70580132fcf5f2481d930d173e058997e970589" }
-pubky-common = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f70580132fcf5f2481d930d173e058997e970589" }
-pubky-homeserver = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f70580132fcf5f2481d930d173e058997e970589" }
-pubky-testnet = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f70580132fcf5f2481d930d173e058997e970589" }
+pubky = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f89c530861786be3ca332339bcd78d0e16b3c408" }
+pubky-common = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f89c530861786be3ca332339bcd78d0e16b3c408" }
+pubky-homeserver = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f89c530861786be3ca332339bcd78d0e16b3c408" }
+pubky-testnet = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f89c530861786be3ca332339bcd78d0e16b3c408" }
+pubky-noise = { git = "https://github.com/pubky/pubky-noise.git", rev = "80c9d70a06e1b3ff01b14600e37796eb7177a644" }
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }

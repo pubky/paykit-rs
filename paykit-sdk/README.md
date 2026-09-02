@@ -197,8 +197,10 @@ Common workflows:
   `process_pending_private_messages` from a broader retry worker
 - call `sync_public_contact_markers` on startup if the app uses public contact
   markers
-- call `sign_out` when the app wants to clear its live Pubky access; shared
-  Paykit state remains available to other apps and to a later session
+- call `sign_out` when the app wants to revoke its Pubky grant and clear its
+  local session access; shared Paykit state remains available to other apps and
+  to a later session
+- call `forget_session_access` only for explicit local-only cleanup
 - call `remove_paykit_app` before sign-out when the app should also withdraw
   its public Payment Endpoints and App Registry entry; removal requires the app
   to cancel or finish its active Payment Requests, undelivered private events,
@@ -240,15 +242,22 @@ using `PubkySharedStateStorage` may race, but homeserver conditional writes
 prevent lost updates; the stale operation fails and can be retried from the
 latest shared state.
 
-`sign_out` clears only this application's live Pubky session access. It does
-not clear the identity's Paykit state or withdraw another application's data.
-If provider clearing fails, stored state remains intact so callers can retry
-safely.
+`sign_out` validates the active identity, revokes this application's Pubky
+grant, and clears its local session access. It does not clear the identity's
+Paykit state or withdraw another application's data. If live access, remote
+revocation, or provider clearing fails, shared state remains intact and the
+operation returns an error.
+
+`forget_session_access` clears local access without revoking the grant. It is
+an explicit recovery operation; other persisted copies of that grant remain
+valid until expiry or remote revocation.
 
 If the provider returns no live session access during ordinary startup or
 workflow calls, the SDK blocks Pubky-backed work but preserves the last
-identity-scoped state. An app that should also withdraw its published payment
-capability calls `remove_paykit_app` while authenticated before signing out.
+identity-scoped state. Secure `sign_out` also fails until live access is
+restored and the grant can be revoked. An app that should also withdraw its
+published payment capability calls `remove_paykit_app` while authenticated
+before signing out.
 
 Read-only private views such as cached Private Payment Lists can still be
 returned for the initialized identity when live session access is missing.

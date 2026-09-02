@@ -62,6 +62,10 @@ impl PubkySessionProvider for TestPubkySessionProvider {
         Ok(self.session.clone())
     }
 
+    async fn revoke_session_access(&self, _access: &PubkySessionAccess) -> Result<()> {
+        Ok(())
+    }
+
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
         Ok(self
             .session
@@ -71,26 +75,6 @@ impl PubkySessionProvider for TestPubkySessionProvider {
 
     async fn clear_session_access(&self) -> Result<()> {
         Ok(())
-    }
-}
-
-struct FailingClearSessionProvider;
-
-#[async_trait]
-impl PubkySessionProvider for FailingClearSessionProvider {
-    async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
-        Ok(None)
-    }
-
-    async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
-        Ok(None)
-    }
-
-    async fn clear_session_access(&self) -> Result<()> {
-        Err(PaykitSdkError::Identity {
-            context: "failed to clear Pubky session access".into(),
-            source: None,
-        })
     }
 }
 
@@ -663,5 +647,6 @@ mod payment_resolution;
 mod private_lists;
 mod private_stream;
 mod public_endpoints;
+mod public_reads;
 mod receipts;
 mod recovery;

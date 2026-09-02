@@ -133,6 +133,11 @@ impl EncryptedLinkSnapshot {
     pub fn remote_noise_public_key(&self) -> &PublicKey {
         &self.remote_noise_public_key
     }
+
+    /// Stable identifier of the completed Noise handshake, unchanged by transport messages.
+    pub fn link_id(&self) -> Option<[u8; 32]> {
+        self.state.link_id
+    }
 }
 
 fn deserialize_noise_state(

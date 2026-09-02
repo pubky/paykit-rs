@@ -1,12 +1,15 @@
 /target
-paykit-ffi/bindings/android/native-debug-symbols.zip
 .idea/
 .DS_Store
 *.swp
+.build/
 .swiftpm/
 
-# iOS build artifacts (rebuilt by build_ios.sh; sources are committed)
-paykit-ffi/bindings/ios/Paykit.xcframework/
-paykit-ffi/bindings/ios/Paykit.xcframework.zip
-paykit-ffi/bindings/ios/ios-arm64/
-paykit-ffi/bindings/ios/ios-arm64-sim/
+# Generated UniFFI bindgen outputs
+paykit-ffi/bindings/android/lib/src/main/kotlin/com/synonym/paykit/paykit.android.kt
+paykit-ffi/bindings/android/lib/src/main/kotlin/com/synonym/paykit/paykit.common.kt
+paykit-ffi/bindings/android/lib/src/main/jniLibs/**/*.so
+paykit-ffi/bindings/android/native-debug-symbols.zip
+
+# Generated iOS release artifacts
+paykit-ffi/dist/

@@ -434,16 +434,38 @@ where
     ) -> Result<()> {
         let now = self.clock.now();
         let sent = mark_outbound_sent(sending, now);
-        self.retry_storage_transaction(|| {
-            let sent = sent.clone();
-            let lease = lease.clone();
-            move |tx| {
-                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                tx.save_outbound_private_message(sent.clone())?;
-                Ok(())
+        let link_id = self
+            .retry_storage_transaction(|| {
+                let sent = sent.clone();
+                let lease = lease.clone();
+                move |tx| {
+                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                    tx.save_outbound_private_message(sent.clone())?;
+                    // The prepared-send transaction already persisted the advanced
+                    // snapshot. Read its link ID in the same transaction as Sent.
+                    Ok(tx
+                        .encrypted_link_state(&sent.counterparty)
+                        .and_then(|state| state.link_snapshot)
+                        .and_then(|snapshot| {
+                            paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot).ok()
+                        })
+                        .and_then(|snapshot| snapshot.link_id()))
+                }
+            })
+            .await?;
+        if sent.kind == PrivateMessageKind::PrivatePaymentList.as_str() {
+            if let Some(link_id) = link_id {
+                if let Ok(mut publications) = self.private_payment_list_publications.lock() {
+                    publications.insert(
+                        (sent.counterparty.clone(), sent.app_id.clone()),
+                        PrivatePaymentListPublication {
+                            link_id,
+                            outbound_message_id: sent.outbound_message_id,
+                        },
+                    );
+                }
             }
-        })
-        .await?;
+        }
         report.sent.push(sent.outbound_message_id);
         Ok(())
     }

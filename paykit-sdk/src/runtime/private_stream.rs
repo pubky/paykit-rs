@@ -235,7 +235,9 @@ where
                     link_state: Some(next_link_state.clone()),
                     authorized_receipt_apps: authorized_receipt_apps.clone(),
                     link_lease: Some(lease.clone()),
-                    receive_batch_id: aggregate.as_ref().map(|report| report.receive_batch_id),
+                    receive_batch_id: aggregate
+                        .as_ref()
+                        .and_then(|report| report.receive_batch_id),
                     received_at: now,
                 },
             )

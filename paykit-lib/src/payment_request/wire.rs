@@ -4,7 +4,8 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::{
     shared_wire::{BillingPeriodWire, PaymentAmountWire, RequiredNullable},
     validation::{
-        invalid_data, invalid_wire, validate_outgoing_version_kind, validate_wire_version_kind,
+        invalid_data, invalid_plaintext_json, invalid_wire, validate_outgoing_version_kind,
+        validate_wire_version_kind,
     },
     EventId, PaykitAppId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
@@ -404,18 +405,17 @@ pub(super) fn serialize_payment_proof_json(
 }
 
 pub(super) fn parse_payment_request_json(json: &str) -> Result<PaymentRequest> {
-    let wire: PaymentRequestWire = serde_json::from_str(json).map_err(|err| {
-        invalid_data(
-            format!("failed to parse Payment Request JSON: {err}"),
-            Some(err.into()),
-        )
-    })?;
+    // SECURITY / REDACTION: this parses decrypted private-message plaintext,
+    // and serde_json errors can embed document fragments. Keep the context
+    // static so field values never reach error chains, logs, or FFI text.
+    let wire: PaymentRequestWire = serde_json::from_str(json)
+        .map_err(|_| invalid_plaintext_json("failed to parse Payment Request JSON"))?;
     validate_app_id(&wire.app_id, "Payment Request")?;
     PaymentRequest::try_from(wire).map_err(|err| invalid_wire(err, "Payment Request"))
 }
 
 pub(super) fn parse_acceptance_json(json: &str) -> Result<PaymentRequestAcceptance> {
-    let wire = parse_basic_event_json(json, "Payment Request Acceptance")?;
+    let wire = parse_basic_event_json(json, "failed to parse Payment Request Acceptance JSON")?;
     validate_app_id(&wire.app_id, "Payment Request Acceptance")?;
     validate_wire_version_kind(
         wire.version,
@@ -440,7 +440,7 @@ pub(super) fn parse_acceptance_json(json: &str) -> Result<PaymentRequestAcceptan
 }
 
 pub(super) fn parse_rejection_json(json: &str) -> Result<PaymentRequestRejection> {
-    let wire = parse_basic_event_json(json, "Payment Request Rejection")?;
+    let wire = parse_basic_event_json(json, "failed to parse Payment Request Rejection JSON")?;
     validate_app_id(&wire.app_id, "Payment Request Rejection")?;
     validate_wire_version_kind(
         wire.version,
@@ -460,7 +460,7 @@ pub(super) fn parse_rejection_json(json: &str) -> Result<PaymentRequestRejection
 }
 
 pub(super) fn parse_cancellation_json(json: &str) -> Result<PaymentRequestCancellation> {
-    let wire = parse_basic_event_json(json, "Payment Request Cancellation")?;
+    let wire = parse_basic_event_json(json, "failed to parse Payment Request Cancellation JSON")?;
     validate_app_id(&wire.app_id, "Payment Request Cancellation")?;
     validate_wire_version_kind(
         wire.version,
@@ -480,12 +480,10 @@ pub(super) fn parse_cancellation_json(json: &str) -> Result<PaymentRequestCancel
 }
 
 pub(super) fn parse_payment_proof_json(json: &str) -> Result<PaymentProof> {
-    let wire: PaymentProofWire = serde_json::from_str(json).map_err(|err| {
-        invalid_data(
-            format!("failed to parse Payment Proof JSON: {err}"),
-            Some(err.into()),
-        )
-    })?;
+    // SECURITY / REDACTION: see `parse_payment_request_json`; the proof body
+    // is decrypted private-message plaintext.
+    let wire: PaymentProofWire = serde_json::from_str(json)
+        .map_err(|_| invalid_plaintext_json("failed to parse Payment Proof JSON"))?;
     validate_app_id(&wire.app_id, "Payment Proof")?;
     PaymentProof::try_from(wire).map_err(|err| invalid_wire(err, "Payment Proof"))
 }
@@ -511,13 +509,10 @@ pub(super) fn parse_event_header_ids(json: &str) -> (Option<EventId>, Option<Pay
     (event_id, payment_request_id)
 }
 
-fn parse_basic_event_json(json: &str, label: &'static str) -> Result<BasicEventWire> {
-    serde_json::from_str(json).map_err(|err| {
-        invalid_data(
-            format!("failed to parse {label} JSON: {err}"),
-            Some(err.into()),
-        )
-    })
+fn parse_basic_event_json(json: &str, context: &'static str) -> Result<BasicEventWire> {
+    // SECURITY / REDACTION: see `parse_payment_request_json`; these event
+    // bodies are decrypted private-message plaintext.
+    serde_json::from_str(json).map_err(|_| invalid_plaintext_json(context))
 }
 #[cfg(test)]
 mod tests;

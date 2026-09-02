@@ -459,16 +459,33 @@ async fn test_encrypted_link_serialize_convenience() {
 #[tokio::test]
 async fn test_prepared_private_message_advances_only_after_persistence_acknowledgement() {
     let mut setup = PrivateTestSetup::new().await;
-    let raw_json = r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{}}"#;
+    let mut payload = serde_json::json!({
+        "version": 1,
+        "kind": "paykit.test_packet",
+        "app_id": "bitkit",
+        "payload": "",
+    });
+    payload["payload"] = "x"
+        .repeat(pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN - payload.to_string().len())
+        .into();
+    let raw_json = payload.to_string();
 
     let sender_before = setup.sender_link.serialize().unwrap();
+    let link_id = setup.sender_link.snapshot().unwrap().link_id();
+    assert!(link_id.is_some());
     let prepared_send = setup
         .sender_link
-        .prepare_private_application_message_json(raw_json)
+        .prepare_private_application_message_json(&raw_json)
         .unwrap();
+    assert_eq!(prepared_send.resulting_snapshot().link_id(), link_id);
     let sender_after = prepared_send.resulting_snapshot().serialize();
     let destination_path = prepared_send.destination_path().to_owned();
     let ciphertext = prepared_send.ciphertext().to_vec();
+    assert_eq!(
+        ciphertext.len(),
+        pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN
+    );
+    assert_eq!(ciphertext.len(), 1018);
     let prepared_debug = format!("{prepared_send:?}");
 
     assert!(!prepared_debug.contains(&destination_path));
@@ -494,6 +511,7 @@ async fn test_prepared_private_message_advances_only_after_persistence_acknowled
         .expect("prepared message should be available");
     let receiver_after = prepared_receive.resulting_snapshot().serialize();
 
+    assert_eq!(prepared_receive.resulting_snapshot().link_id(), link_id);
     assert_eq!(prepared_receive.message().raw_json, raw_json);
     assert!(setup.receiver_link.serialize().is_err());
     assert_ne!(receiver_after, receiver_before);
@@ -556,4 +574,119 @@ fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
             "reserved Noise nonce should be rejected"
         );
     }
+}
+
+#[tokio::test]
+async fn test_malformed_private_application_message_packet_is_rejected() {
+    let setup = PrivateTestSetup::new().await;
+    let mut receiver_link = setup.receiver_link;
+
+    // The receiver reads `{owner}/{storage-path}/{slot}`; an outbox write from
+    // the counterparty session uses the storage path without the owner segment.
+    let receive_path = receiver_link.next_receive_path_for_test().unwrap();
+    let outbox_path = receive_path
+        .split_once('/')
+        .map(|(_, storage_path)| storage_path.to_string())
+        .expect("receive path should include an owner segment");
+
+    // Transport packets are fixed-size authenticated ciphertext, without an
+    // outer length prefix. Invalid sizes and unauthenticated full-size packets
+    // must fail without advancing the receive checkpoint.
+    let packet_len = pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN;
+    let malformed_packets = [
+        Vec::new(),
+        vec![0x00],
+        vec![0xff, 0xff, 0x00],
+        vec![0; packet_len - 1],
+        vec![0; packet_len],
+        vec![0; packet_len + 1],
+    ];
+    let checkpoint = receiver_link.serialize().unwrap();
+
+    for packet in malformed_packets {
+        setup
+            .sender_session
+            .storage()
+            .put(outbox_path.clone(), packet)
+            .await
+            .expect("malformed outbox fixture should be stored");
+
+        let result = receiver_link.receive_private_application_messages().await;
+        assert!(
+            result.is_err(),
+            "malformed packet must be rejected as an error, not panic"
+        );
+        assert_eq!(receiver_link.serialize().unwrap(), checkpoint);
+        assert!(receiver_link
+            .prepare_next_private_application_message()
+            .await
+            .is_err());
+        assert_eq!(receiver_link.serialize().unwrap(), checkpoint);
+    }
+
+    close_encrypted_link(receiver_link).await.unwrap();
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_send_retries_republish_after_write_failure() {
+    let mut setup = PrivateTestSetup::new().await;
+    setup.sender_link.enable_write_failure_for_test();
+
+    let json = r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{}}"#;
+    let err = setup
+        .sender_link
+        .send_private_application_message_for_test(json.as_bytes())
+        .await
+        .expect_err("simulated outbox write failure should fail the send");
+
+    // The retry budget must be spent on outbox write failures, not consumed by
+    // a non-retryable prepared-transport state error.
+    let message = err.to_string();
+    assert!(
+        message.contains("after 4 attempts"),
+        "expected the retry budget to be exhausted by write failures, got: {message}"
+    );
+
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(setup.receiver_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_send_can_recover_retained_packet_after_write_failure() {
+    let mut setup = PrivateTestSetup::new().await;
+    setup.sender_link.enable_write_failure_for_test();
+
+    let json = r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{}}"#;
+    setup
+        .sender_link
+        .send_private_application_message_for_test(json.as_bytes())
+        .await
+        .expect_err("simulated outbox write failure should fail the send");
+
+    // The retained packet blocks other operations on this link.
+    assert!(setup.sender_link.snapshot().is_err());
+
+    // Once connectivity recovers, the retained packet can be republished and
+    // the original message still reaches the receiver.
+    setup.sender_link.disable_write_failure_for_test();
+    setup.sender_link.retry_pending_send().await.unwrap();
+    setup.sender_link.snapshot().unwrap();
+
+    let mut receiver_link = setup.receiver_link;
+    let received = receiver_link
+        .receive_private_application_messages()
+        .await
+        .unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].raw_json, json);
+
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(receiver_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
 }

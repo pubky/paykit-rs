@@ -207,7 +207,7 @@ pub(crate) fn derive_payment_request_records_from_parts(
         events.push(stored);
     }
 
-    events.sort_by(compare_stored_events);
+    events.sort_by(compare_stored_events_by_request);
     let tainted_events = events
         .iter()
         .filter(|event| pre_invalid_request_ids.contains(&event.payment_request_id()))
@@ -243,6 +243,17 @@ pub(crate) fn derive_payment_request_records_from_parts(
         ))
     });
     Ok(records)
+}
+
+fn compare_stored_events_by_request(
+    a: &StoredPaymentRequestEvent,
+    b: &StoredPaymentRequestEvent,
+) -> Ordering {
+    a.event()
+        .payment_request_id()
+        .as_str()
+        .cmp(b.event().payment_request_id().as_str())
+        .then_with(|| compare_stored_events(a, b))
 }
 
 fn compare_stored_events(a: &StoredPaymentRequestEvent, b: &StoredPaymentRequestEvent) -> Ordering {

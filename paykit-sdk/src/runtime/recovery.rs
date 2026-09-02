@@ -181,7 +181,7 @@ where
         lease: &PeerLinkOperationLease,
         force_new_attempt: bool,
     ) {
-        let (session_access, _) = match self.private_link_session_access().await {
+        let (session_access, ..) = match self.private_link_session_access().await {
             Ok(value) => value,
             Err(err) => {
                 let _ = self
@@ -330,7 +330,7 @@ where
         let session_access = match session_access {
             Some(session_access) => session_access,
             None => {
-                let (session_access, _) = self.private_link_session_access().await?;
+                let (session_access, ..) = self.private_link_session_access().await?;
                 return self
                     .observe_remote_recovery_marker_with_session(counterparty, &session_access)
                     .await

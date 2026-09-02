@@ -163,15 +163,13 @@ impl PrivateApplicationMessage {
 }
 
 pub(super) fn decode_private_application_message(raw: &[u8]) -> Result<PrivateApplicationMessage> {
-    // Trim trailing zero-padding added by pubky-noise's fixed-size buffers.
-    // Paykit application messages are JSON, so trailing NUL bytes are not valid
-    // payload content.
-    let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let plaintext = match std::str::from_utf8(&raw[..end]) {
+    // pubky-noise returns the exact authenticated application body. It owns
+    // transport framing and padding; preserve malformed JSON for caller routing.
+    let plaintext = match std::str::from_utf8(raw) {
         Ok(plaintext) => plaintext.to_owned(),
         Err(_) => format!(
             "{INVALID_UTF8_PRIVATE_MESSAGE_PREFIX}{}",
-            URL_SAFE_NO_PAD.encode(&raw[..end])
+            URL_SAFE_NO_PAD.encode(raw)
         ),
     };
 
@@ -318,14 +316,25 @@ pub(super) async fn send_private_application_message(
 
     let max_attempts = send_attempts_from_retries(max_send_retries);
     let mut last_error: Option<String> = None;
+    // A failed outbox write leaves the prepared packet unacknowledged.
+    // Preparing a new send would then fail with
+    // `UnacknowledgedPreparedTransport` (non-retryable), so retries republish
+    // the same prepared packet instead of preparing a new one.
+    let mut retry_pending = false;
 
     for attempt in 1..=max_attempts {
-        match encryptor.send_message(plaintext).await {
+        let outcome = if retry_pending {
+            encryptor.retry_pending_send().await
+        } else {
+            encryptor.send_message(plaintext).await
+        };
+        match outcome {
             Ok(()) => {
                 debug!(context, "Private Application Message sent successfully");
                 return Ok(());
             }
             Err(err) if is_retryable_private_send_error(&err) => {
+                retry_pending = true;
                 last_error = Some(format!("{err:?}"));
                 if attempt < max_attempts {
                     warn!(

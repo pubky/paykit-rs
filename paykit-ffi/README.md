@@ -26,10 +26,14 @@ on low-level `paykit-lib` protocol bindings.
 - `SdkPaymentAdapter` — platform callback interface for receiving details,
   endpoint reservation cleanup, payable endpoint ordering, and payment target
   construction.
-- `PaykitSdk.initialize`, `identityStatus`, and `signOut` — app-facing
-  account/session lifecycle for the current Paykit runtime.
+- `PaykitSdk.initialize`, `identityStatus`, `signOut`, and
+  `forgetSessionAccess` — app-facing account/session lifecycle for the current
+  Paykit runtime. `signOut` revokes the Pubky grant and leaves identity-wide
+  Paykit state intact; `forgetSessionAccess` performs local-only cleanup.
 - `PaykitSdk.stateRevision` — return the latest observed SDK state revision so
   apps can detect when SDK-managed state changed.
+- `PaykitSdk.backupStateRevision` — fingerprint backup contents without
+  transient operation leases, so empty polls do not trigger app backups.
 - `PubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
   session state.
@@ -139,6 +143,14 @@ Helpers that both queue and attempt delivery return
 `LINKING` can appear in `queued`; the message remains eligible for a later
 outbound worker run after the link becomes `LINKED`.
 
+### Public File Downloads
+
+`fetchPubkyFile(uri, maxBytes)` and `fetchPubkyText(uri, maxBytes)` require a
+positive byte limit. `fetchPubkyFileBounded(uri, maxBytes)` additionally caps
+the limit at 5 MiB and permits zero for an empty body. Missing files return
+`nil`/`null`; oversized bodies fail before full buffering. Image decoding,
+pixel and cache limits, and request timeouts remain app responsibilities.
+
 ### Payment Requests
 
 - `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
@@ -189,7 +201,7 @@ object.
 - `PubkyAuthRequestState` — secret-bearing URL plus client key used by
   `resumeAuth`; delete it after completion, expiry, or abandonment.
 - `pubkySecretKeyFromBip39Seed(seed)` — derive a Pubky secret key from a
-  64-byte BIP39 seed using the Pubky Core/Ring convention.
+  64-byte BIP39 seed using the Pubky/Ring convention.
 - `pubkySecretKeyFromBip39Mnemonic(mnemonicPhrase)` — derive the same key from
   a BIP39 English mnemonic phrase.
 - `pubkyPublicKeyFromSecret(localSecretKey)` — derive a Pubky public key.
@@ -251,7 +263,7 @@ bootstrap.approveAuthWithCompanionClaim(
 - `PaykitSdk.deletePaykitProfile(revision)` — remove the fetched profile only
   if its revision is still current.
 - `PaykitSdk.publishPaykitBlob`, `uploadProfileAvatar`,
-  `deletePaykitBlob`, `fetchPubkyFile`, and `fetchPubkyText` — publish profile
+  `deletePaykitBlob`, `fetchPubkyFile`, `fetchPubkyFileBounded`, and `fetchPubkyText` — publish profile
   blobs and read public Pubky resources with caller-provided size limits.
 - `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
   `removeContact` — manage Contact Records. Each contact is one Pubky
@@ -279,14 +291,15 @@ identity profile fields without exposing an FFI JSON value model.
 Any generation can be derived from `PubkyLocalSecretKey` by passing its
 generation number. Delegated apps can instead load `PaykitIdentitySecretKey`
 without receiving the Pubky root secret. After rotation, every remaining app
-must persist the replacement Paykit secret;
-it cannot be re-derived from the unchanged Pubky key.
+must use the replacement Paykit secret. Delegated apps receive it from the
+identity's key-management layer; a root-key holder can derive it for that
+generation.
 
 `PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.
-`PaykitSdk.stateRevision` returns the latest revision observed by the selected
-storage mode. Callback storage can compare it before and after SDK-mutating
-workflows to mark app backups dirty.
+`PaykitSdk.backupStateRevision` lets apps compare backup contents before and
+after SDK-mutating workflows to mark app backups dirty. `stateRevision`
+remains the selected storage mode's revision, including transient lease changes.
 `encodeSdkStateBlobSnapshot` and `decodeSdkStateBlobSnapshot` are convenience
 helpers for apps that store the opaque state blob and revision in one platform
 record.
@@ -329,8 +342,10 @@ When callback storage is selected, `SdkStateBlobStore` must persist every blob
 save atomically. Every runtime for the same Pubky identity must resolve to the
 same logical blob. A protected device-local blob is suitable only while one
 process owns the runtime. If the app also stores the SDK blob inside a larger
-app backup record, compare `stateRevision` before and after SDK-mutating
-workflows and mark the app backup dirty when it changes.
+app backup record, compare `backupStateRevision` before and after SDK-mutating
+workflows and mark the app backup dirty when it changes, including when a
+workflow fails after persisting progress. If the comparison fails, conservatively
+mark the backup dirty. Do not use this fingerprint as the store's CAS revision.
 
 State-store callbacks run while the SDK holds its per-handle storage lock. They
 must only load or save the blob and must not call back into that SDK handle.
@@ -354,9 +369,9 @@ call `initialize`. Do not reuse the previous identity's blob. Reopening the
 previous store restores that identity without deleting its state.
 
 ```text
-before = sdk.stateRevision()
+before = sdk.backupStateRevision()
 report = sdk.syncPublicEndpointsWithReceivingDetails(details)
-after = sdk.stateRevision()
+after = sdk.backupStateRevision()
 
 if after != before:
     markAppBackupDirty()
@@ -481,6 +496,14 @@ cd paykit-ffi
 ./build.sh all
 ```
 
+The iOS script regenerates SwiftPM interfaces in `bindings/ios` and writes the
+XCFramework and zip to `dist/ios`. It also updates the checksum in
+`Package.swift`; keep that change only when preparing a release.
+
+Android Kotlin bindings, JNI libraries, debug symbols, and the local Maven
+publication are generated artifacts, not tracked sources. The Gradle project,
+manifest, ProGuard rules, and `kotlin-manual` helpers remain tracked.
+
 Release builds use the same script with `-r`:
 
 ```bash
@@ -514,6 +537,7 @@ paykit-ffi/
 ├── build.sh                # Unified all-platform build script
 ├── build_ios.sh            # Internal iOS sub-build script
 ├── build_android.sh        # Internal Android sub-build script
-├── bindings/ios/           # Generated Swift + XCFramework
-└── bindings/android/       # Generated Kotlin + Android library
+├── bindings/ios/           # SwiftPM source/interface files
+├── bindings/android/       # Android Gradle source/config files
+└── dist/ios/               # Ignored generated XCFramework release artifacts
 ```

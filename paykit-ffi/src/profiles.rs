@@ -327,6 +327,21 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Fetch a public Pubky file with a byte limit capped at 5 MiB.
+    ///
+    /// Missing files return `None`. Zero permits only an empty body.
+    /// Image decoding, caching, and request timeouts remain app responsibilities.
+    pub async fn fetch_pubky_file_bounded(
+        &self,
+        uri: String,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, PaykitFfiError> {
+        self.runtime
+            .fetch_pubky_file_bounded(&uri, max_bytes)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Fetch a public Pubky UTF-8 text file up to `max_bytes`.
     pub async fn fetch_pubky_text(
         &self,

@@ -66,6 +66,31 @@ fn test_encrypt_receipt_rejects_oversized_envelope() {
 }
 
 #[test]
+fn test_encrypt_receipt_accepts_large_metadata_within_limit() {
+    let receipt_id = ReceiptId::new("450e8400-e29b-41d4-a716-446655440003").unwrap();
+    let receipt = Receipt {
+        receipt_id: receipt_id.clone(),
+        payment_reference: PaymentReference::new("invoice-2026-0003").unwrap(),
+        payment_request_id: None,
+        billing_period: None,
+        recipient_public_key: Keypair::random().public_key(),
+        payment_endpoint_identifier: None,
+        amount: None,
+        metadata: metadata(json!({"blob": "a".repeat(50 * 1024)})),
+    };
+    let location = ReceiptAccess::location_for(&receipt_id);
+    let key = ReceiptDecryptionKey::generate();
+
+    let encrypted = receipt.encrypt(&key).unwrap();
+
+    assert!(encrypted.len() <= ENCRYPTED_RECEIPT_MAX_BYTES);
+    assert_eq!(
+        decrypt_receipt(&encrypted, &key, &location).unwrap(),
+        receipt
+    );
+}
+
+#[test]
 fn test_decrypt_receipt_rejects_oversized_envelope_before_parsing() {
     let receipt_id = ReceiptId::new("450e8400-e29b-41d4-a716-446655440000").unwrap();
     let location = ReceiptAccess::location_for(&receipt_id);
