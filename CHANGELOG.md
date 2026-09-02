@@ -7,6 +7,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- Added the V1 Allowance lifecycle across the Rust library, SDK runtime, and
+  Swift/Kotlin bindings, including durable derivation, backup migration, Event
+  ID replay handling, and Encrypted Link recovery behavior.
+- Documented wallet integration requirements for using accepted Allowances
+  with ordinary one-time and Recurring Payment Requests.
+
+### Changed
+
+- **Breaking (Rust API):** `AllowanceAcceptance::new`,
+  `AllowanceRejection::new`, `AllowanceEnd::withdrawal`, and
+  `AllowanceEnd::accepted` now return `Result` and reject lifecycle messages
+  that reuse their causal Event IDs.
+
+### Fixed
+
+- Kept the first crossing Payment Request Acceptance after payee cancellation;
+  a second Acceptance now invalidates history without replacing the first.
+
 ## [0.1.0-rc54] - 2026-09-14
 
 ### Added
@@ -19,6 +39,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 - Make `PrivateStreamIntakeReport.receive_batch_id` optional because an empty receive no longer allocates a batch.
+
 
 ## [0.1.0-rc52] - 2026-09-10
 
