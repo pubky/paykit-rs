@@ -798,7 +798,8 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 return;
             }
             let crosses_payee_cancellation = record.state == PaymentRequestLifecycleState::Canceled
-                && cancellation_was_sent_by_payee(record);
+                && cancellation_was_sent_by_payee(record)
+                && record.accepted_event_id.is_none();
             if !matches!(record.state, PaymentRequestLifecycleState::Proposed)
                 && !crosses_payee_cancellation
             {
