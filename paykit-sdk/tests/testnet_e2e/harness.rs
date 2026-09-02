@@ -5,6 +5,7 @@
 //! Pubky testnet (homeserver) per test, and real signed-up sessions wrapped in
 //! the SDK's own `PubkySessionAccess` via `PubkySessionBootstrap`.
 
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,12 +20,26 @@ use paykit_sdk::{
     PAYKIT_SESSION_CAPABILITIES,
 };
 use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
-use tokio::sync::{oneshot, Mutex as TokioMutex, OnceCell};
+use tokio::sync::{oneshot, Mutex as TokioMutex, OnceCell, Semaphore, SemaphorePermit};
 
 const TEST_CLIENT_ID: &str = "paykit-sdk.test";
 
 static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
+static TESTNET_CONCURRENCY: Semaphore = Semaphore::const_new(2);
+
+pub struct TestnetInstance {
+    inner: EphemeralTestnet,
+    _permit: SemaphorePermit<'static>,
+}
+
+impl Deref for TestnetInstance {
+    type Target = EphemeralTestnet;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
 
 async fn shared_postgres() -> &'static DockerPostgres {
     SHARED_POSTGRES
@@ -36,7 +51,11 @@ async fn shared_postgres() -> &'static DockerPostgres {
         .await
 }
 
-pub async fn build_testnet() -> EphemeralTestnet {
+pub async fn build_testnet() -> TestnetInstance {
+    let permit = TESTNET_CONCURRENCY
+        .acquire()
+        .await
+        .expect("testnet concurrency semaphore should remain open");
     let _guard = TESTNET_BUILD_LOCK.lock().await;
 
     let builder = if std::env::var_os("TEST_PUBKY_CONNECTION_STRING").is_some() {
@@ -49,7 +68,10 @@ pub async fn build_testnet() -> EphemeralTestnet {
         EphemeralTestnet::builder().postgres(postgres)
     };
 
-    builder.with_http_relay().build().await.unwrap()
+    TestnetInstance {
+        inner: builder.with_http_relay().build().await.unwrap(),
+        _permit: permit,
+    }
 }
 
 pub fn session_bootstrap(testnet: &EphemeralTestnet, client_id: &str) -> PubkySessionBootstrap {
@@ -261,7 +283,7 @@ pub struct TestUser {
     pub access: PubkySessionAccess,
     pub public_key: PubkyPublicKey,
     pub app_id: PaykitAppId,
-    session_secret: String,
+    identity_secret: PubkyLocalSecretKey,
 }
 
 impl TestUser {
@@ -297,8 +319,7 @@ impl TestUser {
 
         let storage = InMemoryStorage::default();
         let adapter = TestnetPaymentAdapter::default();
-        let provider =
-            TestnetSessionProvider::with_session_secret(access.clone(), session_secret.clone());
+        let provider = TestnetSessionProvider::with_session_secret(access.clone(), session_secret);
         let sdk = PaykitSdk::new(storage.clone(), provider, adapter.clone(), config);
 
         let report = sdk
@@ -331,18 +352,30 @@ impl TestUser {
             access,
             public_key: result.public_key,
             app_id,
-            session_secret,
+            identity_secret: secret_key,
         }
     }
 
     /// Build another application runtime for this identity and shared state.
-    pub async fn additional_app(&self, app_id: PaykitAppId, display_name: &str) -> TestUser {
+    pub async fn additional_app(
+        &self,
+        testnet: &EphemeralTestnet,
+        app_id: PaykitAppId,
+        display_name: &str,
+    ) -> TestUser {
         let storage = self.storage.clone();
         let adapter = TestnetPaymentAdapter::default();
-        let provider = TestnetSessionProvider::with_session_secret(
-            self.access.clone(),
-            self.session_secret.clone(),
-        );
+        let result = session_bootstrap(testnet, &format!("{app_id}.test"))
+            .sign_in(&self.identity_secret, PAYKIT_SESSION_CAPABILITIES)
+            .await
+            .expect("shared application sign-in should succeed");
+        let session_secret = result
+            .export_session_secret()
+            .await
+            .expect("shared application grant should export local restore material")
+            .into_inner();
+        let access = result.access;
+        let provider = TestnetSessionProvider::with_session_secret(access.clone(), session_secret);
         let sdk = PaykitSdk::new(
             storage.clone(),
             provider,
@@ -377,17 +410,17 @@ impl TestUser {
             sdk,
             storage,
             adapter,
-            access: self.access.clone(),
-            public_key: self.public_key.clone(),
+            access,
+            public_key: result.public_key,
             app_id,
-            session_secret: self.session_secret.clone(),
+            identity_secret: self.identity_secret.clone(),
         }
     }
 }
 
 /// Two signed-up users sharing one testnet homeserver.
 pub struct TwoParty {
-    pub _testnet: EphemeralTestnet,
+    pub _testnet: TestnetInstance,
     pub alice: TestUser,
     pub bob: TestUser,
 }

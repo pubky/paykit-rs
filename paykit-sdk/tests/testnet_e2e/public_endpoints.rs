@@ -123,7 +123,7 @@ async fn test_public_resolution_isolates_one_app_with_malformed_endpoints() {
         .expect("valid endpoint sync should succeed");
 
     let malformed_app_id = PaykitAppId::new("malformed-app").unwrap();
-    user.additional_app(malformed_app_id.clone(), "Malformed App")
+    user.additional_app(&testnet, malformed_app_id.clone(), "Malformed App")
         .await;
     let invalid_identifier = "a".repeat(65);
     user.access

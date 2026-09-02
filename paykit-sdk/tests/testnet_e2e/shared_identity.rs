@@ -24,13 +24,12 @@ use paykit_sdk::{
     PubkySharedStateStorage, ReceiptDraftBuilder, ReceiptIssuanceStatus, Result as PaykitResult,
     StorageAdapter, PAYKIT_SESSION_CAPABILITIES,
 };
-use pubky_testnet::EphemeralTestnet;
 use serde_json::Map as JsonMap;
 use tokio::sync::oneshot;
 
 use crate::harness::{
     app_id, build_testnet, linked_two_party, private_receiving_detail, session_bootstrap, TestUser,
-    TestnetPaymentAdapter, TestnetSessionProvider,
+    TestnetInstance, TestnetPaymentAdapter, TestnetSessionProvider,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -84,12 +83,18 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
-        .unwrap()
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+    let bitkit_result =
+        PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
+            .unwrap()
+            .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+            .await
+            .unwrap();
+    let bitkit_session_secret = bitkit_result
+        .export_session_secret()
         .await
         .unwrap()
-        .access;
+        .into_inner();
+    let access = bitkit_result.access;
 
     let mut public_only_access = access.clone();
     public_only_access.local_secret_key = None;
@@ -105,7 +110,8 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
             if context.contains("requires the Paykit identity secret")
     ));
 
-    let bitkit_provider = TestnetSessionProvider::new(access.clone());
+    let bitkit_provider =
+        TestnetSessionProvider::with_session_secret(access.clone(), bitkit_session_secret);
     let bitkit = PaykitSdk::new(
         PubkySharedStateStorage::new(bitkit_provider.clone()),
         bitkit_provider,
@@ -115,7 +121,12 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
     bitkit.initialize().await.unwrap();
     bitkit.publish_paykit_app(test_app("Bitkit")).await.unwrap();
 
-    let server_provider = TestnetSessionProvider::new(access);
+    let server_access = session_bootstrap(&testnet, "paykit-server.test")
+        .sign_in(&secret, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .unwrap()
+        .access;
+    let server_provider = TestnetSessionProvider::new(server_access);
     let server_storage = PubkySharedStateStorage::new(server_provider.clone());
     let server = PaykitSdk::new(
         server_storage.clone(),
@@ -1080,7 +1091,7 @@ impl SharedStateTestUser {
 }
 
 struct HomeserverSharedPair {
-    _testnet: EphemeralTestnet,
+    _testnet: TestnetInstance,
     secret: PubkyLocalSecretKey,
     bitkit: SharedStateTestUser,
     server: SharedStateTestUser,
@@ -1617,7 +1628,7 @@ async fn test_two_apps_share_private_request_state_and_app_lifecycle() {
     let pair = linked_two_party().await;
     let alice_server = pair
         .alice
-        .additional_app(app_id("paykit-server"), "Paykit Server")
+        .additional_app(&pair._testnet, app_id("paykit-server"), "Paykit Server")
         .await;
 
     let request = pair
@@ -1666,14 +1677,6 @@ async fn test_two_apps_share_private_request_state_and_app_lifecycle() {
         .expect("the second application should resume the shared receive checkpoint");
     assert!(second_intake.stream_item_ids.is_empty());
 
-    let signed_out = pair
-        .alice
-        .sdk
-        .sign_out()
-        .await
-        .expect("signing out one application should succeed");
-    assert_eq!(signed_out.capability, PubkyIdentityCapability::SignedOut);
-
     alice_server
         .sdk
         .claim_payment_request_for_execution(pair.bob.public_key.clone(), &request_id(&request))
@@ -1699,6 +1702,14 @@ async fn test_two_apps_share_private_request_state_and_app_lifecycle() {
         other_app_cancel,
         Err(PaykitSdkError::Policy { .. })
     ));
+
+    let signed_out = pair
+        .alice
+        .sdk
+        .sign_out()
+        .await
+        .expect("signing out one application should succeed");
+    assert_eq!(signed_out.capability, PubkyIdentityCapability::SignedOut);
 
     alice_server
         .sdk
@@ -1754,7 +1765,7 @@ async fn test_failed_app_removal_is_isolated_and_retryable() {
     let pair = linked_two_party().await;
     let alice_server = pair
         .alice
-        .additional_app(app_id("paykit-server"), "Paykit Server")
+        .additional_app(&pair._testnet, app_id("paykit-server"), "Paykit Server")
         .await;
     alice_server
         .sdk

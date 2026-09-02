@@ -129,7 +129,7 @@ struct NoPaymentAdapter;
 impl PaymentAdapter for NoPaymentAdapter {}
 
 #[tokio::test]
-async fn test_sign_out_preserves_shared_app_state() {
+async fn test_forget_session_access_preserves_shared_app_state() {
     let storage = InMemoryStorage::new();
     let identity = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let now = Utc::now();
@@ -164,7 +164,7 @@ async fn test_sign_out_preserves_shared_app_state() {
         PaykitSdkConfig::new("bitkit").unwrap(),
     );
 
-    let status = sdk.sign_out().await.unwrap();
+    let status = sdk.forget_session_access().await.unwrap();
 
     assert_eq!(
         status.capability,
