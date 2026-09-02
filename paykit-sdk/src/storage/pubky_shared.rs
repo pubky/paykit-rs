@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use super::{
     decode_storage_state_blob, encode_storage_state_blob, run_storage_state_transaction,
-    StorageAdapter, StorageState, StorageTransactionCallback,
+    StorageAdapter, StorageKeyRotationCallback, StorageState, StorageTransactionCallback,
 };
 use crate::{
     validate_storage_state, PaykitIdentitySecretKey, PaykitSdkError, PubkyPublicKey,
@@ -122,6 +122,17 @@ impl PubkySharedStateStorage {
 
     async fn load_remote_state(&self, access: &PubkySessionAccess) -> Result<RemoteStateSnapshot> {
         let Some(encrypted) = load_encrypted_blob(access).await? else {
+            let owner = access.public_key()?.to_public_key()?;
+            if paykit_lib::get_paykit_app_registry(&access.outbox_client.public_storage(), &owner)
+                .await?
+                .is_some()
+            {
+                return Err(PaykitSdkError::Storage {
+                    context: "Pubky shared state is missing for an initialized Paykit identity"
+                        .into(),
+                    source: None,
+                });
+            }
             return Ok(RemoteStateSnapshot {
                 state: StorageState::default(),
                 revision: None,
@@ -167,7 +178,7 @@ impl PubkySharedStateStorage {
         match write_result {
             Ok(response) => self.record_revision(Some(response_etag(&response)?)),
             Err(write_error) if is_precondition_failed(&write_error) => {
-                Err(PaykitSdkError::Storage {
+                Err(PaykitSdkError::ConcurrentUpdate {
                     context: "Pubky shared state changed during transaction".into(),
                     source: Some(write_error.into()),
                 })
@@ -229,7 +240,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         &self,
         current_key: PaykitIdentitySecretKey,
         replacement_key: PaykitIdentitySecretKey,
-        f: StorageTransactionCallback<'a>,
+        f: StorageKeyRotationCallback<'a>,
     ) -> Result<Box<dyn Any + Send>> {
         current_key.validate_successor(&replacement_key)?;
         let _guard = self.transaction_lock.lock().await;
@@ -244,28 +255,34 @@ impl StorageAdapter for PubkySharedStateStorage {
         }
         self.record_revision(revision.clone())?;
 
-        let initial_state = match encrypted.as_ref().map(|blob| blob.bytes.as_slice()) {
-            None => StorageState::default(),
-            Some(encrypted) => match encrypted_state_key_generation(encrypted)? {
-                generation if generation == current_key.key_generation() => {
-                    decrypt_state_with_key(&current_key, &access.public_key()?, encrypted)?
-                }
-                generation if generation == replacement_key.key_generation() => {
-                    decrypt_state_with_key(&replacement_key, &access.public_key()?, encrypted)?
-                }
-                generation => {
-                    return Err(PaykitSdkError::Identity {
-                        context: format!(
+        let (initial_state, already_rotated) =
+            match encrypted.as_ref().map(|blob| blob.bytes.as_slice()) {
+                None => (StorageState::default(), false),
+                Some(encrypted) => match encrypted_state_key_generation(encrypted)? {
+                    generation if generation == current_key.key_generation() => (
+                        decrypt_state_with_key(&current_key, &access.public_key()?, encrypted)?,
+                        false,
+                    ),
+                    generation if generation == replacement_key.key_generation() => (
+                        decrypt_state_with_key(&replacement_key, &access.public_key()?, encrypted)?,
+                        true,
+                    ),
+                    generation => {
+                        return Err(PaykitSdkError::Identity {
+                            context: format!(
                             "shared-state key generation {generation} cannot rotate from {} to {}",
                             current_key.key_generation(),
                             replacement_key.key_generation()
                         ),
-                        source: None,
-                    });
-                }
-            },
-        };
-        let (updated_state, result) = run_storage_state_transaction(initial_state, f)?;
+                            source: None,
+                        });
+                    }
+                },
+            };
+        let (updated_state, result) = run_storage_state_transaction(
+            initial_state,
+            Box::new(move |tx| f(tx, already_rotated)),
+        )?;
         validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
             context: "SDK state failed validation before Paykit key rotation".into(),
             source: None,

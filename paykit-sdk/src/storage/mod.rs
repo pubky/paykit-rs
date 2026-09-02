@@ -13,9 +13,9 @@ pub use in_memory::{run_storage_state_transaction, InMemoryStorage};
 pub use pubky_shared::PubkySharedStateStorage;
 pub use records::{
     EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, NewOutboundPrivateMessage,
-    NewPrivateStreamItem, OutboundPrivateMessageRecord, PaymentEndpointReservationRecord,
-    PeerLinkOperationLease, PreparedOutboundPrivateSend, PrivateStreamItemRecord,
-    PublicEndpointRecord, StorageState,
+    NewPrivateStreamItem, OutboundPrivateMessageRecord, PaykitAppOperationLease,
+    PaymentEndpointReservationRecord, PaymentRequestExecutionClaim, PeerLinkOperationLease,
+    PreparedOutboundPrivateSend, PrivateStreamItemRecord, PublicEndpointRecord, StorageState,
 };
 pub use state_blob::{
     decode_storage_state_blob, encode_storage_state_blob, SDK_STATE_BLOB_VERSION,
@@ -23,6 +23,8 @@ pub use state_blob::{
 
 pub(crate) use queue::outbound_private_queue_head_is_claimable;
 pub(crate) use records::NewPrivateStreamItemDetails;
+
+const CONCURRENT_UPDATE_MAX_ATTEMPTS: usize = 8;
 
 use crate::{
     domain::contacts::ContactRecord,
@@ -54,6 +56,10 @@ impl ValidatedStorageState {
 pub type StorageTransactionCallback<'a> =
     Box<dyn FnOnce(&mut dyn StorageTransaction) -> Result<Box<dyn Any + Send>> + Send + 'a>;
 
+/// Erased storage callback used while rotating Paykit key material.
+pub type StorageKeyRotationCallback<'a> =
+    Box<dyn FnOnce(&mut dyn StorageTransaction, bool) -> Result<Box<dyn Any + Send>> + Send + 'a>;
+
 /// Authoritative logical state boundary for Paykit SDK.
 ///
 /// Production adapters must provide atomic transactions with monotonic id
@@ -79,9 +85,10 @@ pub trait StorageAdapter: Send + Sync {
         &self,
         _current_key: PaykitIdentitySecretKey,
         _replacement_key: PaykitIdentitySecretKey,
-        f: StorageTransactionCallback<'a>,
+        f: StorageKeyRotationCallback<'a>,
     ) -> Result<Box<dyn Any + Send>> {
-        self.transaction_erased(f).await
+        self.transaction_erased(Box::new(move |tx| f(tx, false)))
+            .await
     }
 
     /// Run an atomic storage transaction.
@@ -115,13 +122,15 @@ pub trait StorageAdapter: Send + Sync {
     where
         Self: Sized,
         T: Send + 'static,
-        F: FnOnce(&mut dyn StorageTransaction) -> Result<T> + Send,
+        F: FnOnce(&mut dyn StorageTransaction, bool) -> Result<T> + Send,
     {
         let result = self
             .rotate_paykit_identity_key_erased(
                 current_key,
                 replacement_key,
-                Box::new(move |tx| Ok(Box::new(f(tx)?) as Box<dyn Any + Send>)),
+                Box::new(move |tx, already_rotated| {
+                    Ok(Box::new(f(tx, already_rotated)?) as Box<dyn Any + Send>)
+                }),
             )
             .await?;
         result
@@ -160,6 +169,29 @@ pub trait StorageAdapter: Send + Sync {
     }
 }
 
+pub(crate) async fn retry_storage_transaction<S, T, F, O>(
+    storage: &S,
+    mut operation: F,
+) -> Result<T>
+where
+    S: StorageAdapter,
+    T: Send + 'static,
+    F: FnMut() -> O,
+    O: FnOnce(&mut dyn StorageTransaction) -> Result<T> + Send,
+{
+    for attempt in 0..CONCURRENT_UPDATE_MAX_ATTEMPTS {
+        match storage.transaction(operation()).await {
+            Err(err)
+                if err.is_concurrent_update() && attempt + 1 < CONCURRENT_UPDATE_MAX_ATTEMPTS =>
+            {
+                continue;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("bounded storage transaction retry loop always returns")
+}
+
 #[async_trait]
 impl<T> StorageAdapter for Box<T>
 where
@@ -176,7 +208,7 @@ where
         &self,
         current_key: PaykitIdentitySecretKey,
         replacement_key: PaykitIdentitySecretKey,
-        f: StorageTransactionCallback<'a>,
+        f: StorageKeyRotationCallback<'a>,
     ) -> Result<Box<dyn Any + Send>> {
         (**self)
             .rotate_paykit_identity_key_erased(current_key, replacement_key, f)
@@ -200,7 +232,7 @@ where
         &self,
         current_key: PaykitIdentitySecretKey,
         replacement_key: PaykitIdentitySecretKey,
-        f: StorageTransactionCallback<'a>,
+        f: StorageKeyRotationCallback<'a>,
     ) -> Result<Box<dyn Any + Send>> {
         (**self)
             .rotate_paykit_identity_key_erased(current_key, replacement_key, f)
@@ -335,6 +367,40 @@ pub trait StorageTransaction {
     /// Release a previously claimed peer link operation.
     fn release_peer_link_operation(&mut self, counterparty: &PubkyPublicKey, lease_id: u64);
 
+    /// Claim exclusive public-state or lifecycle work for one Paykit App.
+    fn claim_paykit_app_operation(
+        &mut self,
+        app_id: &paykit_lib::PaykitAppId,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Option<PaykitAppOperationLease>>;
+
+    /// Load the active public-state operation lease for one Paykit App.
+    fn paykit_app_operation_lease(
+        &self,
+        app_id: &paykit_lib::PaykitAppId,
+    ) -> Option<PaykitAppOperationLease>;
+
+    /// Release a previously claimed Paykit App operation.
+    fn release_paykit_app_operation(&mut self, app_id: &paykit_lib::PaykitAppId, lease_id: u64);
+
+    /// Load one identity-wide Payment Request execution claim.
+    fn payment_request_execution_claim(
+        &self,
+        counterparty: &PubkyPublicKey,
+        payment_request_id: &str,
+    ) -> Option<PaymentRequestExecutionClaim>;
+
+    /// Save one identity-wide Payment Request execution claim.
+    fn save_payment_request_execution_claim(&mut self, claim: PaymentRequestExecutionClaim);
+
+    /// Remove one identity-wide Payment Request execution claim.
+    fn remove_payment_request_execution_claim(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        payment_request_id: &str,
+    ) -> Option<PaymentRequestExecutionClaim>;
+
     /// Insert one outbound private message and return its assigned record.
     fn insert_outbound_private_message(
         &mut self,
@@ -442,6 +508,22 @@ pub(crate) fn require_peer_link_operation_lease(
             context: format!(
                 "peer link operation lease {} is no longer active for counterparty {}",
                 lease.lease_id, lease.counterparty
+            ),
+            source: None,
+        }),
+    }
+}
+
+pub(crate) fn require_paykit_app_operation_lease(
+    tx: &dyn StorageTransaction,
+    lease: &PaykitAppOperationLease,
+) -> Result<()> {
+    match tx.paykit_app_operation_lease(&lease.app_id) {
+        Some(active) if active.lease_id == lease.lease_id => Ok(()),
+        _ => Err(PaykitSdkError::Policy {
+            context: format!(
+                "Paykit App operation lease {} is no longer active for '{}'",
+                lease.lease_id, lease.app_id
             ),
             source: None,
         }),

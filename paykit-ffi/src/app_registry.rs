@@ -98,9 +98,6 @@ impl FfiPaykitSdk {
     }
 
     /// Add or replace this application in the identity-wide registry.
-    ///
-    /// Serialize registry mutations across SDK instances until Pubky supports
-    /// conditional registry writes.
     pub async fn publish_paykit_app(
         &self,
         display_name: String,
@@ -120,9 +117,6 @@ impl FfiPaykitSdk {
     /// Active app-owned Payment Requests, undelivered private events, and
     /// incomplete Receipt issuance must be finished, and shared Private Payment
     /// Lists must be cleared, before removal.
-    ///
-    /// Serialize registry mutations across SDK instances until Pubky supports
-    /// conditional registry writes.
     pub async fn remove_paykit_app(&self) -> Result<FfiPaykitAppRegistry, PaykitFfiError> {
         self.runtime
             .remove_paykit_app()
@@ -143,9 +137,6 @@ impl FfiPaykitSdk {
     }
 
     /// Set or clear the identity-wide default Paykit application.
-    ///
-    /// Serialize registry mutations across SDK instances until Pubky supports
-    /// conditional registry writes.
     pub async fn set_default_paykit_app(
         &self,
         app_id: Option<String>,
@@ -162,9 +153,6 @@ impl FfiPaykitSdk {
     }
 
     /// Set or clear the default Paykit application for one endpoint identifier.
-    ///
-    /// Serialize registry mutations across SDK instances until Pubky supports
-    /// conditional registry writes.
     pub async fn set_default_paykit_app_for_endpoint(
         &self,
         identifier: String,

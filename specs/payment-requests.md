@@ -199,8 +199,8 @@ Rules:
 - `recurrence` MUST be an object for recurring requests.
 - `accepted_payment_endpoint_identifiers` MUST be a non-empty array of valid Payment Endpoint Identifiers.
 - `required_app_id` is required and MUST be either `null` or a valid Paykit App
-  ID. When present, it constrains payment execution to an endpoint owned by
-  that app.
+  ID. When present, it constrains payment execution to that App and an endpoint
+  owned by it.
 - `metadata` is optional. If present, it MUST be a JSON object.
 - Request terms are immutable after the initial `paykit.payment_request` event.
 
@@ -444,6 +444,8 @@ Validation rules:
   or index recurring payments SHOULD enforce recurrence eligibility according
   to their local scheduling policy.
 - `payment_endpoint_identifier` MUST be one of the request's `accepted_payment_endpoint_identifiers`.
+- The first valid proof completes a one-time request or its recurring Billing
+  Period for SDK deduplication. Later proofs for the same work are not applied.
 - `proof` MUST be a JSON object. Its internal fields are method-specific and are
   not interpreted by Paykit v0.2.
 
@@ -494,12 +496,20 @@ Terminal states:
 - `cancelled`
 
 For one-time requests, `proof_submitted` means Paykit has received a Payment
-Proof event, not that payment settlement was independently verified. It is not a
-Paykit protocol-final state. Wallets, processors, SDKs, or apps decide whether a
-submitted proof settles the request, whether additional or corrective proofs are
-accepted, and when the local request can be treated as closed. For recurring
-requests, a Payment Proof reports one billing period, not completion of the
-whole request.
+Proof event, not that payment settlement was independently verified. It closes
+payment execution for that request so another App cannot pay it again. For
+recurring requests, a Payment Proof completes one Billing Period, not the whole
+request.
+
+### Identity-wide execution ownership
+
+The SDK coordinates payer Apps with an identity-wide execution claim. The
+claim is identity-wide shared state, not a protocol message. An App claims
+before acceptance and payment execution. Open one-time requests may be
+explicitly released while unresolved; recurring claims may be released for
+another local payer App to handle future or unpaid periods. `required_app_id`
+continues to restrict which payee App's Payment Endpoint may be paid. Claims
+are never released automatically after ambiguous payment failures.
 
 Implementations MAY expose `proposal_expired` as a local view state for a
 proposed request whose trusted local time is past `proposal_expires_at`.

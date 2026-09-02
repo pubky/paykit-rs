@@ -181,6 +181,37 @@ pub async fn set_payment_endpoint(
         .map_err(|err| map_error("set_payment_endpoint", err))
 }
 
+/// Creates a public Payment Endpoint only when it is currently absent.
+pub async fn create_payment_endpoint(
+    session: &pubky::PubkySession,
+    app_id: &PaykitAppId,
+    identifier: PaymentEndpointIdentifier,
+    payload: PaymentEndpointPayload,
+) -> Result<()> {
+    pubky_routing::create_payment_endpoint(session, app_id, &identifier, &payload)
+        .await
+        .map_err(|err| map_error("create_payment_endpoint", err))
+}
+
+/// Replaces a public Payment Endpoint only at the supplied strong revision.
+pub async fn update_payment_endpoint(
+    session: &pubky::PubkySession,
+    app_id: &PaykitAppId,
+    identifier: PaymentEndpointIdentifier,
+    payload: PaymentEndpointPayload,
+    expected_revision: &str,
+) -> Result<()> {
+    pubky_routing::update_payment_endpoint(
+        session,
+        app_id,
+        &identifier,
+        &payload,
+        expected_revision,
+    )
+    .await
+    .map_err(|err| map_error("update_payment_endpoint", err))
+}
+
 /// Removes a public payment endpoint from the authenticated Pubky session.
 #[instrument(skip(session), fields(identifier = %identifier))]
 pub async fn remove_payment_endpoint(
@@ -192,6 +223,23 @@ pub async fn remove_payment_endpoint(
     pubky_routing::delete_payment_endpoint(session, app_id, &identifier)
         .await
         .map_err(|err| map_error("remove_payment_endpoint", err))
+}
+
+/// Removes a public Payment Endpoint only at the supplied strong revision.
+pub async fn remove_payment_endpoint_if_revision(
+    session: &pubky::PubkySession,
+    app_id: &PaykitAppId,
+    identifier: PaymentEndpointIdentifier,
+    expected_revision: &str,
+) -> Result<()> {
+    pubky_routing::delete_payment_endpoint_if_revision(
+        session,
+        app_id,
+        &identifier,
+        expected_revision,
+    )
+    .await
+    .map_err(|err| map_error("remove_payment_endpoint_if_revision", err))
 }
 
 /// Retrieves the public Payment List for the given payee.
@@ -308,6 +356,21 @@ pub async fn get_payment_endpoint(
         .map_err(|err| map_error("get_payment_endpoint", err))?;
     debug!(found = result.is_some(), "payment endpoint lookup complete");
     Ok(result)
+}
+
+/// Retrieves a specific public Payment Endpoint and its strong revision.
+///
+/// The outer `Option` is `None` when the resource is absent. The inner payload
+/// is `None` when the resource exists but is empty.
+pub async fn get_payment_endpoint_with_revision(
+    storage: &pubky::PublicStorage,
+    payee: &PublicKey,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<Option<(Option<PaymentEndpointPayload>, String)>> {
+    pubky_routing::fetch_payment_endpoint_with_revision(storage, payee, app_id, identifier)
+        .await
+        .map_err(|err| map_error("get_payment_endpoint_with_revision", err))
 }
 
 #[cfg(test)]

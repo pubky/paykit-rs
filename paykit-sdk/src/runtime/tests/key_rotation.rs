@@ -61,13 +61,19 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
                     generation: 7,
                     checkpointed_at: FixedClock.now(),
                 });
-                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                let mut message = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                     counterparty,
                     app_id(),
                     PrivateMessageKind::PrivatePaymentList.as_str().into(),
                     r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{}}"#.into(),
                     FixedClock.now(),
                 ))?;
+                message.status = OutboundPrivateMessageStatus::Sending;
+                message.prepared_send = Some(PreparedOutboundPrivateSend {
+                    destination_path: "/pub/paykit/v0/private/send/0".into(),
+                    ciphertext: vec![4, 5, 6],
+                });
+                tx.save_outbound_private_message(message)?;
                 Ok(())
             }
         })
@@ -95,4 +101,5 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
         state.outbound_private_messages[0].status,
         OutboundPrivateMessageStatus::RecoveryRequired
     );
+    assert!(state.outbound_private_messages[0].prepared_send.is_none());
 }

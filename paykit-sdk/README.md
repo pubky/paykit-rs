@@ -128,7 +128,8 @@ Common workflows:
 - request and validate `PAYKIT_SESSION_CAPABILITIES` for full SDK
   auth/session handoff
 - use `publish_paykit_profile` / `fetch_paykit_profile` for identity-wide
-  Paykit Profile metadata, including application-defined public fields in `extra`
+  Paykit Profile metadata, including application-defined public fields in
+  `extra`; updates pass the fetched revision so concurrent edits fail explicitly
 - use `publish_paykit_blob` / `delete_paykit_blob` for files under the
   identity-wide Paykit blob prefix
 - use `fetch_pubky_file` / `fetch_pubky_text` with an explicit byte limit to

@@ -3,7 +3,9 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     domain::linked_peers::LinkedPeerState,
-    storage::{EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord},
+    storage::{
+        EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord, PaymentRequestExecutionClaim,
+    },
     PaykitSdkError, PrivateStreamParseStatus,
 };
 
@@ -38,6 +40,10 @@ fn payment_request_raw(reference: &str) -> String {
     format!(
         r#"{{"version":1,"kind":"paykit.payment_request","app_id":"bitkit","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"{reference}","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{{}}}}}}"#
     )
+}
+
+fn payment_request_cancellation_raw() -> &'static str {
+    r#"{"version":1,"kind":"paykit.payment_request_cancellation","app_id":"bitkit","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33"}"#
 }
 
 fn receipt_access_raw(event_id: &str, receipt_id: &str, reference: &str) -> String {
@@ -146,6 +152,55 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
     let peer = snapshot.linked_peers.get(&counterparty).unwrap();
     assert_eq!(peer.last_private_receive_at, Some(timestamp()));
     assert_eq!(peer.last_sync_at, Some(timestamp()));
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_releases_claim_for_inbound_cancellation() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![private_message(&payment_request_raw("invoice-2026-0001"))],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
+                    counterparty,
+                    payment_request_id: "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33".into(),
+                    app_id: PaykitAppId::new("wallet").unwrap(),
+                    claimed_at: timestamp(),
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![private_message(payment_request_cancellation_raw())],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    assert!(storage
+        .transaction(move |tx| Ok(tx.payment_request_execution_claim(
+            &counterparty,
+            "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+        )))
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]

@@ -120,8 +120,12 @@ fn test_public_app_load_order_prioritizes_configured_defaults() {
         .unwrap();
 
     assert_eq!(
-        public_app_load_order(&registry),
-        vec![default, endpoint_default, alpha]
+        public_app_load_order(&registry, None),
+        vec![endpoint_default.clone(), default.clone(), alpha.clone()]
+    );
+    assert_eq!(
+        public_app_load_order(&registry, Some(&alpha)),
+        vec![alpha, endpoint_default, default]
     );
 }
 

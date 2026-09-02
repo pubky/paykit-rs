@@ -154,6 +154,7 @@ pub(in crate::runtime) fn app_preference_rank(
 
 pub(in crate::runtime) fn public_app_load_order(
     registry: &paykit_lib::PaykitAppRegistry,
+    required_app_id: Option<&paykit_lib::PaykitAppId>,
 ) -> Vec<paykit_lib::PaykitAppId> {
     let endpoint_defaults = registry
         .default_apps_by_endpoint()
@@ -162,12 +163,14 @@ pub(in crate::runtime) fn public_app_load_order(
     let mut app_ids = registry.apps().keys().cloned().collect::<Vec<_>>();
     app_ids.sort_by(|left, right| {
         let rank = |app_id: &paykit_lib::PaykitAppId| {
-            if registry.default_app_id() == Some(app_id) {
+            if required_app_id == Some(app_id) {
                 0
             } else if endpoint_defaults.contains(&app_id) {
                 1
-            } else {
+            } else if registry.default_app_id() == Some(app_id) {
                 2
+            } else {
+                3
             }
         };
         rank(left)

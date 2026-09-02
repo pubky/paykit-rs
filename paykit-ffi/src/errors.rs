@@ -3,6 +3,14 @@ use paykit_sdk::PaykitSdkError;
 /// Error type exposed through generated bindings.
 #[derive(uniffi::Error, Clone, Debug, thiserror::Error)]
 pub enum PaykitFfiError {
+    /// Another authorized client committed a newer shared-state revision.
+    #[error("concurrent_update/{code}: {context}")]
+    ConcurrentUpdate {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Redacted human-readable error context.
+        context: String,
+    },
     /// Durable storage failed.
     #[error("storage/{code}: {context}")]
     Storage {
@@ -72,6 +80,14 @@ pub enum PaykitFfiError {
 impl From<PaykitSdkError> for PaykitFfiError {
     fn from(err: PaykitSdkError) -> Self {
         match err {
+            PaykitSdkError::ConcurrentUpdate { context, source } => {
+                callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| {
+                    Self::ConcurrentUpdate {
+                        code: "concurrent_update".into(),
+                        context,
+                    }
+                })
+            }
             PaykitSdkError::Storage { context, source } => {
                 callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| Self::Storage {
                     code: "storage_error".into(),
@@ -156,6 +172,10 @@ fn callback_ffi_error(source: Option<&anyhow::Error>, context: &str) -> Option<P
     let error = source?.downcast_ref::<PaykitFfiError>()?;
     let context = context.to_owned();
     Some(match error {
+        PaykitFfiError::ConcurrentUpdate { code, .. } => PaykitFfiError::ConcurrentUpdate {
+            code: code.clone(),
+            context,
+        },
         PaykitFfiError::Storage { code, .. } => PaykitFfiError::Storage {
             code: code.clone(),
             context,
@@ -194,6 +214,13 @@ fn callback_ffi_error(source: Option<&anyhow::Error>, context: &str) -> Option<P
 pub(crate) fn ffi_error_to_sdk(err: PaykitFfiError, context: &'static str) -> PaykitSdkError {
     let source = Some(anyhow::Error::new(err.clone()));
     match err {
+        PaykitFfiError::ConcurrentUpdate {
+            code,
+            context: _reason,
+        } => PaykitSdkError::ConcurrentUpdate {
+            context: format!("{context}: {code}"),
+            source,
+        },
         PaykitFfiError::Storage {
             code,
             context: _reason,

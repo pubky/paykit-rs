@@ -103,7 +103,7 @@ async fn test_resolve_private_payment_request_enforces_request_constraints() {
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::new("test-app").unwrap(),
+        PaykitSdkConfig::new("server").unwrap(),
         FixedClock,
     );
 
@@ -187,7 +187,7 @@ async fn test_resolve_private_payment_request_rejects_terminal_request() {
 }
 
 #[tokio::test]
-async fn test_resolve_private_payment_request_rejects_other_payer_app_owner() {
+async fn test_resolve_private_payment_request_rejects_other_target_app() {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage

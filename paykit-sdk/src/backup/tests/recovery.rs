@@ -12,6 +12,7 @@ async fn test_restore_backup_state_marks_link_state_without_peer_recovery_requir
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: vec![EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             link_snapshot: None,
@@ -52,6 +53,7 @@ async fn test_restore_backup_state_preserves_private_stream_without_forcing_reco
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: vec![PrivateStreamItemRecord {

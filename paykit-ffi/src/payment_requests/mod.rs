@@ -222,6 +222,8 @@ pub struct FfiPaymentRequestRecord {
     pub proposal_app_id: Option<String>,
     /// Payer application that first accepted the proposal.
     pub payer_app_id: Option<String>,
+    /// Paykit App currently preparing to execute this payment.
+    pub execution_claim_app_id: Option<String>,
     /// Immutable terms from the proposal.
     pub terms: Option<FfiPaymentRequestTerms>,
     /// Acceptance Event ID.
@@ -339,7 +341,41 @@ impl FfiPaykitSdk {
             .and_then(FfiPaymentRequestRecord::try_from)
     }
 
-    /// Queue acceptance for a received Payment Request and return local derived state.
+    /// Claim a received Payment Request before preparing payment execution.
+    pub async fn claim_payment_request_for_execution(
+        &self,
+        counterparty: String,
+        payment_request_id: String,
+    ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
+        let payment_request_id = parse_payment_request_id(payment_request_id)?;
+        self.runtime
+            .claim_payment_request_for_execution(
+                parse_public_key(counterparty)?,
+                &payment_request_id,
+            )
+            .await
+            .map_err(Into::into)
+            .and_then(FfiPaymentRequestRecord::try_from)
+    }
+
+    /// Release this App's unresolved execution claim without rejecting the request.
+    pub async fn release_payment_request_execution_claim(
+        &self,
+        counterparty: String,
+        payment_request_id: String,
+    ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
+        let payment_request_id = parse_payment_request_id(payment_request_id)?;
+        self.runtime
+            .release_payment_request_execution_claim(
+                parse_public_key(counterparty)?,
+                &payment_request_id,
+            )
+            .await
+            .map_err(Into::into)
+            .and_then(FfiPaymentRequestRecord::try_from)
+    }
+
+    /// Queue acceptance before external payment execution and return local derived state.
     pub async fn accept_payment_request(
         &self,
         counterparty: String,

@@ -282,7 +282,7 @@ pub(super) fn apply_stored_event(
                 mark_invalid_stored(record, stored, "Payment Proof came from the wrong side");
                 return;
             }
-            if is_competing_payer_app(record, stored) {
+            if record.state == PaymentRequestLifecycleState::ProofSubmitted {
                 touch_stored_audit(record, stored);
                 return;
             }
@@ -294,14 +294,10 @@ pub(super) fn apply_stored_event(
                 mark_invalid_stored(record, stored, "Payment Proof arrived before acceptance");
                 return;
             }
-            if record.payer_app_id.as_ref() != stored.app_id().as_ref() {
-                mark_invalid_stored(
-                    record,
-                    stored,
-                    "Payment Proof came from a different payer application",
-                );
+            let Some(payer_app_id) = stored.app_id() else {
+                mark_invalid_stored(record, stored, "Payment Proof has no payer App attribution");
                 return;
-            }
+            };
             let Some(request) = request_from_record(record) else {
                 mark_invalid_stored(
                     record,
@@ -312,6 +308,19 @@ pub(super) fn apply_stored_event(
             };
             if let Err(err) = proof.validate_for_request(&request) {
                 mark_invalid_stored(record, stored, err.to_string());
+                return;
+            }
+            if record.payment_proofs.iter().any(|existing| {
+                existing
+                    .billing_period
+                    .as_ref()
+                    .map(|period| (&period.starts_at, &period.ends_at))
+                    == proof
+                        .billing_period
+                        .as_ref()
+                        .map(|period| (&period.starts_at, &period.ends_at))
+            }) {
+                touch_stored_audit(record, stored);
                 return;
             }
             record.payment_proofs.push(PaymentProofRecord {
@@ -334,6 +343,7 @@ pub(super) fn apply_stored_event(
                 proof: proof.proof.clone(),
                 recorded_at: stored.record_time(),
             });
+            record.payer_app_id = Some(payer_app_id);
             record.state = if record
                 .terms
                 .as_ref()

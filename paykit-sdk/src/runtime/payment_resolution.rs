@@ -412,7 +412,12 @@ where
         amount: Option<PaymentAmountContext>,
         payment_request_terms: Option<PaymentRequestTermsRecord>,
     ) -> Result<PublicContactPaymentResolution> {
-        let mut batch = self.public_payment_candidates(&counterparty).await?;
+        let required_app_id = payment_request_terms
+            .as_ref()
+            .and_then(|terms| terms.required_app_id.as_ref());
+        let mut batch = self
+            .public_payment_candidates(&counterparty, required_app_id)
+            .await?;
         filter_public_candidates_for_request(&mut batch.candidates, payment_request_terms.as_ref());
         if batch.candidates.is_empty() {
             return Ok(unresolved_public_resolution(
@@ -566,19 +571,6 @@ where
                 source: None,
             });
         }
-        if record
-            .payer_app_id
-            .as_ref()
-            .is_some_and(|payer_app_id| payer_app_id != &self.config.app_id)
-        {
-            return Err(PaykitSdkError::Policy {
-                context: format!(
-                    "cannot resolve Payment Request {}: another Paykit app owns the payer response",
-                    payment_request_id
-                ),
-                source: None,
-            });
-        }
         self.ensure_payment_request_origin_app_authorized(
             counterparty,
             &record,
@@ -713,6 +705,7 @@ where
     async fn public_payment_candidates(
         &self,
         counterparty: &PubkyPublicKey,
+        required_app_id: Option<&paykit_lib::PaykitAppId>,
     ) -> Result<PublicPaymentCandidateLoad> {
         let public_storage =
             self.pubky
@@ -730,7 +723,7 @@ where
             return Ok(PublicPaymentCandidateLoad::default());
         };
         let loaded = load_public_payment_lists_with_budget(
-            public_app_load_order(&registry),
+            public_app_load_order(&registry, required_app_id),
             |app_id, max_endpoints, max_payload_bytes| {
                 let public_storage = &public_storage;
                 let public_key = &public_key;

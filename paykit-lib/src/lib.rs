@@ -22,9 +22,10 @@ mod validation;
 pub use app::PaykitAppId;
 #[doc(inline)]
 pub use app_registry::{
-    get_paykit_app_registry, parse_paykit_app_registry_json, serialize_paykit_app_registry,
-    set_paykit_app_registry, PaykitApp, PaykitAppCapabilities, PaykitAppRegistry,
-    INITIAL_PAYKIT_KEY_GENERATION, PAYKIT_APP_REGISTRY_MAX_APPS, PAYKIT_APP_REGISTRY_MAX_BYTES,
+    create_paykit_app_registry, get_paykit_app_registry, get_paykit_app_registry_with_etag,
+    parse_paykit_app_registry_json, serialize_paykit_app_registry, update_paykit_app_registry,
+    PaykitApp, PaykitAppCapabilities, PaykitAppRegistry, INITIAL_PAYKIT_KEY_GENERATION,
+    PAYKIT_APP_REGISTRY_MAX_APPS, PAYKIT_APP_REGISTRY_MAX_BYTES,
     PAYKIT_APP_REGISTRY_MAX_ENDPOINT_DEFAULTS,
 };
 #[doc(inline)]
@@ -55,9 +56,10 @@ pub use noise_key::{derive_paykit_noise_public_key, derive_paykit_noise_secret_k
 pub use payment_amount::PaymentAmount;
 #[doc(inline)]
 pub use payment_endpoint::{
-    get_payment_endpoint, get_payment_list, get_payment_list_with_limits,
-    is_payment_list_limit_exceeded, remove_payment_endpoint, set_payment_endpoint,
-    PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList,
+    create_payment_endpoint, get_payment_endpoint, get_payment_endpoint_with_revision,
+    get_payment_list, get_payment_list_with_limits, is_payment_list_limit_exceeded,
+    remove_payment_endpoint, remove_payment_endpoint_if_revision, set_payment_endpoint,
+    update_payment_endpoint, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList,
     PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES, PAYMENT_LIST_MAX_ENDPOINTS,
 };
 #[doc(inline)]

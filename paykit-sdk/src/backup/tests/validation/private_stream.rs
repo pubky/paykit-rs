@@ -12,6 +12,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_metadata() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: vec![PrivateStreamItemRecord {
@@ -55,6 +56,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_status() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: vec![PrivateStreamItemRecord {
@@ -113,6 +115,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_error() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: vec![PrivateStreamItemRecord {
@@ -155,6 +158,7 @@ async fn test_restore_backup_state_rejects_stale_dedupe_event_header() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: vec![PrivateStreamItemRecord {
@@ -205,6 +209,7 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: vec![PrivateStreamItemRecord {
@@ -271,6 +276,7 @@ async fn test_restore_backup_state_rejects_wrong_receipt_access_location_dedupe_
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: vec![PrivateStreamItemRecord {
@@ -333,6 +339,7 @@ async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: vec![
@@ -396,6 +403,7 @@ async fn test_restore_backup_state_rejects_missing_event_dedupe_index() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: vec![PrivateStreamItemRecord {
@@ -449,6 +457,7 @@ async fn test_restore_backup_state_rejects_missing_receipt_access_index() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: vec![PrivateStreamItemRecord {

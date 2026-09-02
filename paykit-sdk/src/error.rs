@@ -6,6 +6,16 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum PaykitSdkError {
+    /// Another authorized client committed a newer shared-state revision.
+    #[error("concurrent update: {context}")]
+    ConcurrentUpdate {
+        /// Human-readable retry context.
+        context: String,
+        /// Underlying cause, when available.
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+
     /// Durable storage failed.
     #[error("storage error: {context}")]
     Storage {
@@ -90,6 +100,9 @@ pub enum PaykitSdkError {
 impl fmt::Debug for PaykitSdkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ConcurrentUpdate { context, source } => {
+                debug_error_variant(f, "ConcurrentUpdate", context, source)
+            }
             Self::Storage { context, source } => debug_error_variant(f, "Storage", context, source),
             Self::Identity { context, source } => {
                 debug_error_variant(f, "Identity", context, source)
@@ -111,6 +124,13 @@ impl fmt::Debug for PaykitSdkError {
                 debug_error_variant(f, "RecoveryRequired", context, source)
             }
         }
+    }
+}
+
+impl PaykitSdkError {
+    /// Return whether retrying after reloading shared state is appropriate.
+    pub fn is_concurrent_update(&self) -> bool {
+        matches!(self, Self::ConcurrentUpdate { .. })
     }
 }
 

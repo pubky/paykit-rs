@@ -166,6 +166,107 @@ async fn test_peer_link_operation_stale_release_keeps_newer_lease() {
 }
 
 #[tokio::test]
+async fn test_paykit_app_operation_lease_blocks_same_app_only() {
+    let storage = InMemoryStorage::new();
+    let bitkit = app_id();
+    let server = paykit_lib::PaykitAppId::new("paykit-server").unwrap();
+
+    let first = storage
+        .transaction({
+            let bitkit = bitkit.clone();
+            move |tx| {
+                tx.claim_paykit_app_operation(
+                    &bitkit,
+                    timestamp(),
+                    timestamp() + chrono::Duration::seconds(60),
+                )
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let (same_app, other_app) = storage
+        .transaction({
+            let bitkit = bitkit.clone();
+            let server = server.clone();
+            move |tx| {
+                Ok((
+                    tx.claim_paykit_app_operation(
+                        &bitkit,
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(60),
+                    )?,
+                    tx.claim_paykit_app_operation(
+                        &server,
+                        timestamp(),
+                        timestamp() + chrono::Duration::seconds(60),
+                    )?,
+                ))
+            }
+        })
+        .await
+        .unwrap();
+
+    assert!(same_app.is_none());
+    assert!(other_app.is_some());
+    assert_eq!(first.app_id, bitkit);
+}
+
+#[tokio::test]
+async fn test_paykit_app_operation_stale_release_keeps_newer_lease() {
+    let storage = InMemoryStorage::new();
+    let app_id = app_id();
+
+    let first = storage
+        .transaction({
+            let app_id = app_id.clone();
+            move |tx| {
+                tx.claim_paykit_app_operation(
+                    &app_id,
+                    timestamp(),
+                    timestamp() + chrono::Duration::seconds(10),
+                )
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let second = storage
+        .transaction({
+            let app_id = app_id.clone();
+            move |tx| {
+                tx.claim_paykit_app_operation(
+                    &app_id,
+                    timestamp() + chrono::Duration::seconds(11),
+                    timestamp() + chrono::Duration::seconds(71),
+                )
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    storage
+        .transaction({
+            let app_id = app_id.clone();
+            move |tx| {
+                tx.release_paykit_app_operation(&app_id, first.lease_id);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .transaction(move |tx| Ok(tx.paykit_app_operation_lease(&app_id)))
+            .await
+            .unwrap(),
+        Some(second)
+    );
+}
+
+#[tokio::test]
 async fn test_stale_peer_link_lease_cannot_overwrite_outbound_status() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();

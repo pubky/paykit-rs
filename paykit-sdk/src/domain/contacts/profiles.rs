@@ -304,6 +304,8 @@ pub struct PaykitProfileRecord {
     pub profile: PaykitProfile,
     /// Pubky path used for the profile.
     pub path: String,
+    /// Strong ETag identifying the exact profile revision.
+    pub revision: String,
     /// Local observation/publication time.
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

@@ -4,10 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::outbound_private::OutboundPrivateMessageStatus,
+    domain::outbound_private::{mark_outbound_recovery_required, OutboundPrivateMessageStatus},
     storage::{
-        require_peer_link_operation_lease, EncryptedLinkStateRecord, LinkedPeerRecord,
-        PeerLinkOperationLease, StorageAdapter, StorageTransaction,
+        require_peer_link_operation_lease, retry_storage_transaction, EncryptedLinkStateRecord,
+        LinkedPeerRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
     PaykitSdkError, PubkyPublicKey, Result,
 };
@@ -170,8 +170,11 @@ async fn save_linked_peer_state_inner<S>(
 where
     S: StorageAdapter,
 {
-    storage
-        .transaction(move |tx| {
+    retry_storage_transaction(storage, || {
+        let counterparty = counterparty.clone();
+        let lease = lease.clone();
+        let state = state.clone();
+        move |tx| {
             if let Some(lease) = lease.as_ref() {
                 require_peer_link_operation_lease(tx, lease)?;
             } else if tx
@@ -204,8 +207,9 @@ where
             }
             tx.save_linked_peer(record.clone());
             Ok(record)
-        })
-        .await
+        }
+    })
+    .await
 }
 
 /// Mark a Linked Peer as requiring recovery.
@@ -275,6 +279,21 @@ where
             checkpointed_at: now,
         });
     }
+    for message in tx.outbound_private_messages(counterparty) {
+        if matches!(
+            message.status,
+            OutboundPrivateMessageStatus::Pending
+                | OutboundPrivateMessageStatus::Sending
+                | OutboundPrivateMessageStatus::Failed
+                | OutboundPrivateMessageStatus::RecoveryRequired
+        ) {
+            tx.save_outbound_private_message(mark_outbound_recovery_required(
+                message,
+                "Encrypted Link recovery is required".into(),
+                now,
+            ))?;
+        }
+    }
     Ok(RecoveryRequiredMark { new_episode })
 }
 
@@ -287,8 +306,10 @@ async fn mark_recovery_required_inner<S>(
 where
     S: StorageAdapter,
 {
-    storage
-        .transaction(move |tx| {
+    retry_storage_transaction(storage, || {
+        let counterparty = counterparty.clone();
+        let lease = lease.clone();
+        move |tx| {
             if let Some(lease) = lease.as_ref() {
                 require_peer_link_operation_lease(tx, lease)?;
             } else if tx.peer_link_operation_lease(&counterparty).is_some() {
@@ -300,8 +321,9 @@ where
                 });
             }
             mark_recovery_required_in_transaction(tx, &counterparty, now)
-        })
-        .await
+        }
+    })
+    .await
 }
 
 /// Persist an in-progress Encrypted Link Handshake snapshot.
@@ -361,8 +383,11 @@ async fn save_link_handshake_state_inner<S>(
 where
     S: StorageAdapter,
 {
-    storage
-        .transaction(move |tx| {
+    retry_storage_transaction(storage, || {
+        let counterparty = counterparty.clone();
+        let handshake_snapshot = handshake_snapshot.clone();
+        let lease = lease.clone();
+        move |tx| {
             if let Some(lease) = lease.as_ref() {
                 require_peer_link_operation_lease(tx, lease)?;
             }
@@ -396,8 +421,9 @@ where
                 generation: link_state.generation,
                 handshake_role: link_state.handshake_role,
             })
-        })
-        .await
+        }
+    })
+    .await
 }
 
 /// Persist an in-progress handshake only if the stored generation is unchanged.
@@ -462,8 +488,11 @@ async fn save_link_handshake_state_if_generation_inner<S>(
 where
     S: StorageAdapter,
 {
-    storage
-        .transaction(move |tx| {
+    retry_storage_transaction(storage, || {
+        let counterparty = counterparty.clone();
+        let handshake_snapshot = handshake_snapshot.clone();
+        let lease = lease.clone();
+        move |tx| {
             if let Some(lease) = lease.as_ref() {
                 require_peer_link_operation_lease(tx, lease)?;
             }
@@ -502,8 +531,9 @@ where
                 generation: link_state.generation,
                 handshake_role: link_state.handshake_role,
             })
-        })
-        .await
+        }
+    })
+    .await
 }
 
 /// Persist an established Encrypted Link snapshot.
@@ -517,8 +547,10 @@ pub(crate) async fn save_linked_peer_link_state<S>(
 where
     S: StorageAdapter,
 {
-    storage
-        .transaction(move |tx| {
+    retry_storage_transaction(storage, || {
+        let counterparty = counterparty.clone();
+        let link_snapshot = link_snapshot.clone();
+        move |tx| {
             let mut peer = tx
                 .linked_peer(&counterparty)
                 .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
@@ -550,8 +582,9 @@ where
                 generation: link_state.generation,
                 handshake_role: link_state.handshake_role,
             })
-        })
-        .await
+        }
+    })
+    .await
 }
 
 /// Persist an established link if generation and lease still match.
@@ -588,8 +621,11 @@ async fn save_linked_peer_link_state_if_generation_inner<S>(
 where
     S: StorageAdapter,
 {
-    storage
-        .transaction(move |tx| {
+    retry_storage_transaction(storage, || {
+        let counterparty = counterparty.clone();
+        let link_snapshot = link_snapshot.clone();
+        let lease = lease.clone();
+        move |tx| {
             if let Some(lease) = lease.as_ref() {
                 require_peer_link_operation_lease(tx, lease)?;
             }
@@ -629,8 +665,9 @@ where
                 generation: link_state.generation,
                 handshake_role: link_state.handshake_role,
             })
-        })
-        .await
+        }
+    })
+    .await
 }
 
 pub(crate) fn requeue_recovery_required_outbound_messages(

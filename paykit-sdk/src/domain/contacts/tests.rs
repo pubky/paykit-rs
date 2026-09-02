@@ -155,6 +155,7 @@ fn test_contact_profile_resolution_from_paykit_profile() {
             extra: None,
         },
         path: paykit_profile_path(),
+        revision: "profile-revision".into(),
         updated_at: chrono::Utc::now(),
     };
 

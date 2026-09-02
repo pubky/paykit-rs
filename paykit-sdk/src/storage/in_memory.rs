@@ -344,6 +344,84 @@ impl StorageTransaction for StorageStateTransaction {
         }
     }
 
+    fn claim_paykit_app_operation(
+        &mut self,
+        app_id: &paykit_lib::PaykitAppId,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Option<PaykitAppOperationLease>> {
+        if self
+            .state
+            .paykit_app_operation_leases
+            .get(app_id)
+            .is_some_and(|existing| existing.expires_at > now)
+        {
+            return Ok(None);
+        }
+        let next_lease_id = self
+            .state
+            .next_paykit_app_operation_lease_id
+            .checked_add(1)
+            .ok_or_else(storage_id_exhausted)?;
+        let lease = PaykitAppOperationLease {
+            app_id: app_id.clone(),
+            lease_id: self.state.next_paykit_app_operation_lease_id,
+            claimed_at: now,
+            expires_at,
+        };
+        self.state.next_paykit_app_operation_lease_id = next_lease_id;
+        self.state
+            .paykit_app_operation_leases
+            .insert(app_id.clone(), lease.clone());
+        Ok(Some(lease))
+    }
+
+    fn paykit_app_operation_lease(
+        &self,
+        app_id: &paykit_lib::PaykitAppId,
+    ) -> Option<PaykitAppOperationLease> {
+        self.state.paykit_app_operation_leases.get(app_id).cloned()
+    }
+
+    fn release_paykit_app_operation(&mut self, app_id: &paykit_lib::PaykitAppId, lease_id: u64) {
+        if self
+            .state
+            .paykit_app_operation_leases
+            .get(app_id)
+            .is_some_and(|lease| lease.lease_id == lease_id)
+        {
+            self.state.paykit_app_operation_leases.remove(app_id);
+        }
+    }
+
+    fn payment_request_execution_claim(
+        &self,
+        counterparty: &PubkyPublicKey,
+        payment_request_id: &str,
+    ) -> Option<PaymentRequestExecutionClaim> {
+        self.state
+            .payment_request_execution_claims
+            .get(&(counterparty.clone(), payment_request_id.to_owned()))
+            .cloned()
+    }
+
+    fn save_payment_request_execution_claim(&mut self, claim: PaymentRequestExecutionClaim) {
+        self.state.payment_request_execution_claims.insert(
+            (claim.counterparty.clone(), claim.payment_request_id.clone()),
+            claim,
+        );
+    }
+
+    fn remove_payment_request_execution_claim(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        payment_request_id: &str,
+    ) -> Option<PaymentRequestExecutionClaim> {
+        self.state
+            .payment_request_execution_claims
+            .remove(&(counterparty.clone(), payment_request_id.to_owned()))
+    }
+
     fn insert_outbound_private_message(
         &mut self,
         message: NewOutboundPrivateMessage,

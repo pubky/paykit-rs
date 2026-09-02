@@ -27,7 +27,7 @@ use crate::{
     domain::private_stream::persist_private_stream_batch,
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, InMemoryStorage, LinkedPeerRecord,
-        NewOutboundPrivateMessage, PublicEndpointRecord,
+        NewOutboundPrivateMessage, PreparedOutboundPrivateSend, PublicEndpointRecord,
     },
     EventIdConflict, OutboundPrivateMessageStatus, PubkySessionAccess,
 };

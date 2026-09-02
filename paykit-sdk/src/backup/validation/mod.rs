@@ -45,6 +45,7 @@ pub fn validate_storage_state(state: &StorageState) -> Result<()> {
     )?;
     validate_private_stream_items(&private_stream_items)?;
     validate_event_dedup_records(&state.event_dedup_records, &private_stream_items)?;
+    validate_payment_request_execution_claims(state)?;
     validate_receipt_access_records(&state.receipt_access_records, &private_stream_items)?;
     validate_required_private_stream_indexes(
         &private_stream_items,
@@ -81,6 +82,56 @@ pub fn validate_storage_state(state: &StorageState) -> Result<()> {
     Ok(())
 }
 
+fn validate_payment_request_execution_claims(state: &StorageState) -> Result<()> {
+    for claim in state.payment_request_execution_claims.values() {
+        let records = derive_payment_request_records_from_parts(
+            claim.counterparty.clone(),
+            state
+                .private_stream_items
+                .iter()
+                .filter(|item| item.counterparty == claim.counterparty)
+                .cloned()
+                .collect(),
+            state
+                .outbound_private_messages
+                .iter()
+                .filter(|message| message.counterparty == claim.counterparty)
+                .cloned()
+                .collect(),
+            state
+                .event_dedup_records
+                .iter()
+                .filter(|((counterparty, _), _)| counterparty == &claim.counterparty)
+                .map(|((_, event_id), record)| (event_id.clone(), record.clone()))
+                .collect(),
+            claim.claimed_at,
+        )?;
+        let record = records
+            .iter()
+            .find(|record| record.payment_request_id == claim.payment_request_id)
+            .ok_or_else(|| {
+                invalid_live_state("Payment Request execution claim has no matching request")
+            })?;
+        if record.local_role != Some(PaymentRequestLocalRole::Payer) {
+            return Err(invalid_live_state(
+                "Payment Request execution claim belongs to the non-payer side",
+            ));
+        }
+        if !matches!(
+            record.state,
+            PaymentRequestLifecycleState::Proposed
+                | PaymentRequestLifecycleState::Accepted
+                | PaymentRequestLifecycleState::ActiveRecurring
+                | PaymentRequestLifecycleState::RecoveryRequired
+        ) {
+            return Err(invalid_live_state(
+                "Payment Request execution claim has no unresolved payment work",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_live_identity(state: &StorageState) -> Result<()> {
     let has_public_identity = state
         .identity_state
@@ -106,6 +157,8 @@ fn has_identity_scoped_live_state(state: &StorageState) -> bool {
         || !state.payment_endpoint_reservations.is_empty()
         || !state.encrypted_link_states.is_empty()
         || !state.peer_link_operation_leases.is_empty()
+        || !state.paykit_app_operation_leases.is_empty()
+        || !state.payment_request_execution_claims.is_empty()
         || !state.outbound_private_messages.is_empty()
         || !state.private_stream_items.is_empty()
         || !state.event_dedup_records.is_empty()
@@ -148,6 +201,18 @@ fn validate_live_record_keys(state: &StorageState) -> Result<()> {
         &state.peer_link_operation_leases,
         |key, record| key == &record.counterparty,
         "peer link operation lease key does not match its counterparty",
+    )?;
+    validate_record_keys(
+        &state.paykit_app_operation_leases,
+        |key, record| key == &record.app_id,
+        "Paykit App operation lease key does not match its app",
+    )?;
+    validate_record_keys(
+        &state.payment_request_execution_claims,
+        |(counterparty, payment_request_id), record| {
+            counterparty == &record.counterparty && payment_request_id == &record.payment_request_id
+        },
+        "Payment Request execution claim key does not match its record",
     )?;
     validate_record_keys(
         &state.event_dedup_records,
@@ -221,6 +286,15 @@ fn validate_live_app_state(state: &StorageState) -> Result<()> {
             "Paykit App capabilities belong to neither a registered nor retired app",
         ));
     }
+    if state
+        .payment_request_execution_claims
+        .values()
+        .any(|claim| state.retired_paykit_apps.contains(&claim.app_id))
+    {
+        return Err(invalid_live_state(
+            "Payment Request execution claim belongs to a retired app",
+        ));
+    }
     Ok(())
 }
 
@@ -240,6 +314,25 @@ fn validate_live_link_state(state: &StorageState) -> Result<()> {
         if lease.expires_at <= lease.claimed_at {
             return Err(invalid_live_state(
                 "peer link operation lease has an invalid validity interval",
+            ));
+        }
+    }
+
+    let mut app_lease_ids = HashSet::new();
+    for lease in state.paykit_app_operation_leases.values() {
+        if !app_lease_ids.insert(lease.lease_id) {
+            return Err(invalid_live_state(
+                "Paykit App operation lease id is duplicated",
+            ));
+        }
+        if lease.lease_id >= state.next_paykit_app_operation_lease_id {
+            return Err(invalid_live_state(
+                "Paykit App operation lease id is outside its allocated range",
+            ));
+        }
+        if lease.expires_at <= lease.claimed_at {
+            return Err(invalid_live_state(
+                "Paykit App operation lease has an invalid validity interval",
             ));
         }
     }

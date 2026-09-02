@@ -3,7 +3,7 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     domain::outbound_private::OutboundPrivateMessageStatus,
-    storage::{InMemoryStorage, NewOutboundPrivateMessage},
+    storage::{InMemoryStorage, NewOutboundPrivateMessage, PreparedOutboundPrivateSend},
 };
 
 fn timestamp() -> DateTime<Utc> {
@@ -337,6 +337,29 @@ async fn test_mark_recovery_required_clears_handshake_snapshot() {
     )
     .await
     .unwrap();
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let mut message = tx.insert_outbound_private_message(
+                    NewOutboundPrivateMessage::new(
+                        counterparty,
+                        paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+                        "paykit.payment_request".into(),
+                        r#"{"version":1,"kind":"paykit.payment_request","app_id":"bitkit","event_id":"event-1"}"#.into(),
+                        timestamp(),
+                    ),
+                )?;
+                message.status = OutboundPrivateMessageStatus::Sending;
+                message.prepared_send = Some(PreparedOutboundPrivateSend {
+                    destination_path: "/pub/paykit/v0/private/send/0".into(),
+                    ciphertext: vec![4, 5, 6],
+                });
+                tx.save_outbound_private_message(message)
+            }
+        })
+        .await
+        .unwrap();
 
     let mark = mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
         .await
@@ -356,6 +379,15 @@ async fn test_mark_recovery_required_clears_handshake_snapshot() {
     assert!(link_state.handshake_snapshot.is_none());
     assert!(link_state.handshake_role.is_none());
     assert_eq!(link_state.generation, 1);
+    let outbound = storage
+        .transaction(move |tx| Ok(tx.outbound_private_messages(&counterparty)))
+        .await
+        .unwrap();
+    assert_eq!(
+        outbound[0].status,
+        OutboundPrivateMessageStatus::RecoveryRequired
+    );
+    assert!(outbound[0].prepared_send.is_none());
 }
 
 #[tokio::test]

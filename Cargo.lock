@@ -3307,6 +3307,7 @@ dependencies = [
  "pubky",
  "pubky-noise",
  "pubky-testnet",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3748,7 +3749,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 [[package]]
 name = "pubky"
 version = "0.11.0"
-source = "git+https://github.com/ben-kaufman/pubky-homeserver-private.git?rev=551d12155e4fc1591df77fc7291e96f9e53a7a6e#551d12155e4fc1591df77fc7291e96f9e53a7a6e"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f70580132fcf5f2481d930d173e058997e970589#f70580132fcf5f2481d930d173e058997e970589"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3779,7 +3780,7 @@ dependencies = [
 [[package]]
 name = "pubky-common"
 version = "0.11.0"
-source = "git+https://github.com/ben-kaufman/pubky-homeserver-private.git?rev=551d12155e4fc1591df77fc7291e96f9e53a7a6e#551d12155e4fc1591df77fc7291e96f9e53a7a6e"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f70580132fcf5f2481d930d173e058997e970589#f70580132fcf5f2481d930d173e058997e970589"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -3800,7 +3801,7 @@ dependencies = [
 [[package]]
 name = "pubky-homeserver"
 version = "0.11.0"
-source = "git+https://github.com/ben-kaufman/pubky-homeserver-private.git?rev=551d12155e4fc1591df77fc7291e96f9e53a7a6e#551d12155e4fc1591df77fc7291e96f9e53a7a6e"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f70580132fcf5f2481d930d173e058997e970589#f70580132fcf5f2481d930d173e058997e970589"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3826,6 +3827,7 @@ dependencies = [
  "httpdate",
  "infer",
  "jsonwebtoken",
+ "lru 0.14.0",
  "mime_guess",
  "opendal",
  "opentelemetry",
@@ -3878,7 +3880,7 @@ dependencies = [
 [[package]]
 name = "pubky-testnet"
 version = "0.11.0"
-source = "git+https://github.com/ben-kaufman/pubky-homeserver-private.git?rev=551d12155e4fc1591df77fc7291e96f9e53a7a6e#551d12155e4fc1591df77fc7291e96f9e53a7a6e"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f70580132fcf5f2481d930d173e058997e970589#f70580132fcf5f2481d930d173e058997e970589"
 dependencies = [
  "anyhow",
  "clap",
@@ -3918,7 +3920,7 @@ dependencies = [
 [[package]]
 name = "pubky_test_utils"
 version = "0.1.0"
-source = "git+https://github.com/ben-kaufman/pubky-homeserver-private.git?rev=551d12155e4fc1591df77fc7291e96f9e53a7a6e#551d12155e4fc1591df77fc7291e96f9e53a7a6e"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f70580132fcf5f2481d930d173e058997e970589#f70580132fcf5f2481d930d173e058997e970589"
 dependencies = [
  "pubky_test_utils_drop_db_helper",
  "pubky_test_utils_macro",
@@ -3927,7 +3929,7 @@ dependencies = [
 [[package]]
 name = "pubky_test_utils_drop_db_helper"
 version = "0.1.0"
-source = "git+https://github.com/ben-kaufman/pubky-homeserver-private.git?rev=551d12155e4fc1591df77fc7291e96f9e53a7a6e#551d12155e4fc1591df77fc7291e96f9e53a7a6e"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f70580132fcf5f2481d930d173e058997e970589#f70580132fcf5f2481d930d173e058997e970589"
 dependencies = [
  "sqlx",
 ]
@@ -3935,7 +3937,7 @@ dependencies = [
 [[package]]
 name = "pubky_test_utils_macro"
 version = "0.1.0"
-source = "git+https://github.com/ben-kaufman/pubky-homeserver-private.git?rev=551d12155e4fc1591df77fc7291e96f9e53a7a6e#551d12155e4fc1591df77fc7291e96f9e53a7a6e"
+source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f70580132fcf5f2481d930d173e058997e970589#f70580132fcf5f2481d930d173e058997e970589"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

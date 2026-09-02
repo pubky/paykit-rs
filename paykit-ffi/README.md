@@ -246,8 +246,10 @@ bootstrap.approveAuthWithCompanionClaim(
 ### Profiles and Contacts
 
 - `PaykitSdk.publishPaykitProfile` / `fetchPaykitProfile` — write and read
-  public Paykit Profiles.
-- `PaykitSdk.deletePaykitProfile` — remove this identity's Paykit Profile.
+  public Paykit Profiles. Updates pass the revision returned by the preceding
+  fetch or publication.
+- `PaykitSdk.deletePaykitProfile(revision)` — remove the fetched profile only
+  if its revision is still current.
 - `PaykitSdk.publishPaykitBlob`, `uploadProfileAvatar`,
   `deletePaykitBlob`, `fetchPubkyFile`, and `fetchPubkyText` — publish profile
   blobs and read public Pubky resources with caller-provided size limits.

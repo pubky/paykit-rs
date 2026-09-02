@@ -160,7 +160,7 @@ async fn test_delete_paykit_profile_requires_session() {
         FixedClock,
     );
 
-    let result = sdk.delete_paykit_profile().await;
+    let result = sdk.delete_paykit_profile("profile-revision".into()).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
 }

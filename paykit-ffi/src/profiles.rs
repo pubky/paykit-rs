@@ -87,6 +87,8 @@ pub struct FfiPaykitProfileRecord {
     pub profile: FfiPaykitProfile,
     /// Pubky path used for the profile.
     pub path: String,
+    /// Strong ETag identifying the exact profile revision.
+    pub revision: String,
     /// Local observation/publication time as RFC3339 text.
     pub updated_at: String,
 }
@@ -237,13 +239,17 @@ impl fmt::Debug for FfiContactRecord {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
-    /// Publish this identity's Paykit Profile.
+    /// Publish this identity's Paykit Profile at an expected revision.
+    ///
+    /// Pass `None` to create the first profile. Updates must pass the revision
+    /// returned by the preceding fetch or publication.
     pub async fn publish_paykit_profile(
         &self,
         profile: FfiPaykitProfile,
+        expected_revision: Option<String>,
     ) -> Result<FfiPaykitProfileRecord, PaykitFfiError> {
         self.runtime
-            .publish_paykit_profile(profile.try_into()?)
+            .publish_paykit_profile(profile.try_into()?, expected_revision)
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -261,10 +267,13 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Delete this identity's Paykit Profile.
-    pub async fn delete_paykit_profile(&self) -> Result<(), PaykitFfiError> {
+    /// Delete this identity's Paykit Profile at the supplied revision.
+    pub async fn delete_paykit_profile(
+        &self,
+        expected_revision: String,
+    ) -> Result<(), PaykitFfiError> {
         self.runtime
-            .delete_paykit_profile()
+            .delete_paykit_profile(expected_revision)
             .await
             .map_err(Into::into)
     }
@@ -544,6 +553,7 @@ impl From<PaykitProfileRecord> for FfiPaykitProfileRecord {
             public_key: app_public_key(&value.public_key),
             profile: value.profile.into(),
             path: value.path,
+            revision: value.revision,
             updated_at: value.updated_at.to_rfc3339(),
         }
     }

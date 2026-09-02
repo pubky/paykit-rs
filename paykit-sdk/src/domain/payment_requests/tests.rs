@@ -125,8 +125,18 @@ fn proof_raw(event_id: &str, request_id: &str, reference: &str) -> String {
 }
 
 fn proof_raw_for_app(event_id: &str, request_id: &str, reference: &str, app_id: &str) -> String {
+    proof_raw_for_apps(event_id, request_id, reference, app_id, app_id)
+}
+
+fn proof_raw_for_apps(
+    event_id: &str,
+    request_id: &str,
+    reference: &str,
+    sender_app_id: &str,
+    payment_app_id: &str,
+) -> String {
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_proof","app_id":"{app_id}","event_id":"{event_id}","payment_request_id":"{request_id}","payment_reference":"{reference}","billing_period":null,"payment_endpoint_identifier":"btc-lightning-bolt11","payment_app_id":"{app_id}","proof":{{"txid":"secret"}}}}"#
+        r#"{{"version":1,"kind":"paykit.payment_proof","app_id":"{sender_app_id}","event_id":"{event_id}","payment_request_id":"{request_id}","payment_reference":"{reference}","billing_period":null,"payment_endpoint_identifier":"btc-lightning-bolt11","payment_app_id":"{payment_app_id}","proof":{{"txid":"secret"}}}}"#
     )
 }
 
@@ -165,6 +175,23 @@ async fn persist_authorized_request(
         })
         .await
         .unwrap();
+}
+
+async fn claim_execution(
+    storage: &InMemoryStorage,
+    counterparty: PubkyPublicKey,
+    request_id: &str,
+    app_id: paykit_lib::PaykitAppId,
+) {
+    claim_payment_request_execution(
+        storage,
+        counterparty,
+        &app_id,
+        &paykit_lib::PaymentRequestId::new(request_id).unwrap(),
+        timestamp(),
+    )
+    .await
+    .unwrap();
 }
 
 async fn persist_messages_at(

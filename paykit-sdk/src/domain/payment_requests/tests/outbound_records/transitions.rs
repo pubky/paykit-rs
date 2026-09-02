@@ -229,7 +229,7 @@ async fn test_payment_request_records_apply_later_cancellation_after_acceptance(
 }
 
 #[tokio::test]
-async fn test_payment_request_records_preserve_first_payer_app_transition() {
+async fn test_payment_request_records_allow_open_request_proof_from_another_app() {
     let storage = registered_storage();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
@@ -275,11 +275,12 @@ async fn test_payment_request_records_preserve_first_payer_app_transition() {
                 request_id,
                 "competing-payer",
             ),
-            proof_raw_for_app(
+            proof_raw_for_apps(
                 "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d106",
                 request_id,
                 "invoice-2026-0001",
                 "competing-payer",
+                "bitkit",
             ),
         ],
         timestamp() + ChronoDuration::minutes(1),
@@ -290,13 +291,16 @@ async fn test_payment_request_records_preserve_first_payer_app_transition() {
         .await
         .unwrap();
 
-    assert_eq!(records[0].state, PaymentRequestLifecycleState::Accepted);
+    assert_eq!(
+        records[0].state,
+        PaymentRequestLifecycleState::ProofSubmitted
+    );
     assert_eq!(
         records[0]
             .payer_app_id
             .as_ref()
             .map(|app_id| app_id.as_str()),
-        Some("first-payer")
+        Some("competing-payer")
     );
     assert_eq!(
         records[0].accepted_event_id.as_deref(),
@@ -304,7 +308,11 @@ async fn test_payment_request_records_preserve_first_payer_app_transition() {
     );
     assert!(records[0].rejected_event_id.is_none());
     assert!(records[0].canceled_event_id.is_none());
-    assert!(records[0].payment_proofs.is_empty());
+    assert_eq!(records[0].payment_proofs.len(), 1);
+    assert_eq!(
+        records[0].payment_proofs[0].payment_app_id.as_str(),
+        "bitkit"
+    );
     assert!(records[0].invalid_reason.is_none());
 }
 

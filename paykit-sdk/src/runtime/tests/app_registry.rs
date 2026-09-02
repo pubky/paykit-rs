@@ -1,7 +1,7 @@
 use super::*;
 use crate::runtime::app_removal::{
-    begin_paykit_app_removal, reactivate_paykit_app, require_app_capability_downgrade_safe,
-    restore_app_capabilities, stage_app_capability_update,
+    begin_paykit_app_removal, require_app_capability_downgrade_safe, restore_app_capabilities,
+    stage_app_capability_update,
 };
 
 fn capabilities() -> paykit_lib::PaykitAppCapabilities {
@@ -14,11 +14,13 @@ fn capabilities() -> paykit_lib::PaykitAppCapabilities {
 }
 
 #[tokio::test]
-async fn test_aborted_app_removal_restores_previous_active_state() {
+async fn test_app_removal_preflight_retires_active_app_without_blockers() {
     let storage = registered_test_storage();
 
-    let was_active = begin_paykit_app_removal(&storage, &app_id()).await.unwrap();
-    assert!(was_active);
+    let blockers = begin_paykit_app_removal(&storage, &app_id(), FixedClock.now())
+        .await
+        .unwrap();
+    assert!(blockers.is_empty());
     storage
         .transaction(|tx| {
             assert!(!tx.paykit_app_is_registered(&app_id()));
@@ -27,8 +29,33 @@ async fn test_aborted_app_removal_restores_previous_active_state() {
         })
         .await
         .unwrap();
+}
 
-    reactivate_paykit_app(&storage, app_id()).await.unwrap();
+#[tokio::test]
+async fn test_app_removal_preflight_keeps_active_app_when_blocked() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction(move |tx| {
+            tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                counterparty,
+                app_id(),
+                PrivateMessageKind::PaymentRequestCancellation
+                    .as_str()
+                    .into(),
+                r#"{"version":1,"kind":"paykit.payment_request_cancellation","app_id":"bitkit","event_id":"650e8400-e29b-41d4-a716-446655440000","payment_request_id":"550e8400-e29b-41d4-a716-446655440000"}"#.into(),
+                FixedClock.now(),
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let blockers = begin_paykit_app_removal(&storage, &app_id(), FixedClock.now())
+        .await
+        .unwrap();
+
+    assert_eq!(blockers.undelivered_private_events, 1);
     storage
         .transaction(|tx| {
             assert!(tx.paykit_app_is_registered(&app_id()));
@@ -50,9 +77,11 @@ async fn test_app_removal_does_not_reactivate_previously_retired_app() {
         .await
         .unwrap();
 
-    let was_active = begin_paykit_app_removal(&storage, &app_id()).await.unwrap();
+    let blockers = begin_paykit_app_removal(&storage, &app_id(), FixedClock.now())
+        .await
+        .unwrap();
 
-    assert!(!was_active);
+    assert!(blockers.is_empty());
     storage
         .transaction(|tx| {
             assert!(!tx.paykit_app_is_registered(&app_id()));
@@ -286,7 +315,10 @@ async fn test_restored_retired_app_can_stage_republish_without_capability_cache(
 #[tokio::test]
 async fn test_remove_unknown_app_can_stage_later_publish() {
     let storage = InMemoryStorage::new();
-    assert!(!begin_paykit_app_removal(&storage, &app_id()).await.unwrap());
+    let blockers = begin_paykit_app_removal(&storage, &app_id(), FixedClock.now())
+        .await
+        .unwrap();
+    assert!(blockers.is_empty());
 
     let staged =
         stage_app_capability_update(&storage, &app_id(), None, capabilities(), FixedClock.now())

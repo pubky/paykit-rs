@@ -208,7 +208,7 @@ async fn test_list_payment_requests_filters_across_counterparties() {
 }
 
 #[tokio::test]
-async fn test_actionable_received_payment_requests_includes_all_payment_targets() {
+async fn test_actionable_received_payment_requests_do_not_treat_payee_app_as_executor() {
     let storage = registered_test_storage();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -272,27 +272,29 @@ async fn test_actionable_received_payment_requests_includes_all_payment_targets(
 }
 
 #[tokio::test]
-async fn test_actionable_received_payment_requests_excludes_locally_accepted_request() {
-    assert_local_response_is_not_actionable(
+async fn test_actionable_received_payment_requests_include_unclaimed_accepted_request() {
+    assert_local_response_actionability(
         "550e8400-e29b-41d4-a716-446655440030",
         "650e8400-e29b-41d4-a716-446655440030",
         parsed_payment_request_event(payment_request_acceptance_raw(
             "650e8400-e29b-41d4-a716-446655440031",
             "550e8400-e29b-41d4-a716-446655440030",
         )),
+        true,
     )
     .await;
 }
 
 #[tokio::test]
 async fn test_actionable_received_payment_requests_excludes_locally_rejected_request() {
-    assert_local_response_is_not_actionable(
+    assert_local_response_actionability(
         "550e8400-e29b-41d4-a716-446655440040",
         "650e8400-e29b-41d4-a716-446655440040",
         parsed_payment_request_event(payment_request_rejection_raw(
             "650e8400-e29b-41d4-a716-446655440041",
             "550e8400-e29b-41d4-a716-446655440040",
         )),
+        false,
     )
     .await;
 }
@@ -664,10 +666,11 @@ async fn test_accept_payment_request_rejects_unregistered_origin_app() {
         .is_empty());
 }
 
-async fn assert_local_response_is_not_actionable(
+async fn assert_local_response_actionability(
     request_id: &str,
     request_event_id: &str,
     response: PaymentRequestEvent,
+    expected_actionable: bool,
 ) {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -709,7 +712,7 @@ async fn assert_local_response_is_not_actionable(
 
     let actionable = sdk.actionable_received_payment_requests().await.unwrap();
 
-    assert!(actionable.is_empty());
+    assert_eq!(!actionable.is_empty(), expected_actionable);
 }
 
 async fn authorize_payment_request_app(

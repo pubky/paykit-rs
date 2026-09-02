@@ -320,6 +320,22 @@ async fn test_storage_allocators_fail_without_mutating_at_exhaustion() {
         .is_empty());
 
     state.next_peer_link_operation_lease_id = 0;
+    state.next_paykit_app_operation_lease_id = u64::MAX;
+    let storage = InMemoryStorage::from_state(state.clone());
+    let result = storage
+        .transaction(move |tx| {
+            tx.claim_paykit_app_operation(&app_id(), timestamp(), timestamp())?;
+            Ok(())
+        })
+        .await;
+    assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
+    assert!(storage
+        .snapshot()
+        .unwrap()
+        .paykit_app_operation_leases
+        .is_empty());
+
+    state.next_paykit_app_operation_lease_id = 0;
     state.next_outbound_private_message_id = u64::MAX;
     let storage = InMemoryStorage::from_state(state.clone());
     let result = storage

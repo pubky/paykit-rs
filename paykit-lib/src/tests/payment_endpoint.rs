@@ -24,14 +24,85 @@ async fn test_app_registry_round_trips_through_public_storage() {
         )
         .unwrap();
 
-    set_paykit_app_registry(&setup.session, &registry)
+    create_paykit_app_registry(&setup.session, &registry)
         .await
         .unwrap();
     let fetched = get_paykit_app_registry(&setup.public_storage, &setup.public_key)
         .await
         .unwrap();
+    let versioned = get_paykit_app_registry_with_etag(&setup.public_storage, &setup.public_key)
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(fetched, Some(registry));
+    assert_eq!(versioned.0, fetched.unwrap());
+    assert!(!versioned.1.is_empty());
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_app_registry_rejects_stale_etag_update() {
+    let setup = TestSetup::new().await;
+    let mut registry = PaykitAppRegistry::new(Some(Keypair::random().public_key()));
+    registry
+        .register_app(
+            app_id(),
+            PaykitApp::new("Bitkit", app_capabilities()).unwrap(),
+        )
+        .unwrap();
+    create_paykit_app_registry(&setup.session, &registry)
+        .await
+        .unwrap();
+
+    let (mut first_update, etag) =
+        get_paykit_app_registry_with_etag(&setup.public_storage, &setup.public_key)
+            .await
+            .unwrap()
+            .unwrap();
+    let mut stale_update = first_update.clone();
+    first_update
+        .register_app(
+            PaykitAppId::new("paykit-server").unwrap(),
+            PaykitApp::new("Paykit Server", app_capabilities()).unwrap(),
+        )
+        .unwrap();
+    stale_update
+        .register_app(
+            PaykitAppId::new("exchange").unwrap(),
+            PaykitApp::new("Exchange", app_capabilities()).unwrap(),
+        )
+        .unwrap();
+
+    update_paykit_app_registry(&setup.session, &first_update, &etag)
+        .await
+        .unwrap();
+    let error = update_paykit_app_registry(&setup.session, &stale_update, &etag)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        PaykitError::Transport { source, .. }
+            if matches!(
+                source.downcast_ref::<pubky::Error>(),
+                Some(pubky::Error::Request(pubky::errors::RequestError::Server {
+                    status,
+                    ..
+                })) if *status == pubky::StatusCode::PRECONDITION_FAILED
+            )
+    ));
+
+    let stored = get_paykit_app_registry(&setup.public_storage, &setup.public_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.apps().contains_key(&app_id()));
+    assert!(stored
+        .apps()
+        .contains_key(&PaykitAppId::new("paykit-server").unwrap()));
+    assert!(!stored
+        .apps()
+        .contains_key(&PaykitAppId::new("exchange").unwrap()));
     setup.raw_session.signout().await.unwrap();
 }
 
@@ -80,6 +151,92 @@ async fn endpoint_round_trip_and_update() {
             .await
             .unwrap();
     assert_eq!(updated, Some(new_endpoint.clone()));
+
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_endpoint_conditional_updates_reject_stale_revisions() {
+    let setup = TestSetup::new().await;
+    let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+    let initial = PaymentEndpointPayload::new("ln-initial");
+    let updated = PaymentEndpointPayload::new("ln-updated");
+
+    create_payment_endpoint(
+        &setup.session,
+        &app_id(),
+        identifier.clone(),
+        initial.clone(),
+    )
+    .await
+    .unwrap();
+    let (payload, initial_revision) = get_payment_endpoint_with_revision(
+        &setup.public_storage,
+        &setup.public_key,
+        &app_id(),
+        &identifier,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(payload, Some(initial));
+
+    update_payment_endpoint(
+        &setup.session,
+        &app_id(),
+        identifier.clone(),
+        updated.clone(),
+        &initial_revision,
+    )
+    .await
+    .unwrap();
+    let stale_delete = remove_payment_endpoint_if_revision(
+        &setup.session,
+        &app_id(),
+        identifier.clone(),
+        &initial_revision,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        stale_delete,
+        PaykitError::Transport { source, .. }
+            if matches!(
+                source.downcast_ref::<pubky::Error>(),
+                Some(pubky::Error::Request(pubky::errors::RequestError::Server {
+                    status,
+                    ..
+                })) if *status == pubky::StatusCode::PRECONDITION_FAILED
+            )
+    ));
+
+    let (payload, current_revision) = get_payment_endpoint_with_revision(
+        &setup.public_storage,
+        &setup.public_key,
+        &app_id(),
+        &identifier,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(payload, Some(updated));
+    remove_payment_endpoint_if_revision(
+        &setup.session,
+        &app_id(),
+        identifier.clone(),
+        &current_revision,
+    )
+    .await
+    .unwrap();
+    assert!(get_payment_endpoint_with_revision(
+        &setup.public_storage,
+        &setup.public_key,
+        &app_id(),
+        &identifier,
+    )
+    .await
+    .unwrap()
+    .is_none());
 
     setup.raw_session.signout().await.unwrap();
 }

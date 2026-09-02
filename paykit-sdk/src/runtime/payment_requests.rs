@@ -109,8 +109,12 @@ where
                 ..PaymentRequestFilter::default()
             })
             .await?;
-        self.filter_authorized_remote_payment_request_apps(records)
-            .await
+        Ok(self
+            .filter_authorized_remote_payment_request_apps(records)
+            .await?
+            .into_iter()
+            .filter(|record| self.execution_available_to_current_app(record))
+            .collect())
     }
 
     /// Return received Payment Requests from currently authorized apps that need a response.
@@ -121,12 +125,25 @@ where
                 states: vec![
                     PaymentRequestLifecycleState::Proposed,
                     PaymentRequestLifecycleState::ProposalExpired,
+                    PaymentRequestLifecycleState::Accepted,
+                    PaymentRequestLifecycleState::ActiveRecurring,
                 ],
                 ..PaymentRequestFilter::default()
             })
             .await?;
-        self.filter_authorized_remote_payment_request_apps(records)
-            .await
+        Ok(self
+            .filter_authorized_remote_payment_request_apps(records)
+            .await?
+            .into_iter()
+            .filter(|record| self.execution_available_to_current_app(record))
+            .collect())
+    }
+
+    fn execution_available_to_current_app(&self, record: &PaymentRequestRecord) -> bool {
+        record
+            .execution_claim_app_id
+            .as_ref()
+            .is_none_or(|app_id| app_id == &self.config.app_id)
     }
 
     async fn filter_authorized_remote_payment_request_apps(
@@ -294,10 +311,66 @@ where
             .await
     }
 
-    /// Queue acceptance for a received Payment Request and return local derived state.
+    /// Claim a received Payment Request before beginning payment preparation.
     ///
-    /// The returned record reflects the local outbound queue, not delivery or
-    /// counterparty processing.
+    /// The shared claim hides the work from other local Paykit Apps. It remains
+    /// through acceptance and may be explicitly released while payment remains
+    /// unresolved. Payment execution must wait for
+    /// [`Self::accept_payment_request`] to succeed when the request is still
+    /// proposed.
+    pub async fn claim_payment_request_for_execution(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+    ) -> Result<PaymentRequestRecord> {
+        let record = self
+            .load_payment_request_record(&counterparty, payment_request_id)
+            .await?;
+        require_payer_role(&record, "claim Payment Request for execution")?;
+        self.ensure_payment_request_origin_app_authorized(
+            &counterparty,
+            &record,
+            "claim Payment Request for execution",
+        )
+        .await?;
+        claim_payment_request_execution(
+            &self.storage,
+            counterparty,
+            &self.config.app_id,
+            payment_request_id,
+            self.clock.now(),
+        )
+        .await
+    }
+
+    /// Release this App's unresolved Payment Request execution claim.
+    ///
+    /// Releasing does not reject the request and makes it actionable to other
+    /// compatible local Paykit Apps again. The request's endpoint constraints
+    /// remain unchanged. One-time requests cannot be released after proof;
+    /// recurring requests retain completed billing-period proofs.
+    pub async fn release_payment_request_execution_claim(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+    ) -> Result<PaymentRequestRecord> {
+        release_payment_request_execution_claim(
+            &self.storage,
+            counterparty,
+            &self.config.app_id,
+            payment_request_id,
+            self.clock.now(),
+        )
+        .await
+    }
+
+    /// Queue acceptance for a claimed received Payment Request.
+    ///
+    /// The current App must claim the request first. Success queues acceptance
+    /// before returning; only then may the integrating application execute
+    /// payment. The execution claim remains until proof, cancellation, or an
+    /// explicit release.
+    /// The returned record does not imply delivery or counterparty processing.
     pub async fn accept_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -399,7 +472,13 @@ where
             )
             .await?;
         }
-        require_payment_request_action_app(&record, &self.config.app_id, "cancel Payment Request")?;
+        if record.local_role == Some(PaymentRequestLocalRole::Payee) {
+            require_payment_request_action_app(
+                &record,
+                &self.config.app_id,
+                "cancel Payment Request",
+            )?;
+        }
         let event =
             PaymentRequestCancellation::new(EventId::new_v4(), payment_request_id.clone(), reason);
         self.enqueue_raw_payment_request_cancellation(counterparty.clone(), &event)
@@ -433,7 +512,12 @@ where
             ],
             "submit Payment Proof",
         )?;
-        require_payer_app(&record, &self.config.app_id, "submit Payment Proof")?;
+        if record.execution_claim_app_id.as_ref() != Some(&self.config.app_id) {
+            return Err(PaykitSdkError::Policy {
+                context: "cannot submit Payment Proof: claim payment execution first".into(),
+                source: None,
+            });
+        }
         self.ensure_payment_request_origin_app_authorized(
             &counterparty,
             &record,

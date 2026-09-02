@@ -28,12 +28,13 @@ fn test_app_removal_blocks_owned_payer_and_payee_subscriptions() {
         PaymentRequestLifecycleState::ActiveRecurring,
     );
     payer.payer_app_id = Some(app_id.clone());
+    payer.execution_claim_app_id = Some(app_id.clone());
 
     assert!(payment_request_record_blocks_app_removal(&payee, &app_id));
     assert!(payment_request_record_blocks_app_removal(&payer, &app_id));
 
     payer.state = PaymentRequestLifecycleState::ProofSubmitted;
-    assert!(payment_request_record_blocks_app_removal(&payer, &app_id));
+    assert!(!payment_request_record_blocks_app_removal(&payer, &app_id));
 
     payer.state = PaymentRequestLifecycleState::Canceled;
     assert!(!payment_request_record_blocks_app_removal(&payer, &app_id));
@@ -42,10 +43,22 @@ fn test_app_removal_blocks_owned_payer_and_payee_subscriptions() {
 #[test]
 fn test_app_removal_does_not_claim_unanswered_identity_request() {
     let app_id = app_id();
-    let request = payment_request_removal_record(
+    let mut request = payment_request_removal_record(
         PaymentRequestLocalRole::Payer,
         PaymentRequestLifecycleState::Proposed,
     );
+    request.terms = Some(PaymentRequestTermsRecord {
+        amount: crate::AmountRecord {
+            value: "0.001".into(),
+            asset: "btc".into(),
+        },
+        payment_reference: "invoice-2026-0001".into(),
+        proposal_expires_at: None,
+        recurrence: None,
+        accepted_payment_endpoint_identifiers: vec!["btc-lightning-bolt11".into()],
+        required_app_id: Some(app_id.clone()),
+        metadata: serde_json::Map::new(),
+    });
 
     assert!(!payment_request_record_blocks_app_removal(
         &request, &app_id
@@ -580,6 +593,7 @@ fn payment_request_removal_record(
         proposal_event_id: None,
         proposal_app_id: None,
         payer_app_id: None,
+        execution_claim_app_id: None,
         terms: None,
         accepted_event_id: None,
         accepted_outbound_status: None,

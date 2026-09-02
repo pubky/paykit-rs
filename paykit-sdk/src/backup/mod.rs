@@ -15,6 +15,7 @@ use crate::{
     domain::outbound_private::validate_queued_outbound_private_message,
     domain::payment_requests::{
         derive_payment_request_records_from_parts, payment_request_record_blocks_app_removal,
+        PaymentRequestLifecycleState, PaymentRequestLocalRole,
     },
     domain::private_lists::counterparties_with_shared_private_payment_lists,
     domain::private_stream::{
@@ -29,8 +30,8 @@ use crate::{
     identity::{IdentityState, PubkyPublicKey},
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
-        PaymentEndpointReservationRecord, PrivateStreamItemRecord, PublicEndpointRecord,
-        StorageAdapter, StorageState, ValidatedStorageState,
+        PaymentEndpointReservationRecord, PaymentRequestExecutionClaim, PrivateStreamItemRecord,
+        PublicEndpointRecord, StorageAdapter, StorageState, ValidatedStorageState,
     },
     OutboundPrivateMessageStatus, PaykitSdkError, Result,
 };
@@ -67,6 +68,8 @@ pub struct SdkBackupState {
     pub public_endpoint_records: Vec<PublicEndpointRecord>,
     /// Payment Endpoint Reservation records.
     pub payment_endpoint_reservations: Vec<PaymentEndpointReservationRecord>,
+    /// Durable ownership claims for unresolved Payment Request execution.
+    pub payment_request_execution_claims: Vec<PaymentRequestExecutionClaim>,
     /// Encrypted Link state records.
     pub encrypted_link_states: Vec<EncryptedLinkStateRecord>,
     /// Outbound Private Application Message records.
@@ -107,6 +110,10 @@ impl fmt::Debug for SdkBackupState {
             .field(
                 "payment_endpoint_reservations",
                 &self.payment_endpoint_reservations.len(),
+            )
+            .field(
+                "payment_request_execution_claims",
+                &self.payment_request_execution_claims.len(),
             )
             .field("encrypted_link_states", &self.encrypted_link_states.len())
             .field(
@@ -208,9 +215,13 @@ where
                 .peer_link_operation_leases
                 .values()
                 .any(|lease| lease.expires_at > now)
+                || current_state
+                    .paykit_app_operation_leases
+                    .values()
+                    .any(|lease| lease.expires_at > now)
             {
                 return Err(PaykitSdkError::Policy {
-                    context: "cannot restore backup while peer link work is in progress".into(),
+                    context: "cannot restore backup while shared SDK work is in progress".into(),
                     source: None,
                 });
             }
@@ -244,8 +255,13 @@ where
             };
             let current_next_peer_link_operation_lease_id =
                 current_state.next_peer_link_operation_lease_id;
-            let (state, report) = backup
-                .into_storage_state(current_identity, current_next_peer_link_operation_lease_id)?;
+            let current_next_paykit_app_operation_lease_id =
+                current_state.next_paykit_app_operation_lease_id;
+            let (state, report) = backup.into_storage_state(
+                current_identity,
+                current_next_peer_link_operation_lease_id,
+                current_next_paykit_app_operation_lease_id,
+            )?;
             tx.replace_storage_state(state);
             Ok(report)
         })
@@ -256,9 +272,11 @@ fn storage_state_is_empty_except_identity(state: &StorageState) -> bool {
     let mut empty = StorageState {
         identity_state: state.identity_state.clone(),
         peer_link_operation_leases: state.peer_link_operation_leases.clone(),
+        paykit_app_operation_leases: state.paykit_app_operation_leases.clone(),
         ..StorageState::default()
     };
     empty.next_peer_link_operation_lease_id = state.next_peer_link_operation_lease_id;
+    empty.next_paykit_app_operation_lease_id = state.next_paykit_app_operation_lease_id;
     state == &empty
 }
 
@@ -304,6 +322,17 @@ impl SdkBackupState {
             .collect::<Vec<_>>();
         encrypted_link_states
             .sort_by(|left, right| left.counterparty.as_str().cmp(right.counterparty.as_str()));
+
+        let mut payment_request_execution_claims = state
+            .payment_request_execution_claims
+            .into_values()
+            .collect::<Vec<_>>();
+        payment_request_execution_claims.sort_by(|left, right| {
+            left.counterparty
+                .as_str()
+                .cmp(right.counterparty.as_str())
+                .then(left.payment_request_id.cmp(&right.payment_request_id))
+        });
 
         let mut event_dedup_records = state.event_dedup_records.into_values().collect::<Vec<_>>();
         event_dedup_records.sort_by(|left, right| {
@@ -351,6 +380,7 @@ impl SdkBackupState {
             retired_paykit_apps,
             public_endpoint_records,
             payment_endpoint_reservations,
+            payment_request_execution_claims,
             encrypted_link_states,
             outbound_private_messages: state.outbound_private_messages,
             private_stream_items: state.private_stream_items,
@@ -368,6 +398,7 @@ impl SdkBackupState {
         self,
         current_identity: Option<&IdentityState>,
         next_peer_link_operation_lease_id: u64,
+        next_paykit_app_operation_lease_id: u64,
     ) -> Result<(ValidatedStorageState, RestoreReport)> {
         self.validate(current_identity)?;
 
@@ -418,6 +449,16 @@ impl SdkBackupState {
         validate_payment_endpoint_reservations(
             &payment_endpoint_reservations,
             &outbound_private_messages,
+        )?;
+        let payment_request_execution_claims = keyed_by_tuple(
+            self.payment_request_execution_claims,
+            |record| {
+                (
+                    record.counterparty.clone(),
+                    record.payment_request_id.clone(),
+                )
+            },
+            "Payment Request execution claim",
         )?;
         let private_stream_items = unique_private_stream_items(self.private_stream_items)?;
         validate_private_stream_items(&private_stream_items)?;
@@ -524,6 +565,9 @@ impl SdkBackupState {
             encrypted_link_states,
             peer_link_operation_leases: HashMap::new(),
             next_peer_link_operation_lease_id,
+            paykit_app_operation_leases: HashMap::new(),
+            next_paykit_app_operation_lease_id,
+            payment_request_execution_claims,
             outbound_private_messages,
             next_outbound_private_message_id,
             private_stream_items,

@@ -19,7 +19,7 @@ use paykit_sdk::{
     PAYKIT_SESSION_CAPABILITIES,
 };
 use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
-use tokio::sync::{Mutex as TokioMutex, OnceCell};
+use tokio::sync::{oneshot, Mutex as TokioMutex, OnceCell};
 
 const TEST_CLIENT_ID: &str = "paykit-sdk.test";
 
@@ -108,6 +108,12 @@ pub struct TestnetPaymentAdapter {
     public_details: Arc<Mutex<Vec<PublicReceivingDetail>>>,
     private_details: Arc<Mutex<Vec<PrivateReceivingDetail>>>,
     fail_reservation_cancellation: Arc<Mutex<bool>>,
+    public_details_pause: Arc<Mutex<Option<PublicDetailsPause>>>,
+}
+
+struct PublicDetailsPause {
+    loaded: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
 }
 
 impl TestnetPaymentAdapter {
@@ -117,6 +123,19 @@ impl TestnetPaymentAdapter {
 
     pub fn set_private_details(&self, details: Vec<PrivateReceivingDetail>) {
         *self.private_details.lock().expect("details lock poisoned") = details;
+    }
+
+    pub fn pause_next_public_details_load(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (loaded_tx, loaded_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        *self
+            .public_details_pause
+            .lock()
+            .expect("public details pause lock poisoned") = Some(PublicDetailsPause {
+            loaded: loaded_tx,
+            resume: resume_rx,
+        });
+        (loaded_rx, resume_tx)
     }
 
     pub fn set_fail_reservation_cancellation(&self, fail: bool) {
@@ -130,11 +149,21 @@ impl TestnetPaymentAdapter {
 #[async_trait]
 impl PaymentAdapter for TestnetPaymentAdapter {
     async fn current_public_receiving_details(&self) -> Result<Vec<PublicReceivingDetail>> {
-        Ok(self
+        let details = self
             .public_details
             .lock()
             .expect("details lock poisoned")
-            .clone())
+            .clone();
+        let pause = self
+            .public_details_pause
+            .lock()
+            .expect("public details pause lock poisoned")
+            .take();
+        if let Some(pause) = pause {
+            let _ = pause.loaded.send(());
+            let _ = pause.resume.await;
+        }
+        Ok(details)
     }
 
     async fn current_private_receiving_details(

@@ -252,19 +252,18 @@ where
         link_state.handshake_role = None;
         link_state.generation = link_state.generation.saturating_add(1);
         link_state.checkpointed_at = now;
-        self.storage
-            .transaction({
-                let sending = sending.clone();
-                let link_state = link_state.clone();
-                let lease = lease.clone();
-                move |tx| {
-                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                    tx.save_outbound_private_message(sending.clone())?;
-                    tx.save_encrypted_link_state(link_state);
-                    Ok(())
-                }
-            })
-            .await?;
+        self.retry_storage_transaction(|| {
+            let sending = sending.clone();
+            let link_state = link_state.clone();
+            let lease = lease.clone();
+            move |tx| {
+                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                tx.save_outbound_private_message(sending.clone())?;
+                tx.save_encrypted_link_state(link_state);
+                Ok(())
+            }
+        })
+        .await?;
         link.acknowledge_persisted_private_send(prepared)?;
         Ok(sending)
     }
@@ -435,17 +434,16 @@ where
     ) -> Result<()> {
         let now = self.clock.now();
         let sent = mark_outbound_sent(sending, now);
-        self.storage
-            .transaction({
-                let sent = sent.clone();
-                let lease = lease.clone();
-                move |tx| {
-                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                    tx.save_outbound_private_message(sent.clone())?;
-                    Ok(())
-                }
-            })
-            .await?;
+        self.retry_storage_transaction(|| {
+            let sent = sent.clone();
+            let lease = lease.clone();
+            move |tx| {
+                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                tx.save_outbound_private_message(sent.clone())?;
+                Ok(())
+            }
+        })
+        .await?;
         report.sent.push(sent.outbound_message_id);
         Ok(())
     }
@@ -465,8 +463,7 @@ where
         if requires_recovery {
             let failed = mark_outbound_recovery_required(sending, error.clone(), now);
             let (failed, mark) = self
-                .storage
-                .transaction({
+                .retry_storage_transaction(|| {
                     let failed = failed.clone();
                     let lease = lease.clone();
                     let counterparty = counterparty.clone();
@@ -512,17 +509,16 @@ where
         record: OutboundPrivateMessageRecord,
         lease: &PeerLinkOperationLease,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.storage
-            .transaction({
-                let record = record.clone();
-                let lease = lease.clone();
-                move |tx| {
-                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                    tx.save_outbound_private_message(record.clone())?;
-                    Ok(record)
-                }
-            })
-            .await
+        self.retry_storage_transaction(|| {
+            let record = record.clone();
+            let lease = lease.clone();
+            move |tx| {
+                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                tx.save_outbound_private_message(record.clone())?;
+                Ok(record)
+            }
+        })
+        .await
     }
 
     async fn record_outbound_recovery_marker_result(

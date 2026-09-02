@@ -1,9 +1,11 @@
 use super::*;
+use crate::domain::payment_requests::payment_request_records_from_transaction;
 
 pub(super) async fn begin_paykit_app_removal<S>(
     storage: &S,
     app_id: &paykit_lib::PaykitAppId,
-) -> Result<bool>
+    now: DateTime<Utc>,
+) -> Result<PaykitAppRemovalBlockers>
 where
     S: StorageAdapter,
 {
@@ -11,10 +13,11 @@ where
         .transaction({
             let app_id = app_id.clone();
             move |tx| {
-                let was_active =
-                    tx.paykit_app_is_registered(&app_id) && !tx.paykit_app_is_retired(&app_id);
-                tx.retire_paykit_app(app_id);
-                Ok(was_active)
+                let blockers = app_removal_blockers_in_transaction(tx, &app_id, now)?;
+                if blockers.is_empty() {
+                    tx.retire_paykit_app(app_id);
+                }
+                Ok(blockers)
             }
         })
         .await
@@ -110,21 +113,6 @@ pub(super) fn retire_app_outbound_private_messages(
     }
     debug_assert_eq!(counterparties.len(), leases.len());
     Ok(leases)
-}
-
-pub(super) async fn reactivate_paykit_app<S>(
-    storage: &S,
-    app_id: paykit_lib::PaykitAppId,
-) -> Result<()>
-where
-    S: StorageAdapter,
-{
-    storage
-        .transaction(move |tx| {
-            tx.activate_paykit_app(&app_id);
-            Ok(())
-        })
-        .await
 }
 
 pub(super) async fn require_app_capability_downgrade_safe<S>(
@@ -391,9 +379,20 @@ pub(super) async fn app_removal_blockers<S>(
 where
     S: StorageAdapter,
 {
-    let snapshot = storage
-        .transaction(|tx| Ok(tx.export_storage_state()))
-        .await?;
+    storage
+        .transaction({
+            let app_id = app_id.clone();
+            move |tx| app_removal_blockers_in_transaction(tx, &app_id, now)
+        })
+        .await
+}
+
+fn app_removal_blockers_in_transaction(
+    tx: &dyn StorageTransaction,
+    app_id: &paykit_lib::PaykitAppId,
+    now: DateTime<Utc>,
+) -> Result<PaykitAppRemovalBlockers> {
+    let snapshot = tx.export_storage_state();
     let counterparties = snapshot
         .outbound_private_messages
         .iter()
@@ -408,11 +407,11 @@ where
 
     let mut active_payment_requests = 0;
     for counterparty in counterparties {
-        active_payment_requests += derive_payment_request_records(storage, &counterparty, now)
-            .await?
-            .into_iter()
-            .filter(|record| payment_request_record_blocks_app_removal(record, app_id))
-            .count();
+        active_payment_requests +=
+            payment_request_records_from_transaction(tx, &counterparty, now)?
+                .into_iter()
+                .filter(|record| payment_request_record_blocks_app_removal(record, app_id))
+                .count();
     }
 
     let undelivered_private_events = snapshot

@@ -156,7 +156,7 @@ async fn test_remote_recovery_marker_preflight_does_not_persist_observation() {
 }
 
 #[tokio::test]
-async fn test_remote_recovery_marker_observation_ignores_stale_marker() {
+async fn test_remote_recovery_marker_observation_does_not_compare_remote_clock() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -205,23 +205,26 @@ async fn test_remote_recovery_marker_observation_ignores_stale_marker() {
         .await
         .unwrap();
 
-    assert!(!changed);
+    assert!(changed);
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(peer.state, LinkedPeerState::Linked);
-    assert!(peer.remote_recovery_attempt_id.is_none());
+    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+    assert_eq!(
+        peer.remote_recovery_attempt_id.as_deref(),
+        Some("650e8400-e29b-41d4-a716-446655440000")
+    );
     let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(link_state.link_snapshot, Some(vec![1, 2, 3]));
-    assert_eq!(link_state.generation, 7);
+    assert!(link_state.link_snapshot.is_none());
+    assert_eq!(link_state.generation, 8);
 }
 
 #[tokio::test]
-async fn test_remote_recovery_marker_observation_ignores_same_second_marker() {
+async fn test_remote_recovery_marker_observation_does_not_require_timestamp_ordering() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -270,23 +273,26 @@ async fn test_remote_recovery_marker_observation_ignores_same_second_marker() {
         .await
         .unwrap();
 
-    assert!(!changed);
+    assert!(changed);
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(peer.state, LinkedPeerState::Linked);
-    assert!(peer.remote_recovery_attempt_id.is_none());
+    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+    assert_eq!(
+        peer.remote_recovery_attempt_id.as_deref(),
+        Some("650e8400-e29b-41d4-a716-446655440000")
+    );
     let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(link_state.link_snapshot, Some(vec![1, 2, 3]));
-    assert_eq!(link_state.generation, 7);
+    assert!(link_state.link_snapshot.is_none());
+    assert_eq!(link_state.generation, 8);
 }
 
 #[tokio::test]
-async fn test_remote_recovery_marker_observation_ignores_marker_before_private_receive() {
+async fn test_remote_recovery_marker_observation_does_not_compare_receive_clock() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -335,23 +341,26 @@ async fn test_remote_recovery_marker_observation_ignores_marker_before_private_r
         .await
         .unwrap();
 
-    assert!(!changed);
+    assert!(changed);
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(peer.state, LinkedPeerState::Linked);
-    assert!(peer.remote_recovery_attempt_id.is_none());
+    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+    assert_eq!(
+        peer.remote_recovery_attempt_id.as_deref(),
+        Some("650e8400-e29b-41d4-a716-446655440000")
+    );
     let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(link_state.link_snapshot, Some(vec![1, 2, 3]));
-    assert_eq!(link_state.generation, 7);
+    assert!(link_state.link_snapshot.is_none());
+    assert_eq!(link_state.generation, 8);
 }
 
 #[tokio::test]
-async fn test_remote_recovery_marker_observation_preserves_newer_handshake() {
+async fn test_remote_recovery_marker_observation_replaces_idle_handshake() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -400,27 +409,27 @@ async fn test_remote_recovery_marker_observation_preserves_newer_handshake() {
         .await
         .unwrap();
 
-    assert!(!changed);
+    assert!(changed);
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(peer.state, LinkedPeerState::Linking);
-    assert!(peer.remote_recovery_attempt_id.is_none());
+    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+    assert_eq!(
+        peer.remote_recovery_attempt_id.as_deref(),
+        Some("650e8400-e29b-41d4-a716-446655440000")
+    );
     let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(link_state.handshake_snapshot, Some(vec![1, 2, 3]));
-    assert_eq!(
-        link_state.handshake_role,
-        Some(EncryptedLinkHandshakeRole::Initiator)
-    );
-    assert_eq!(link_state.generation, 7);
+    assert!(link_state.handshake_snapshot.is_none());
+    assert!(link_state.handshake_role.is_none());
+    assert_eq!(link_state.generation, 8);
 }
 
 #[tokio::test]
-async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake() {
+async fn test_remote_recovery_marker_observation_replaces_unleased_handshake() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -469,23 +478,23 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
         .await
         .unwrap();
 
-    assert!(!changed);
+    assert!(changed);
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(peer.state, LinkedPeerState::Linking);
-    assert!(peer.remote_recovery_attempt_id.is_none());
+    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+    assert_eq!(
+        peer.remote_recovery_attempt_id.as_deref(),
+        Some("650e8400-e29b-41d4-a716-446655440000")
+    );
     let link_state = crate::load_encrypted_link_state(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(link_state.handshake_snapshot, Some(vec![1, 2, 3]));
-    assert_eq!(
-        link_state.handshake_role,
-        Some(EncryptedLinkHandshakeRole::Initiator)
-    );
-    assert_eq!(link_state.generation, 7);
+    assert!(link_state.handshake_snapshot.is_none());
+    assert!(link_state.handshake_role.is_none());
+    assert_eq!(link_state.generation, 8);
 }
 
 #[tokio::test]
@@ -558,8 +567,7 @@ async fn test_remote_recovery_marker_observation_accepts_newer_marker_after_stal
 }
 
 #[tokio::test]
-async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake_with_active_lease()
-{
+async fn test_remote_recovery_marker_observation_rejects_active_handshake_lease() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -605,16 +613,16 @@ async fn test_remote_recovery_marker_observation_preserves_in_progress_handshake
         FixedClock,
     );
 
-    let changed = sdk
+    let error = sdk
         .mark_remote_recovery_marker_observed_if_needed(
             &counterparty,
             "650e8400-e29b-41d4-a716-446655440000",
             FixedClock.now() + ChronoDuration::seconds(1),
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-    assert!(!changed);
+    assert!(matches!(error, PaykitSdkError::Policy { .. }));
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await
         .unwrap()

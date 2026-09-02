@@ -1,9 +1,10 @@
 use super::app_removal::{
     app_removal_blockers, begin_paykit_app_removal, detach_shared_app_reservations,
-    reactivate_paykit_app, restore_app_capabilities, retire_app_outbound_private_messages,
-    stage_app_capability_update,
+    restore_app_capabilities, retire_app_outbound_private_messages, stage_app_capability_update,
 };
 use super::*;
+
+const APP_REGISTRY_UPDATE_MAX_ATTEMPTS: usize = 8;
 
 fn authorized_app_ids(
     apps: &HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
@@ -32,6 +33,85 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
+    pub(super) async fn claim_paykit_app_operation(&self) -> Result<PaykitAppOperationLease> {
+        self.claim_paykit_app_operation_inner(false).await
+    }
+
+    async fn claim_paykit_app_publication_operation(&self) -> Result<PaykitAppOperationLease> {
+        self.claim_paykit_app_operation_inner(true).await
+    }
+
+    async fn claim_paykit_app_operation_inner(
+        &self,
+        allow_unpublished: bool,
+    ) -> Result<PaykitAppOperationLease> {
+        let now = self.clock.now();
+        let timeout = ChronoDuration::from_std(PAYKIT_APP_OPERATION_LEASE_TIMEOUT)
+            .expect("fixed Paykit App operation lease timeout must fit chrono duration");
+        let expires_at = now + timeout;
+        let app_id = self.config.app_id.clone();
+        self.retry_storage_transaction(|| {
+            let app_id = app_id.clone();
+            move |tx| {
+                if !allow_unpublished
+                    && !tx.paykit_app_is_registered(&app_id)
+                    && !tx.paykit_app_is_retired(&app_id)
+                {
+                    return Err(PaykitSdkError::Policy {
+                        context: format!(
+                            "Paykit app '{app_id}' must be published before claiming shared work"
+                        ),
+                        source: None,
+                    });
+                }
+                tx.claim_paykit_app_operation(&app_id, now, expires_at)
+            }
+        })
+        .await?
+        .ok_or_else(|| PaykitSdkError::Policy {
+            context: format!("Paykit App operation already in progress for '{app_id}'"),
+            source: None,
+        })
+    }
+
+    pub(super) async fn release_paykit_app_operation(
+        &self,
+        lease: &PaykitAppOperationLease,
+    ) -> Result<()> {
+        self.retry_storage_transaction(|| {
+            let lease = lease.clone();
+            move |tx| {
+                tx.release_paykit_app_operation(&lease.app_id, lease.lease_id);
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    pub(super) async fn require_paykit_app_operation_lease(
+        &self,
+        lease: &PaykitAppOperationLease,
+    ) -> Result<()> {
+        self.retry_storage_transaction(|| {
+            let lease = lease.clone();
+            move |tx| crate::storage::require_paykit_app_operation_lease(tx, &lease)
+        })
+        .await
+    }
+
+    pub(super) async fn finish_paykit_app_operation<T>(
+        &self,
+        lease: PaykitAppOperationLease,
+        result: Result<T>,
+    ) -> Result<T> {
+        let release_result = self.release_paykit_app_operation(&lease).await;
+        match (result, release_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(err), _) => Err(err),
+            (Ok(_), Err(err)) => Err(err),
+        }
+    }
+
     pub(super) async fn counterparty_app_authorization_context(
         &self,
         counterparty: &PubkyPublicKey,
@@ -122,17 +202,24 @@ where
     ///
     /// Publishing also reactivates an application whose earlier removal did
     /// not complete.
-    ///
-    /// Calls that mutate the same identity's registry must be serialized
-    /// across SDK instances until Pubky supports conditional registry writes.
     pub async fn publish_paykit_app(
         &self,
         app: paykit_lib::PaykitApp,
     ) -> Result<paykit_lib::PaykitAppRegistry> {
         let _identity_guard = self.claim_identity_operation("publish Paykit app")?;
+        let app_lease = self.claim_paykit_app_publication_operation().await?;
+        let result = self.publish_paykit_app_inner(app, &app_lease).await;
+        self.finish_paykit_app_operation(app_lease, result).await
+    }
+
+    async fn publish_paykit_app_inner(
+        &self,
+        app: paykit_lib::PaykitApp,
+        app_lease: &PaykitAppOperationLease,
+    ) -> Result<paykit_lib::PaykitAppRegistry> {
         let app_id = self.config.app_id.clone();
         let capabilities = app.capabilities();
-        let (session_access, mut registry) = self.paykit_app_registry_update_context(true).await?;
+        let (session_access, registry) = self.paykit_app_registry_update_context(true).await?;
         let remote_capabilities = registry
             .apps()
             .get(&app_id)
@@ -145,36 +232,41 @@ where
             self.clock.now(),
         )
         .await?;
-        if let Err(err) = registry.register_app(app_id.clone(), app) {
-            if let Some((previous, staged)) = staged_capabilities {
-                restore_app_capabilities(&self.storage, &app_id, staged, previous).await?;
+        let published = self
+            .update_paykit_app_registry_with_access(&session_access, true, |registry| {
+                registry.register_app(app_id.clone(), app.clone())?;
+                Ok(())
+            })
+            .await;
+        let registry = match published {
+            Ok(registry) => registry,
+            Err(err) => {
+                if let Some((previous, staged)) = staged_capabilities {
+                    restore_app_capabilities(&self.storage, &app_id, staged, previous).await?;
+                }
+                return Err(err);
             }
-            return Err(err.into());
-        }
-        if let Err(err) =
-            paykit_lib::set_paykit_app_registry(&session_access.session, &registry).await
-        {
-            if let Some((previous, staged)) = staged_capabilities {
-                restore_app_capabilities(&self.storage, &app_id, staged, previous).await?;
-            }
-            return Err(err.into());
-        }
+        };
         let now = self.clock.now();
         self.storage
-            .transaction(move |tx| {
-                tx.save_paykit_app_capabilities(&app_id, capabilities);
-                tx.activate_paykit_app(&app_id);
-                let linked_counterparties = tx
-                    .export_storage_state()
-                    .linked_peers
-                    .into_values()
-                    .filter(|peer| peer.state == LinkedPeerState::Linked)
-                    .map(|peer| peer.counterparty)
-                    .collect::<Vec<_>>();
-                for counterparty in linked_counterparties {
-                    requeue_recovery_required_outbound_messages(tx, &counterparty, now)?;
+            .transaction({
+                let app_lease = app_lease.clone();
+                move |tx| {
+                    crate::storage::require_paykit_app_operation_lease(tx, &app_lease)?;
+                    tx.save_paykit_app_capabilities(&app_id, capabilities);
+                    tx.activate_paykit_app(&app_id);
+                    let linked_counterparties = tx
+                        .export_storage_state()
+                        .linked_peers
+                        .into_values()
+                        .filter(|peer| peer.state == LinkedPeerState::Linked)
+                        .map(|peer| peer.counterparty)
+                        .collect::<Vec<_>>();
+                    for counterparty in linked_counterparties {
+                        requeue_recovery_required_outbound_messages(tx, &counterparty, now)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
             })
             .await?;
         Ok(registry)
@@ -186,29 +278,23 @@ where
     /// to be complete. It then blocks new app-owned private work before cleanup
     /// begins. If cleanup fails, call this method again or publish the app to
     /// reactivate it.
-    ///
-    /// Calls that mutate the same identity's registry must be serialized
-    /// across SDK instances until Pubky supports conditional registry writes.
     pub async fn remove_paykit_app(&self) -> Result<paykit_lib::PaykitAppRegistry> {
         let _identity_guard = self.claim_identity_operation("remove Paykit app")?;
-        let (session_access, mut registry) = self.paykit_app_registry_update_context(true).await?;
+        let app_lease = self.claim_paykit_app_operation().await?;
+        let result = self.remove_paykit_app_inner(&app_lease).await;
+        self.finish_paykit_app_operation(app_lease, result).await
+    }
+
+    async fn remove_paykit_app_inner(
+        &self,
+        app_lease: &PaykitAppOperationLease,
+    ) -> Result<paykit_lib::PaykitAppRegistry> {
+        let session_access = self.paykit_app_registry_session_access().await?;
+        self.load_paykit_app_registry_for_update(&session_access, true)
+            .await?;
         let app_id = self.config.app_id.clone();
-        let registry_capabilities = registry.apps().get(&app_id).map(|app| app.capabilities());
-        let registry_entry_exists = registry_capabilities.is_some();
-        let was_locally_active = begin_paykit_app_removal(&self.storage, &app_id).await?;
-        let blockers = match app_removal_blockers(&self.storage, &app_id, self.clock.now()).await {
-            Ok(blockers) => blockers,
-            Err(err) => {
-                if was_locally_active {
-                    reactivate_paykit_app(&self.storage, app_id).await?;
-                }
-                return Err(err);
-            }
-        };
+        let blockers = begin_paykit_app_removal(&self.storage, &app_id, self.clock.now()).await?;
         if !blockers.is_empty() {
-            if was_locally_active {
-                reactivate_paykit_app(&self.storage, app_id).await?;
-            }
             return Err(PaykitSdkError::Policy {
                 context: format!(
                     "cannot remove Paykit app while it owns {} active Payment Request(s), {} undelivered private event(s), {} incomplete Receipt issuance(s), and {} shared Private Payment List(s); cancel, finish, or clear them before retrying",
@@ -232,7 +318,7 @@ where
                 }
             })
             .await?;
-        let result = async {
+        let cleanup_result = async {
             let mut cleanup_failures = Vec::new();
             for lease in &leases {
                 cleanup_failures.extend(
@@ -295,7 +381,8 @@ where
             let mut identifiers = identifiers.into_iter().collect::<Vec<_>>();
             identifiers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
             for identifier in identifiers {
-                paykit_lib::remove_payment_endpoint(&session_access.session, &app_id, identifier)
+                self.require_paykit_app_operation_lease(app_lease).await?;
+                self.remove_public_endpoint_if_current(&session_access, &identifier, None)
                     .await?;
             }
 
@@ -319,10 +406,13 @@ where
                 })
                 .await?;
 
-            if registry_entry_exists {
-                registry.remove_app(&app_id);
-                paykit_lib::set_paykit_app_registry(&session_access.session, &registry).await?;
-            }
+            self.require_paykit_app_operation_lease(app_lease).await?;
+            let registry = self
+                .update_paykit_app_registry_with_access(&session_access, true, |registry| {
+                    registry.remove_app(&app_id);
+                    Ok(())
+                })
+                .await?;
             Ok(registry)
         }
         .await;
@@ -333,7 +423,7 @@ where
                 release_error.get_or_insert(err);
             }
         }
-        match (result, release_error) {
+        match (cleanup_result, release_error) {
             (Ok(registry), None) => Ok(registry),
             (Err(err), _) => Err(err),
             (Ok(_), Some(err)) => Err(err),
@@ -346,24 +436,18 @@ where
     }
 
     /// Set or clear the identity-wide default Paykit application.
-    ///
-    /// Calls that mutate the same identity's registry must be serialized
-    /// across SDK instances until Pubky supports conditional registry writes.
     pub async fn set_default_paykit_app(
         &self,
         app_id: Option<paykit_lib::PaykitAppId>,
     ) -> Result<paykit_lib::PaykitAppRegistry> {
         self.update_paykit_app_registry("set default Paykit app", false, move |registry| {
-            registry.set_default_app(app_id)?;
+            registry.set_default_app(app_id.clone())?;
             Ok(())
         })
         .await
     }
 
     /// Set or clear the default Paykit application for one endpoint identifier.
-    ///
-    /// Calls that mutate the same identity's registry must be serialized
-    /// across SDK instances until Pubky supports conditional registry writes.
     pub async fn set_default_paykit_app_for_endpoint(
         &self,
         identifier: paykit_lib::PaymentEndpointIdentifier,
@@ -373,8 +457,8 @@ where
             "set default Paykit app for endpoint",
             false,
             move |registry| {
-                if let Some(app_id) = app_id {
-                    registry.set_default_app_for_endpoint(identifier, app_id)?;
+                if let Some(app_id) = app_id.as_ref() {
+                    registry.set_default_app_for_endpoint(identifier.clone(), app_id.clone())?;
                 } else {
                     registry.clear_default_app_for_endpoint(&identifier);
                 }
@@ -391,35 +475,38 @@ where
         update: F,
     ) -> Result<paykit_lib::PaykitAppRegistry>
     where
-        F: FnOnce(&mut paykit_lib::PaykitAppRegistry) -> Result<()>,
+        F: Fn(&mut paykit_lib::PaykitAppRegistry) -> Result<()>,
     {
         let _identity_guard = self.claim_identity_operation(operation)?;
-        let (session_access, mut registry) = self
-            .paykit_app_registry_update_context(create_if_missing)
-            .await?;
-        update(&mut registry)?;
-        paykit_lib::set_paykit_app_registry(&session_access.session, &registry).await?;
-        Ok(registry)
+        let session_access = self.paykit_app_registry_session_access().await?;
+        self.update_paykit_app_registry_with_access(&session_access, create_if_missing, update)
+            .await
     }
 
     async fn paykit_app_registry_update_context(
         &self,
         create_if_missing: bool,
     ) -> Result<(GuardedSessionAccess, paykit_lib::PaykitAppRegistry)> {
+        let session_access = self.paykit_app_registry_session_access().await?;
+        let registry = self
+            .load_paykit_app_registry_for_update(&session_access, create_if_missing)
+            .await?;
+        Ok((session_access, registry))
+    }
+
+    async fn paykit_app_registry_session_access(&self) -> Result<GuardedSessionAccess> {
         let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
-        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+        session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
-        })?;
-        let local_noise_public_key =
-            session_access
-                .paykit_identity_secret_key()
-                .map(|secret_key| {
-                    let noise_secret_key = secret_key.noise_secret_key();
-                    pubky::Keypair::from_secret(&noise_secret_key)
-                        .public_key()
-                        .clone()
-                });
+        })
+    }
+
+    async fn load_paykit_app_registry_for_update(
+        &self,
+        session_access: &PubkySessionAccess,
+        create_if_missing: bool,
+    ) -> Result<paykit_lib::PaykitAppRegistry> {
         let public_storage = session_access.outbox_client.public_storage();
         let session_info = session_access.session.info();
         let owner = session_info.public_key();
@@ -427,7 +514,7 @@ where
         let mut registry = match existing {
             Some(registry) => registry,
             None if create_if_missing => {
-                paykit_lib::PaykitAppRegistry::new(local_noise_public_key.clone())
+                paykit_lib::PaykitAppRegistry::new(self.local_noise_public_key(session_access))
             }
             None => {
                 return Err(PaykitSdkError::NotFound {
@@ -436,7 +523,132 @@ where
                 });
             }
         };
-        if let Some(local_noise_public_key) = local_noise_public_key {
+        self.validate_local_registry_noise_key(session_access, &mut registry)?;
+        Ok(registry)
+    }
+
+    pub(super) async fn update_paykit_app_registry_with_access<F>(
+        &self,
+        session_access: &PubkySessionAccess,
+        create_if_missing: bool,
+        update: F,
+    ) -> Result<paykit_lib::PaykitAppRegistry>
+    where
+        F: Fn(&mut paykit_lib::PaykitAppRegistry) -> Result<()>,
+    {
+        self.update_paykit_app_registry_with_access_inner(
+            session_access,
+            create_if_missing,
+            true,
+            update,
+        )
+        .await
+    }
+
+    pub(super) async fn update_paykit_app_registry_for_key_rotation<F>(
+        &self,
+        session_access: &PubkySessionAccess,
+        update: F,
+    ) -> Result<paykit_lib::PaykitAppRegistry>
+    where
+        F: Fn(&mut paykit_lib::PaykitAppRegistry) -> Result<()>,
+    {
+        self.update_paykit_app_registry_with_access_inner(session_access, false, false, update)
+            .await
+    }
+
+    async fn update_paykit_app_registry_with_access_inner<F>(
+        &self,
+        session_access: &PubkySessionAccess,
+        create_if_missing: bool,
+        validate_local_noise_key: bool,
+        update: F,
+    ) -> Result<paykit_lib::PaykitAppRegistry>
+    where
+        F: Fn(&mut paykit_lib::PaykitAppRegistry) -> Result<()>,
+    {
+        let public_storage = session_access.outbox_client.public_storage();
+        let session_info = session_access.session.info();
+        let owner = session_info.public_key();
+        for attempt in 0..APP_REGISTRY_UPDATE_MAX_ATTEMPTS {
+            let snapshot =
+                paykit_lib::get_paykit_app_registry_with_etag(&public_storage, owner).await?;
+            let (mut registry, etag) = match snapshot {
+                Some((registry, etag)) => (registry, Some(etag)),
+                None if create_if_missing => (
+                    paykit_lib::PaykitAppRegistry::new(self.local_noise_public_key(session_access)),
+                    None,
+                ),
+                None => {
+                    return Err(PaykitSdkError::NotFound {
+                        context: "Paykit app registry".into(),
+                        source: None,
+                    });
+                }
+            };
+            if validate_local_noise_key {
+                self.validate_local_registry_noise_key(session_access, &mut registry)?;
+            }
+            let unchanged = registry.clone();
+            update(&mut registry)?;
+            if registry == unchanged {
+                return Ok(registry);
+            }
+            let write = match etag {
+                Some(etag) => {
+                    paykit_lib::update_paykit_app_registry(
+                        &session_access.session,
+                        &registry,
+                        &etag,
+                    )
+                    .await
+                }
+                None => {
+                    paykit_lib::create_paykit_app_registry(&session_access.session, &registry).await
+                }
+            };
+            match write {
+                Ok(()) => return Ok(registry),
+                Err(err)
+                    if is_app_registry_precondition_failed(&err)
+                        && attempt + 1 < APP_REGISTRY_UPDATE_MAX_ATTEMPTS =>
+                {
+                    continue;
+                }
+                Err(err) if is_app_registry_precondition_failed(&err) => {
+                    return Err(PaykitSdkError::ConcurrentUpdate {
+                        context: format!(
+                            "Paykit App Registry remained busy after {APP_REGISTRY_UPDATE_MAX_ATTEMPTS} update attempts"
+                        ),
+                        source: Some(err.into()),
+                    });
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        unreachable!("bounded App Registry update loop always returns")
+    }
+
+    fn local_noise_public_key(
+        &self,
+        session_access: &PubkySessionAccess,
+    ) -> Option<paykit_lib::PublicKey> {
+        session_access
+            .paykit_identity_secret_key()
+            .map(|secret_key| {
+                let noise_secret_key = secret_key.noise_secret_key();
+                pubky::Keypair::from_secret(&noise_secret_key)
+                    .public_key()
+                    .clone()
+            })
+    }
+
+    fn validate_local_registry_noise_key(
+        &self,
+        session_access: &PubkySessionAccess,
+        registry: &mut paykit_lib::PaykitAppRegistry,
+    ) -> Result<()> {
+        if let Some(local_noise_public_key) = self.local_noise_public_key(session_access) {
             registry
                 .set_noise_public_key(local_noise_public_key)
                 .map_err(|_| PaykitSdkError::Identity {
@@ -445,6 +657,18 @@ where
                     source: None,
                 })?;
         }
-        Ok((session_access, registry))
+        Ok(())
     }
+}
+
+fn is_app_registry_precondition_failed(err: &paykit_lib::PaykitError) -> bool {
+    matches!(
+        err,
+        paykit_lib::PaykitError::Transport { source, .. }
+            if matches!(
+                source.downcast_ref::<PubkyError>(),
+                Some(PubkyError::Request(RequestError::Server { status, .. }))
+                    if *status == StatusCode::PRECONDITION_FAILED
+            )
+    )
 }

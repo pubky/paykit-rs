@@ -95,11 +95,7 @@ pub async fn upsert_payment_endpoint(
     identifier: &PaymentEndpointIdentifier,
     payload: &PaymentEndpointPayload,
 ) -> Result<()> {
-    if payload.as_str().len() > PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES {
-        return Err(PaykitError::Validation(format!(
-            "Payment Endpoint payload must not exceed {PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES} bytes"
-        )));
-    }
+    validate_payment_endpoint_payload(payload)?;
     let path = payment_endpoint_path(app_id, identifier);
     debug!(path = %path, "writing payment endpoint to Pubky storage");
     session
@@ -114,6 +110,45 @@ pub async fn upsert_payment_endpoint(
             }
         })?;
     debug!("payment endpoint stored successfully");
+    Ok(())
+}
+
+pub async fn create_payment_endpoint(
+    session: &PubkySession,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+    payload: &PaymentEndpointPayload,
+) -> Result<()> {
+    validate_payment_endpoint_payload(payload)?;
+    let path = payment_endpoint_path(app_id, identifier);
+    session
+        .storage()
+        .put_if_absent(path, payload.as_str().to_string())
+        .await
+        .map_err(|err| PaykitError::Transport {
+            context: "create endpoint".into(),
+            source: err.into(),
+        })?;
+    Ok(())
+}
+
+pub async fn update_payment_endpoint(
+    session: &PubkySession,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+    payload: &PaymentEndpointPayload,
+    revision: &str,
+) -> Result<()> {
+    validate_payment_endpoint_payload(payload)?;
+    let path = payment_endpoint_path(app_id, identifier);
+    session
+        .storage()
+        .put_if_match(path, payload.as_str().to_string(), revision)
+        .await
+        .map_err(|err| PaykitError::Transport {
+            context: "update endpoint".into(),
+            source: err.into(),
+        })?;
     Ok(())
 }
 
@@ -140,6 +175,33 @@ pub async fn delete_payment_endpoint(
         }
     }
     debug!("payment endpoint removed successfully");
+    Ok(())
+}
+
+pub async fn delete_payment_endpoint_if_revision(
+    session: &PubkySession,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+    revision: &str,
+) -> Result<()> {
+    let path = payment_endpoint_path(app_id, identifier);
+    session
+        .storage()
+        .delete_if_match(path, revision)
+        .await
+        .map_err(|err| PaykitError::Transport {
+            context: "delete endpoint".into(),
+            source: err.into(),
+        })?;
+    Ok(())
+}
+
+fn validate_payment_endpoint_payload(payload: &PaymentEndpointPayload) -> Result<()> {
+    if payload.as_str().len() > PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES {
+        return Err(PaykitError::Validation(format!(
+            "Payment Endpoint payload must not exceed {PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES} bytes"
+        )));
+    }
     Ok(())
 }
 
@@ -270,6 +332,40 @@ pub async fn fetch_payment_endpoint(
     }
 }
 
+pub async fn fetch_payment_endpoint_with_revision(
+    storage: &PublicStorage,
+    payee: &PublicKey,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<Option<(Option<PaymentEndpointPayload>, String)>> {
+    let addr = format!("{payee}{}", payment_endpoint_path(app_id, identifier));
+    let mut response = match storage.get(&addr).await {
+        Ok(response) => response,
+        Err(err) if is_not_found(&err) => return Ok(None),
+        Err(err) => {
+            return Err(PaykitError::Transport {
+                context: "fetch endpoint".into(),
+                source: err.into(),
+            });
+        }
+    };
+    let revision = pubky::ResourceStats::from_headers(response.headers())
+        .etag
+        .filter(|etag| !etag.starts_with("W/\"") && !etag.is_empty())
+        .ok_or_else(|| PaykitError::InvalidData {
+            context: "Payment Endpoint response is missing a strong ETag".into(),
+            source: None,
+        })?;
+    let payload = read_text_response(
+        &mut response,
+        "fetch endpoint",
+        Some(PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES),
+    )
+    .await?
+    .map(PaymentEndpointPayload::new);
+    Ok(Some((payload, revision)))
+}
+
 pub(crate) fn payment_endpoint_path_prefix(app_id: &PaykitAppId) -> String {
     format!("{PAYKIT_PATH_PREFIX}apps/{app_id}/endpoints/")
 }
@@ -285,18 +381,36 @@ pub(crate) fn payment_endpoint_path(
     )
 }
 
-/// Writes the complete identity-wide Paykit App Registry.
-pub async fn upsert_paykit_app_registry(
+/// Creates the identity-wide Paykit App Registry if it does not exist.
+pub async fn create_paykit_app_registry(
     session: &PubkySession,
     registry: &PaykitAppRegistry,
 ) -> Result<()> {
     let body = serialize_paykit_app_registry(registry)?;
     session
         .storage()
-        .put(PAYKIT_APP_REGISTRY_PATH, body)
+        .put_if_absent(PAYKIT_APP_REGISTRY_PATH, body)
         .await
         .map_err(|err| PaykitError::Transport {
-            context: "put Paykit App Registry".into(),
+            context: "create Paykit App Registry".into(),
+            source: err.into(),
+        })?;
+    Ok(())
+}
+
+/// Replaces the identity-wide Paykit App Registry at one exact revision.
+pub async fn update_paykit_app_registry(
+    session: &PubkySession,
+    registry: &PaykitAppRegistry,
+    etag: &str,
+) -> Result<()> {
+    let body = serialize_paykit_app_registry(registry)?;
+    session
+        .storage()
+        .put_if_match(PAYKIT_APP_REGISTRY_PATH, body, etag)
+        .await
+        .map_err(|err| PaykitError::Transport {
+            context: "update Paykit App Registry".into(),
             source: err.into(),
         })?;
     Ok(())
@@ -319,6 +433,42 @@ pub async fn fetch_paykit_app_registry(
     .transpose()
 }
 
+/// Fetches and parses the identity-wide Paykit App Registry with its ETag.
+pub async fn fetch_paykit_app_registry_with_etag(
+    storage: &PublicStorage,
+    owner: &PublicKey,
+) -> Result<Option<(PaykitAppRegistry, String)>> {
+    let addr = format!("{owner}{PAYKIT_APP_REGISTRY_PATH}");
+    let mut response = match storage.get(&addr).await {
+        Ok(response) => response,
+        Err(err) if is_not_found(&err) => return Ok(None),
+        Err(err) => {
+            return Err(PaykitError::Transport {
+                context: "fetch Paykit App Registry".into(),
+                source: err.into(),
+            });
+        }
+    };
+    let etag = pubky::ResourceStats::from_headers(response.headers())
+        .etag
+        .filter(|etag| !etag.starts_with("W/\""))
+        .ok_or_else(|| PaykitError::InvalidData {
+            context: "Paykit App Registry response is missing a strong ETag".into(),
+            source: None,
+        })?;
+    let body = read_text_response(
+        &mut response,
+        "fetch Paykit App Registry",
+        Some(crate::PAYKIT_APP_REGISTRY_MAX_BYTES),
+    )
+    .await?
+    .ok_or_else(|| PaykitError::InvalidData {
+        context: "Paykit App Registry is empty".into(),
+        source: None,
+    })?;
+    Ok(Some((parse_paykit_app_registry_json(&body)?, etag)))
+}
+
 #[instrument(skip(storage, addr, label), fields(operation = %label))]
 pub(crate) async fn fetch_text(
     storage: &PublicStorage,
@@ -328,53 +478,7 @@ pub(crate) async fn fetch_text(
 ) -> Result<Option<String>> {
     trace!("fetching text resource");
     match storage.get(&addr).await {
-        Ok(mut resp) => {
-            if let (Some(max_bytes), Some(content_length)) = (max_bytes, resp.content_length()) {
-                if content_length > max_bytes as u64 {
-                    return Err(PaykitError::InvalidData {
-                        context: format!("{label}: response exceeds the {max_bytes}-byte limit"),
-                        source: Some(ResponseSizeLimitExceeded.into()),
-                    });
-                }
-            }
-            let mut bytes = Vec::new();
-            while let Some(chunk) = resp.chunk().await.map_err(|err| {
-                error!("failed to read response bytes");
-                PaykitError::Transport {
-                    context: label.to_string(),
-                    source: err.into(),
-                }
-            })? {
-                if let Some(max_bytes) = max_bytes {
-                    if bytes.len().saturating_add(chunk.len()) > max_bytes {
-                        return Err(PaykitError::InvalidData {
-                            context: format!(
-                                "{label}: response exceeds the {max_bytes}-byte limit"
-                            ),
-                            source: Some(ResponseSizeLimitExceeded.into()),
-                        });
-                    }
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            if bytes.is_empty() {
-                debug!("resource is empty, returning None");
-                return Ok(None);
-            }
-            let data = String::from_utf8(bytes).map_err(|err| {
-                let pos = err.utf8_error().valid_up_to();
-                error!(
-                    valid_up_to = pos,
-                    "response contains invalid UTF-8 — data may be corrupt"
-                );
-                PaykitError::InvalidData {
-                    context: format!("{label}: invalid UTF-8 at byte {pos}"),
-                    source: Some(err.into()),
-                }
-            })?;
-            trace!(len = data.len(), "text resource fetched");
-            Ok(Some(data))
-        }
+        Ok(mut resp) => read_text_response(&mut resp, label, max_bytes).await,
         Err(err) if is_not_found(&err) => {
             debug!("resource not found (404/GONE)");
             Ok(None)
@@ -387,6 +491,56 @@ pub(crate) async fn fetch_text(
             })
         }
     }
+}
+
+async fn read_text_response(
+    response: &mut reqwest::Response,
+    label: &str,
+    max_bytes: Option<usize>,
+) -> Result<Option<String>> {
+    if let (Some(max_bytes), Some(content_length)) = (max_bytes, response.content_length()) {
+        if content_length > max_bytes as u64 {
+            return Err(PaykitError::InvalidData {
+                context: format!("{label}: response exceeds the {max_bytes}-byte limit"),
+                source: Some(ResponseSizeLimitExceeded.into()),
+            });
+        }
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|err| {
+        error!("failed to read response bytes");
+        PaykitError::Transport {
+            context: label.to_string(),
+            source: err.into(),
+        }
+    })? {
+        if let Some(max_bytes) = max_bytes {
+            if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(PaykitError::InvalidData {
+                    context: format!("{label}: response exceeds the {max_bytes}-byte limit"),
+                    source: Some(ResponseSizeLimitExceeded.into()),
+                });
+            }
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        debug!("resource is empty, returning None");
+        return Ok(None);
+    }
+    let data = String::from_utf8(bytes).map_err(|err| {
+        let pos = err.utf8_error().valid_up_to();
+        error!(
+            valid_up_to = pos,
+            "response contains invalid UTF-8 — data may be corrupt"
+        );
+        PaykitError::InvalidData {
+            context: format!("{label}: invalid UTF-8 at byte {pos}"),
+            source: Some(err.into()),
+        }
+    })?;
+    trace!(len = data.len(), "text resource fetched");
+    Ok(Some(data))
 }
 
 #[instrument(skip(storage, addr, label), fields(operation = %label))]

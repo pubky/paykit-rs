@@ -200,6 +200,32 @@ pub struct PeerLinkOperationLease {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Storage-backed lease for one application's public-state or lifecycle operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaykitAppOperationLease {
+    /// Application whose public state is being updated.
+    pub app_id: paykit_lib::PaykitAppId,
+    /// Assigned lease id.
+    pub lease_id: u64,
+    /// Claim time.
+    pub claimed_at: DateTime<Utc>,
+    /// Expiry time after which another worker may retry.
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Identity-wide ownership claim made before an application executes a payment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentRequestExecutionClaim {
+    /// Counterparty that proposed the Payment Request.
+    pub counterparty: PubkyPublicKey,
+    /// Stable Payment Request ID.
+    pub payment_request_id: String,
+    /// Paykit App that owns payment execution.
+    pub app_id: paykit_lib::PaykitAppId,
+    /// Time at which the application claimed the request.
+    pub claimed_at: DateTime<Utc>,
+}
+
 /// New outbound private message before storage assigns an id.
 ///
 /// The payload may contain private Paykit secrets. `Debug` redacts it.
@@ -619,6 +645,13 @@ pub struct StorageState {
     pub peer_link_operation_leases: HashMap<PubkyPublicKey, PeerLinkOperationLease>,
     /// Next peer link operation lease id.
     pub next_peer_link_operation_lease_id: u64,
+    /// Active public-state operation leases by Paykit App.
+    pub paykit_app_operation_leases: HashMap<paykit_lib::PaykitAppId, PaykitAppOperationLease>,
+    /// Next Paykit App operation lease id.
+    pub next_paykit_app_operation_lease_id: u64,
+    /// Reversible identity-wide payment-execution claims by counterparty and request id.
+    pub payment_request_execution_claims:
+        HashMap<(PubkyPublicKey, String), PaymentRequestExecutionClaim>,
     /// Append-only outbound private message records.
     pub outbound_private_messages: Vec<OutboundPrivateMessageRecord>,
     /// Next outbound private message id.
@@ -689,6 +722,18 @@ impl fmt::Debug for StorageState {
             .field(
                 "next_peer_link_operation_lease_id",
                 &self.next_peer_link_operation_lease_id,
+            )
+            .field(
+                "paykit_app_operation_leases",
+                &format_args!("{} records", self.paykit_app_operation_leases.len()),
+            )
+            .field(
+                "next_paykit_app_operation_lease_id",
+                &self.next_paykit_app_operation_lease_id,
+            )
+            .field(
+                "payment_request_execution_claims",
+                &format_args!("{} records", self.payment_request_execution_claims.len()),
             )
             .field(
                 "outbound_private_messages",

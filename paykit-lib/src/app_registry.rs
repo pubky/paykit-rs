@@ -36,8 +36,8 @@ pub struct PaykitAppCapabilities {
     pub receipts: bool,
     /// App advertises that it can execute outgoing payments.
     ///
-    /// This is discovery metadata. The SDK does not use it to authorize
-    /// protocol messages because payment execution remains app-owned.
+    /// The SDK requires this capability before an App can claim or accept a
+    /// Payment Request for execution.
     pub outgoing_payments: bool,
 }
 
@@ -433,24 +433,48 @@ pub fn parse_paykit_app_registry_json(raw_json: &str) -> Result<PaykitAppRegistr
     Ok(registry)
 }
 
-/// Publish the complete identity-wide Paykit App Registry.
+/// Create the identity-wide Paykit App Registry if it does not exist.
 ///
-/// This replaces the registry document. The caller is responsible for creating
-/// a Pubky session with write access to the registry path and for session
-/// lifetime, capability scope, and key rotation. Request timeouts are configured
-/// on the Pubky client; Paykit does not impose an additional deadline.
+/// The caller is responsible for creating a Pubky session with write access to
+/// the registry path and for session lifetime, capability scope, and key
+/// rotation. Request timeouts are configured on the Pubky client; Paykit does
+/// not impose an additional deadline. Concurrent creation fails rather than
+/// replacing the existing registry.
 ///
 /// # Errors
 ///
 /// Returns [`PaykitError::Validation`] when the registry cannot be serialized
 /// and [`PaykitError::Transport`] when Pubky storage rejects the write.
-pub async fn set_paykit_app_registry(
+pub async fn create_paykit_app_registry(
     session: &pubky::PubkySession,
     registry: &PaykitAppRegistry,
 ) -> Result<()> {
-    pubky_routing::upsert_paykit_app_registry(session, registry)
+    pubky_routing::create_paykit_app_registry(session, registry)
         .await
-        .map_err(|err| map_error("set_paykit_app_registry", err))
+        .map_err(|err| map_error("create_paykit_app_registry", err))
+}
+
+/// Replace the identity-wide Paykit App Registry if its ETag still matches.
+///
+/// `etag` must come from the same response as the registry being modified.
+/// A concurrent change fails with a Pubky `412 Precondition Failed` transport
+/// error so the caller can refetch, merge its mutation, and retry.
+/// The caller remains responsible for Pubky session lifetime, capability scope,
+/// key rotation, and request timeout configuration.
+///
+/// # Errors
+///
+/// Returns [`PaykitError::Validation`] when the registry cannot be serialized
+/// and [`PaykitError::Transport`] when the ETag is stale or Pubky rejects the
+/// write.
+pub async fn update_paykit_app_registry(
+    session: &pubky::PubkySession,
+    registry: &PaykitAppRegistry,
+    etag: &str,
+) -> Result<()> {
+    pubky_routing::update_paykit_app_registry(session, registry, etag)
+        .await
+        .map_err(|err| map_error("update_paykit_app_registry", err))
 }
 
 /// Fetch the identity-wide Paykit App Registry, if it exists.
@@ -470,6 +494,24 @@ pub async fn get_paykit_app_registry(
     pubky_routing::fetch_paykit_app_registry(storage, owner)
         .await
         .map_err(|err| map_error("get_paykit_app_registry", err))
+}
+
+/// Fetch the identity-wide Paykit App Registry and its strong ETag.
+///
+/// The ETag belongs to the same response as the returned registry and can be
+/// passed to [`update_paykit_app_registry`].
+///
+/// # Errors
+///
+/// Returns [`PaykitError::InvalidData`] for malformed data or a missing strong
+/// ETag and [`PaykitError::Transport`] when Pubky storage cannot be read.
+pub async fn get_paykit_app_registry_with_etag(
+    storage: &pubky::PublicStorage,
+    owner: &PublicKey,
+) -> Result<Option<(PaykitAppRegistry, String)>> {
+    pubky_routing::fetch_paykit_app_registry_with_etag(storage, owner)
+        .await
+        .map_err(|err| map_error("get_paykit_app_registry_with_etag", err))
 }
 
 fn parse_remote_app_id(value: String) -> Result<PaykitAppId> {

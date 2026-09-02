@@ -173,8 +173,10 @@ where
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerRecord> {
         let now = self.clock.now();
-        self.storage
-            .transaction(move |tx| {
+        self.retry_storage_transaction(|| {
+            let counterparty = counterparty.clone();
+            let lease = lease.clone();
+            move |tx| {
                 crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                 let mut record = tx
                     .linked_peer(&counterparty)
@@ -185,8 +187,9 @@ where
                 tx.save_linked_peer(record.clone());
                 clear_encrypted_link_state(tx, &counterparty, now);
                 Ok(record)
-            })
-            .await
+            }
+        })
+        .await
     }
 
     /// Remove a local peer block and return the peer to `NotLinked`.
@@ -214,8 +217,10 @@ where
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerRecord> {
         let now = self.clock.now();
-        self.storage
-            .transaction(move |tx| {
+        self.retry_storage_transaction(|| {
+            let counterparty = counterparty.clone();
+            let lease = lease.clone();
+            move |tx| {
                 crate::storage::require_peer_link_operation_lease(tx, &lease)?;
                 let mut record = tx
                     .linked_peer(&counterparty)
@@ -229,8 +234,9 @@ where
                 tx.save_linked_peer(record.clone());
                 clear_encrypted_link_state(tx, &counterparty, now);
                 Ok(record)
-            })
-            .await
+            }
+        })
+        .await
     }
 
     /// Start an Encrypted Link Handshake as the initiator.
@@ -770,27 +776,31 @@ where
         let lease_timeout = ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
             .expect("fixed peer link lease timeout must fit chrono duration");
         let expires_at = now + lease_timeout;
-        self.storage
-            .transaction(|tx| tx.claim_peer_link_operation(counterparty, now, expires_at))
-            .await?
-            .ok_or_else(|| PaykitSdkError::Policy {
-                context: format!(
-                    "peer link operation already in progress for counterparty {counterparty}"
-                ),
-                source: None,
-            })
+        self.retry_storage_transaction(|| {
+            let counterparty = counterparty.clone();
+            move |tx| tx.claim_peer_link_operation(&counterparty, now, expires_at)
+        })
+        .await?
+        .ok_or_else(|| PaykitSdkError::Policy {
+            context: format!(
+                "peer link operation already in progress for counterparty {counterparty}"
+            ),
+            source: None,
+        })
     }
 
     pub(super) async fn release_peer_link_operation(
         &self,
         lease: &PeerLinkOperationLease,
     ) -> Result<()> {
-        self.storage
-            .transaction(|tx| {
+        self.retry_storage_transaction(|| {
+            let lease = lease.clone();
+            move |tx| {
                 tx.release_peer_link_operation(&lease.counterparty, lease.lease_id);
                 Ok(())
-            })
-            .await
+            }
+        })
+        .await
     }
 
     pub(super) async fn finish_peer_link_operation<T>(

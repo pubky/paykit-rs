@@ -1,9 +1,12 @@
 use super::*;
 
 // Destructure any PaykitFfiError into (variant_label, code, context) so the
-// table-driven assertions below can compare all eight arms uniformly.
+// table-driven assertions below can compare all nine arms uniformly.
 fn parts(err: &PaykitFfiError) -> (&'static str, &str, &str) {
     match err {
+        PaykitFfiError::ConcurrentUpdate { code, context } => {
+            ("concurrent_update", code.as_str(), context.as_str())
+        }
         PaykitFfiError::Storage { code, context } => ("storage", code.as_str(), context.as_str()),
         PaykitFfiError::Identity { code, context } => ("identity", code.as_str(), context.as_str()),
         PaykitFfiError::Transport { code, context } => {
@@ -28,7 +31,16 @@ fn test_sdk_error_maps_to_expected_ffi_variant_and_code() {
     // Each SDK variant maps to a stable FFI variant + machine-readable code, with the
     // human-readable context carried through. Source-bearing variants use `source: None`
     // so this exercises the default (non-downcast) mapping path.
-    let cases: [(PaykitSdkError, &str, &str, &str); 8] = [
+    let cases: [(PaykitSdkError, &str, &str, &str); 9] = [
+        (
+            PaykitSdkError::ConcurrentUpdate {
+                context: "shared state changed".into(),
+                source: None,
+            },
+            "concurrent_update",
+            "concurrent_update",
+            "shared state changed",
+        ),
         (
             PaykitSdkError::Storage {
                 context: "load state blob".into(),
@@ -120,6 +132,10 @@ fn test_ffi_sdk_round_trip_preserves_variant_and_code() {
     // Callback errors keep their machine-readable identity while replacing
     // app-provided context with the SDK operation that failed.
     let originals = [
+        PaykitFfiError::ConcurrentUpdate {
+            code: "stale_revision".into(),
+            context: "shared state changed".into(),
+        },
         PaykitFfiError::Storage {
             code: "atomic_write_failed".into(),
             context: "state blob write failed".into(),

@@ -245,6 +245,9 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
             proposal_event_id: value.proposal_event_id,
             proposal_app_id: value.proposal_app_id.map(|app_id| app_id.to_string()),
             payer_app_id: value.payer_app_id.map(|app_id| app_id.to_string()),
+            execution_claim_app_id: value
+                .execution_claim_app_id
+                .map(|app_id| app_id.to_string()),
             terms: value.terms.map(TryInto::try_into).transpose()?,
             accepted_event_id: value.accepted_event_id,
             accepted_outbound_status: value.accepted_outbound_status.map(Into::into),

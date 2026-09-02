@@ -252,6 +252,7 @@ The Rust SDK storage model supports records for:
 - Encrypted Link snapshots and handshake snapshots
 - endpoint publication records
 - endpoint reservation records
+- per-App operation leases and Payment Request execution claims
 - outbound Private Application Message records and retry state
 - raw Private Application Message stream items
 - Event Message dedupe indexes
@@ -423,8 +424,8 @@ The registry uses this closed-world JSON shape:
 App IDs are stable path-safe identifiers. Defaults may only refer to registered
 apps. Registries are limited to 64 KiB, 64 applications, and 256
 endpoint-specific defaults. Registry updates replace the complete document;
-concurrent writers need homeserver conditional writes so one app cannot
-overwrite another app's newer registration.
+the SDK uses homeserver ETag preconditions and bounded refetch/merge retries so
+one app cannot overwrite another app's newer registration.
 
 `noise_public_key` may be omitted while only public-capable apps are
 registered. The first private-capable app initializes it from the current
@@ -447,7 +448,8 @@ Pubky file-management layer.
 Paykit Profile has a small shared display core plus an application-defined
 `extra` JSON object for additional public identity fields. The SDK stores and
 returns `extra`, but does not assign protocol meaning to those fields. Writers
-replace the complete identity-wide Paykit Profile document.
+replace the complete identity-wide Paykit Profile document at its fetched
+revision. A concurrent replacement fails so the writer can reload first.
 
 This is separate from the Pubky app profile namespace:
 
@@ -873,8 +875,8 @@ the same durable state.
 Recommended locks:
 
 - identity lock: serializes import/export/sign-out and session refresh.
-- public endpoint lock: serializes publication and cleanup of local public
-  Payment Endpoints.
+- storage-backed App operation lease: serializes publication and cleanup of one
+  App's public Payment Endpoints across devices and runtimes.
 - storage-backed peer link operation lease: serializes Encrypted Link restore,
   handshake, send, receive, and snapshot updates per counterparty identity.
 - outbound queue claim/lock: serializes retry workers per counterparty identity.
@@ -899,10 +901,10 @@ holder cannot replace newer shared state, while prepared sends ensure a retry
 publishes the same ciphertext.
 
 The Rust SDK implementation provides storage-backed per-peer leases for
-Encrypted Link work and serializes `initialize`, `sign_out`, and public endpoint
-sync calls on one runtime instance. Integrators that run more than one runtime
-instance against the same storage must serialize identity-scoped operations and
-public endpoint sync with their own process or storage lock.
+Encrypted Link work and per-App leases for public endpoint sync and App
+removal. It also serializes `initialize` and `sign_out` calls on one runtime
+instance. Homeserver-backed shared storage extends the durable leases across
+devices and processes.
 
 ## Workflows
 
@@ -930,14 +932,14 @@ public endpoint sync with their own process or storage lock.
 
 ### Publish Public Payment Endpoints
 
-1. Ask `PaymentAdapter` for the configured app's current public receiving details.
-2. Convert receiving details into Payment Endpoint payloads.
-3. Validate identifiers and payloads through `paykit-lib`.
-4. Persist pending-publication endpoint state.
-5. Publish pending endpoints.
-6. Remove stale managed endpoints.
-7. Persist confirmed/pending/failed state.
-8. Return an `EndpointSyncReport`.
+1. Claim the configured App's shared operation lease.
+2. Ask `PaymentAdapter` for the App's current public receiving details.
+3. Convert receiving details into Payment Endpoint payloads.
+4. Validate identifiers and payloads through `paykit-lib`.
+5. Persist all pending publication and removal records in one transaction.
+6. Publish pending endpoints and remove stale managed endpoints.
+7. Persist each confirmed or failed result while verifying the lease.
+8. Release the lease and return an `EndpointSyncReport`.
 
 The SDK should not remove endpoints it did not create for the configured App ID
 unless explicitly configured to manage that app's complete endpoint namespace.
@@ -1112,10 +1114,15 @@ Payer receive flow:
 5. Check duplicate/conflicting Payment Request ID terms.
 6. Check proposal expiry.
 7. Derive local state and expose valid requests as actionable. A non-null
-   `required_app_id` constrains which payee App's Payment Endpoint may be paid;
-   it does not constrain which payer App may respond.
+   `required_app_id` limits resolution to Payment Endpoints owned by that
+   payee App. Any compatible local payer App may claim execution.
 
-### Accept, Reject, Or Cancel Payment Request
+### Claim And Respond To A Payment Request
+
+Before preparing or executing a payment, a payer App claims the request in
+identity-wide shared state. Exactly one App can hold the claim. The App queues
+acceptance before it starts payment execution, and acceptance does not release
+the claim.
 
 For outbound lifecycle events:
 
@@ -1125,10 +1132,18 @@ For outbound lifecycle events:
 4. Serialize and persist exact outbound payload.
 5. Send and retry using the same Event ID and payload.
 
-Cancellation is unilateral. Acceptance and rejection are payer-only.
-The first payer App to accept or reject owns subsequent payer-side events for
-that request. This is tracked separately from the payee-side
-`required_app_id` endpoint constraint.
+Cancellation is unilateral. Acceptance and rejection are payer-only. An open
+one-time request may be explicitly released after acceptance while unresolved;
+another compatible App can then claim it without sending another acceptance.
+For an open recurring request, the claim covers the subscription and may be
+released for another local payer App to handle future or unpaid periods. A
+targeted request remains limited to Payment Endpoints owned by its required
+payee App after release. Claims are never released automatically because an
+uncertain failure may have completed the payment.
+
+One-time proof submission removes the execution claim. Recurring proof
+submission retains it. A proof permanently completes its one-time request or
+billing period; later Apps cannot submit another proof for that completed work.
 Derived records include local outbound delivery status for queued lifecycle
 events. Apps should not treat outbound status as counterparty acceptance or
 settlement confirmation.
@@ -1296,6 +1311,8 @@ Bindings should not expose:
 
 SDK errors should be structured:
 
+- `ConcurrentUpdate`: another authorized client committed newer shared state;
+  reload and retry the complete operation
 - `Storage`: durable storage failure
 - `Identity`: Pubky session/key/capability failure
 - `Transport`: Pubky or Encrypted Link transport failure

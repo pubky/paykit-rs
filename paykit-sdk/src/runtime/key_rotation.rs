@@ -46,7 +46,7 @@ where
 
         let owner = access.public_key()?;
         let public_storage = access.outbox_client.public_storage();
-        let mut registry =
+        let registry =
             paykit_lib::get_paykit_app_registry(&public_storage, &owner.to_public_key()?)
                 .await?
                 .ok_or_else(|| PaykitSdkError::NotFound {
@@ -56,52 +56,82 @@ where
 
         let current_noise_public_key = noise_public_key(&current_key);
         let replacement_noise_public_key = noise_public_key(&replacement_key);
-        match registry.key_generation() {
-            generation if generation == current_key.key_generation() => {
-                if registry.noise_public_key() != Some(&current_noise_public_key) {
-                    return Err(PaykitSdkError::Identity {
-                        context: "current Paykit identity key does not match the App Registry"
-                            .into(),
-                        source: None,
-                    });
-                }
-            }
-            generation if generation == replacement_key.key_generation() => {
-                if registry.noise_public_key() != Some(&replacement_noise_public_key) {
-                    return Err(PaykitSdkError::Identity {
-                        context: "replacement Paykit identity key does not match the App Registry"
-                            .into(),
-                        source: None,
-                    });
-                }
-            }
-            generation => {
-                return Err(PaykitSdkError::Identity {
-                    context: format!(
-                        "App Registry key generation {generation} cannot rotate from {} to {}",
-                        current_key.key_generation(),
-                        replacement_key.key_generation()
-                    ),
-                    source: None,
-                });
-            }
-        }
+        let mut registry_check = registry;
+        apply_registry_key_rotation(
+            &mut registry_check,
+            &current_key,
+            &replacement_key,
+            &current_noise_public_key,
+            &replacement_noise_public_key,
+        )?;
 
         let now = self.clock.now();
         self.storage
-            .rotate_paykit_identity_key(current_key, replacement_key.clone(), move |tx| {
-                rotate_private_state(tx, &owner, now)
-            })
+            .rotate_paykit_identity_key(
+                current_key.clone(),
+                replacement_key.clone(),
+                move |tx, already_rotated| {
+                    if already_rotated {
+                        Ok(())
+                    } else {
+                        rotate_private_state(tx, &owner, now)
+                    }
+                },
+            )
             .await?;
 
-        if registry.key_generation() != replacement_key.key_generation() {
+        self.update_paykit_app_registry_for_key_rotation(&access, |registry| {
+            apply_registry_key_rotation(
+                registry,
+                &current_key,
+                &replacement_key,
+                &current_noise_public_key,
+                &replacement_noise_public_key,
+            )
+        })
+        .await
+    }
+}
+
+fn apply_registry_key_rotation(
+    registry: &mut paykit_lib::PaykitAppRegistry,
+    current_key: &crate::PaykitIdentitySecretKey,
+    replacement_key: &crate::PaykitIdentitySecretKey,
+    current_noise_public_key: &paykit_lib::PublicKey,
+    replacement_noise_public_key: &paykit_lib::PublicKey,
+) -> Result<()> {
+    match registry.key_generation() {
+        generation if generation == current_key.key_generation() => {
+            if registry.noise_public_key() != Some(current_noise_public_key) {
+                return Err(PaykitSdkError::Identity {
+                    context: "current Paykit identity key does not match the App Registry".into(),
+                    source: None,
+                });
+            }
             registry.rotate_noise_public_key(
-                replacement_noise_public_key,
+                replacement_noise_public_key.clone(),
                 replacement_key.key_generation(),
             )?;
-            paykit_lib::set_paykit_app_registry(&access.session, &registry).await?;
+            Ok(())
         }
-        Ok(registry)
+        generation if generation == replacement_key.key_generation() => {
+            if registry.noise_public_key() != Some(replacement_noise_public_key) {
+                return Err(PaykitSdkError::Identity {
+                    context: "replacement Paykit identity key does not match the App Registry"
+                        .into(),
+                    source: None,
+                });
+            }
+            Ok(())
+        }
+        generation => Err(PaykitSdkError::Identity {
+            context: format!(
+                "App Registry key generation {generation} cannot rotate from {} to {}",
+                current_key.key_generation(),
+                replacement_key.key_generation()
+            ),
+            source: None,
+        }),
     }
 }
 
@@ -156,6 +186,7 @@ pub(super) fn rotate_private_state(
             message.status = OutboundPrivateMessageStatus::RecoveryRequired;
             message.updated_at = now;
             message.last_error = Some(KEY_ROTATION_RECOVERY_REASON.into());
+            message.prepared_send = None;
         }
     }
 

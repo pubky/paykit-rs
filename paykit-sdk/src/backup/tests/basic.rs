@@ -102,6 +102,64 @@ async fn test_backup_round_trips_retired_apps() {
 }
 
 #[tokio::test]
+async fn test_backup_round_trips_payment_request_execution_claims() {
+    let storage = InMemoryStorage::new();
+    let counterparty = public_key();
+    let request_id = "550e8400-e29b-41d4-a716-446655440000";
+    storage
+        .save_identity_state(identity(public_key()))
+        .await
+        .unwrap();
+    let raw_json = payment_request_json("650e8400-e29b-41d4-a716-446655440000").replace(
+        r#""required_app_id":null"#,
+        r#""required_app_id":"paykit-server""#,
+    );
+    crate::domain::private_stream::persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some(PrivateMessageKind::PaymentRequest.as_str().into()),
+            app_id: Some("bitkit".into()),
+            raw_json,
+        }],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
+                    counterparty,
+                    payment_request_id: request_id.into(),
+                    app_id: app_id(),
+                    claimed_at: timestamp(),
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let backup = export_backup_state(&storage).await.unwrap();
+    assert_eq!(backup.payment_request_execution_claims.len(), 1);
+
+    let restored = InMemoryStorage::new();
+    restore_backup_state(&restored, backup).await.unwrap();
+    let claim = restored
+        .snapshot()
+        .unwrap()
+        .payment_request_execution_claims
+        .remove(&(counterparty, request_id.into()))
+        .unwrap();
+
+    assert_eq!(claim.app_id, app_id());
+}
+
+#[tokio::test]
 async fn test_backup_restore_clears_receipt_app_authorization_cache() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
@@ -162,6 +220,7 @@ async fn test_restore_backup_state_marks_missing_link_checkpoint_recovery_requir
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: vec![EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             link_snapshot: None,
@@ -322,6 +381,7 @@ async fn test_restore_backup_state_rejects_inconsistent_contact_marker_state() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: Vec::new(),
@@ -358,6 +418,7 @@ async fn test_restore_backup_state_rejects_dual_contact_marker_timestamps() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: Vec::new(),
@@ -391,6 +452,7 @@ async fn test_restore_backup_state_accepts_pending_contact_marker_removal() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: Vec::new(),
@@ -437,6 +499,7 @@ async fn test_restore_backup_state_rejects_active_peer_work() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: Vec::new(),
@@ -485,6 +548,7 @@ async fn test_failed_restore_does_not_bind_empty_storage_to_identity() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: Vec::new(),
@@ -531,6 +595,7 @@ async fn test_restore_backup_state_rejects_overwriting_existing_shared_state() {
         retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: Vec::new(),

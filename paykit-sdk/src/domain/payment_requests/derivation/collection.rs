@@ -18,7 +18,7 @@ pub(crate) async fn received_payment_request_records<S>(
 where
     S: StorageAdapter,
 {
-    let (items, dedupe_records) = storage
+    let (items, dedupe_records, execution_claims) = storage
         .transaction(|tx| {
             let items = tx.private_stream_items(counterparty);
             let mut dedupe_records = HashMap::new();
@@ -36,10 +36,19 @@ where
                     dedupe_records.insert(event_id.as_str().to_owned(), record);
                 }
             }
-            Ok((items, dedupe_records))
+            let execution_claims = tx
+                .export_storage_state()
+                .payment_request_execution_claims
+                .into_iter()
+                .filter(|((claim_counterparty, _), _)| claim_counterparty == counterparty)
+                .collect::<HashMap<_, _>>();
+            Ok((items, dedupe_records, execution_claims))
         })
         .await?;
-    derive_received_payment_request_records(counterparty.clone(), items, dedupe_records, now)
+    let mut records =
+        derive_received_payment_request_records(counterparty.clone(), items, dedupe_records, now)?;
+    apply_execution_claims(&mut records, &execution_claims);
+    Ok(records)
 }
 
 /// Derive local Payment Request records for one counterparty.
@@ -82,13 +91,32 @@ pub(crate) fn payment_request_records_from_transaction(
             dedupe_records.insert(event_id.as_str().to_owned(), record);
         }
     }
-    derive_payment_request_records_from_parts(
+    let mut records = derive_payment_request_records_from_parts(
         counterparty.clone(),
         items,
         outbound,
         dedupe_records,
         now,
-    )
+    )?;
+    apply_execution_claims(
+        &mut records,
+        &tx.export_storage_state().payment_request_execution_claims,
+    );
+    Ok(records)
+}
+
+fn apply_execution_claims(
+    records: &mut [PaymentRequestRecord],
+    claims: &HashMap<(PubkyPublicKey, String), PaymentRequestExecutionClaim>,
+) {
+    for record in records {
+        record.execution_claim_app_id = claims
+            .get(&(
+                record.counterparty.clone(),
+                record.payment_request_id.clone(),
+            ))
+            .map(|claim| claim.app_id.clone());
+    }
 }
 
 fn derive_received_payment_request_records(

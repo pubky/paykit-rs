@@ -62,13 +62,14 @@ use crate::{
         ReservationCleanupFailure,
     },
     domain::payment_requests::{
-        enqueue_checked_payment_request_action,
+        claim_payment_request_execution, enqueue_checked_payment_request_action,
         enqueue_payment_request as enqueue_payment_request_message,
         payment_request_record_blocks_app_removal,
         payment_request_records as derive_payment_request_records,
         received_payment_request_records as derive_received_payment_request_records,
-        request_from_record, PaymentRequestFilter, PaymentRequestLifecycleState,
-        PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestTermsRecord,
+        release_payment_request_execution_claim, request_from_record, PaymentRequestFilter,
+        PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
+        PaymentRequestTermsRecord,
     },
     domain::payment_resolution::{
         PreparedPrivateContactPayment, PrivateContactPaymentResolution,
@@ -104,8 +105,10 @@ use crate::{
     domain::recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
     storage::{
-        outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
-        OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
+        outbound_private_queue_head_is_claimable,
+        retry_storage_transaction as retry_storage_transaction_with_adapter,
+        EncryptedLinkStateRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
+        PaykitAppOperationLease, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
     PaykitSdkError, PaymentAdapter, PrivatePaymentEndpointCandidate,
     PrivatePaymentEndpointReservation, PrivatePaymentEndpointReservationCancellation,
@@ -116,6 +119,7 @@ use crate::{
 };
 
 const PEER_LINK_OPERATION_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const PAYKIT_APP_OPERATION_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const OUTBOUND_PRIVATE_SEND_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const OUTBOUND_PRIVATE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 const RESERVATION_CANCELLATION_CLAIM_TIMEOUT: std::time::Duration =
@@ -252,6 +256,15 @@ where
         Ok(RuntimeOperationGuard {
             in_progress: Arc::clone(&self.identity_operation_in_progress),
         })
+    }
+
+    async fn retry_storage_transaction<T, F, O>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnMut() -> O,
+        O: FnOnce(&mut dyn StorageTransaction) -> Result<T> + Send,
+    {
+        retry_storage_transaction_with_adapter(&self.storage, operation).await
     }
 
     /// Initialize durable SDK identity state.
@@ -496,6 +509,46 @@ async fn fetch_public_text(
     }
 }
 
+async fn fetch_public_text_with_revision(
+    storage: &pubky::PublicStorage,
+    public_key: &PubkyPublicKey,
+    path: &str,
+    context: &'static str,
+    max_bytes: usize,
+) -> Result<Option<(String, String)>> {
+    let addr = public_resource_uri(public_key, path);
+    match storage.get(addr).await {
+        Ok(mut resp) => {
+            require_response_size_within_limit(resp.content_length(), max_bytes, context)?;
+            let revision = pubky::ResourceStats::from_headers(resp.headers())
+                .etag
+                .filter(|etag| !etag.starts_with("W/\"") && !etag.is_empty())
+                .ok_or_else(|| PaykitSdkError::Transport {
+                    context: format!("{context}: response is missing a strong ETag"),
+                    source: None,
+                })?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|err| PaykitSdkError::Transport {
+                    context: context.into(),
+                    source: Some(err.into()),
+                })?
+            {
+                append_response_chunk(&mut bytes, &chunk, max_bytes, context)?;
+            }
+            let text = String::from_utf8(bytes).map_err(|_| PaykitSdkError::Protocol {
+                context: format!("{context}: response is not valid UTF-8"),
+                source: None,
+            })?;
+            Ok(Some((text, revision)))
+        }
+        Err(err) if is_pubky_not_found(&err) => Ok(None),
+        Err(err) => Err(map_pubky_transport_error(context, err)),
+    }
+}
+
 async fn fetch_public_file_uri(
     storage: &pubky::PublicStorage,
     uri: &str,
@@ -663,6 +716,14 @@ fn is_pubky_not_found(err: &PubkyError) -> bool {
         err,
         PubkyError::Request(RequestError::Server { status, .. })
             if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
+    )
+}
+
+fn is_pubky_precondition_failed(err: &PubkyError) -> bool {
+    matches!(
+        err,
+        PubkyError::Request(RequestError::Server { status, .. })
+            if *status == StatusCode::PRECONDITION_FAILED
     )
 }
 

@@ -96,6 +96,7 @@ fn test_payment_request_record_conversion_redacts_references() {
         proposal_event_id: Some("650e8400-e29b-41d4-a716-446655440000".into()),
         proposal_app_id: Some(paykit_sdk::PaykitAppId::new("bitkit").unwrap()),
         payer_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
+        execution_claim_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
         terms: Some(PaymentRequestTermsRecord {
             amount: AmountRecord {
                 value: "10".into(),
@@ -140,6 +141,7 @@ fn test_payment_request_record_conversion_redacts_references() {
 
     assert_eq!(ffi.state, FfiPaymentRequestLifecycleState::Accepted);
     assert_eq!(ffi.payer_app_id.as_deref(), Some("wallet"));
+    assert_eq!(ffi.execution_claim_app_id.as_deref(), Some("wallet"));
     assert_eq!(ffi.proposal_app_id.as_deref(), Some("bitkit"));
     assert_eq!(
         ffi.terms.as_ref().unwrap().payment_reference.export_text(),
