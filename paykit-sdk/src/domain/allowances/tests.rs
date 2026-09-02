@@ -86,28 +86,32 @@ fn proposal(event_id_value: &str, role: AllowanceRole) -> AllowanceEvent {
 }
 
 fn acceptance(proposal_event_id: &str) -> AllowanceEvent {
-    AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-        event_id(ACCEPTANCE_ID),
-        allowance_id(),
-        event_id(proposal_event_id),
-    ))
+    AllowanceEvent::Acceptance(
+        AllowanceAcceptance::new(
+            event_id(ACCEPTANCE_ID),
+            allowance_id(),
+            event_id(proposal_event_id),
+        )
+        .unwrap(),
+    )
 }
 
 fn withdrawal() -> AllowanceEvent {
-    AllowanceEvent::End(AllowanceEnd::withdrawal(
-        event_id(END_ID),
-        allowance_id(),
-        event_id(PROPOSAL_ID),
-    ))
+    AllowanceEvent::End(
+        AllowanceEnd::withdrawal(event_id(END_ID), allowance_id(), event_id(PROPOSAL_ID)).unwrap(),
+    )
 }
 
 fn accepted_end(end_event_id: &str, acceptance_event_id: &str) -> AllowanceEvent {
-    AllowanceEvent::End(AllowanceEnd::accepted(
-        event_id(end_event_id),
-        allowance_id(),
-        event_id(PROPOSAL_ID),
-        event_id(acceptance_event_id),
-    ))
+    AllowanceEvent::End(
+        AllowanceEnd::accepted(
+            event_id(end_event_id),
+            allowance_id(),
+            event_id(PROPOSAL_ID),
+            event_id(acceptance_event_id),
+        )
+        .unwrap(),
+    )
 }
 
 fn linked_peer(
@@ -798,11 +802,14 @@ async fn test_allowance_first_response_fifo_controls_and_later_response_invalida
         &storage,
         peer.clone(),
         receiver_path(),
-        AllowanceEvent::Rejection(AllowanceRejection::new(
-            event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
-            allowance_id(),
-            event_id(PROPOSAL_ID),
-        )),
+        AllowanceEvent::Rejection(
+            AllowanceRejection::new(
+                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
+                allowance_id(),
+                event_id(PROPOSAL_ID),
+            )
+            .unwrap(),
+        ),
         timestamp() - ChronoDuration::hours(1),
     )
     .await;
