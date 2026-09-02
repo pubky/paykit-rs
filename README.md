@@ -10,7 +10,7 @@
 Paykit helps apps discover where someone can receive a payment through their
 Pubky identity. As a meta payment protocol, it also provides a layer for
 payment-related metadata such as Payment Requests, Payment Proofs, receipts,
-and Receipt Access.
+Receipt Access, and Allowances.
 
 A payee can publish public payment details under their Pubky public key, or
 share a Private Payment List with another person over an Encrypted Link. Paykit
@@ -71,6 +71,12 @@ path domains.
 - **Payment Request**: a private protocol object where a payee asks a payer for
   one-time or recurring payment. Its lifecycle messages use Event Message
   semantics.
+- **Allowance**: shared, scoped permission from an Allower to an Allowee that
+  the Allower's wallet may use to handle qualifying Payment Requests
+  automatically. It is not a balance, payment, or wallet-local setting.
+- **Allower**: the party granting an Allowance and controlling the funds.
+- **Allowee**: the authenticated Payment Request sender whose qualifying
+  requests may use the Allowance.
 - **Payment Amount**: decimal `value` text plus an `asset`, used by Payment
   Requests and optional Receipt details.
 - **Payment Proof**: method-specific evidence for one concrete payment
@@ -156,6 +162,33 @@ A Payment Endpoint Payload may also contain a static receiving detail such as an
 on-chain address, reusable offer, bank account detail, payment tag, or similar
 handle.
 
+## Allowances
+
+Allowances add a consent lifecycle to ordinary Payment Requests without adding
+an Allowance-specific request or payment message. Either party may propose
+immutable terms on an exact Encrypted Link, the recipient may accept or reject,
+and a proposal sender may withdraw while either party may end accepted
+authority. `paykit-sdk` durably derives these shared lifecycle views across
+restart, backup restore, Event ID replay, and Encrypted Link recovery.
+
+A one-time or Recurring Payment Request remains unchanged: it carries no
+Allowance ID and follows the normal acceptance, cancellation, Payment Proof,
+endpoint-resolution, and scheduling rules. At the first automatic-handling
+decision, a wallet may associate it with exactly one matching accepted
+Allowance. No match or multiple matches leaves the request on its ordinary
+manual path.
+
+Automatic payment remains wallet-owned. An integrating wallet must durably
+record local enablement and the first selected-Allowance or manual-only
+decision before side effects; never retroactively rematch; pin a Recurring
+Payment Request to its selected Allowance and recheck every Billing Period;
+prevent duplicate semantic payments; count only automatic payments and their
+unresolved reservations against capacity; reserve before an irreversible
+payment step; and expose an explicit, safe accepted-but-unpaid manual path.
+Paykit does not implement matching, usage accounting, scheduling, or payment
+execution. See [the Allowances specification](specs/allowances.md) for the full
+eligibility, durability, and recovery requirements.
+
 ## Receipts
 
 Paykit receipts are encrypted before storage. The plaintext Receipt is created
@@ -210,9 +243,10 @@ before executing a payment through their existing infrastructure.
 `paykit-sdk` is the Rust runtime layer for SDK-managed local
 state such as endpoint sync, Encrypted Link snapshots, private stream intake,
 Private Payment Lists, Paykit Profiles, Paykit Blob helpers, read-only Pubky
-app profile/follows helpers, local Contact Records, and contact payment resolution. Payment
-execution, settlement detection, product UI, and platform session storage
-remain with the integrating application and its adapters.
+app profile/follows helpers, local Contact Records, contact payment resolution,
+Payment Requests, and Allowance lifecycle views. Payment execution, Allowance
+matching and usage, settlement detection, product UI, and platform session
+storage remain with the integrating application and its adapters.
 
 ## Library Crates
 

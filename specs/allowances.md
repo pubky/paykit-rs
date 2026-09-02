@@ -274,6 +274,11 @@ invalid. A local view containing the proposal and valid acceptance has accepted
 authority, but no global acceptance instant exists. Acceptance does not create
 or execute a payment.
 
+Every lifecycle message has its own Event ID. An Acceptance or Rejection Event
+ID MUST differ from its Proposal Event ID. An End Event ID, Proposal Event ID,
+and non-null Acceptance Event ID MUST be pairwise distinct. Reusing a causal
+Event ID for the current message is invalid rather than an exact replay.
+
 ### End
 
 ```json

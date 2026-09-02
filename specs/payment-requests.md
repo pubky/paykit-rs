@@ -359,10 +359,12 @@ Validation rules:
   requires the SDK/runtime to persist its local decision or processing time.
 - A payee that has already recorded its own Cancellation MUST record an
   otherwise-valid later-received Acceptance from the payer as crossing, without
-  reopening the request; the lifecycle remains `cancelled`. This exception is
-  safe because the events occupy opposite FIFO directions and Cancellation
-  still prevents new execution. An Acceptance after the payer's own earlier
-  Cancellation is invalid because those events occupy the same FIFO direction.
+  reopening the request, only when no earlier Acceptance has been recorded; the
+  lifecycle remains `cancelled`. A second Acceptance is invalid and MUST NOT
+  replace the first recorded Acceptance. This exception is safe because the
+  events occupy opposite FIFO directions and Cancellation still prevents new
+  execution. An Acceptance after the payer's own earlier Cancellation is
+  invalid because those events occupy the same FIFO direction.
 - Acceptance is explicit. Paying without this message is not protocol-level acceptance in v0.2.
 
 ## paykit.payment_request_rejection
@@ -532,9 +534,10 @@ Terminal authorization states:
 - `rejected`
 - `cancelled`
 
-Neither state can be reopened by a later Acceptance. A crossing Acceptance may
-be recorded on a cancelled request only as described above. Rejection admits no
-later Payment Proof. Cancellation prevents new execution, but a qualifying
+Neither state can be reopened by a later Acceptance. The first crossing
+Acceptance may be recorded on a cancelled request only as described above;
+another Acceptance is invalid. Rejection admits no later Payment Proof.
+Cancellation prevents new execution, but a qualifying
 Payment Proof may still report an execution that crossed its irreversible
 boundary first; recording that proof does not transition the request out of
 `cancelled`.

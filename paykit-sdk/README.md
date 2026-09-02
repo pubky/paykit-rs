@@ -60,8 +60,8 @@ Implemented in this Rust SDK crate:
   marker workflows
 - Private Payment List publication/cache and contact payment resolution
 - Payment Endpoint Reservations for contact-scoped receiving details
-- Payment Request lifecycle state, Receipt Access indexing, receipt issuance,
-  and receipt retrieval
+- Payment Request and Allowance lifecycle derivation, Receipt Access indexing,
+  receipt issuance, and receipt retrieval
 - Paykit-facing profile/contact helpers and SDK backup/restore
 
 Not implemented in this crate yet:
@@ -150,8 +150,11 @@ Common workflows:
   should come from receiver folders, Noise keys, and SDK state, not a different
   Pubky identity derivation label
 - call `receive_private_messages` before deriving Private Payment Lists,
-  Payment Requests, Receipt Access state, or resolving a private contact
-  payment when the freshest private endpoints matter
+  Payment Requests, Allowances, Receipt Access state, or resolving a private
+  contact payment when the freshest private endpoints matter
+- use `propose_allowance`, `accept_allowance`, `reject_allowance`, and
+  `end_allowance` for durable lifecycle intent; drain the normal outbound queue
+  and use `allowance_record` or `list_allowances` for derived views
 - call `resolve_private_contact_payment` for Private Payment List endpoints or
   `resolve_public_contact_payment` for public Payment Endpoints; each returns a
   source-specific result with ordered adapter-built `PaymentTarget` values;
@@ -177,6 +180,71 @@ Common workflows:
   SDK-managed identity-scoped state
 - export and persist an SDK backup before `sign_out` if the app wants that
   sign-out to be reversible for the same user
+
+## Allowance Integration
+
+An Allowance is shared consent for possible automatic handling; the SDK does
+not interpret it as payment authorization by itself. A typical lifecycle uses
+the same durable private queue as other Event Messages:
+
+```rust
+use paykit_lib::{AllowanceAmountRange, AllowanceId, AllowanceTerms};
+use paykit_sdk::{AllowanceFilter, AllowanceLocalRole};
+
+let terms = AllowanceTerms::builder("btc")
+    .per_payment_amount(AllowanceAmountRange::new("0.0001", "0.01")?)
+    .lifetime_amount_limit("0.10")
+    .build()?;
+let proposed = sdk
+    .propose_allowance(
+        counterparty.clone(),
+        counterparty_receiver_path.clone(),
+        AllowanceLocalRole::Allower,
+        terms,
+    )
+    .await?;
+let allowance_id = AllowanceId::new(&proposed.allowance_id)?;
+
+// Send queued events through process_outbound_private_messages. After the
+// peer receives the proposal, it calls accept_allowance or reject_allowance.
+// Either peer may later call end_allowance for accepted authority.
+let current = sdk
+    .allowance_record(&counterparty, &counterparty_receiver_path, &allowance_id)
+    .await?;
+let all = sdk.list_allowances(AllowanceFilter::default()).await?;
+```
+
+Ordinary one-time and Recurring Payment Requests do not change when an
+Allowance is present. They carry no Allowance ID and keep the existing proposal,
+Acceptance, Cancellation, Payment Proof, endpoint-resolution, and recurrence
+rules. The SDK supplies durable lifecycle history; the wallet owns the decision
+to use it.
+
+Before automatic work, wallet code must apply all of these local requirements:
+
+- automatic handling is locally enabled and exactly one accepted Allowance
+  matches the request on the exact Encrypted Link;
+- the first selected-Allowance or manual-only decision is durably recorded
+  before side effects; no match or ambiguity is manual-only, and later state
+  changes never retroactively rematch it;
+- a Recurring Payment Request pins that first Allowance, then rechecks its
+  lifecycle, terms, current capacity, endpoint, and each Billing Period when
+  payment becomes due;
+- a semantic payment key prevents duplicate automatic or manual execution;
+- only committed automatic payments and unresolved automatic reservations
+  consume Allowance capacity; manual payments do not;
+- capacity is reserved atomically before an irreversible payment side effect,
+  and pending, unknown, or recovery-incomplete outcomes remain reserved; and
+- if automatic handling stops after Acceptance, an explicit
+  accepted-but-unpaid manual path is exposed only after durable payment and
+  reservation state proves another successful or unresolved attempt cannot
+  exist.
+
+During incomplete history or Encrypted Link recovery, automatic handling must
+fail closed. Restore the full SDK backup, relink the same Receiver References,
+then rederive a consistent history before resuming. See
+[Allowances](../specs/allowances.md) for the normative matching, usage,
+reservation, and execution-boundary rules.
 
 ## Profile And Contact Namespace
 
@@ -270,5 +338,5 @@ pauses until relink.
 Losing SDK-managed backup or state blob data means losing access to local
 private Paykit runtime state. Public Paykit data can be rediscovered from Pubky,
 but Encrypted Link snapshots, private stream history, Receipt Access keys,
-outbound queues, local Contact Records, and Payment Request/Receipt history
-cannot be safely reconstructed from homeserver data alone.
+outbound queues, local Contact Records, and Payment Request/Allowance/Receipt
+history cannot be safely reconstructed from homeserver data alone.
