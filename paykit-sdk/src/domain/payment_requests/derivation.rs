@@ -15,9 +15,11 @@ pub(crate) async fn received_payment_request_records<S>(
 where
     S: StorageAdapter,
 {
-    let (items, dedupe_records) = storage
+    let (items, dedupe_records, outbound_carriers) = storage
         .transaction(|tx| {
             let items = tx.private_stream_items(counterparty, counterparty_receiver_path);
+            let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_path);
+            let outbound_carriers = outbound_event_carriers(&outbound);
             let mut dedupe_records = HashMap::new();
             for item in &items {
                 let Some(message) = payment_request_message_from_item(item) else {
@@ -37,7 +39,7 @@ where
                     dedupe_records.insert(event_id.as_str().to_owned(), record);
                 }
             }
-            Ok((items, dedupe_records))
+            Ok((items, dedupe_records, outbound_carriers))
         })
         .await?;
     derive_received_payment_request_records(
@@ -45,6 +47,7 @@ where
         counterparty_receiver_path.clone(),
         items,
         dedupe_records,
+        outbound_carriers,
         now,
     )
 }
@@ -63,30 +66,30 @@ pub(crate) async fn payment_request_records<S>(
 where
     S: StorageAdapter,
 {
-    let (items, outbound, dedupe_records) = storage
+    let (items, outbound, dedupe_records, outbound_carriers) = storage
         .transaction(|tx| {
             let items = tx.private_stream_items(counterparty, counterparty_receiver_path);
             let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_path);
+            let outbound_carriers = outbound_event_carriers(&outbound);
+            let received_event_ids = items
+                .iter()
+                .filter_map(payment_request_message_from_item)
+                .filter_map(|message| parse_payment_request_event_message(&message))
+                .filter_map(|parsed| parsed.event_id().map(|id| id.as_str().to_owned()))
+                .collect::<HashSet<_>>();
             let mut dedupe_records = HashMap::new();
-            for item in &items {
-                let Some(message) = payment_request_message_from_item(item) else {
-                    continue;
-                };
-                let Some(parsed) = parse_payment_request_event_message(&message) else {
-                    continue;
-                };
-                let Some(event_id) = parsed.event_id() else {
-                    continue;
-                };
-                if let Some(record) = tx.event_dedup_record(
-                    counterparty,
-                    counterparty_receiver_path,
-                    event_id.as_str(),
-                ) {
-                    dedupe_records.insert(event_id.as_str().to_owned(), record);
+            for event_id in outbound_carriers
+                .event_ids
+                .iter()
+                .chain(&received_event_ids)
+            {
+                if let Some(record) =
+                    tx.event_dedup_record(counterparty, counterparty_receiver_path, event_id)
+                {
+                    dedupe_records.insert(event_id.clone(), record);
                 }
             }
-            Ok((items, outbound, dedupe_records))
+            Ok((items, outbound, dedupe_records, outbound_carriers))
         })
         .await?;
     derive_payment_request_records(
@@ -95,14 +98,17 @@ where
         items,
         outbound,
         dedupe_records,
+        outbound_carriers,
         now,
     )
 }
+
 fn derive_received_payment_request_records(
     counterparty: PubkyPublicKey,
     counterparty_receiver_path: PaykitReceiverPath,
     mut items: Vec<PrivateStreamItemRecord>,
     dedupe_records: HashMap<String, EventDedupRecord>,
+    outbound_carriers: OutboundEventCarriers,
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentRequestRecord>> {
     items.sort_by_key(|item| item.stream_item_id);
@@ -143,6 +149,18 @@ fn derive_received_payment_request_records(
                     }
                     continue;
                 }
+            }
+            if outbound_carriers.event_ids.contains(event_id) {
+                if let Some(payment_request_id) = payment_request_id {
+                    record_for(
+                        &mut records,
+                        &counterparty,
+                        &counterparty_receiver_path,
+                        payment_request_id,
+                    )
+                    .mark_invalid(&item, "Event ID reused by another Event Message carrier");
+                }
+                continue;
             }
         }
 
@@ -257,6 +275,7 @@ fn derive_payment_request_records(
     mut items: Vec<PrivateStreamItemRecord>,
     outbound: Vec<OutboundPrivateMessageRecord>,
     dedupe_records: HashMap<String, EventDedupRecord>,
+    outbound_carriers: OutboundEventCarriers,
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentRequestRecord>> {
     let mut records = HashMap::<String, PaymentRequestRecord>::new();
@@ -314,6 +333,25 @@ fn derive_payment_request_records(
                     }
                     continue;
                 }
+            }
+            if outbound_carriers.event_ids.contains(event_id) {
+                if let Some(payment_request_id) = payment_request_id {
+                    tainted_event_seeds.push(TaintedEventSeed {
+                        event_id: event_id.to_owned(),
+                        payment_request_id: payment_request_id.clone(),
+                        payload_hash: payload_hash(&item.raw_json),
+                        source_rank: 0,
+                    });
+                    pre_invalid_request_ids.insert(payment_request_id.clone());
+                    record_for(
+                        &mut records,
+                        &counterparty,
+                        &counterparty_receiver_path,
+                        payment_request_id,
+                    )
+                    .mark_invalid(&item, "Event ID reused by another Event Message carrier");
+                }
+                continue;
             }
         }
 
@@ -379,17 +417,24 @@ fn derive_payment_request_records(
             message,
             event: event.clone(),
         };
-        if dedupe_records
-            .get(event.event_id().as_str())
-            .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
+        if dedupe_records.contains_key(event.event_id().as_str())
+            || outbound_carriers
+                .conflicted_event_ids
+                .contains(event.event_id().as_str())
         {
+            let payment_request_id = stored.payment_request_id();
+            pre_invalid_request_ids.insert(payment_request_id.clone());
             let record = record_for(
                 &mut records,
                 &counterparty,
                 &counterparty_receiver_path,
-                stored.payment_request_id(),
+                payment_request_id,
             );
-            mark_invalid_stored(record, &stored, "Event ID reused with different payload");
+            mark_invalid_stored(
+                record,
+                &stored,
+                "Event ID reused by another Event Message carrier",
+            );
             continue;
         }
         events.push(stored);
@@ -752,7 +797,14 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 );
                 return;
             }
-            if !matches!(record.state, PaymentRequestLifecycleState::Proposed) {
+            // Only the first Acceptance may cross a payee Cancellation; any
+            // later Acceptance falls through to the transition check below.
+            let crosses_payee_cancellation = record.state == PaymentRequestLifecycleState::Canceled
+                && cancellation_was_sent_by_payee(record)
+                && record.accepted_event_id.is_none();
+            if !matches!(record.state, PaymentRequestLifecycleState::Proposed)
+                && !crosses_payee_cancellation
+            {
                 mark_invalid_stored(
                     record,
                     stored,
@@ -762,16 +814,9 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
             }
             record.accepted_event_id = Some(acceptance.event_id.as_str().to_owned());
             record.accepted_outbound_status = outbound_status(stored);
-            record.state = if record
-                .terms
-                .as_ref()
-                .and_then(|terms| terms.recurrence.as_ref())
-                .is_some()
-            {
-                PaymentRequestLifecycleState::ActiveRecurring
-            } else {
-                PaymentRequestLifecycleState::Accepted
-            };
+            if !crosses_payee_cancellation {
+                record.state = accepted_state(record);
+            }
             touch_stored(record, stored);
         }
         PaymentRequestEvent::Rejection(rejection) => {
@@ -835,11 +880,8 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 mark_invalid_stored(record, stored, "Payment Proof came from the wrong side");
                 return;
             }
-            if !matches!(
-                record.state,
-                PaymentRequestLifecycleState::Accepted
-                    | PaymentRequestLifecycleState::ActiveRecurring
-            ) {
+            let follows_cancellation = record.state == PaymentRequestLifecycleState::Canceled;
+            if !proof_follows_acceptance(record) {
                 mark_invalid_stored(record, stored, "Payment Proof arrived before acceptance");
                 return;
             }
@@ -874,12 +916,9 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 proof: proof.proof.clone(),
                 recorded_at: stored.record_time(),
             });
-            record.state = if record
-                .terms
-                .as_ref()
-                .and_then(|terms| terms.recurrence.as_ref())
-                .is_some()
-            {
+            record.state = if follows_cancellation {
+                PaymentRequestLifecycleState::Canceled
+            } else if request.request.recurrence.is_some() {
                 PaymentRequestLifecycleState::ActiveRecurring
             } else {
                 PaymentRequestLifecycleState::ProofSubmitted
@@ -954,6 +993,52 @@ fn payer_action_source_allowed(
             StoredPaymentRequestEvent::Received { .. }
         )
     )
+}
+
+fn cancellation_was_sent_by_payee(record: &PaymentRequestRecord) -> bool {
+    matches!(
+        (record.local_role, &record.canceled_outbound_status),
+        (Some(PaymentRequestLocalRole::Payer), None)
+            | (Some(PaymentRequestLocalRole::Payee), Some(_))
+    )
+}
+
+/// Lifecycle states in which a Payment Proof may follow.
+///
+/// A canceled request stays eligible only while its record retains a valid
+/// Acceptance, so evidence of payment that crossed the cancellation is kept.
+pub(crate) fn payment_proof_allowed_states(
+    record: &PaymentRequestRecord,
+) -> &'static [PaymentRequestLifecycleState] {
+    if record.accepted_event_id.is_some() {
+        &[
+            PaymentRequestLifecycleState::Accepted,
+            PaymentRequestLifecycleState::ActiveRecurring,
+            PaymentRequestLifecycleState::Canceled,
+        ]
+    } else {
+        &[
+            PaymentRequestLifecycleState::Accepted,
+            PaymentRequestLifecycleState::ActiveRecurring,
+        ]
+    }
+}
+
+fn proof_follows_acceptance(record: &PaymentRequestRecord) -> bool {
+    payment_proof_allowed_states(record).contains(&record.state)
+}
+
+fn accepted_state(record: &PaymentRequestRecord) -> PaymentRequestLifecycleState {
+    if record
+        .terms
+        .as_ref()
+        .and_then(|terms| terms.recurrence.as_ref())
+        .is_some()
+    {
+        PaymentRequestLifecycleState::ActiveRecurring
+    } else {
+        PaymentRequestLifecycleState::Accepted
+    }
 }
 
 fn touch_stored(record: &mut PaymentRequestRecord, stored: &StoredPaymentRequestEvent) {

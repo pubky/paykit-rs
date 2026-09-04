@@ -262,20 +262,7 @@ where
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
-        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
-            return Err(PaykitSdkError::Identity {
-                context: "local Pubky identity is not initialized".into(),
-                source: None,
-            });
-        }
-        if session_access.is_none() {
-            return Err(PaykitSdkError::Identity {
-                context: "no Pubky session available".into(),
-                source: None,
-            });
-        }
-
+        self.require_identity_and_session().await?;
         self.ensure_peer_allows_private_automation(counterparty, counterparty_receiver_path)
             .await?;
 
@@ -454,6 +441,11 @@ where
 
     /// Queue a Payment Proof for an accepted Payment Request and return local derived state.
     ///
+    /// A canceled request remains eligible only when its record retains a valid
+    /// Acceptance. In that case, the caller is responsible for establishing
+    /// that payment execution passed its irreversible boundary before the
+    /// cancellation was observed; Paykit cannot derive that fact from events.
+    ///
     /// The returned record reflects the local outbound queue, not delivery or
     /// counterparty processing.
     pub async fn submit_payment_proof(
@@ -475,10 +467,7 @@ where
         require_payer_role(&record, "submit Payment Proof")?;
         require_state(
             &record,
-            &[
-                PaymentRequestLifecycleState::Accepted,
-                PaymentRequestLifecycleState::ActiveRecurring,
-            ],
+            payment_proof_allowed_states(&record),
             "submit Payment Proof",
         )?;
         let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {

@@ -1195,6 +1195,31 @@ pub(super) fn validate_required_private_stream_indexes(
             });
         }
     }
+    validate_receipt_access_authority(event_dedup_records, receipt_access_records)?;
+    Ok(())
+}
+
+fn validate_receipt_access_authority(
+    event_dedup_records: &HashMap<(PubkyPublicKey, PaykitReceiverPath, String), EventDedupRecord>,
+    receipt_access_records: &HashMap<
+        (PubkyPublicKey, PaykitReceiverPath, String),
+        ReceiptAccessRecord,
+    >,
+) -> Result<()> {
+    for (key, access) in receipt_access_records {
+        let is_authoritative = event_dedup_records
+            .get(key)
+            .is_some_and(|dedupe| dedupe.first_stream_item_id == access.stream_item_id);
+        if !is_authoritative {
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access record '{}' is not the authoritative first Event carrier",
+                    access.event_id
+                ),
+                source: None,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -1466,7 +1491,7 @@ fn validate_receipt_issuance_status(record: &ReceiptIssuanceRecord) -> Result<()
     Ok(())
 }
 
-fn private_message_header(
+pub(super) fn private_message_header(
     raw_json: &str,
 ) -> Result<(Option<u32>, Option<String>, Option<PrivateMessageKind>)> {
     let value = match serde_json::from_str::<serde_json::Value>(raw_json) {
@@ -1564,7 +1589,7 @@ fn private_application_message(
     }
 }
 
-fn private_application_message_from_raw(
+pub(super) fn private_application_message_from_raw(
     raw_json: String,
     parsed_version: Option<u32>,
     parsed_kind: Option<String>,

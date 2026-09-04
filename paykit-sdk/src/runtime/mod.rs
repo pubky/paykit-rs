@@ -6,9 +6,9 @@ use std::{
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use paykit_lib::{
-    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaykitReceiverCapabilities,
-    PaykitReceiverMarker, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
-    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestId,
+    AllowanceId, AllowanceTerms, BillingPeriod, EncryptedLinkRecoveryMarker, EventId,
+    PaykitReceiverCapabilities, PaykitReceiverMarker, PaymentEndpointIdentifier, PaymentProof,
+    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestId,
     PaymentRequestRejection, PaymentRequestTerms, PrivateMessageKind, ReceiptDraft,
 };
 use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
@@ -27,6 +27,12 @@ use crate::{
     config::{
         EncryptedLinkRecoveryMarkerPolicy, EndpointManagementScope, PaykitSdkConfig,
         PublicContactSharingPolicy,
+    },
+    domain::allowances::{
+        allowance_record as derive_allowance_record, allowance_records as derive_allowance_records,
+        allowance_scopes, enqueue_allowance_end, enqueue_allowance_proposal,
+        enqueue_allowance_response, sort_allowances_newest_first, AllowanceFilter,
+        AllowanceLocalRole, AllowanceRecord, AllowanceResponse,
     },
     domain::contacts::{
         parse_profile_json, parse_pubky_profile_json, paykit_blob_path,
@@ -49,9 +55,10 @@ use crate::{
     domain::linked_peers::{
         default_linked_peer, mark_recovery_required_for_marker_in_transaction,
         mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
-        save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
-        save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
-        EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
+        require_private_automation_ready, save_link_handshake_state_if_generation_with_lease,
+        save_link_handshake_state_with_lease, save_linked_peer_link_state_if_generation_with_lease,
+        save_linked_peer_state_with_lease, EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport,
+        LinkedPeerState,
     },
     domain::outbound_private::{
         claim_next_outbound_private_message_with_peer_lease, mark_outbound_failed,
@@ -67,7 +74,7 @@ use crate::{
         enqueue_payment_request_acceptance as enqueue_payment_request_acceptance_message,
         enqueue_payment_request_cancellation as enqueue_payment_request_cancellation_message,
         enqueue_payment_request_rejection as enqueue_payment_request_rejection_message,
-        payment_request_records as derive_payment_request_records,
+        payment_proof_allowed_states, payment_request_records as derive_payment_request_records,
         received_payment_request_records as derive_received_payment_request_records,
         request_from_record, PaymentRequestFilter, PaymentRequestLifecycleState,
         PaymentRequestLocalRole, PaymentRequestRecord,
@@ -114,6 +121,7 @@ use crate::{
     PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
 };
 
+mod allowances;
 mod backup;
 mod contacts;
 mod encrypted_links;
@@ -347,6 +355,25 @@ where
             .await?;
 
         Ok(IdentityStatus::from_state(&state, false))
+    }
+
+    /// Require an initialized local identity and a live Pubky session before
+    /// queueing private outbound intent.
+    async fn require_identity_and_session(&self) -> Result<()> {
+        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.local_pubky_public_key.is_none() {
+            return Err(PaykitSdkError::Identity {
+                context: "local Pubky identity is not initialized".into(),
+                source: None,
+            });
+        }
+        if session_access.is_none() {
+            return Err(PaykitSdkError::Identity {
+                context: "no Pubky session available".into(),
+                source: None,
+            });
+        }
+        Ok(())
     }
 
     async fn load_session_access_and_refresh_identity(
