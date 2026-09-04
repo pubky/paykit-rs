@@ -565,13 +565,18 @@ pub struct AllowanceAcceptance {
 }
 
 impl AllowanceAcceptance {
-    /// Create a V1 Allowance Acceptance.
-    pub fn new(event_id: EventId, allowance_id: AllowanceId, proposal_event_id: EventId) -> Self {
-        Self {
+    /// Create a V1 Allowance Acceptance with a distinct causal Event ID.
+    pub fn new(
+        event_id: EventId,
+        allowance_id: AllowanceId,
+        proposal_event_id: EventId,
+    ) -> Result<Self> {
+        validate_distinct_event_ids(&event_id, &proposal_event_id, None)?;
+        Ok(Self {
             event_id,
             allowance_id,
             proposal_event_id,
-        }
+        })
     }
 
     event_accessors!(PrivateMessageKind::AllowanceAcceptance);
@@ -600,13 +605,18 @@ pub struct AllowanceRejection {
 }
 
 impl AllowanceRejection {
-    /// Create a V1 Allowance Rejection.
-    pub fn new(event_id: EventId, allowance_id: AllowanceId, proposal_event_id: EventId) -> Self {
-        Self {
+    /// Create a V1 Allowance Rejection with a distinct causal Event ID.
+    pub fn new(
+        event_id: EventId,
+        allowance_id: AllowanceId,
+        proposal_event_id: EventId,
+    ) -> Result<Self> {
+        validate_distinct_event_ids(&event_id, &proposal_event_id, None)?;
+        Ok(Self {
             event_id,
             allowance_id,
             proposal_event_id,
-        }
+        })
     }
 
     event_accessors!(PrivateMessageKind::AllowanceRejection);
@@ -637,21 +647,23 @@ pub struct AllowanceEnd {
 
 impl AllowanceEnd {
     /// Create a proposal withdrawal with a null Acceptance Event ID.
+    ///
+    /// The End and Proposal Event IDs must be distinct.
     pub fn withdrawal(
         event_id: EventId,
         allowance_id: AllowanceId,
         proposal_event_id: EventId,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new(event_id, allowance_id, proposal_event_id, None)
     }
 
-    /// Create an End for accepted authority.
+    /// Create an End for accepted authority with pairwise-distinct Event IDs.
     pub fn accepted(
         event_id: EventId,
         allowance_id: AllowanceId,
         proposal_event_id: EventId,
         acceptance_event_id: EventId,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new(
             event_id,
             allowance_id,
@@ -665,13 +677,14 @@ impl AllowanceEnd {
         allowance_id: AllowanceId,
         proposal_event_id: EventId,
         acceptance_event_id: Option<EventId>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        validate_distinct_event_ids(&event_id, &proposal_event_id, acceptance_event_id.as_ref())?;
+        Ok(Self {
             event_id,
             allowance_id,
             proposal_event_id,
             acceptance_event_id,
-        }
+        })
     }
 
     event_accessors!(PrivateMessageKind::AllowanceEnd);
@@ -852,6 +865,23 @@ fn validate_response(
     Ok(())
 }
 
+fn validate_distinct_event_ids(
+    event_id: &EventId,
+    proposal_event_id: &EventId,
+    acceptance_event_id: Option<&EventId>,
+) -> Result<()> {
+    if event_id == proposal_event_id
+        || acceptance_event_id.is_some_and(|acceptance_event_id| {
+            acceptance_event_id == event_id || acceptance_event_id == proposal_event_id
+        })
+    {
+        return Err(PaykitError::Validation(
+            "Allowance lifecycle Event IDs must be pairwise distinct".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_common_correlation(
     allowance_id: &AllowanceId,
     proposal_event_id: &EventId,
@@ -992,7 +1022,8 @@ mod tests {
             EventId::new_v4(),
             proposal.allowance_id.clone(),
             proposal.event_id.clone(),
-        );
+        )
+        .unwrap();
         assert!(acceptance
             .validate_for_proposal(&proposal, AllowanceRole::Allowee)
             .is_ok());
@@ -1004,6 +1035,7 @@ mod tests {
             AllowanceId::new_v4(),
             proposal.event_id.clone(),
         )
+        .unwrap()
         .validate_for_proposal(&proposal, AllowanceRole::Allowee)
         .is_err());
         assert!(AllowanceAcceptance::new(
@@ -1011,6 +1043,7 @@ mod tests {
             proposal.allowance_id.clone(),
             EventId::new_v4(),
         )
+        .unwrap()
         .validate_for_proposal(&proposal, AllowanceRole::Allowee)
         .is_err());
 
@@ -1019,7 +1052,8 @@ mod tests {
             proposal.allowance_id.clone(),
             proposal.event_id.clone(),
             acceptance.event_id.clone(),
-        );
+        )
+        .unwrap();
         assert!(end
             .validate_for_accepted_allowance(&proposal, &acceptance, AllowanceRole::Allowee)
             .is_ok());
@@ -1032,7 +1066,8 @@ mod tests {
             proposal.allowance_id.clone(),
             proposal.event_id.clone(),
             EventId::new_v4(),
-        );
+        )
+        .unwrap();
         assert!(mismatched_end
             .validate_for_accepted_allowance(&proposal, &acceptance, AllowanceRole::Allowee)
             .is_err());
@@ -1041,7 +1076,8 @@ mod tests {
             EventId::new_v4(),
             proposal.allowance_id.clone(),
             proposal.event_id.clone(),
-        );
+        )
+        .unwrap();
         assert!(withdrawal
             .validate_withdrawal_for_proposal(&proposal, AllowanceRole::Allower)
             .is_ok());
@@ -1051,6 +1087,70 @@ mod tests {
         assert!(end
             .validate_withdrawal_for_proposal(&proposal, AllowanceRole::Allower)
             .is_err());
+    }
+
+    #[test]
+    fn test_response_constructors_reject_reused_proposal_event_id() {
+        let proposal = minimal_proposal();
+
+        assert!(matches!(
+            AllowanceAcceptance::new(
+                proposal.event_id.clone(),
+                proposal.allowance_id.clone(),
+                proposal.event_id.clone(),
+            ),
+            Err(PaykitError::Validation(_))
+        ));
+        assert!(matches!(
+            AllowanceRejection::new(
+                proposal.event_id.clone(),
+                proposal.allowance_id.clone(),
+                proposal.event_id.clone(),
+            ),
+            Err(PaykitError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn test_end_constructors_require_pairwise_distinct_event_ids() {
+        let proposal = minimal_proposal();
+        let acceptance_event_id = EventId::new_v4();
+
+        assert!(matches!(
+            AllowanceEnd::withdrawal(
+                proposal.event_id.clone(),
+                proposal.allowance_id.clone(),
+                proposal.event_id.clone(),
+            ),
+            Err(PaykitError::Validation(_))
+        ));
+        for (event_id, proposal_event_id, acceptance_event_id) in [
+            (
+                proposal.event_id.clone(),
+                proposal.event_id.clone(),
+                acceptance_event_id.clone(),
+            ),
+            (
+                acceptance_event_id.clone(),
+                proposal.event_id.clone(),
+                acceptance_event_id.clone(),
+            ),
+            (
+                EventId::new_v4(),
+                proposal.event_id.clone(),
+                proposal.event_id.clone(),
+            ),
+        ] {
+            assert!(matches!(
+                AllowanceEnd::accepted(
+                    event_id,
+                    proposal.allowance_id.clone(),
+                    proposal_event_id,
+                    acceptance_event_id,
+                ),
+                Err(PaykitError::Validation(_))
+            ));
+        }
     }
 
     #[test]

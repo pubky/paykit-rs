@@ -104,8 +104,8 @@ The current Rust SDK implementation covers:
   retries, and recovery marker workflows
 - Private Payment List publication, caching, and contact payment resolution
 - Payment Endpoint Reservations for contact-scoped receiving details
-- Payment Request lifecycle state, Receipt Access indexing, receipt issuance,
-  and receipt retrieval
+- Payment Request and Allowance lifecycle state, Receipt Access indexing,
+  receipt issuance, and receipt retrieval
 - Paykit-facing profile/contact helpers
 - SDK backup/export/restore validation
 
@@ -130,6 +130,7 @@ paykit-sdk/
     pubky_session.rs
     domain/
       adapters/
+      allowances/
       contacts/
       endpoints/
       endpoint_reservations/
@@ -145,6 +146,7 @@ paykit-sdk/
     runtime/
       mod.rs
       backup.rs
+      allowances.rs
       contacts.rs
       encrypted_links.rs
       outbound_private.rs

@@ -11,18 +11,21 @@ async fn test_allowance_send_helpers_preserve_fifo_event_order() {
         acceptance_event_id.clone(),
         allowance_id(),
         proposal_event_id.clone(),
-    );
+    )
+    .unwrap();
     let rejection = AllowanceRejection::new(
         event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d203"),
         allowance_id(),
         proposal_event_id.clone(),
-    );
+    )
+    .unwrap();
     let end = AllowanceEnd::accepted(
         event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
         allowance_id(),
         proposal_event_id,
         acceptance_event_id,
-    );
+    )
+    .unwrap();
 
     send_allowance_proposal(&mut setup.sender_link, &proposal)
         .await

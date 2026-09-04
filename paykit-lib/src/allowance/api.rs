@@ -168,29 +168,26 @@ mod tests {
 
     #[test]
     fn test_parser_flags_reused_causal_event_ids_as_malformed() {
-        let event_id = proposal().event_id().clone();
-        let acceptance = AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-            event_id.clone(),
-            proposal().allowance_id().clone(),
-            event_id.clone(),
-        ));
-        // Serialization refuses the reuse, so build the wire text by hand.
+        let proposal = proposal();
+        let event_id = proposal.event_id().clone();
+        let kind = PrivateMessageKind::AllowanceAcceptance;
+        // Constructors refuse the reuse, so build the wire text by hand.
         let raw_json = format!(
             "{{\"version\":1,\"kind\":\"{}\",\"event_id\":\"{event_id}\",\"allowance_id\":\"{}\",\"proposal_event_id\":\"{event_id}\"}}",
-            acceptance.kind().as_str(),
-            acceptance.allowance_id()
+            kind.as_str(),
+            proposal.allowance_id()
         );
         let message = PrivateApplicationMessage {
             version: Some(1),
-            kind: Some(acceptance.kind().as_str().to_string()),
+            kind: Some(kind.as_str().to_string()),
             raw_json,
         };
 
         let parsed = parse_allowance_event_message(&message).unwrap();
         assert!(!parsed.is_valid());
-        assert_eq!(parsed.kind(), PrivateMessageKind::AllowanceAcceptance);
+        assert_eq!(parsed.kind(), kind);
         assert_eq!(parsed.event_id(), Some(&event_id));
-        assert_eq!(parsed.allowance_id(), Some(acceptance.allowance_id()));
+        assert_eq!(parsed.allowance_id(), Some(proposal.allowance_id()));
     }
 
     #[test]

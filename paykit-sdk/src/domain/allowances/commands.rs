@@ -90,15 +90,16 @@ where
             }
             require_lifecycle(&record, AllowanceLifecycleState::Proposed, action)?;
             let proposal_event_id = bound_proposal_event_id(&record)?;
-            let event =
-                match response {
-                    AllowanceResponse::Acceptance => AllowanceEvent::Acceptance(
-                        AllowanceAcceptance::new(event_id, allowance_id.clone(), proposal_event_id),
-                    ),
-                    AllowanceResponse::Rejection => AllowanceEvent::Rejection(
-                        AllowanceRejection::new(event_id, allowance_id.clone(), proposal_event_id),
-                    ),
-                };
+            let event = match response {
+                AllowanceResponse::Acceptance => AllowanceEvent::Acceptance(
+                    AllowanceAcceptance::new(event_id, allowance_id.clone(), proposal_event_id)?,
+                ),
+                AllowanceResponse::Rejection => AllowanceEvent::Rejection(AllowanceRejection::new(
+                    event_id,
+                    allowance_id.clone(),
+                    proposal_event_id,
+                )?),
+            };
             append_and_derive(
                 tx,
                 &counterparty,
@@ -147,7 +148,7 @@ where
                         event_id,
                         allowance_id.clone(),
                         proposal_event_id,
-                    ))
+                    )?)
                 }
                 AllowanceLifecycleState::Accepted => {
                     let acceptance_event_id = bound_event_id(
@@ -159,7 +160,7 @@ where
                         allowance_id.clone(),
                         proposal_event_id,
                         acceptance_event_id,
-                    ))
+                    )?)
                 }
                 _ => {
                     return Err(PaykitSdkError::Policy {

@@ -7,6 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- Added the V1 Allowance lifecycle across the Rust library, SDK runtime, and
+  Swift/Kotlin bindings, including durable derivation, backup migration, Event
+  ID replay handling, and Encrypted Link recovery behavior.
+- Added the Private Message Kinds `paykit.allowance_proposal`,
+  `paykit.allowance_acceptance`, `paykit.allowance_rejection`, and
+  `paykit.allowance_end` (Event Message semantics). `paykit-sdk` exposes
+  `list_allowances`, `allowance_record`, `propose_allowance`,
+  `accept_allowance`, `reject_allowance`, and `end_allowance`; the FFI, Swift,
+  and Kotlin bindings expose the same surface with `get_allowance` in place of
+  `allowance_record`, plus the Allowance record, terms, and state types
+  documented in `specs/allowances.md`.
+- Documented wallet integration requirements for using accepted Allowances
+  with ordinary one-time and Recurring Payment Requests.
+
+### Changed
+
+- **Breaking (Rust API):** `AllowanceAcceptance::new`,
+  `AllowanceRejection::new`, `AllowanceEnd::withdrawal`, and
+  `AllowanceEnd::accepted` now return `Result` and reject lifecycle messages
+  that reuse their causal Event IDs.
+
 ## [0.1.0-rc50] - 2026-08-31
 
 ### Added

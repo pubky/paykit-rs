@@ -6,6 +6,7 @@
 
 mod harness;
 
+mod allowances;
 mod encrypted_links;
 mod private_lists;
 mod profiles;

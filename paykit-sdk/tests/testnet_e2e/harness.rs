@@ -5,6 +5,7 @@
 //! Pubky testnet (homeserver) per test, and real signed-up sessions wrapped in
 //! the SDK's own `PubkySessionAccess` via `PubkySessionBootstrap`.
 
+use chrono::Utc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use paykit_sdk::{
     PrivatePaymentEndpointSelectionRequest, PrivateReceivingDetail, PubkyLocalSecretKey,
     PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap, PubkySessionProvider,
     PublicPaymentEndpointCandidate, PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
-    ReceiverNoiseSecretKey, Result,
+    ReceiverNoiseSecretKey, Result, StorageAdapter,
 };
 use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
@@ -187,10 +188,12 @@ impl PaymentAdapter for TestnetPaymentAdapter {
 /// record assertions. `access` retains the real session for unauthenticated
 /// public-storage reads in assertions.
 pub struct TestUser {
-    pub sdk: PaykitSdk<InMemoryStorage, TestnetSessionProvider, TestnetPaymentAdapter>,
+    pub sdk: TestSdk,
     pub storage: InMemoryStorage,
     pub adapter: TestnetPaymentAdapter,
     pub access: PubkySessionAccess,
+    /// Local grant restore material, reused when the runtime is rebuilt.
+    pub session_secret: String,
     pub public_key: PubkyPublicKey,
     pub receiver_path: PaykitReceiverPath,
 }
@@ -258,15 +261,14 @@ impl TestUser {
 
         let storage = InMemoryStorage::default();
         let adapter = TestnetPaymentAdapter::default();
-        let provider = TestnetSessionProvider::new(access.clone(), session_secret);
-        let sdk = PaykitSdk::new(storage.clone(), provider, adapter.clone(), config)
-            .expect("SDK construction should succeed");
-
-        let report = sdk
-            .initialize()
-            .await
-            .expect("SDK initialization should succeed");
-        assert!(report.identity.live_session_available);
+        let sdk = build_initialized_sdk(
+            storage.clone(),
+            &access,
+            &session_secret,
+            adapter.clone(),
+            config,
+        )
+        .await;
         sdk.publish_paykit_receiver_marker(PaykitReceiverCapabilities {
             private_payments: true,
             payment_requests: true,
@@ -281,10 +283,58 @@ impl TestUser {
             storage,
             adapter,
             access,
+            session_secret,
             public_key: result.public_key,
             receiver_path,
         }
     }
+
+    /// Rebuild this user's runtime around the supplied durable storage.
+    ///
+    /// Tests use this to distinguish an ordinary process restart (shared
+    /// storage) from a backup restore into a fresh local store.
+    pub async fn restart_with_storage(&self, storage: InMemoryStorage) -> TestUser {
+        let config = PaykitSdkConfig::new(self.receiver_path.clone());
+        let sdk = build_initialized_sdk(
+            storage.clone(),
+            &self.access,
+            &self.session_secret,
+            self.adapter.clone(),
+            config,
+        )
+        .await;
+
+        TestUser {
+            sdk,
+            storage,
+            adapter: self.adapter.clone(),
+            access: self.access.clone(),
+            session_secret: self.session_secret.clone(),
+            public_key: self.public_key.clone(),
+            receiver_path: self.receiver_path.clone(),
+        }
+    }
+}
+
+pub type TestSdk = PaykitSdk<InMemoryStorage, TestnetSessionProvider, TestnetPaymentAdapter>;
+
+/// Construct and initialize an SDK over `storage` with a live testnet session.
+async fn build_initialized_sdk(
+    storage: InMemoryStorage,
+    access: &PubkySessionAccess,
+    session_secret: &str,
+    adapter: TestnetPaymentAdapter,
+    config: PaykitSdkConfig,
+) -> TestSdk {
+    let provider = TestnetSessionProvider::new(access.clone(), session_secret.to_string());
+    let sdk = PaykitSdk::new(storage, provider, adapter, config)
+        .expect("SDK construction should succeed");
+    let report = sdk
+        .initialize()
+        .await
+        .expect("SDK initialization should succeed");
+    assert!(report.identity.live_session_available);
+    sdk
 }
 
 /// Two signed-up users sharing one testnet homeserver.
@@ -332,31 +382,103 @@ pub async fn linked_two_party() -> TwoParty {
 /// counterparty message is `Linking` (not an error), so advance failures are
 /// real faults and unwrap loudly.
 pub async fn drive_link_to_linked(alice: &TestUser, bob: &TestUser) {
+    drive_until_linked(alice, bob, false).await;
+}
+
+/// Re-establish a link after both peers have entered recovery.
+pub async fn drive_recovery_to_linked(alice: &TestUser, bob: &TestUser) {
+    drive_until_linked(alice, bob, true).await;
+}
+
+/// Shared poll loop for `drive_link_to_linked` and `drive_recovery_to_linked`.
+///
+/// `recovering` selects the per-step SDK call: `ensure_link_with_peer` restarts
+/// the handshake from `RecoveryRequired`, while `advance_link_handshake` drives
+/// one already in progress.
+async fn drive_until_linked(alice: &TestUser, bob: &TestUser, recovering: bool) {
+    async fn step(
+        local: &TestUser,
+        peer: &TestUser,
+        recovering: bool,
+        side: &str,
+        phase: &str,
+    ) -> LinkedPeerState {
+        let peer_key = peer.public_key.clone();
+        let peer_path = peer.receiver_path.clone();
+        let result = if recovering {
+            local
+                .sdk
+                .ensure_link_with_peer(peer_key, peer_path, 1)
+                .await
+        } else {
+            local.sdk.advance_link_handshake(peer_key, peer_path).await
+        };
+        result
+            .unwrap_or_else(|error| panic!("{side} {phase} advance should succeed: {error}"))
+            .state
+    }
+
+    let (phase, initial_state) = if recovering {
+        ("recovery", LinkedPeerState::RecoveryRequired)
+    } else {
+        ("Handshake", LinkedPeerState::Linking)
+    };
     let deadline = Instant::now() + Duration::from_secs(15);
-    let mut alice_state = LinkedPeerState::Linking;
-    let mut bob_state = LinkedPeerState::Linking;
+    let mut alice_state = initial_state.clone();
+    let mut bob_state = initial_state;
     while alice_state != LinkedPeerState::Linked || bob_state != LinkedPeerState::Linked {
         assert!(
             Instant::now() < deadline,
-            "Encrypted Link Handshake timed out"
+            "Encrypted Link {phase} timed out"
         );
         if alice_state != LinkedPeerState::Linked {
-            alice_state = alice
-                .sdk
-                .advance_link_handshake(bob.public_key.clone(), bob.receiver_path.clone())
-                .await
-                .expect("initiator handshake advance should succeed")
-                .state;
+            alice_state = step(alice, bob, recovering, "initiator", phase).await;
         }
         if bob_state != LinkedPeerState::Linked {
-            bob_state = bob
-                .sdk
-                .advance_link_handshake(alice.public_key.clone(), alice.receiver_path.clone())
-                .await
-                .expect("responder handshake advance should succeed")
-                .state;
+            bob_state = step(bob, alice, recovering, "responder", phase).await;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Wait until a newly published recovery marker will be newer than the
+/// observer's persisted second-resolution checkpoint.
+pub async fn wait_until_marker_is_newer_than_observer_checkpoint(
+    observer: &TestUser,
+    counterparty: &PubkyPublicKey,
+    counterparty_receiver_path: &PaykitReceiverPath,
+) {
+    let cutoff = observer
+        .storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let counterparty_receiver_path = counterparty_receiver_path.clone();
+            move |tx| {
+                let link_checkpoint = tx
+                    .encrypted_link_state(&counterparty, &counterparty_receiver_path)
+                    .and_then(|state| {
+                        (state.link_snapshot.is_some() || state.handshake_snapshot.is_some())
+                            .then_some(state.checkpointed_at)
+                    });
+                let receive_checkpoint = tx
+                    .linked_peer(&counterparty, &counterparty_receiver_path)
+                    .and_then(|peer| peer.last_private_receive_at);
+                Ok(link_checkpoint.max(receive_checkpoint))
+            }
+        })
+        .await
+        .expect("observer checkpoint lookup should succeed");
+
+    let Some(cutoff) = cutoff else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Utc::now().timestamp() <= cutoff.timestamp() {
+        assert!(
+            Instant::now() < deadline,
+            "test clock did not advance past observer checkpoint"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 

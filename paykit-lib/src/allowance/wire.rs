@@ -372,21 +372,14 @@ pub(super) fn serialize_proposal_json(event: &AllowanceProposal) -> Result<Strin
 }
 
 pub(super) fn serialize_acceptance_json(event: &AllowanceAcceptance) -> Result<String> {
-    require_distinct_causal_ids(event.event_id(), event.proposal_event_id(), None)?;
     serialize_wire_json(&ResponseWire::from(event))
 }
 
 pub(super) fn serialize_rejection_json(event: &AllowanceRejection) -> Result<String> {
-    require_distinct_causal_ids(event.event_id(), event.proposal_event_id(), None)?;
     serialize_wire_json(&ResponseWire::from(event))
 }
 
 pub(super) fn serialize_end_json(event: &AllowanceEnd) -> Result<String> {
-    require_distinct_causal_ids(
-        event.event_id(),
-        event.proposal_event_id(),
-        event.acceptance_event_id(),
-    )?;
     serialize_wire_json(&EndWire::from(event))
 }
 
@@ -454,58 +447,31 @@ fn parse_end(json: &str) -> Result<AllowanceEvent> {
         PrivateMessageKind::AllowanceEnd,
         WIRE_LABEL,
     )?;
-    let event_id = parse_canonical(wire.event_id, EventId::new)?;
-    let allowance_id = parse_canonical(wire.allowance_id, AllowanceId::new)?;
-    let proposal_event_id = parse_canonical(wire.proposal_event_id, EventId::new)?;
-    let acceptance_event_id = wire
-        .acceptance_event_id
-        .into_inner()
-        .map(|id| parse_canonical(id, EventId::new))
-        .transpose()?;
-    require_distinct_causal_ids(&event_id, &proposal_event_id, acceptance_event_id.as_ref())?;
-    Ok(AllowanceEvent::End(AllowanceEnd::new(
-        event_id,
-        allowance_id,
-        proposal_event_id,
-        acceptance_event_id,
-    )))
+    AllowanceEnd::new(
+        parse_canonical(wire.event_id, EventId::new)?,
+        parse_canonical(wire.allowance_id, AllowanceId::new)?,
+        parse_canonical(wire.proposal_event_id, EventId::new)?,
+        wire.acceptance_event_id
+            .into_inner()
+            .map(|id| parse_canonical(id, EventId::new))
+            .transpose()?,
+    )
+    .map(AllowanceEvent::End)
 }
 
 /// Parse the shared Acceptance/Rejection wire shape into `build`'s event type.
 fn parse_response<T>(
     json: &str,
     expected: PrivateMessageKind,
-    build: fn(EventId, AllowanceId, EventId) -> T,
+    build: fn(EventId, AllowanceId, EventId) -> Result<T>,
 ) -> Result<T> {
     let wire: ResponseWire = parse_wire(json)?;
     validate_wire_version_kind(wire.version, &wire.kind, expected, WIRE_LABEL)?;
-    let event_id = parse_canonical(wire.event_id, EventId::new)?;
-    let allowance_id = parse_canonical(wire.allowance_id, AllowanceId::new)?;
-    let proposal_event_id = parse_canonical(wire.proposal_event_id, EventId::new)?;
-    require_distinct_causal_ids(&event_id, &proposal_event_id, None)?;
-    Ok(build(event_id, allowance_id, proposal_event_id))
-}
-
-/// Enforce the spec rule that an event's own Event ID and every causal Event
-/// ID it references are pairwise distinct.
-///
-/// The message is a fixed string so the check is safe on both the outbound
-/// (caller input) and inbound (decrypted plaintext) paths.
-fn require_distinct_causal_ids(
-    event_id: &EventId,
-    proposal_event_id: &EventId,
-    acceptance_event_id: Option<&EventId>,
-) -> Result<()> {
-    let reused = event_id == proposal_event_id
-        || acceptance_event_id.is_some_and(|acceptance_event_id| {
-            acceptance_event_id == event_id || acceptance_event_id == proposal_event_id
-        });
-    if reused {
-        return Err(PaykitError::Validation(
-            "Allowance causal Event IDs must be pairwise distinct".into(),
-        ));
-    }
-    Ok(())
+    build(
+        parse_canonical(wire.event_id, EventId::new)?,
+        parse_canonical(wire.allowance_id, AllowanceId::new)?,
+        parse_canonical(wire.proposal_event_id, EventId::new)?,
+    )
 }
 
 fn parse_wire<W: DeserializeOwned>(json: &str) -> Result<W> {
@@ -589,27 +555,39 @@ mod tests {
         let acceptance_id = event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202");
         let events = vec![
             proposal,
-            AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-                acceptance_id.clone(),
-                AllowanceId::new(ALLOWANCE_ID).unwrap(),
-                event_id(EVENT_ID),
-            )),
-            AllowanceEvent::Rejection(AllowanceRejection::new(
-                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d203"),
-                AllowanceId::new(ALLOWANCE_ID).unwrap(),
-                event_id(EVENT_ID),
-            )),
-            AllowanceEvent::End(AllowanceEnd::withdrawal(
-                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
-                AllowanceId::new(ALLOWANCE_ID).unwrap(),
-                event_id(EVENT_ID),
-            )),
-            AllowanceEvent::End(AllowanceEnd::accepted(
-                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205"),
-                AllowanceId::new(ALLOWANCE_ID).unwrap(),
-                event_id(EVENT_ID),
-                acceptance_id,
-            )),
+            AllowanceEvent::Acceptance(
+                AllowanceAcceptance::new(
+                    acceptance_id.clone(),
+                    AllowanceId::new(ALLOWANCE_ID).unwrap(),
+                    event_id(EVENT_ID),
+                )
+                .unwrap(),
+            ),
+            AllowanceEvent::Rejection(
+                AllowanceRejection::new(
+                    event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d203"),
+                    AllowanceId::new(ALLOWANCE_ID).unwrap(),
+                    event_id(EVENT_ID),
+                )
+                .unwrap(),
+            ),
+            AllowanceEvent::End(
+                AllowanceEnd::withdrawal(
+                    event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
+                    AllowanceId::new(ALLOWANCE_ID).unwrap(),
+                    event_id(EVENT_ID),
+                )
+                .unwrap(),
+            ),
+            AllowanceEvent::End(
+                AllowanceEnd::accepted(
+                    event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205"),
+                    AllowanceId::new(ALLOWANCE_ID).unwrap(),
+                    event_id(EVENT_ID),
+                    acceptance_id,
+                )
+                .unwrap(),
+            ),
         ];
 
         for event in events {
@@ -677,11 +655,14 @@ mod tests {
             assert!(parse_proposal_json(&serde_json::to_string(&invalid).unwrap()).is_err());
         }
 
-        let end = AllowanceEvent::End(AllowanceEnd::withdrawal(
-            event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
-            AllowanceId::new(ALLOWANCE_ID).unwrap(),
-            event_id(EVENT_ID),
-        ));
+        let end = AllowanceEvent::End(
+            AllowanceEnd::withdrawal(
+                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
+                AllowanceId::new(ALLOWANCE_ID).unwrap(),
+                event_id(EVENT_ID),
+            )
+            .unwrap(),
+        );
         let mut end_value: JsonValue =
             serde_json::from_str(&serialize_allowance_json(&end).unwrap()).unwrap();
         end_value
@@ -706,103 +687,16 @@ mod tests {
         assert!(parse_proposal_json(&uppercase_allowance_id).is_err());
     }
 
-    /// Valid End for accepted authority with the fixture IDs.
-    fn accepted_end() -> AllowanceEvent {
-        AllowanceEvent::End(AllowanceEnd::accepted(
-            event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205"),
-            AllowanceId::new(ALLOWANCE_ID).unwrap(),
-            event_id(EVENT_ID),
-            event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202"),
-        ))
-    }
-
-    /// Re-serialize `event` with the `target` field copied from `source`.
-    fn json_with_reused_id(event: &AllowanceEvent, target: &str, source: &str) -> String {
-        let mut value: JsonValue =
-            serde_json::from_str(&serialize_allowance_json(event).unwrap()).unwrap();
-        value[target] = value[source].clone();
-        serde_json::to_string(&value).unwrap()
-    }
-
-    #[test]
-    fn test_wire_rejects_reused_causal_event_ids() {
-        let acceptance = AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-            event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202"),
-            AllowanceId::new(ALLOWANCE_ID).unwrap(),
-            event_id(EVENT_ID),
-        ));
-        let rejection = AllowanceEvent::Rejection(AllowanceRejection::new(
-            event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d203"),
-            AllowanceId::new(ALLOWANCE_ID).unwrap(),
-            event_id(EVENT_ID),
-        ));
-        let end = accepted_end();
-
-        for (event, target, source) in [
-            (&acceptance, "proposal_event_id", "event_id"),
-            (&rejection, "proposal_event_id", "event_id"),
-            (&end, "proposal_event_id", "event_id"),
-            (&end, "acceptance_event_id", "event_id"),
-            (&end, "acceptance_event_id", "proposal_event_id"),
-        ] {
-            let raw = json_with_reused_id(event, target, source);
-            assert!(matches!(
-                parse_json(event.kind(), &raw),
-                Err(PaykitError::InvalidData { .. })
-            ));
-        }
-    }
-
-    #[test]
-    fn test_serialize_rejects_reused_causal_event_ids() {
-        let allowance_id = AllowanceId::new(ALLOWANCE_ID).unwrap();
-        let proposal_event_id = event_id(EVENT_ID);
-        let acceptance_event_id = event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202");
-
-        for event in [
-            AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-                proposal_event_id.clone(),
-                allowance_id.clone(),
-                proposal_event_id.clone(),
-            )),
-            AllowanceEvent::Rejection(AllowanceRejection::new(
-                proposal_event_id.clone(),
-                allowance_id.clone(),
-                proposal_event_id.clone(),
-            )),
-            AllowanceEvent::End(AllowanceEnd::withdrawal(
-                proposal_event_id.clone(),
-                allowance_id.clone(),
-                proposal_event_id.clone(),
-            )),
-            AllowanceEvent::End(AllowanceEnd::accepted(
-                acceptance_event_id.clone(),
-                allowance_id.clone(),
-                proposal_event_id.clone(),
-                acceptance_event_id.clone(),
-            )),
-            AllowanceEvent::End(AllowanceEnd::accepted(
-                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205"),
-                allowance_id.clone(),
-                acceptance_event_id.clone(),
-                acceptance_event_id.clone(),
-            )),
-        ] {
-            assert!(matches!(
-                serialize_allowance_json(&event),
-                Err(PaykitError::Validation(_))
-            ));
-        }
-        assert!(serialize_allowance_json(&accepted_end()).is_ok());
-    }
-
     #[test]
     fn test_wire_rejects_invalid_response_shapes() {
-        let acceptance = AllowanceEvent::Acceptance(AllowanceAcceptance::new(
-            event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202"),
-            AllowanceId::new(ALLOWANCE_ID).unwrap(),
-            event_id(EVENT_ID),
-        ));
+        let acceptance = AllowanceEvent::Acceptance(
+            AllowanceAcceptance::new(
+                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202"),
+                AllowanceId::new(ALLOWANCE_ID).unwrap(),
+                event_id(EVENT_ID),
+            )
+            .unwrap(),
+        );
         let json = serialize_allowance_json(&acceptance).unwrap();
 
         // JSON kind says acceptance but the message was routed as a rejection.
@@ -818,6 +712,76 @@ mod tests {
             PrivateMessageKind::AllowanceRejection.as_str(),
         );
         assert!(parse_json(PrivateMessageKind::AllowanceRejection, &rejection).is_err());
+    }
+
+    #[test]
+    fn test_wire_rejects_reused_causal_event_ids() {
+        let allowance_id = AllowanceId::new(ALLOWANCE_ID).unwrap();
+        let proposal_event_id = event_id(EVENT_ID);
+        let acceptance_event_id = event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202");
+        let response_event_id = event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d203");
+
+        for event in [
+            AllowanceEvent::Acceptance(
+                AllowanceAcceptance::new(
+                    response_event_id.clone(),
+                    allowance_id.clone(),
+                    proposal_event_id.clone(),
+                )
+                .unwrap(),
+            ),
+            AllowanceEvent::Rejection(
+                AllowanceRejection::new(
+                    response_event_id.clone(),
+                    allowance_id.clone(),
+                    proposal_event_id.clone(),
+                )
+                .unwrap(),
+            ),
+            AllowanceEvent::End(
+                AllowanceEnd::withdrawal(
+                    response_event_id.clone(),
+                    allowance_id.clone(),
+                    proposal_event_id.clone(),
+                )
+                .unwrap(),
+            ),
+        ] {
+            let mut value: JsonValue =
+                serde_json::from_str(&serialize_allowance_json(&event).unwrap()).unwrap();
+            value["event_id"] = value["proposal_event_id"].clone();
+            assert!(matches!(
+                parse_json(event.kind(), &serde_json::to_string(&value).unwrap()),
+                Err(PaykitError::InvalidData { .. })
+            ));
+        }
+
+        let accepted_end = AllowanceEvent::End(
+            AllowanceEnd::accepted(
+                response_event_id,
+                allowance_id,
+                proposal_event_id,
+                acceptance_event_id,
+            )
+            .unwrap(),
+        );
+        let accepted_value: JsonValue =
+            serde_json::from_str(&serialize_allowance_json(&accepted_end).unwrap()).unwrap();
+        for (target, source) in [
+            ("event_id", "proposal_event_id"),
+            ("event_id", "acceptance_event_id"),
+            ("acceptance_event_id", "proposal_event_id"),
+        ] {
+            let mut invalid = accepted_value.clone();
+            invalid[target] = invalid[source].clone();
+            assert!(matches!(
+                parse_json(
+                    PrivateMessageKind::AllowanceEnd,
+                    &serde_json::to_string(&invalid).unwrap(),
+                ),
+                Err(PaykitError::InvalidData { .. })
+            ));
+        }
     }
 
     #[test]
