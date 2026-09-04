@@ -112,9 +112,9 @@ where
 
     /// Queue acceptance as the authenticated proposal recipient.
     ///
-    /// The lifecycle, role, history, link, Event ID, and append checks occur in
-    /// one durable transaction. The caller remains responsible for Pubky
-    /// session creation, capability scope, key rotation, and timeouts.
+    /// The lifecycle, role, history, link, and append checks occur in one
+    /// durable transaction. The caller remains responsible for Pubky session
+    /// creation, capability scope, key rotation, and timeouts.
     pub async fn accept_allowance(
         &self,
         counterparty: PubkyPublicKey,
@@ -135,9 +135,9 @@ where
 
     /// Queue rejection as the authenticated proposal recipient.
     ///
-    /// The lifecycle, role, history, link, Event ID, and append checks occur in
-    /// one durable transaction. The caller remains responsible for Pubky
-    /// session creation, capability scope, key rotation, and timeouts.
+    /// The lifecycle, role, history, link, and append checks occur in one
+    /// durable transaction. The caller remains responsible for Pubky session
+    /// creation, capability scope, key rotation, and timeouts.
     pub async fn reject_allowance(
         &self,
         counterparty: PubkyPublicKey,
@@ -158,9 +158,12 @@ where
 
     /// Queue a proposal withdrawal or unilateral End for accepted authority.
     ///
-    /// The lifecycle, role, history, link, Event ID, and append checks occur in
-    /// one durable transaction. The caller remains responsible for Pubky
-    /// session creation, capability scope, key rotation, and timeouts.
+    /// End is the fail-safe terminal action: it is permitted on invalid or
+    /// unresolved Allowance history and is blocked only while the exact
+    /// Encrypted Link requires recovery. The lifecycle, role, link, and append
+    /// checks occur in one durable transaction. The caller remains responsible
+    /// for Pubky session creation, capability scope, key rotation, and
+    /// timeouts.
     pub async fn end_allowance(
         &self,
         counterparty: PubkyPublicKey,
