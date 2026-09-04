@@ -887,7 +887,7 @@ async fn test_allowance_end_command_blocked_when_history_needs_recovery() {
                         message,
                         "link reset".into(),
                         timestamp(),
-                    ));
+                    ))?;
                 }
                 Ok(())
             }
