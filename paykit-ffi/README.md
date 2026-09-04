@@ -23,8 +23,11 @@ on low-level `paykit-lib` protocol bindings.
 - `SdkPaymentAdapter` — platform callback interface for receiving details,
   endpoint reservation cleanup, payable endpoint ordering, and payment target
   construction.
-- `PaykitSdk.initialize`, `identityStatus`, and `signOut` — app-facing
-  account/session lifecycle for the current Paykit runtime.
+- `PaykitSdk.initialize`, `identityStatus`, `signOut`, and
+  `forgetSessionAccess` — app-facing account/session lifecycle for the current
+  Paykit runtime. `signOut` revokes the Pubky grant and preserves local state if
+  live access or remote revocation is unavailable; `forgetSessionAccess`
+  performs explicit local-only cleanup.
 - `PaykitSdk.stateRevision` — return the platform SDK state revision so
   apps can detect when SDK-managed state changed.
 - `PubkySessionAccess` — opaque Pubky session access material. Use its
@@ -164,8 +167,16 @@ object.
 
 ### Pubky Session Bootstrap
 
-- `PubkySessionBootstrap` — create/import Pubky sessions and auth flows.
-- `PubkyAuthRequest` — pending external auth-flow handle.
+- `PubkySessionBootstrap(clientId)` — create/import grant sessions and grant
+  auth flows for a stable app-owned Pubky client ID.
+- `PubkyClientConfig.authRelayUrl` — select a local or private grant-auth
+  relay; leave unset for Pubky's production default.
+- `PubkyAuthRequest` — pending external auth-flow handle; call `saveState()` to
+  persist its complete proof-of-possession state securely when an unapproved
+  request must survive process loss. Once `complete()` fetches an approval,
+  cancellation or a later exchange failure requires a new auth request.
+- `PubkyAuthRequestState` — secret-bearing URL plus client key used by
+  `resumeAuth`; delete it after completion, expiry, or abandonment.
 - `pubkySecretKeyFromBip39Seed(seed)` — derive a Pubky secret key from a
   64-byte BIP39 seed using the Pubky Core/Ring convention.
 - `pubkySecretKeyFromBip39Mnemonic(mnemonicPhrase)` — derive the same key from
@@ -173,8 +184,8 @@ object.
 - `pubkyPublicKeyFromSecret(localSecretKey)` — derive a Pubky public key.
 - `parsePubkyAuthUrl(authUrl)` — inspect a Pubky auth URL.
 - `PubkySessionBootstrap.approveAuthWithCompanionClaim(...)` — sign, encrypt,
-  and relay an application-defined companion claim before approving the normal
-  Pubky Auth token.
+  and relay an application-defined companion claim before approving the Pubky
+  grant.
 - `PubkyAuthCompanionClaim` — integrator-owned query parameter, claim type, and
   unsigned payload; no channel, signature, nonce, or secretbox primitives cross
   FFI.
@@ -183,7 +194,7 @@ object.
 The companion approval method throws
 `PubkyAuthCompanionClaimApprovalError`, whose cases distinguish invalid auth
 URLs, invalid claims or local keys, encryption failure, relay delivery failure,
-and normal authorization failure. Relay delivery completes before normal Auth
+and grant authorization failure. Relay delivery completes before grant
 approval begins, so a relay or encryption failure does not authorize the
 requesting server. The integrating application owns its payload serialization
 and semantic validation; Paykit owns the common cryptographic transport and

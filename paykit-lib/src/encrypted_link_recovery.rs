@@ -171,10 +171,10 @@ pub async fn publish_encrypted_link_recovery_marker(
     remote_receiver_path: &PaykitReceiverPath,
     marker: &EncryptedLinkRecoveryMarker,
 ) -> Result<String> {
-    let local_identity_public_key = session.info().public_key();
+    let local_identity_public_key = session.info().public_key().clone();
     let (write_path, _) = encrypted_link_recovery_marker_paths(
         local_noise_secret_key,
-        local_identity_public_key,
+        &local_identity_public_key,
         remote_identity_public_key,
         remote_noise_public_key,
         local_receiver_path,
@@ -201,10 +201,10 @@ pub async fn remove_encrypted_link_recovery_marker(
     local_receiver_path: &PaykitReceiverPath,
     remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<String> {
-    let local_identity_public_key = session.info().public_key();
+    let local_identity_public_key = session.info().public_key().clone();
     let (write_path, _) = encrypted_link_recovery_marker_paths(
         local_noise_secret_key,
-        local_identity_public_key,
+        &local_identity_public_key,
         remote_identity_public_key,
         remote_noise_public_key,
         local_receiver_path,

@@ -76,10 +76,10 @@ pub(super) fn validate_private_payment_paths(
     remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<()> {
     let local_secret_key = config.pubky_root_keypair.secret_key();
-    let local_identity_public_key = config.local_session.info().public_key();
+    let local_identity_public_key = config.local_session.info().public_key().clone();
     let (expected_write_path, expected_read_path) = compute_private_payment_paths(
         &local_secret_key,
-        local_identity_public_key,
+        &local_identity_public_key,
         remote_identity_public_key,
         remote_noise_public_key,
         local_receiver_path,

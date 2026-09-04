@@ -60,6 +60,12 @@ pub struct FfiPubkyLocalSecretKey {
     pub(crate) bytes: Vec<u8>,
 }
 
+impl Drop for FfiPubkyLocalSecretKey {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
 /// Receiver-scoped Noise secret key bytes supplied by platform secure storage.
 #[derive(uniffi::Object)]
 pub struct FfiReceiverNoiseSecretKey {

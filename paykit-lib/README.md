@@ -11,7 +11,7 @@ Add `paykit-lib` to your `Cargo.toml`.
 ```toml
 [dependencies]
 paykit-lib = { version = "x.x.x" }
-pubky = "0.8"
+pubky = "0.11.0"
 ```
 
 Minimal example — store and retrieve a public Payment Endpoint:
