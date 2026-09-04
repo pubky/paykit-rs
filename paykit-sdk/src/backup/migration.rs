@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use paykit_lib::{PaykitReceiverPath, PrivateMessageKind, ReceiptAccess};
+use paykit_lib::{PaykitReceiverPath, PrivateMessageKind};
 
 use crate::{
     domain::{
@@ -25,7 +25,6 @@ type EventKey = (PubkyPublicKey, PaykitReceiverPath, String);
 struct EventCarrier<'a> {
     item: &'a PrivateStreamItemRecord,
     header: PrivateStreamEventHeader,
-    receipt_access: Option<ReceiptAccess>,
 }
 
 /// Recognize Allowance items that an older SDK stored as unknown kinds, then
@@ -68,11 +67,10 @@ pub(super) fn migrate_legacy_allowance_stream_state(
         if !affected_event_keys.contains(&key) {
             continue;
         }
-        carriers_by_key.entry(key).or_default().push(EventCarrier {
-            item,
-            header,
-            receipt_access: classification.receipt_access,
-        });
+        carriers_by_key
+            .entry(key)
+            .or_default()
+            .push(EventCarrier { item, header });
     }
 
     for (key, carriers) in carriers_by_key {
@@ -183,69 +181,14 @@ fn rebuild_event_indexes(
         },
     );
     if previous_first_stream_item_id != Some(first.item.stream_item_id) {
-        reconcile_receipt_indexes(key, first, receipt_access_records, receipt_records);
+        // A changed first carrier is always a migrated Allowance item, so any
+        // Receipt Access index for this Event ID is stale; strict validation
+        // decides the rest.
+        receipt_access_records.remove(key);
+        receipt_records.retain(|_, record| {
+            record.issuer != key.0
+                || record.issuer_receiver_path != key.1
+                || record.receipt_access_event_id != key.2
+        });
     }
-}
-
-fn reconcile_receipt_indexes(
-    key: &EventKey,
-    first: &EventCarrier<'_>,
-    receipt_access_records: &mut HashMap<EventKey, ReceiptAccessRecord>,
-    receipt_records: &mut HashMap<EventKey, ReceiptRecord>,
-) {
-    let previous_access = receipt_access_records.remove(key);
-    let new_access = first.receipt_access.as_ref().map(|access| {
-        ReceiptAccessRecord::from_access(
-            key.0.clone(),
-            key.1.clone(),
-            first.item.stream_item_id,
-            first.item.receive_batch_id,
-            first.item.received_at,
-            access,
-        )
-    });
-    let descriptor_unchanged = previous_access
-        .as_ref()
-        .zip(new_access.as_ref())
-        .is_some_and(|(previous, current)| receipt_access_descriptor_matches(previous, current));
-    if !descriptor_unchanged {
-        remove_cached_receipts(key, receipt_records);
-    }
-    if let Some(mut access) = new_access {
-        if let Some(previous) = previous_access.filter(|_| descriptor_unchanged) {
-            preserve_receipt_retrieval_state(&mut access, &previous);
-        }
-        receipt_access_records.insert(key.clone(), access);
-    }
-}
-
-fn receipt_access_descriptor_matches(
-    previous: &ReceiptAccessRecord,
-    current: &ReceiptAccessRecord,
-) -> bool {
-    previous.event_id == current.event_id
-        && previous.receipt_id == current.receipt_id
-        && previous.payment_reference == current.payment_reference
-        && previous.payment_request_id == current.payment_request_id
-        && previous.billing_period == current.billing_period
-        && previous.location == current.location
-        && previous.key == current.key
-}
-
-fn preserve_receipt_retrieval_state(
-    current: &mut ReceiptAccessRecord,
-    previous: &ReceiptAccessRecord,
-) {
-    current.retrieval_status = previous.retrieval_status;
-    current.retrieval_attempted_at = previous.retrieval_attempted_at;
-    current.retrieved_at = previous.retrieved_at;
-    current.last_retrieval_error = previous.last_retrieval_error.clone();
-}
-
-fn remove_cached_receipts(key: &EventKey, receipt_records: &mut HashMap<EventKey, ReceiptRecord>) {
-    receipt_records.retain(|_, record| {
-        record.issuer != key.0
-            || record.issuer_receiver_path != key.1
-            || record.receipt_access_event_id != key.2
-    });
 }

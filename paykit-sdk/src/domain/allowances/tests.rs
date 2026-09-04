@@ -10,12 +10,13 @@ use paykit_lib::{
 use super::*;
 use crate::{
     domain::{
-        linked_peers::LinkedPeerState,
+        linked_peers::{default_linked_peer, LinkedPeerState},
         outbound_private::enqueue_private_message,
         payment_requests::{payment_request_records, PaymentRequestLifecycleState},
         private_stream::persist_private_stream_batch,
     },
     storage::{EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord, StorageAdapter},
+    test_utils::allowance_application_message,
     PaykitSdkError,
 };
 
@@ -115,19 +116,9 @@ fn linked_peer(
     path: PaykitReceiverPath,
     state: LinkedPeerState,
 ) -> LinkedPeerRecord {
-    LinkedPeerRecord {
-        counterparty: peer,
-        counterparty_receiver_path: path,
-        state,
-        last_sync_at: Some(timestamp()),
-        last_private_receive_at: None,
-        failure_count: 0,
-        local_recovery_attempt_id: None,
-        local_recovery_marker_created_at: None,
-        local_recovery_marker_last_error: None,
-        remote_recovery_attempt_id: None,
-        remote_recovery_marker_observed_at: None,
-    }
+    let mut record = default_linked_peer(peer, path);
+    record.state = state;
+    record
 }
 
 async fn derived(
@@ -178,12 +169,7 @@ async fn enqueue_allowance_rejection(
 }
 
 fn message(event: &AllowanceEvent) -> PrivateApplicationMessage {
-    let raw_json = serialize_allowance_event(event).unwrap();
-    PrivateApplicationMessage {
-        version: Some(1),
-        kind: Some(event.kind().as_str().to_owned()),
-        raw_json,
-    }
+    allowance_application_message(event)
 }
 
 async fn persist_inbound(
