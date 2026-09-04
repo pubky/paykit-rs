@@ -10,6 +10,27 @@ use crate::{
 /// Protocol version of every Allowance Event Message this module produces.
 const ALLOWANCE_V1_VERSION: u8 = 1;
 
+/// SECURITY / REDACTION: Allowance Terms are private counterparty data and
+/// must never reach Debug or log output, so every terms-bearing type prints a
+/// fixed `Name(<redacted>)` marker instead of its fields.
+macro_rules! redacted_debug {
+    ($($ty:ident),* $(,)?) => {$(
+        impl fmt::Debug for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(concat!(stringify!($ty), "(<redacted>)"))
+            }
+        }
+    )*};
+}
+
+redacted_debug!(
+    AllowanceAmountRange,
+    AllowancePeriod,
+    AllowancePeriodLimit,
+    AllowanceTerms,
+    AllowanceTermsBuilder,
+);
+
 /// UUID-v4 identifier shared by one Allowance lifecycle.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AllowanceId(String);
@@ -62,7 +83,7 @@ impl AllowanceRole {
     }
 
     /// Return the counterparty role.
-    pub fn counterparty(self) -> Self {
+    pub(crate) fn counterparty(self) -> Self {
         match self {
             Self::Allower => Self::Allowee,
             Self::Allowee => Self::Allower,
@@ -116,12 +137,6 @@ impl AllowanceAmountRange {
     /// Access the maximum decimal spelling.
     pub fn maximum(&self) -> &str {
         &self.maximum
-    }
-}
-
-impl fmt::Debug for AllowanceAmountRange {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AllowanceAmountRange(<redacted>)")
     }
 }
 
@@ -273,12 +288,6 @@ impl AllowancePeriod {
     }
 }
 
-impl fmt::Debug for AllowancePeriod {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AllowancePeriod(<redacted>)")
-    }
-}
-
 /// Amount and/or payment-count ceiling applied over one period.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct AllowancePeriodLimit {
@@ -325,22 +334,16 @@ impl AllowancePeriodLimit {
     }
 }
 
-impl fmt::Debug for AllowancePeriodLimit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AllowancePeriodLimit(<redacted>)")
-    }
-}
-
 /// Immutable constraints proposed for one Allowance.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AllowanceTerms {
-    asset: String,
-    per_payment_amount: Option<AllowanceAmountRange>,
-    period_limits: Vec<AllowancePeriodLimit>,
-    lifetime_amount_limit: Option<String>,
-    active_from: Option<String>,
-    expires_at: Option<String>,
-    allowed_payment_endpoint_identifiers: Option<Vec<PaymentEndpointIdentifier>>,
+    pub(super) asset: String,
+    pub(super) per_payment_amount: Option<AllowanceAmountRange>,
+    pub(super) period_limits: Vec<AllowancePeriodLimit>,
+    pub(super) lifetime_amount_limit: Option<String>,
+    pub(super) active_from: Option<String>,
+    pub(super) expires_at: Option<String>,
+    pub(super) allowed_payment_endpoint_identifiers: Option<Vec<PaymentEndpointIdentifier>>,
 }
 
 impl AllowanceTerms {
@@ -384,29 +387,7 @@ impl AllowanceTerms {
         self.allowed_payment_endpoint_identifiers.as_deref()
     }
 
-    pub(super) fn from_parts(
-        asset: String,
-        per_payment_amount: Option<AllowanceAmountRange>,
-        period_limits: Vec<AllowancePeriodLimit>,
-        lifetime_amount_limit: Option<String>,
-        active_from: Option<String>,
-        expires_at: Option<String>,
-        allowed_payment_endpoint_identifiers: Option<Vec<PaymentEndpointIdentifier>>,
-    ) -> Result<Self> {
-        let terms = Self {
-            asset,
-            per_payment_amount,
-            period_limits,
-            lifetime_amount_limit,
-            active_from,
-            expires_at,
-            allowed_payment_endpoint_identifiers,
-        };
-        terms.validate()?;
-        Ok(terms)
-    }
-
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         validate_asset_text(&self.asset, "Allowance asset")?;
         if let Some(limit) = &self.lifetime_amount_limit {
             validate_decimal_text(limit, "Allowance lifetime_amount_limit")?;
@@ -429,23 +410,11 @@ impl AllowanceTerms {
     }
 }
 
-impl fmt::Debug for AllowanceTerms {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AllowanceTerms(<redacted>)")
-    }
-}
-
 /// Builder for immutable [`AllowanceTerms`].
 ///
 /// Holds unvalidated terms; [`AllowanceTermsBuilder::build`] validates them.
 #[derive(Clone)]
 pub struct AllowanceTermsBuilder(AllowanceTerms);
-
-impl fmt::Debug for AllowanceTermsBuilder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AllowanceTermsBuilder(<redacted>)")
-    }
-}
 
 impl AllowanceTermsBuilder {
     /// Create a builder for an exact, case-sensitive asset.
