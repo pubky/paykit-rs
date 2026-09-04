@@ -707,6 +707,14 @@ mod tests {
                 )
                 .unwrap(),
             ),
+            AllowanceEvent::End(
+                AllowanceEnd::withdrawal(
+                    response_event_id.clone(),
+                    allowance_id.clone(),
+                    proposal_event_id.clone(),
+                )
+                .unwrap(),
+            ),
         ] {
             let mut value: JsonValue =
                 serde_json::from_str(&serialize_allowance_json(&event).unwrap()).unwrap();
@@ -716,25 +724,6 @@ mod tests {
                 Err(PaykitError::InvalidData { .. })
             ));
         }
-
-        let withdrawal = AllowanceEvent::End(
-            AllowanceEnd::withdrawal(
-                response_event_id.clone(),
-                allowance_id.clone(),
-                proposal_event_id.clone(),
-            )
-            .unwrap(),
-        );
-        let mut withdrawal_value: JsonValue =
-            serde_json::from_str(&serialize_allowance_json(&withdrawal).unwrap()).unwrap();
-        withdrawal_value["event_id"] = withdrawal_value["proposal_event_id"].clone();
-        assert!(matches!(
-            parse_json(
-                PrivateMessageKind::AllowanceEnd,
-                &serde_json::to_string(&withdrawal_value).unwrap(),
-            ),
-            Err(PaykitError::InvalidData { .. })
-        ));
 
         let accepted_end = AllowanceEvent::End(
             AllowanceEnd::accepted(

@@ -233,15 +233,7 @@ impl TestUser {
 
         let storage = InMemoryStorage::default();
         let adapter = TestnetPaymentAdapter::default();
-        let provider = TestnetSessionProvider::new(access.clone());
-        let sdk = PaykitSdk::new(storage.clone(), provider, adapter.clone(), config)
-            .expect("SDK construction should succeed");
-
-        let report = sdk
-            .initialize()
-            .await
-            .expect("SDK initialization should succeed");
-        assert!(report.identity.live_session_available);
+        let sdk = build_initialized_sdk(storage.clone(), &access, adapter.clone(), config).await;
         sdk.publish_paykit_receiver_marker(PaykitReceiverCapabilities {
             private_payments: true,
             payment_requests: true,
@@ -266,25 +258,15 @@ impl TestUser {
     /// Tests use this to distinguish an ordinary process restart (shared
     /// storage) from a backup restore into a fresh local store.
     pub async fn restart_with_storage(&self, storage: InMemoryStorage) -> TestUser {
-        let adapter = self.adapter.clone();
         let config = PaykitSdkConfig::new(self.receiver_path.clone());
-        let sdk = PaykitSdk::new(
-            storage.clone(),
-            TestnetSessionProvider::new(self.access.clone()),
-            adapter.clone(),
-            config,
-        )
-        .expect("restarted SDK construction should succeed");
-        let report = sdk
-            .initialize()
-            .await
-            .expect("restarted SDK initialization should succeed");
-        assert!(report.identity.live_session_available);
+        let sdk =
+            build_initialized_sdk(storage.clone(), &self.access, self.adapter.clone(), config)
+                .await;
 
         TestUser {
             sdk,
             storage,
-            adapter,
+            adapter: self.adapter.clone(),
             access: self.access.clone(),
             public_key: self.public_key.clone(),
             receiver_path: self.receiver_path.clone(),
@@ -293,6 +275,24 @@ impl TestUser {
 }
 
 pub type TestSdk = PaykitSdk<InMemoryStorage, TestnetSessionProvider, TestnetPaymentAdapter>;
+
+/// Construct and initialize an SDK over `storage` with a live testnet session.
+async fn build_initialized_sdk(
+    storage: InMemoryStorage,
+    access: &PubkySessionAccess,
+    adapter: TestnetPaymentAdapter,
+    config: PaykitSdkConfig,
+) -> TestSdk {
+    let provider = TestnetSessionProvider::new(access.clone());
+    let sdk = PaykitSdk::new(storage, provider, adapter, config)
+        .expect("SDK construction should succeed");
+    let report = sdk
+        .initialize()
+        .await
+        .expect("SDK initialization should succeed");
+    assert!(report.identity.live_session_available);
+    sdk
+}
 
 /// Two signed-up users sharing one testnet homeserver.
 pub struct TwoParty {
@@ -339,59 +339,60 @@ pub async fn linked_two_party() -> TwoParty {
 /// counterparty message is `Linking` (not an error), so advance failures are
 /// real faults and unwrap loudly.
 pub async fn drive_link_to_linked(alice: &TestUser, bob: &TestUser) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut alice_state = LinkedPeerState::Linking;
-    let mut bob_state = LinkedPeerState::Linking;
-    while alice_state != LinkedPeerState::Linked || bob_state != LinkedPeerState::Linked {
-        assert!(
-            Instant::now() < deadline,
-            "Encrypted Link Handshake timed out"
-        );
-        if alice_state != LinkedPeerState::Linked {
-            alice_state = alice
-                .sdk
-                .advance_link_handshake(bob.public_key.clone(), bob.receiver_path.clone())
-                .await
-                .expect("initiator handshake advance should succeed")
-                .state;
-        }
-        if bob_state != LinkedPeerState::Linked {
-            bob_state = bob
-                .sdk
-                .advance_link_handshake(alice.public_key.clone(), alice.receiver_path.clone())
-                .await
-                .expect("responder handshake advance should succeed")
-                .state;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    drive_until_linked(alice, bob, false).await;
 }
 
 /// Re-establish a link after both peers have entered recovery.
 pub async fn drive_recovery_to_linked(alice: &TestUser, bob: &TestUser) {
+    drive_until_linked(alice, bob, true).await;
+}
+
+/// Shared poll loop for `drive_link_to_linked` and `drive_recovery_to_linked`.
+///
+/// `recovering` selects the per-step SDK call: `ensure_link_with_peer` restarts
+/// the handshake from `RecoveryRequired`, while `advance_link_handshake` drives
+/// one already in progress.
+async fn drive_until_linked(alice: &TestUser, bob: &TestUser, recovering: bool) {
+    async fn step(
+        local: &TestUser,
+        peer: &TestUser,
+        recovering: bool,
+        side: &str,
+        phase: &str,
+    ) -> LinkedPeerState {
+        let peer_key = peer.public_key.clone();
+        let peer_path = peer.receiver_path.clone();
+        let result = if recovering {
+            local
+                .sdk
+                .ensure_link_with_peer(peer_key, peer_path, 1)
+                .await
+        } else {
+            local.sdk.advance_link_handshake(peer_key, peer_path).await
+        };
+        result
+            .unwrap_or_else(|error| panic!("{side} {phase} advance should succeed: {error}"))
+            .state
+    }
+
+    let (phase, initial_state) = if recovering {
+        ("recovery", LinkedPeerState::RecoveryRequired)
+    } else {
+        ("Handshake", LinkedPeerState::Linking)
+    };
     let deadline = Instant::now() + Duration::from_secs(15);
-    let mut alice_state = LinkedPeerState::RecoveryRequired;
-    let mut bob_state = LinkedPeerState::RecoveryRequired;
+    let mut alice_state = initial_state.clone();
+    let mut bob_state = initial_state;
     while alice_state != LinkedPeerState::Linked || bob_state != LinkedPeerState::Linked {
         assert!(
             Instant::now() < deadline,
-            "Encrypted Link recovery timed out"
+            "Encrypted Link {phase} timed out"
         );
         if alice_state != LinkedPeerState::Linked {
-            alice_state = alice
-                .sdk
-                .ensure_link_with_peer(bob.public_key.clone(), bob.receiver_path.clone(), 1)
-                .await
-                .expect("alice recovery advance should succeed")
-                .state;
+            alice_state = step(alice, bob, recovering, "initiator", phase).await;
         }
         if bob_state != LinkedPeerState::Linked {
-            bob_state = bob
-                .sdk
-                .ensure_link_with_peer(alice.public_key.clone(), alice.receiver_path.clone(), 1)
-                .await
-                .expect("bob recovery advance should succeed")
-                .state;
+            bob_state = step(bob, alice, recovering, "responder", phase).await;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
