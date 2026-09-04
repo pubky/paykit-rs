@@ -10,14 +10,70 @@ use crate::{
         require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
         NewPrivateStreamItem, NewPrivateStreamItemDetails, PeerLinkOperationLease, StorageAdapter,
     },
-    PaykitReceiverPath, PubkyPublicKey, Result,
+    PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
 
 use paykit_lib::{
-    parse_payment_request_event_message, parse_private_payment_list_json,
-    parse_receipt_access_event_message, PrivateApplicationMessage, PrivateMessageKind,
-    ReceiptAccess,
+    parse_allowance_event_message, parse_payment_request_event_message,
+    parse_private_payment_list_json, parse_receipt_access_event_message, AllowanceEventMessage,
+    EventId, PaymentRequestEventMessage, PrivateApplicationMessage, PrivateMessageKind,
+    ReceiptAccess, ReceiptAccessEventMessage,
 };
+
+/// Read surface shared by every typed Event Message parser in `paykit-lib`.
+///
+/// Intake classification, outbound validation, and backup validation only
+/// need these three views, so each new Event Message family adds one `impl`
+/// here instead of a new arm at every site.
+pub(crate) trait ParsedEventMessage {
+    fn event_id(&self) -> Option<&EventId>;
+    fn is_valid(&self) -> bool;
+    fn validation_error(&self) -> Option<&str>;
+}
+
+macro_rules! impl_parsed_event_message {
+    ($($message:ty),* $(,)?) => {$(
+        impl ParsedEventMessage for $message {
+            fn event_id(&self) -> Option<&EventId> {
+                <$message>::event_id(self)
+            }
+
+            fn is_valid(&self) -> bool {
+                <$message>::is_valid(self)
+            }
+
+            fn validation_error(&self) -> Option<&str> {
+                <$message>::validation_error(self)
+            }
+        }
+    )*};
+}
+
+impl_parsed_event_message!(
+    ReceiptAccessEventMessage,
+    PaymentRequestEventMessage,
+    AllowanceEventMessage,
+);
+
+/// Require a parsed Event Message whose kind matched and that validated.
+///
+/// `mismatch_context` is only evaluated when the parser rejected the kind.
+pub(crate) fn require_valid_event_message<M: ParsedEventMessage>(
+    parsed: Option<M>,
+    mismatch_context: impl FnOnce() -> String,
+) -> Result<M> {
+    let message = parsed.ok_or_else(|| PaykitSdkError::Protocol {
+        context: mismatch_context(),
+        source: None,
+    })?;
+    if let Some(error) = message.validation_error() {
+        return Err(PaykitSdkError::Protocol {
+            context: error.to_owned(),
+            source: None,
+        });
+    }
+    Ok(message)
+}
 
 /// Parse status for one received Private Application Message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,58 +318,52 @@ pub(crate) fn classify_private_application_message(
         }
         PrivateMessageKind::ReceiptAccess => {
             let parsed = parse_receipt_access_event_message(message);
-            let event = parsed
-                .as_ref()
-                .and_then(|parsed| parsed.event_id())
-                .map(|event_id| PrivateStreamEventHeader {
-                    event_id: event_id.as_str().to_owned(),
-                    event_kind: kind.as_str().to_owned(),
-                });
-            PrivateStreamMessageClassification {
-                status: status_from_event_validity(
-                    parsed.as_ref().is_some_and(|parsed| parsed.is_valid()),
-                ),
-                parse_error: parsed
-                    .as_ref()
-                    .and_then(|parsed| parsed.validation_error())
-                    .map(str::to_owned),
-                event,
-                receipt_access: parsed.and_then(|parsed| parsed.parsed_access().cloned()),
-            }
+            let mut classification = classify_event_message(kind, parsed.as_ref());
+            classification.receipt_access =
+                parsed.and_then(|parsed| parsed.parsed_access().cloned());
+            classification
         }
         PrivateMessageKind::PaymentRequest
         | PrivateMessageKind::PaymentRequestAcceptance
         | PrivateMessageKind::PaymentRequestRejection
         | PrivateMessageKind::PaymentRequestCancellation
         | PrivateMessageKind::PaymentProof => {
-            let parsed = parse_payment_request_event_message(message);
-            let event = parsed
-                .as_ref()
-                .and_then(|parsed| parsed.event_id())
-                .map(|event_id| PrivateStreamEventHeader {
-                    event_id: event_id.as_str().to_owned(),
-                    event_kind: kind.as_str().to_owned(),
-                });
-            PrivateStreamMessageClassification {
-                status: status_from_event_validity(
-                    parsed.as_ref().is_some_and(|parsed| parsed.is_valid()),
-                ),
-                parse_error: parsed
-                    .as_ref()
-                    .and_then(|parsed| parsed.validation_error())
-                    .map(str::to_owned),
-                event,
-                receipt_access: None,
-            }
+            classify_event_message(kind, parse_payment_request_event_message(message).as_ref())
+        }
+        PrivateMessageKind::AllowanceProposal
+        | PrivateMessageKind::AllowanceAcceptance
+        | PrivateMessageKind::AllowanceRejection
+        | PrivateMessageKind::AllowanceEnd => {
+            classify_event_message(kind, parse_allowance_event_message(message).as_ref())
         }
     }
 }
 
-fn status_from_event_validity(is_valid: bool) -> PrivateStreamParseStatus {
-    if is_valid {
-        PrivateStreamParseStatus::Valid
-    } else {
-        PrivateStreamParseStatus::MalformedRecognized
+/// Classify one recognized Event Message kind from its typed parse result.
+///
+/// `None` means the parser rejected the kind it was handed, which is treated
+/// as a malformed recognized message with no header to dedupe on.
+fn classify_event_message<M: ParsedEventMessage>(
+    kind: PrivateMessageKind,
+    parsed: Option<&M>,
+) -> PrivateStreamMessageClassification {
+    let is_valid = parsed.is_some_and(ParsedEventMessage::is_valid);
+    PrivateStreamMessageClassification {
+        status: if is_valid {
+            PrivateStreamParseStatus::Valid
+        } else {
+            PrivateStreamParseStatus::MalformedRecognized
+        },
+        parse_error: parsed
+            .and_then(ParsedEventMessage::validation_error)
+            .map(str::to_owned),
+        event: parsed
+            .and_then(ParsedEventMessage::event_id)
+            .map(|event_id| PrivateStreamEventHeader {
+                event_id: event_id.as_str().to_owned(),
+                event_kind: kind.as_str().to_owned(),
+            }),
+        receipt_access: None,
     }
 }
 

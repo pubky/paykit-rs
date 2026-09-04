@@ -1,4 +1,7 @@
-use crate::{PaykitError, Result};
+use crate::{
+    validation::{validate_asset_text, validate_decimal_text},
+    Result,
+};
 
 /// Amount of value in a payment flow, expressed as decimal text plus asset.
 ///
@@ -32,50 +35,15 @@ impl PaymentAmount {
     }
 
     pub(crate) fn validate_with_label(&self, label: &'static str) -> Result<()> {
-        validate_decimal(&self.value, label)?;
-        validate_text(&self.asset, "asset")
+        validate_decimal_text(&self.value, format_args!("{label}.value"))?;
+        validate_asset_text(&self.asset, "Payment Amount asset")
     }
-}
-
-fn validate_decimal(value: &str, label: &'static str) -> Result<()> {
-    let mut seen_dot = false;
-    let mut seen_digit = false;
-    for ch in value.chars() {
-        if ch == '.' && !seen_dot {
-            seen_dot = true;
-        } else if ch.is_ascii_digit() {
-            seen_digit = true;
-        } else {
-            return Err(PaykitError::Validation(format!(
-                "{label}.value must be a decimal string"
-            )));
-        }
-    }
-    if !seen_digit {
-        return Err(PaykitError::Validation(format!(
-            "{label}.value must contain at least one digit"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_text(value: &str, field: &'static str) -> Result<()> {
-    if value.is_empty() {
-        return Err(PaykitError::Validation(format!(
-            "Payment Amount {field} must not be empty"
-        )));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(PaykitError::Validation(format!(
-            "Payment Amount {field} must not contain control characters"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PaykitError;
 
     #[test]
     fn payment_amount_accepts_decimal_value_and_asset() {
