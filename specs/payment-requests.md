@@ -278,21 +278,9 @@ Payment Requests and Subscriptions do not require an
 not change when Allowances are implemented. A wallet may use one matching,
 accepted Allowance as prior permission to send the ordinary Acceptance and pay
 automatically. This is optional wallet behavior, not a Payment Request
-requirement or a guarantee of payment.
-
-Automatic Acceptance does not imply that payment succeeded or remains in
-flight. If an Allowance-aware wallet cannot complete payment after recording
-Acceptance, it uses durable wallet-local execution state to decide whether the
-accepted request or Billing Period is safe to present for explicit payment. It
-does not send another Acceptance. This recovery path does not change the
-Payment Request wire lifecycle or make every accepted request actionable.
-
-The same matching applies to one-time and Recurring Payment Requests. Recurring
-Acceptance consumes no Allowance capacity; the wallet rechecks and meters the
-pinned Allowance for each Billing Period. Ending or expiring that Allowance
-stops future automatic payments. Insufficient capacity blocks the current
-payment and is re-evaluated for later Billing Periods. None of these conditions
-rejects or cancels the Payment Request.
+requirement or a guarantee of payment. Allowance matching, accepted-but-unpaid
+recovery, and per-Billing-Period metering are specified in
+[allowances.md](allowances.md) and are not repeated here.
 
 ## paykit.payment_request
 
