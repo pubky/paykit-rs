@@ -355,6 +355,15 @@ missing, invalid, or uncertain endpoint MUST NOT be used for automatic payment.
 Allowances add no destination digest, public-endpoint requirement, or fallback
 selection rule.
 
+Before an automatic payment, the wallet MUST establish that the amount and
+asset the selected payment method will actually transfer equal the requested
+Payment Amount; amount-less endpoint details (for example an amount-less
+invoice or offer) MUST be paid at exactly the requested Payment Amount.
+Endpoint details that fix a different amount or asset, or whose transferred
+amount the wallet cannot determine before execution, MUST be treated as
+unusable for automatic payment, with the same manual-flow outcome as a stale or
+invalid endpoint.
+
 Before automatic Acceptance, zero or multiple candidates, disabled local
 automatic handling, failed endpoint resolution, unsupported payment methods,
 or any stricter wallet check preserve the proposed request's ordinary manual
