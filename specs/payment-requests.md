@@ -59,9 +59,15 @@ The Encrypted Link identifies the local party and counterparty. Payment Request 
 
 All Payment Request protocol messages are `pubky-noise` Private Application Messages sent over an established Encrypted Link.
 
-An Event Message is one lifecycle message, such as a request, acceptance, rejection, cancellation, or proof. Event Messages are FIFO messages, not Latest-State Messages.
+An Event Message is one lifecycle message, such as a request, acceptance,
+rejection, cancellation, or proof. Event Messages are FIFO within each sending
+direction, not Latest-State Messages. The two directions have no protocol-level
+total order.
 
-Payment Request messages are Event Messages. Receivers MUST preserve and process all valid recognized Payment Request events in send order.
+Payment Request messages are Event Messages. Receivers MUST preserve and process
+all valid recognized Payment Request events in each sender's send order. Local
+record or receipt time MUST NOT be treated as proof of cross-direction causal
+order.
 
 Implementations that derive Payment Request state SHOULD consume a unified ordered stream of private messages or Payment Request protocol events. Low-level Paykit Library receive APIs should expose the ordered private message stream plus stateless parsers; per-kind convenience getters belong in higher-level SDK/runtime code that can preserve unrelated recognized Event Message kinds in a persisted event log or queue.
 
@@ -69,6 +75,7 @@ Paykit message kinds use logical lanes over the same Encrypted Link:
 
 - Private Payment Lists use Latest-State Message semantics.
 - Payment Request protocol messages use Event Message semantics.
+- Allowance lifecycle messages use Event Message semantics.
 - Receipt Access uses Event Message semantics.
 
 Recognized Event Messages carry an `event_id` for idempotent local storage and
@@ -132,6 +139,10 @@ Rules:
 - It is used for idempotent storage and replay dedupe.
 - It is stable across retries of the same event.
 - Each distinct lifecycle message uses a distinct `event_id`.
+- Dedupe is scoped to one authenticated Encrypted Link and applies across all
+  Event Message kinds: a reused `event_id` sent by the other party, or reused
+  with different payload bytes, is a conflict and MUST be rejected (fail
+  closed).
 - In v0.2 it is a UUID, not a hash of the event payload. Hash-based IDs would require canonical serialization rules.
 
 ### Payment Reference
@@ -266,9 +277,14 @@ example, a subscription-gated service may create the Recurring Payment Request,
 while the payer's wallet schedules each payment and submits its proof. The
 service validates each period's payment and applies its own access policy.
 
-A Recurring Payment Request is payer-controlled coordination, not a payee-pull
-allowance. Any future mechanism that authorizes a payee to initiate or withdraw
-payments would be a separate payment-execution feature.
+Payment Requests and Subscriptions do not require an
+[Allowance](allowances.md), and their wire messages and ordinary manual flow do
+not change when Allowances are implemented. A wallet may use one matching,
+accepted Allowance as prior permission to send the ordinary Acceptance and pay
+automatically. This is optional wallet behavior, not a Payment Request
+requirement or a guarantee of payment. Allowance matching, accepted-but-unpaid
+recovery, and per-Billing-Period metering are specified in
+[allowances.md](allowances.md) and are not repeated here.
 
 ## paykit.payment_request
 
@@ -327,12 +343,18 @@ Sent by the payer to the payee.
 Validation rules:
 
 - Sender MUST be the payer.
-- The request MUST be known.
-- The request MUST be in the proposed state.
+- At the payer's acceptance decision, the request MUST be known and in the
+  proposed state.
 - The proposal MUST NOT be expired according to the payer's trusted local time
   at the acceptance decision. Payees that receive an acceptance after local
   expiry MAY reject or flag it according to local policy; deterministic replay
   requires the SDK/runtime to persist its local decision or processing time.
+- A payee that has already recorded its own Cancellation MUST record an
+  otherwise-valid later-received Acceptance from the payer as crossing, without
+  reopening the request; the lifecycle remains `cancelled`. This exception is
+  safe because the events occupy opposite FIFO directions and Cancellation
+  still prevents new execution. An Acceptance after the payer's own earlier
+  Cancellation is invalid because those events occupy the same FIFO direction.
 - Acceptance is explicit. Paying without this message is not protocol-level acceptance in v0.2.
 
 ## paykit.payment_request_rejection
@@ -382,6 +404,11 @@ Validation rules:
 - The request MUST be non-terminal.
 - Cancellation is unilateral. No counterparty confirmation is required.
 - After cancellation, payer implementations MUST NOT start new payment execution for the request.
+- Cancellation does not invalidate a payment execution that the payer durably
+  recorded as past its irreversible boundary before observing the cancellation.
+  The payer MAY later send the ordinary Payment Proof for that execution, but
+  MUST NOT use this exception for an execution started after observing
+  cancellation.
 - `reason` is optional and SHOULD be omitted when absent. If present, it MUST be a string; `null` is invalid.
 
 ## paykit.payment_proof
@@ -415,8 +442,19 @@ may be included inside `proof` when needed.
 Validation rules:
 
 - Sender MUST be the payer.
-- The request MUST be known and accepted.
-- The request MUST NOT be cancelled, rejected, or already settled according to local wallet/payment-processor state.
+- The request MUST be known and have a valid Acceptance that precedes the proof
+  in the payer's FIFO event direction.
+- The request MUST NOT be rejected.
+- Implementations MUST reconcile repeated or corrective proofs for the same
+  one-time request or Billing Period using local payment state. A later proof
+  MUST NOT be treated as evidence of another payment merely because it has a
+  different Event ID.
+- If the request is cancelled, the payer MUST send a proof only for an execution
+  it durably recorded as past its irreversible boundary before observing the
+  cancellation. A receiver MUST NOT reject an otherwise-valid proof solely
+  because cancellation precedes it in the receiver's event history.
+- A Payment Proof after cancellation records the earlier execution but does not
+  reopen the request, authorize another payment, or change its cancelled state.
 - `payment_reference` MUST equal the accepted request's `payment_reference`.
 - `billing_period` MUST be `null` for one-time requests.
 - `billing_period` MUST be present for recurring requests.
@@ -430,7 +468,15 @@ Validation rules:
 - `proof` MUST be a JSON object. Its internal fields are method-specific and are
   not interpreted by Paykit v0.2.
 
-Paykit validates the message shape and can validate stateless request/proof correlation fields against a known Payment Request. Integrating applications, wallets, or future higher-level Paykit components validate whether the request is known, accepted, proposal-expired before acceptance, rejected, cancelled, already processed, or whether a recurring Billing Period is eligible under the accepted recurrence. Payment-method-specific code validates whether the proof actually proves payment.
+Paykit validates the message shape and can validate stateless request/proof
+correlation fields against a known Payment Request. Integrating applications,
+wallets, or future higher-level Paykit components validate whether the request
+is known, has an earlier valid Acceptance, was rejected, is already processed,
+or whether a recurring Billing Period is eligible under the accepted
+recurrence. Whether execution crossed its irreversible boundary before the
+payer observed cancellation is durable payer-wallet state and cannot be proven
+from Event Message order alone. Payment-method-specific code validates whether
+the proof actually proves payment.
 
 ## Billing period
 
@@ -467,14 +513,23 @@ State transitions:
 payment_request -> proposed
 proposed + acceptance -> accepted
 proposed + rejection -> rejected
-proposed|accepted + cancellation -> cancelled
 accepted one-time request + payment_proof -> proof_submitted
+proposed|accepted|proof_submitted + cancellation -> cancelled
+proposed + crossing acceptance and cancellation -> cancelled (acceptance recorded)
+cancelled request with recorded acceptance + qualifying payment_proof -> cancelled (proof recorded)
 ```
 
-Terminal states:
+Terminal authorization states:
 
 - `rejected`
 - `cancelled`
+
+Neither state can be reopened by a later Acceptance. A crossing Acceptance may
+be recorded on a cancelled request only as described above. Rejection admits no
+later Payment Proof. Cancellation prevents new execution, but a qualifying
+Payment Proof may still report an execution that crossed its irreversible
+boundary first; recording that proof does not transition the request out of
+`cancelled`.
 
 For one-time requests, `proof_submitted` means Paykit has received a Payment
 Proof event, not that payment settlement was independently verified. It is not a
@@ -594,14 +649,13 @@ If Encrypted Link state is lost, a new handshake may be needed to restore privat
 
 If an implementation persists Encrypted Link snapshots, it MUST treat the snapshot as the local read checkpoint. It MUST persist received Event Messages and dedupe state before replacing the stored snapshot with a snapshot whose read counter has advanced past those messages. A crash after event persistence but before snapshot persistence may replay messages; receivers MUST dedupe replayed Event Messages by `event_id`.
 
-Paykit libraries may parse, order, and structurally validate messages, and should expose either raw or canonical payloads from ordered receive APIs. Durable idempotency is the caller's responsibility. Implementations MUST use persisted history to dedupe repeated `event_id`s, reject conflicting reused `event_id`s, and reject later `paykit.payment_request` events that reuse an existing `payment_request_id` with a different `event_id`.
+Paykit libraries may parse, order, and structurally validate messages, and should expose either raw or canonical payloads from ordered receive APIs. Durable idempotency is the caller's responsibility. Implementations MUST use persisted history to dedupe repeated `event_id`s, reject conflicting reused `event_id`s across kinds and directions within the link, and reject later `paykit.payment_request` events that reuse an existing `payment_request_id` with a different `event_id`.
 
 ## Open questions
 
 1. Should Payment Proof payloads be opaque JSON objects or method-specific typed payloads?
-2. Should Payment Proofs be allowed after cancellation if the payment execution happened before cancellation was received?
-3. Should future versions model update or replacement links between Payment Requests?
-4. Should future versions define payer-requested term changes?
-5. Should future versions define protocol-level resync messages?
-6. Should future versions define grace periods or retry windows as protocol fields?
-7. Should recurring requests support per-period Payment Reference templates or overrides?
+2. Should future versions model update or replacement links between Payment Requests?
+3. Should future versions define payer-requested term changes?
+4. Should future versions define protocol-level resync messages?
+5. Should future versions define grace periods or retry windows as protocol fields?
+6. Should recurring requests support per-period Payment Reference templates or overrides?
