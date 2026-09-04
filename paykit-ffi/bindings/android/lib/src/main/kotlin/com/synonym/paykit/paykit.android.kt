@@ -4496,7 +4496,6 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
  * default string and debug output are redacted.
  */
 public open class AllowanceAmountRange: Disposable, AllowanceAmountRangeInterface {
-    override fun toString(): String = "AllowanceAmountRange(<redacted>)"
 
     public constructor(pointer: Pointer) {
         this.pointer = pointer
@@ -4674,7 +4673,6 @@ public object FfiConverterTypeAllowanceAmountRange: FfiConverter<AllowanceAmount
  * default string and debug output are redacted.
  */
 public open class AllowancePeriod: Disposable, AllowancePeriodInterface {
-    override fun toString(): String = "AllowancePeriod(<redacted>)"
 
     public constructor(pointer: Pointer) {
         this.pointer = pointer
@@ -4882,7 +4880,6 @@ public object FfiConverterTypeAllowancePeriod: FfiConverter<AllowancePeriod, Poi
  * default string and debug output are redacted.
  */
 public open class AllowancePeriodLimit: Disposable, AllowancePeriodLimitInterface {
-    override fun toString(): String = "AllowancePeriodLimit(<redacted>)"
 
     public constructor(pointer: Pointer) {
         this.pointer = pointer
@@ -5075,7 +5072,6 @@ public object FfiConverterTypeAllowancePeriodLimit: FfiConverter<AllowancePeriod
  * as sensitive. Do not include them in ordinary platform logs or diagnostics.
  */
 public open class AllowanceTerms: Disposable, AllowanceTermsInterface {
-    override fun toString(): String = "AllowanceTerms(<redacted>)"
 
     public constructor(pointer: Pointer) {
         this.pointer = pointer
