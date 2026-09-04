@@ -797,8 +797,11 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 );
                 return;
             }
+            // Only the first Acceptance may cross a payee Cancellation; any
+            // later Acceptance falls through to the transition check below.
             let crosses_payee_cancellation = record.state == PaymentRequestLifecycleState::Canceled
-                && cancellation_was_sent_by_payee(record);
+                && cancellation_was_sent_by_payee(record)
+                && record.accepted_event_id.is_none();
             if !matches!(record.state, PaymentRequestLifecycleState::Proposed)
                 && !crosses_payee_cancellation
             {
