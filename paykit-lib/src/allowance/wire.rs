@@ -372,21 +372,14 @@ pub(super) fn serialize_proposal_json(event: &AllowanceProposal) -> Result<Strin
 }
 
 pub(super) fn serialize_acceptance_json(event: &AllowanceAcceptance) -> Result<String> {
-    require_distinct_causal_ids(event.event_id(), event.proposal_event_id(), None)?;
     serialize_wire_json(&ResponseWire::from(event))
 }
 
 pub(super) fn serialize_rejection_json(event: &AllowanceRejection) -> Result<String> {
-    require_distinct_causal_ids(event.event_id(), event.proposal_event_id(), None)?;
     serialize_wire_json(&ResponseWire::from(event))
 }
 
 pub(super) fn serialize_end_json(event: &AllowanceEnd) -> Result<String> {
-    require_distinct_causal_ids(
-        event.event_id(),
-        event.proposal_event_id(),
-        event.acceptance_event_id(),
-    )?;
     serialize_wire_json(&EndWire::from(event))
 }
 
@@ -745,6 +738,14 @@ mod tests {
                 )
                 .unwrap(),
             ),
+            AllowanceEvent::End(
+                AllowanceEnd::withdrawal(
+                    response_event_id.clone(),
+                    allowance_id.clone(),
+                    proposal_event_id.clone(),
+                )
+                .unwrap(),
+            ),
         ] {
             let mut value: JsonValue =
                 serde_json::from_str(&serialize_allowance_json(&event).unwrap()).unwrap();
@@ -754,25 +755,6 @@ mod tests {
                 Err(PaykitError::InvalidData { .. })
             ));
         }
-
-        let withdrawal = AllowanceEvent::End(
-            AllowanceEnd::withdrawal(
-                response_event_id.clone(),
-                allowance_id.clone(),
-                proposal_event_id.clone(),
-            )
-            .unwrap(),
-        );
-        let mut withdrawal_value: JsonValue =
-            serde_json::from_str(&serialize_allowance_json(&withdrawal).unwrap()).unwrap();
-        withdrawal_value["event_id"] = withdrawal_value["proposal_event_id"].clone();
-        assert!(matches!(
-            parse_json(
-                PrivateMessageKind::AllowanceEnd,
-                &serde_json::to_string(&withdrawal_value).unwrap(),
-            ),
-            Err(PaykitError::InvalidData { .. })
-        ));
 
         let accepted_end = AllowanceEvent::End(
             AllowanceEnd::accepted(
