@@ -5,13 +5,13 @@ use paykit_lib::{
 };
 
 use crate::{
-    domain::{linked_peers::require_private_automation_ready, private_stream::canonical_event_id},
+    domain::linked_peers::require_private_automation_ready,
     storage::{NewOutboundPrivateMessage, StorageAdapter, StorageTransaction},
     PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
 
 use super::{
-    derivation::{canonical_allowance_id, derive_allowance_record, AllowanceLinkHistory},
+    derivation::{derive_allowance_record, AllowanceLinkHistory},
     AllowanceHistoryStatus, AllowanceLifecycleState, AllowanceLocalRole, AllowanceRecord,
 };
 
@@ -38,10 +38,6 @@ where
     storage
         .transaction(move |tx| {
             require_link_ready(tx, &counterparty, &counterparty_receiver_path)?;
-            let history =
-                AllowanceLinkHistory::load(tx, &counterparty, &counterparty_receiver_path);
-            require_unused_event_id(tx, &history, &event_id)?;
-            require_unused_allowance_id(&history, &allowance_id)?;
             let event = AllowanceEvent::Proposal(AllowanceProposal::new(
                 event_id,
                 allowance_id.clone(),
@@ -83,8 +79,8 @@ where
                 &counterparty,
                 &counterparty_receiver_path,
                 &allowance_id,
-                &event_id,
                 action,
+                HistoryGate::Consistent,
             )?;
             if local_sent_proposal(&record) {
                 return Err(PaykitSdkError::Policy {
@@ -93,7 +89,7 @@ where
                 });
             }
             require_lifecycle(&record, AllowanceLifecycleState::Proposed, action)?;
-            let proposal_event_id = proposal_event_id(&record)?;
+            let proposal_event_id = bound_proposal_event_id(&record)?;
             let event =
                 match response {
                     AllowanceResponse::Acceptance => AllowanceEvent::Acceptance(
@@ -128,15 +124,17 @@ where
     let event_id = EventId::new_v4();
     storage
         .transaction(move |tx| {
+            // End is the fail-safe terminal action: it stays available on
+            // incomplete or invalid history and is blocked only by recovery.
             let record = require_actionable_record(
                 tx,
                 &counterparty,
                 &counterparty_receiver_path,
                 &allowance_id,
-                &event_id,
                 "end Allowance",
+                HistoryGate::RecoverableOnly,
             )?;
-            let proposal_event_id = proposal_event_id(&record)?;
+            let proposal_event_id = bound_proposal_event_id(&record)?;
             let event = match record.state {
                 AllowanceLifecycleState::Proposed => {
                     if !local_sent_proposal(&record) {
@@ -152,14 +150,10 @@ where
                     ))
                 }
                 AllowanceLifecycleState::Accepted => {
-                    let acceptance_event_id = record
-                        .acceptance_event_id
-                        .as_deref()
-                        .and_then(|id| EventId::new(id).ok())
-                        .ok_or_else(|| PaykitSdkError::Protocol {
-                            context: "accepted Allowance lacks a valid Acceptance Event ID".into(),
-                            source: None,
-                        })?;
+                    let acceptance_event_id = bound_event_id(
+                        record.acceptance_event_id.as_deref(),
+                        "accepted Allowance lacks a valid Acceptance Event ID",
+                    )?;
                     AllowanceEvent::End(AllowanceEnd::accepted(
                         event_id,
                         allowance_id.clone(),
@@ -217,15 +211,24 @@ fn append_and_derive(
     })
 }
 
+/// How strict a command is about the derived history it acts on.
+#[derive(Clone, Copy)]
+enum HistoryGate {
+    /// Require complete and valid history.
+    Consistent,
+    /// Tolerate invalid or unresolved history; block only on recovery.
+    RecoverableOnly,
+}
+
 /// Load a record that a local command may act on: known on this exact link,
-/// with a ready link, consistent history, and a fresh Event ID.
+/// with a ready link and history acceptable under `gate`.
 fn require_actionable_record(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
     counterparty_receiver_path: &PaykitReceiverPath,
     allowance_id: &AllowanceId,
-    event_id: &EventId,
     action: &str,
+    gate: HistoryGate,
 ) -> Result<AllowanceRecord> {
     let history = AllowanceLinkHistory::load(tx, counterparty, counterparty_receiver_path);
     let record = derive_allowance_record(&history, allowance_id).ok_or_else(|| {
@@ -237,8 +240,7 @@ fn require_actionable_record(
         }
     })?;
     require_link_ready(tx, counterparty, counterparty_receiver_path)?;
-    require_consistent_history(&record, action)?;
-    require_unused_event_id(tx, &history, event_id)?;
+    require_history(&record, action, gate)?;
     Ok(record)
 }
 
@@ -257,19 +259,24 @@ fn require_link_ready(
     require_private_automation_ready(peer_state, has_active_link, counterparty)
 }
 
-fn require_consistent_history(record: &AllowanceRecord, action: &str) -> Result<()> {
-    match record.history_status {
-        AllowanceHistoryStatus::Consistent => Ok(()),
-        AllowanceHistoryStatus::RecoveryRequired => Err(PaykitSdkError::RecoveryRequired {
+fn require_history(record: &AllowanceRecord, action: &str, gate: HistoryGate) -> Result<()> {
+    match (record.history_status, gate) {
+        (AllowanceHistoryStatus::Consistent, _) => Ok(()),
+        (AllowanceHistoryStatus::RecoveryRequired, _) => Err(PaykitSdkError::RecoveryRequired {
             context: format!("cannot {action}: exact Encrypted Link history needs recovery"),
             source: None,
         }),
-        AllowanceHistoryStatus::UnresolvedReferences | AllowanceHistoryStatus::Invalid => {
-            Err(PaykitSdkError::Protocol {
-                context: format!("cannot {action}: Allowance history is not complete and valid"),
-                source: None,
-            })
-        }
+        (
+            AllowanceHistoryStatus::UnresolvedReferences | AllowanceHistoryStatus::Invalid,
+            HistoryGate::Consistent,
+        ) => Err(PaykitSdkError::Protocol {
+            context: format!("cannot {action}: Allowance history is not complete and valid"),
+            source: None,
+        }),
+        (
+            AllowanceHistoryStatus::UnresolvedReferences | AllowanceHistoryStatus::Invalid,
+            HistoryGate::RecoverableOnly,
+        ) => Ok(()),
     }
 }
 
@@ -299,64 +306,20 @@ fn require_lifecycle(
     }
 }
 
-fn proposal_event_id(record: &AllowanceRecord) -> Result<EventId> {
-    record
-        .proposal_event_id
-        .as_deref()
+fn bound_proposal_event_id(record: &AllowanceRecord) -> Result<EventId> {
+    bound_event_id(
+        record.proposal_event_id.as_deref(),
+        "Allowance proposal lacks a valid Proposal Event ID",
+    )
+}
+
+/// Re-validate an Event ID bound to the derived record before a new event
+/// references it.
+fn bound_event_id(value: Option<&str>, missing: &'static str) -> Result<EventId> {
+    value
         .and_then(|id| EventId::new(id).ok())
         .ok_or_else(|| PaykitSdkError::Protocol {
-            context: "Allowance proposal lacks a valid Proposal Event ID".into(),
+            context: missing.into(),
             source: None,
         })
-}
-
-fn require_unused_event_id(
-    tx: &dyn StorageTransaction,
-    history: &AllowanceLinkHistory,
-    event_id: &EventId,
-) -> Result<()> {
-    let inbound_used = tx
-        .event_dedup_record(
-            &history.counterparty,
-            &history.counterparty_receiver_path,
-            event_id.as_str(),
-        )
-        .is_some();
-    let outbound_used = history
-        .outbound
-        .iter()
-        .any(|message| canonical_event_id(&message.raw_json).as_deref() == Some(event_id.as_str()));
-    if inbound_used || outbound_used {
-        Err(PaykitSdkError::Protocol {
-            context: "new Allowance Event ID already exists on the exact Encrypted Link".into(),
-            source: None,
-        })
-    } else {
-        Ok(())
-    }
-}
-
-fn require_unused_allowance_id(
-    history: &AllowanceLinkHistory,
-    allowance_id: &AllowanceId,
-) -> Result<()> {
-    let used = history
-        .items
-        .iter()
-        .map(|item| item.raw_json.as_str())
-        .chain(
-            history
-                .outbound
-                .iter()
-                .map(|message| message.raw_json.as_str()),
-        )
-        .any(|raw_json| canonical_allowance_id(raw_json).as_deref() == Some(allowance_id.as_str()));
-    if used {
-        Err(PaykitSdkError::Protocol {
-            context: "new Allowance ID already exists on the exact Encrypted Link".into(),
-            source: None,
-        })
-    } else {
-        Ok(())
-    }
 }
