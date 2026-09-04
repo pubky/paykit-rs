@@ -184,7 +184,9 @@ decision before side effects; never retroactively rematch; pin a Recurring
 Payment Request to its selected Allowance and recheck every Billing Period;
 prevent duplicate semantic payments; count only automatic payments and their
 unresolved reservations against capacity; reserve before an irreversible
-payment step; and expose an explicit, safe accepted-but-unpaid manual path.
+payment step and release only on confirmed terminal failure; never auto-retry
+a manual-only occurrence; and expose an explicit, safe accepted-but-unpaid
+manual path that stays separate from the payer-response query.
 Paykit does not implement matching, usage accounting, scheduling, or payment
 execution. See [the Allowances specification](specs/allowances.md) for the full
 eligibility, durability, and recovery requirements.

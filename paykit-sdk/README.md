@@ -235,10 +235,21 @@ Before automatic work, wallet code must apply all of these local requirements:
   consume Allowance capacity; manual payments do not;
 - capacity is reserved atomically before an irreversible payment side effect,
   and pending, unknown, or recovery-incomplete outcomes remain reserved; and
-- if automatic handling stops after Acceptance, an explicit
-  accepted-but-unpaid manual path is exposed only after durable payment and
+- a verified successful payment commits the reservation, a confirmed terminal
+  failure before settlement releases it, and once an occurrence is durably
+  marked manual-only it is never retried automatically;
+- if automatic handling stops before Acceptance, the request stays on its
+  proposed manual flow only while it remains actionable; if it stops after
+  Acceptance on a non-cancelled request, the explicit-payment path is used
+  without sending a second Acceptance;
+- the accepted-but-unpaid manual path is exposed only after durable payment and
   reservation state proves another successful or unresolved attempt cannot
-  exist.
+  exist; that state is wallet-local, must not make every accepted request
+  payable, must not widen an existing query whose purpose is finding proposals
+  that need a payer response, and for a Recurring Payment Request applies only
+  to the affected Billing Period; and
+- an ordinary Payment Proof remains valid for an execution that crossed the
+  irreversible boundary before Cancellation.
 
 During incomplete history or Encrypted Link recovery, automatic handling must
 fail closed. Restore the full SDK backup, relink the same Receiver References,
