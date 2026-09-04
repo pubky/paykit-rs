@@ -17,9 +17,8 @@ use crate::{
 };
 
 use super::{
-    FfiAllowanceAmountRange, FfiAllowanceFilter, FfiAllowanceHistoryStatus,
-    FfiAllowanceLifecycleState, FfiAllowanceLocalRole, FfiAllowancePeriod, FfiAllowancePeriodLimit,
-    FfiAllowanceRecord, FfiAllowanceTerms,
+    FfiAllowanceFilter, FfiAllowanceHistoryStatus, FfiAllowanceLifecycleState,
+    FfiAllowanceLocalRole, FfiAllowanceRecord, FfiAllowanceTerms,
 };
 
 impl From<AllowanceLocalRole> for FfiAllowanceLocalRole {
@@ -108,24 +107,6 @@ impl TryFrom<FfiAllowanceFilter> for AllowanceFilter {
     }
 }
 
-impl From<&AllowanceAmountRange> for FfiAllowanceAmountRange {
-    fn from(value: &AllowanceAmountRange) -> Self {
-        Self::from_validated_range(value.clone())
-    }
-}
-
-impl From<&AllowancePeriod> for FfiAllowancePeriod {
-    fn from(value: &AllowancePeriod) -> Self {
-        Self::from_validated_period(value.clone())
-    }
-}
-
-impl From<&AllowancePeriodLimit> for FfiAllowancePeriodLimit {
-    fn from(value: &AllowancePeriodLimit) -> Self {
-        Self::from_validated_limit(value.clone())
-    }
-}
-
 impl TryFrom<AllowanceTermsRecord> for FfiAllowanceTerms {
     type Error = PaykitFfiError;
 
@@ -181,31 +162,6 @@ impl TryFrom<AllowanceRecord> for FfiAllowanceRecord {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn parse_allowance_terms(
-    asset: String,
-    per_payment_amount: Option<Arc<FfiAllowanceAmountRange>>,
-    period_limits: Vec<Arc<FfiAllowancePeriodLimit>>,
-    lifetime_amount_limit: Option<String>,
-    active_from: Option<String>,
-    expires_at: Option<String>,
-    allowed_payment_endpoint_identifiers: Option<Vec<String>>,
-) -> Result<AllowanceTerms, PaykitFfiError> {
-    let result = build_allowance_terms(
-        asset,
-        per_payment_amount.map(|range| range.domain_range()),
-        period_limits
-            .into_iter()
-            .map(|limit| limit.domain_limit())
-            .collect(),
-        lifetime_amount_limit,
-        active_from,
-        expires_at,
-        allowed_payment_endpoint_identifiers,
-    );
-    result.map_err(|_| invalid_allowance_terms())
-}
-
-#[allow(clippy::too_many_arguments)]
 fn parse_allowance_terms_record(
     asset: String,
     per_payment_amount: Option<paykit_sdk::AllowanceAmountRangeRecord>,
@@ -248,8 +204,10 @@ fn invalid_allowance_terms() -> PaykitFfiError {
     validation_error("Allowance Terms are invalid")
 }
 
+/// Build validated Allowance Terms. Every error maps to the same redacted
+/// message so private caller input never reaches the platform error context.
 #[allow(clippy::too_many_arguments)]
-fn build_allowance_terms(
+pub(super) fn build_allowance_terms(
     asset: String,
     per_payment_amount: Option<AllowanceAmountRange>,
     period_limits: Vec<AllowancePeriodLimit>,
@@ -276,19 +234,12 @@ fn build_allowance_terms(
         builder = builder.allowed_payment_endpoint_identifiers(
             identifiers
                 .into_iter()
-                .map(|identifier| {
-                    parse_endpoint_identifier(identifier).map_err(|_| {
-                        validation_error(
-                            "Allowance Terms Payment Endpoint Identifier allowlist is invalid",
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+                .map(parse_endpoint_identifier)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| invalid_allowance_terms())?,
         );
     }
-    builder
-        .build()
-        .map_err(|_| validation_error("Allowance Terms are invalid"))
+    builder.build().map_err(|_| invalid_allowance_terms())
 }
 
 pub(super) fn parse_amount_range(
@@ -347,10 +298,4 @@ fn parse_period_unit(value: &str) -> Result<AllowancePeriodUnit, PaykitFfiError>
 
 pub(super) fn parse_allowance_id(value: String) -> Result<AllowanceId, PaykitFfiError> {
     AllowanceId::new(value).map_err(|err| validation_error(err.to_string()))
-}
-
-pub(super) fn allowance_records_to_ffi(
-    records: Vec<AllowanceRecord>,
-) -> Result<Vec<FfiAllowanceRecord>, PaykitFfiError> {
-    records.into_iter().map(TryInto::try_into).collect()
 }
