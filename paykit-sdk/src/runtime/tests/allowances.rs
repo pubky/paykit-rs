@@ -1,14 +1,13 @@
 use super::*;
-use paykit_lib::{
-    serialize_allowance_event, AllowanceEvent, AllowanceProposal, AllowanceRole, EventId,
-};
+use crate::test_utils::allowance_application_message;
+use paykit_lib::{AllowanceEvent, AllowanceProposal, AllowanceRole, EventId};
 
 fn allowance_message(
     allowance_id: &str,
     event_id: &str,
     proposer_role: AllowanceRole,
 ) -> PrivateApplicationMessage {
-    let event = AllowanceEvent::Proposal(AllowanceProposal::new(
+    allowance_application_message(&AllowanceEvent::Proposal(AllowanceProposal::new(
         EventId::new(event_id).unwrap(),
         AllowanceId::new(allowance_id).unwrap(),
         proposer_role,
@@ -16,12 +15,7 @@ fn allowance_message(
             .lifetime_amount_limit("1")
             .build()
             .unwrap(),
-    ));
-    PrivateApplicationMessage {
-        version: Some(1),
-        kind: Some(event.kind().as_str().to_owned()),
-        raw_json: serialize_allowance_event(&event).unwrap(),
-    }
+    )))
 }
 
 #[tokio::test]

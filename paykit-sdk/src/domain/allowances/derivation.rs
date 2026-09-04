@@ -32,13 +32,13 @@ use super::{
 /// Loaded inside one storage transaction so that derivation and any command
 /// append observe the same state.
 pub(super) struct AllowanceLinkHistory {
-    pub(super) counterparty: PubkyPublicKey,
-    pub(super) counterparty_receiver_path: PaykitReceiverPath,
+    counterparty: PubkyPublicKey,
+    counterparty_receiver_path: PaykitReceiverPath,
     /// Every inbound private stream item on the link.
-    pub(super) items: Vec<PrivateStreamItemRecord>,
+    items: Vec<PrivateStreamItemRecord>,
     /// Outbound messages that still carry local intent. `Invalid` and
     /// `Superseded` records never advance the link and are excluded.
-    pub(super) outbound: Vec<OutboundPrivateMessageRecord>,
+    outbound: Vec<OutboundPrivateMessageRecord>,
     /// Event dedupe records keyed by Event ID for every inbound Event Message
     /// on the link, regardless of kind.
     dedupe_records: HashMap<String, EventDedupRecord>,
