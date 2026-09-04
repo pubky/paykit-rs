@@ -19950,7 +19950,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 57246) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_allowances() != 59062) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_allowances() != 36022) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354) {
