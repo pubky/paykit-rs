@@ -11,3 +11,4 @@ mod private_lists;
 mod profiles;
 mod public_endpoints;
 mod recovery;
+mod sessions;

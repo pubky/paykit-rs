@@ -150,10 +150,7 @@ impl FfiPaykitSdk {
             store: state_store_for_runtime,
             transaction_lock: Arc::new(Mutex::new(())),
         };
-        let session_provider = FfiSdkPubkySessionProviderAdapter {
-            provider: session_provider,
-            pubky,
-        };
+        let session_provider = FfiSdkPubkySessionProviderAdapter::new(session_provider, pubky);
         let payment_adapter = FfiSdkPaymentAdapterAdapter {
             adapter: payment_adapter,
         };
@@ -199,10 +196,22 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Clear live Pubky session access and SDK-managed identity-scoped state.
+    /// Revoke the current Pubky grant and clear local SDK identity state.
     pub async fn sign_out(&self) -> Result<FfiIdentityStatus, PaykitFfiError> {
         self.runtime
             .sign_out()
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Clear local session access and SDK identity state without revoking the grant.
+    ///
+    /// Use this only when remote revocation cannot be reached and the app
+    /// intentionally accepts that persisted copies of the grant remain valid.
+    pub async fn forget_session_access(&self) -> Result<FfiIdentityStatus, PaykitFfiError> {
+        self.runtime
+            .forget_session_access()
             .await
             .map(Into::into)
             .map_err(Into::into)

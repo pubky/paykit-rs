@@ -420,6 +420,15 @@ public interface PaykitSdkInterface {
     public suspend fun `fetchPubkyText`(`uri`: kotlin.String): kotlin.String?
 
     /**
+     * Clear local session access and SDK identity state without revoking the grant.
+     *
+     * Use this only when remote revocation cannot be reached and the app
+     * intentionally accepts that persisted copies of the grant remain valid.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `forgetSessionAccess`(): IdentityStatus
+
+    /**
      * Return one Allowance from one exact authenticated Encrypted Link.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -745,7 +754,7 @@ public interface PaykitSdkInterface {
     public suspend fun `saveContact`(`update`: ContactUpdate): ContactRecord
 
     /**
-     * Clear live Pubky session access and SDK-managed identity-scoped state.
+     * Revoke the current Pubky grant and clear local SDK identity state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `signOut`(): IdentityStatus
@@ -908,9 +917,45 @@ public interface PubkyAuthRequestInterface {
 
     /**
      * Wait for auth approval using the receiver's persisted Noise key.
+     *
+     * Completion is one-shot, including when the async operation is cancelled
+     * or returns an error. `save_state` can restore an unapproved request
+     * while its relay inbox remains valid. Once completion fetches the
+     * approval, cancellation or a later exchange failure requires a new auth
+     * request.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `complete`(`localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
+
+    /**
+     * Export the sensitive state required to resume this pending request.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `saveState`(): PubkyAuthRequestState
+
+    public companion object
+}
+
+
+
+
+/**
+ * Sensitive state required to resume a pending Pubky grant auth request.
+ *
+ * Persist this only in secure, temporary platform storage. Delete it after
+ * the request completes, expires, or is abandoned.
+ */
+public interface PubkyAuthRequestStateInterface {
+
+    /**
+     * Export the secret-bearing authorization URL for secure persistence.
+     */
+    public fun `authorizationUrl`(): kotlin.String
+
+    /**
+     * Export the proof-of-possession key for secure persistence.
+     */
+    public fun `exportClientKeySecret`(): kotlin.ByteArray
 
     public companion object
 }
@@ -940,6 +985,11 @@ public interface PubkyLocalSecretKeyInterface {
 public interface PubkySessionAccessInterface {
 
     /**
+     * Return the application identifier recorded in the Pubky grant.
+     */
+    public fun `clientId`(): kotlin.String
+
+    /**
      * Export the local Pubky secret key, when available.
      */
     public fun `exportLocalSecretKey`(): PubkyLocalSecretKey?
@@ -950,7 +1000,7 @@ public interface PubkySessionAccessInterface {
     public fun `exportReceiverNoiseSecretKey`(): ReceiverNoiseSecretKey
 
     /**
-     * Export the Pubky session bearer secret for platform secure storage.
+     * Export the Pubky grant and proof-of-possession secret for secure storage.
      */
     public fun `exportSessionSecret`(): kotlin.String
 
@@ -967,6 +1017,10 @@ public interface PubkySessionBootstrapInterface {
 
     /**
      * Approve a Pubky auth URL with this local secret key.
+     *
+     * The request client ID must match this bootstrap's client ID.
+     * A signup request creates the identity on its requested homeserver before
+     * approving the application grant.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `approveAuth`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey)
@@ -976,21 +1030,25 @@ public interface PubkySessionBootstrapInterface {
      *
      * This high-level operation owns validation, request-bound signing,
      * channel derivation, encryption, relay delivery, and approval ordering.
+     * The request client ID must match this bootstrap's client ID.
      */
     @Throws(PubkyAuthCompanionClaimApprovalException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `approveAuthWithCompanionClaim`(`authUrl`: kotlin.String, `expectedCapabilities`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey, `claim`: PubkyAuthCompanionClaim)
 
     /**
      * Import an exported Pubky session secret and its persisted receiver Noise key.
+     *
+     * The grant must belong to this bootstrap's client ID and cover every
+     * required capability.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `importSession`(`sessionSecret`: kotlin.String, `localSecretKey`: PubkyLocalSecretKey?, `receiverNoiseSecretKey`: ReceiverNoiseSecretKey, `requiredCapabilities`: kotlin.String): PubkySessionBootstrapResult
 
     /**
-     * Resume a short-lived auth flow from its authorization URL.
+     * Resume a short-lived grant auth flow from securely persisted state.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
-    public suspend fun `resumeAuth`(`authorizationUrl`: kotlin.String, `expectedCapabilities`: kotlin.String): PubkyAuthRequest
+    public suspend fun `resumeAuth`(`state`: PubkyAuthRequestState, `expectedCapabilities`: kotlin.String): PubkyAuthRequest
 
     /**
      * Sign in with the receiver's persisted Noise key.
@@ -1150,7 +1208,9 @@ public interface SdkPubkySessionProvider {
     public fun `publicStorageAvailable`(): kotlin.Boolean
 
     /**
-     * Clear platform session access during explicit SDK sign-out.
+     * Clear Pubky session access from local platform storage.
+     *
+     * Normal SDK sign-out revokes the live grant before invoking this callback.
      */
     @Throws(PaykitException::class)
     public fun `clearSessionAccess`()
@@ -3021,7 +3081,7 @@ public data class PrivateStreamIntakeReport (
  *
  * The application serializes its protocol-specific unsigned payload. Paykit
  * validates the identifiers, creates the request-bound identity signature,
- * encrypts the signed payload, and delivers it before normal Pubky Auth.
+ * encrypts the signed payload, and delivers it before grant approval.
  *
  * Generated platform record descriptions may include the raw payload. Apps
  * must not log, interpolate, or otherwise stringify this record.
@@ -3075,11 +3135,15 @@ public data class PubkyAuthDetails (
     /**
      * Requested capabilities as canonical Pubky capability text.
      */
-    val `capabilities`: kotlin.String?,
+    val `capabilities`: kotlin.String,
     /**
      * Relay URL used by the auth flow.
      */
-    val `relayUrl`: kotlin.String?,
+    val `relayUrl`: kotlin.String,
+    /**
+     * Application identifier that will own the grant.
+     */
+    val `clientId`: kotlin.String,
     /**
      * Homeserver requested by a signup flow.
      */
@@ -3101,8 +3165,15 @@ public data class PubkyClientConfig (
     val `requestTimeoutSecs`: kotlin.ULong,
     /**
      * Host running local testnet services, or `None` to use the public Pubky network.
+     *
+     * Unless an explicit grant-auth relay overrides it, grant auth uses the
+     * standard local testnet relay at `http://<host>:15412/inbox/`.
      */
-    val `localTestnetHost`: kotlin.String?
+    val `localTestnetHost`: kotlin.String?,
+    /**
+     * Explicit grant-auth relay inbox URL, or `None` to use Pubky's default.
+     */
+    val `authRelayUrl`: kotlin.String?
 ) {
     public companion object
 }
@@ -4502,7 +4573,7 @@ public sealed class PubkyAuthCompanionClaimApprovalException: kotlin.Exception()
     }
 
     /**
-     * Normal Pubky Auth approval failed after companion delivery succeeded.
+     * Pubky grant approval failed after companion delivery succeeded.
      */
     public class AuthorizationFailure(
         public val `reason`: kotlin.String,
@@ -4541,10 +4612,6 @@ public enum class PubkyAuthRequestKind {
      * Sign up on a Pubky homeserver.
      */
     SIGN_UP,
-    /**
-     * Export a secret from a signer.
-     */
-    SECRET_EXPORT,
     /**
      * SDK returned a value this binding version does not understand.
      */
