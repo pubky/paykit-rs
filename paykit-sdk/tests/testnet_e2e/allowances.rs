@@ -55,6 +55,29 @@ async fn allowance(
         .expect("Allowance should exist on this exact Encrypted Link")
 }
 
+/// Assert both peers derive the same lifecycle state from their own view of
+/// the exact Encrypted Link and agree on the transition's Event ID.
+async fn assert_lifecycle_state_shared(
+    allower: &TestUser,
+    allowee: &TestUser,
+    allowance_id: &AllowanceId,
+    expected_state: AllowanceLifecycleState,
+    event_id: fn(&paykit_sdk::AllowanceRecord) -> &Option<String>,
+) {
+    let allower_record = allowance(allower, allowee, allowance_id).await;
+    let allowee_record = allowance(allowee, allower, allowance_id).await;
+    for (record, expected_role) in [
+        (&allower_record, AllowanceLocalRole::Allower),
+        (&allowee_record, AllowanceLocalRole::Allowee),
+    ] {
+        assert_eq!(record.state, expected_state);
+        assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
+        assert_eq!(record.local_role, Some(expected_role));
+        assert!(event_id(record).is_some());
+    }
+    assert_eq!(event_id(&allower_record), event_id(&allowee_record));
+}
+
 #[tokio::test]
 async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
     let pair = linked_two_party().await;
@@ -88,21 +111,14 @@ async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
         .await
         .expect("Bob should queue the Allowance acceptance");
     deliver(&pair.bob, &pair.alice).await;
-    let alice_accepted = allowance(&pair.alice, &pair.bob, &accepted_allowance_id).await;
-    let bob_accepted = allowance(&pair.bob, &pair.alice, &accepted_allowance_id).await;
-    for (record, expected_role) in [
-        (&alice_accepted, AllowanceLocalRole::Allower),
-        (&bob_accepted, AllowanceLocalRole::Allowee),
-    ] {
-        assert_eq!(record.state, AllowanceLifecycleState::Accepted);
-        assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
-        assert_eq!(record.local_role, Some(expected_role));
-        assert!(record.acceptance_event_id.is_some());
-    }
-    assert_eq!(
-        alice_accepted.acceptance_event_id,
-        bob_accepted.acceptance_event_id
-    );
+    assert_lifecycle_state_shared(
+        &pair.alice,
+        &pair.bob,
+        &accepted_allowance_id,
+        AllowanceLifecycleState::Accepted,
+        |record| &record.acceptance_event_id,
+    )
+    .await;
 
     pair.alice
         .sdk
@@ -114,18 +130,14 @@ async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
         .await
         .expect("Alice should queue the Allowance End");
     deliver(&pair.alice, &pair.bob).await;
-    let alice_ended = allowance(&pair.alice, &pair.bob, &accepted_allowance_id).await;
-    let bob_ended = allowance(&pair.bob, &pair.alice, &accepted_allowance_id).await;
-    for (record, expected_role) in [
-        (&alice_ended, AllowanceLocalRole::Allower),
-        (&bob_ended, AllowanceLocalRole::Allowee),
-    ] {
-        assert_eq!(record.state, AllowanceLifecycleState::Ended);
-        assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
-        assert_eq!(record.local_role, Some(expected_role));
-        assert!(record.end_event_id.is_some());
-    }
-    assert_eq!(alice_ended.end_event_id, bob_ended.end_event_id);
+    assert_lifecycle_state_shared(
+        &pair.alice,
+        &pair.bob,
+        &accepted_allowance_id,
+        AllowanceLifecycleState::Ended,
+        |record| &record.end_event_id,
+    )
+    .await;
 
     let second_proposal = pair
         .bob
@@ -150,21 +162,14 @@ async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
         .await
         .expect("Alice should queue the Allowance rejection");
     deliver(&pair.alice, &pair.bob).await;
-    let alice_rejected = allowance(&pair.alice, &pair.bob, &rejected_allowance_id).await;
-    let bob_rejected = allowance(&pair.bob, &pair.alice, &rejected_allowance_id).await;
-    for (record, expected_role) in [
-        (&alice_rejected, AllowanceLocalRole::Allower),
-        (&bob_rejected, AllowanceLocalRole::Allowee),
-    ] {
-        assert_eq!(record.state, AllowanceLifecycleState::Rejected);
-        assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
-        assert_eq!(record.local_role, Some(expected_role));
-        assert!(record.rejection_event_id.is_some());
-    }
-    assert_eq!(
-        alice_rejected.rejection_event_id,
-        bob_rejected.rejection_event_id
-    );
+    assert_lifecycle_state_shared(
+        &pair.alice,
+        &pair.bob,
+        &rejected_allowance_id,
+        AllowanceLifecycleState::Rejected,
+        |record| &record.rejection_event_id,
+    )
+    .await;
 }
 
 #[tokio::test]
