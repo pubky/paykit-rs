@@ -468,7 +468,7 @@ public interface PaykitSdkInterface {
     public suspend fun `linkedPeers`(): List<LinkedPeerRecord>
 
     /**
-     * Return Allowances matching a local SDK filter, newest first.
+     * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `listAllowances`(`filter`: AllowanceFilter): List<AllowanceRecord>
@@ -1324,7 +1324,7 @@ public data class AllowanceRecord (
      */
     val `lastOutboundStatus`: OutboundPrivateMessageStatus?,
     /**
-     * Latest local record time as RFC3339 text.
+     * Latest local record time as RFC3339 text, used only for presentation ordering.
      */
     val `lastEventAt`: kotlin.String?,
     /**
