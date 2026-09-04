@@ -99,7 +99,8 @@ pub use paykit_lib::{PaykitReceiverCapabilities, PaykitReceiverMarker, PaykitRec
 pub use pubky_session::{
     parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthCompanionClaim,
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
-    PubkyResourceRef, PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionSecret,
+    PubkyAuthRequestState, PubkyResourceRef, PubkySessionBootstrap, PubkySessionBootstrapResult,
+    PubkySessionSecret,
 };
 #[doc(inline)]
 pub use runtime::{Clock, InitializationReport, PaykitSdk, SystemClock};
