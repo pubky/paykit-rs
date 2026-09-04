@@ -469,13 +469,12 @@ the irreversible execution step. If an End or cancellation is observed before
 any irreversible payment side effect, the wallet MUST abort and release the
 reservation. Once the payment is irreversible, later lifecycle events affect
 only future payments and the in-flight outcome remains reserved until
-reconciled. If cancellation is observed before proof is queued, the wallet MAY
-later send the ordinary Payment Proof for that earlier execution under the
-Payment Request crossing-cancellation rules; this includes recording a crossing
-Acceptance without reopening the request when the payee records its own
-Cancellation before receiving the payer's already-sent Acceptance. The request
-remains cancelled. V1 does not communicate Allowance usage or selection to the
-Allowee; the existing Payment Request messages communicate acceptance and proof.
+reconciled. Proof for an execution that was already past its irreversible
+boundary when cancellation was observed, and Acceptances that cross a payee
+Cancellation, follow the Payment Request rules in
+[payment-requests.md](payment-requests.md); the request remains cancelled. V1
+does not communicate Allowance usage or selection to the Allowee; the existing
+Payment Request messages communicate acceptance and proof.
 
 ## Durability and recovery
 
