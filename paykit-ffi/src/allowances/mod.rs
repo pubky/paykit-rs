@@ -379,7 +379,7 @@ pub struct FfiAllowanceRecord {
     pub last_outbound_message_id: Option<u64>,
     /// Delivery status of the last associated outbound message.
     pub last_outbound_status: Option<FfiOutboundPrivateMessageStatus>,
-    /// Latest local record time as RFC3339 text.
+    /// Latest local record time as RFC3339 text, used only for presentation ordering.
     pub last_event_at: Option<String>,
     /// Redaction-safe SDK reason for invalid history, when available.
     pub invalid_reason: Option<String>,
@@ -387,7 +387,7 @@ pub struct FfiAllowanceRecord {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
-    /// Return Allowances matching a local SDK filter, newest first.
+    /// Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
     pub async fn list_allowances(
         &self,
         filter: FfiAllowanceFilter,
