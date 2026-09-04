@@ -313,7 +313,13 @@ fn collect_allowance_events<'a>(
             .is_some_and(is_allowance_kind)
         {
             collect_recognized_allowance_message(source, &mut events, &mut invalid);
-        } else if item.parse_status == PrivateStreamParseStatus::UnknownKind {
+        } else if matches!(
+            item.parse_status,
+            PrivateStreamParseStatus::UnknownKind | PrivateStreamParseStatus::MalformedRecognized
+        ) {
+            // Any other message that names this Allowance but cannot be
+            // interpreted blocks it, whether its kind is unknown or a
+            // recognized kind that failed validation.
             if let Some(allowance_id) = canonical_allowance_id(&item.raw_json) {
                 invalid.push(InvalidEvidence {
                     allowance_id,
